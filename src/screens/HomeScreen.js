@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useContext } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 // 必要なモジュールのインポート
 import { Audio } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
@@ -18,6 +19,10 @@ export default function HomeScreen() {
   // 記録・保存用State
   const [saveModalVisible, setSaveModalVisible] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState('');
+  const [savedCategories, setSavedCategories] = useState(['カット', 'カラー']);
+  const [lastUsedCategory, setLastUsedCategory] = useState('');
+  const [isAddingCategory, setIsAddingCategory] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
   const [photoUri, setPhotoUri] = useState(null);
 
   // 時間設定モーダル用State
@@ -62,6 +67,27 @@ export default function HomeScreen() {
   useEffect(() => {
     return sound ? () => sound.unloadAsync() : undefined;
   }, [sound]);
+
+  // ジャンル履歴のロード
+  useEffect(() => {
+    const loadCategoryData = async () => {
+      try {
+        const storedCategories = await AsyncStorage.getItem('savedCategories');
+        if (storedCategories) {
+          setSavedCategories(JSON.parse(storedCategories));
+        }
+        const lastCat = await AsyncStorage.getItem('lastUsedCategory');
+        if (lastCat) {
+          setLastUsedCategory(lastCat);
+          // 初期状態としてセット
+          setSelectedCategory(lastCat);
+        }
+      } catch (e) {
+        console.error("Failed to load category data", e);
+      }
+    };
+    loadCategoryData();
+  }, []);
 
   // 準備カウントダウン進行のロジック
   useEffect(() => {
@@ -219,6 +245,7 @@ export default function HomeScreen() {
   const handleOpenSaveModal = () => {
     setIsRunning(false); // タイマーを止める
     setIsPreCountingDown(false);
+    setSelectedCategory(lastUsedCategory); // デフォルトで前回のカテゴリをセット
     setSaveModalVisible(true);
   };
 
@@ -256,22 +283,39 @@ export default function HomeScreen() {
     // 経過秒数の計算
     const duration = isCountUp ? targetTime + remainingTime : targetTime - remainingTime;
     
-    // 30分オーバー時の確認ダイアログ実装は別途必要な場合に入れる
-    // if (duration > 1800) { alert("30分以上経過しています"); }
-    
     await saveRecord({
       duration: duration,
       category: selectedCategory || '未分類',
       photoUri: photoUri,
     });
     
+    if (selectedCategory) {
+      await AsyncStorage.setItem('lastUsedCategory', selectedCategory);
+      setLastUsedCategory(selectedCategory);
+    }
+    
     Alert.alert("保存完了", "練習記録を保存しました！");
     
     // モーダルを閉じ、タイマーをリセットする
     setSaveModalVisible(false);
-    setSelectedCategory('');
     setPhotoUri(null);
     resetTimer();
+  };
+
+  const handleAddCategory = async () => {
+    if (newCategoryName.trim()) {
+      const newCats = [...savedCategories, newCategoryName.trim()];
+      const uniqueCats = Array.from(new Set(newCats));
+      setSavedCategories(uniqueCats);
+      setSelectedCategory(newCategoryName.trim());
+      setNewCategoryName('');
+      setIsAddingCategory(false);
+      try {
+        await AsyncStorage.setItem('savedCategories', JSON.stringify(uniqueCats));
+      } catch (e) {
+        console.error(e);
+      }
+    }
   };
 
   const progress = isCountUp ? 0 : Math.max(0, remainingTime / targetTime);
@@ -376,12 +420,46 @@ export default function HomeScreen() {
         <ScrollView contentContainerStyle={styles.modalContainer}>
           <Text style={styles.modalTitle}>練習結果の記録</Text>
           
-          <Text style={styles.label}>ジャンル（任意）</Text>
+          <Text style={styles.label}>ジャンルを追加・選択</Text>
+          <View style={styles.categoryChipsContainer}>
+            {savedCategories.map((cat, index) => (
+              <TouchableOpacity 
+                key={index}
+                style={[styles.categoryChip, selectedCategory === cat && styles.categoryChipSelected]}
+                onPress={() => setSelectedCategory(cat)}
+              >
+                <Text style={[styles.categoryChipText, selectedCategory === cat && styles.categoryChipTextSelected]}>{cat}</Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity 
+              style={[styles.categoryChip, styles.categoryChipAdd]}
+              onPress={() => setIsAddingCategory(!isAddingCategory)}
+            >
+              <Text style={styles.categoryChipTextAdd}>＋ 追加</Text>
+            </TouchableOpacity>
+          </View>
+
+          {isAddingCategory && (
+            <View style={styles.addCategoryContainer}>
+              <TextInput 
+                style={[styles.input, { flex: 1, marginBottom: 0, marginRight: 10 }]} 
+                placeholder="新しいジャンル名を入力"
+                value={newCategoryName}
+                onChangeText={setNewCategoryName}
+                onSubmitEditing={handleAddCategory}
+              />
+              <TouchableOpacity style={styles.addCategoryButton} onPress={handleAddCategory}>
+                <Text style={styles.addCategoryButtonText}>決定</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          <Text style={styles.label}>選択中のジャンル</Text>
           <TextInput 
-            style={styles.input} 
-            placeholder="例: カット、カラー、など"
+            style={[styles.input, { backgroundColor: '#f0f0f0', color: '#333' }]} 
+            placeholder="未選択"
             value={selectedCategory}
-            onChangeText={setSelectedCategory}
+            editable={false}
           />
           
           <Text style={styles.label}>写真を追加</Text>
@@ -661,9 +739,58 @@ const styles = StyleSheet.create({
   input: {
     borderWidth: 1,
     borderColor: '#ccc',
-    padding: 15,
     borderRadius: 8,
+    padding: 12,
+    marginBottom: 20,
     fontSize: 16,
+  },
+  categoryChipsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: 5,
+  },
+  categoryChip: {
+    paddingVertical: 8,
+    paddingHorizontal: 15,
+    backgroundColor: '#E5E5EA',
+    borderRadius: 20,
+    marginRight: 10,
+    marginBottom: 10,
+  },
+  categoryChipSelected: {
+    backgroundColor: '#007AFF',
+  },
+  categoryChipText: {
+    fontSize: 14,
+    color: '#333',
+  },
+  categoryChipTextSelected: {
+    color: '#fff',
+    fontWeight: 'bold',
+  },
+  categoryChipAdd: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#007AFF',
+  },
+  categoryChipTextAdd: {
+    color: '#007AFF',
+    fontWeight: 'bold',
+  },
+  addCategoryContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 15,
+  },
+  addCategoryButton: {
+    backgroundColor: '#34C759',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+  },
+  addCategoryButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
   },
   photoActionBox: {
     flexDirection: 'row',
