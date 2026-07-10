@@ -89,14 +89,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     width: 50,
-    transform: [{ translateX: -5 }], // 左に5ピクセル移動
+    transform: [{ translateX: -10 }], // さらに左に5ピクセル移動（合計-10）
   },
   rightSide: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     width: 60,
-    transform: [{ translateX: 5 }], // 右に5ピクセル移動
+    transform: [{ translateX: 10 }], // さらに右に5ピクセル移動（合計10）
   },
   text: {
     color: '#aaa',
