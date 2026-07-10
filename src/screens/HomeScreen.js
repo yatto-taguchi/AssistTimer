@@ -385,16 +385,22 @@ export default function HomeScreen() {
                   ))}
                 </View>
 
-                {/* スタート前準備時間設定への導線 */}
+                {/* スタート前準備時間設定への導線（ボタン風カードデザイン） */}
                 <TouchableOpacity 
-                  style={styles.countdownNavButton} 
+                  style={[styles.countdownSettingCard, { backgroundColor: isEcoMode ? '#333' : '#F2F2F7' }]} 
                   onPress={() => {
                     setCountdownInputStr(countdownSeconds.toString());
                     setTimeModalMode('countdown');
                   }}
                 >
-                  <Text style={[styles.countdownNavText, { color: isEcoMode ? '#aaa' : '#007AFF' }]}>
-                    スタート前カウントダウン準備時間を設定{'\n'}(現在: {isCountdownEnabled ? `${countdownSeconds}秒` : 'オフ'})
+                  <Text style={[styles.countdownSettingCardTitle, { color: isEcoMode ? '#fff' : '#000' }]}>
+                    スタート前カウントダウン
+                  </Text>
+                  <Text style={[styles.countdownSettingCardSub, { color: isEcoMode ? '#bbb' : '#666' }]}>
+                    準備時間を設定
+                  </Text>
+                  <Text style={[styles.countdownSettingCardStatus, { color: isEcoMode ? '#aaa' : '#007AFF' }]}>
+                    現在: {isCountdownEnabled ? `${countdownSeconds}秒` : 'オフ'}
                   </Text>
                 </TouchableOpacity>
 
@@ -654,17 +660,27 @@ const styles = StyleSheet.create({
     color: '#007AFF',
     fontWeight: 'bold',
   },
-  countdownNavButton: {
+  countdownSettingCard: {
     marginTop: 20,
-    paddingVertical: 10,
+    paddingVertical: 15,
+    paddingHorizontal: 20,
+    borderRadius: 12,
     alignItems: 'center',
+    justifyContent: 'center',
     width: '100%',
   },
-  countdownNavText: {
-    fontSize: 15,
+  countdownSettingCardTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 6,
+  },
+  countdownSettingCardSub: {
+    fontSize: 14,
+    marginBottom: 6,
+  },
+  countdownSettingCardStatus: {
+    fontSize: 14,
     fontWeight: '600',
-    textAlign: 'center',
-    lineHeight: 22,
   },
   countdownSwitchRow: {
     flexDirection: 'row',
