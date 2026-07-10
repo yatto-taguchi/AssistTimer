@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useContext } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch } from 'react-native';
 // 必要なモジュールのインポート
 import { Audio } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
