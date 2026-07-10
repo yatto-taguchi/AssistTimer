@@ -98,9 +98,12 @@ export default function HomeScreen() {
     if (h > 0) {
       // 1時間以上の場合： h:mm:ss （時は0埋めなし、分と秒は2桁）
       formatted = `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-    } else {
-      // 1時間未満の場合： m:ss （分は0埋めなし、秒は2桁）
+    } else if (m > 0) {
+      // 1時間未満・1分以上の場合： m:ss （分は0埋めなし、秒は2桁）
       formatted = `${m}:${s.toString().padStart(2, '0')}`;
+    } else {
+      // 1分未満の場合： s （分を非表示、秒も0埋めなしでそのまま表示）
+      formatted = `${s}`;
     }
     
     return isNegative ? `-${formatted}` : formatted;
