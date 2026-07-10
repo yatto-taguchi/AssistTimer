@@ -210,7 +210,7 @@ export default function HomeScreen() {
   }
 
   // エコモードによるテーマ設定
-  const bgColor = isEcoMode ? '#000' : '#fff';
+  const bgColor = isEcoMode ? '#000' : '#F5F5F5';
   const mainTextColor = isEcoMode ? '#fff' : '#000';
   const ringBgColor = isEcoMode ? '#333' : '#E5E5EA';
 
