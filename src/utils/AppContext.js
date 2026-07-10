@@ -32,6 +32,7 @@ export const AppProvider = ({ children }) => {
         if (ecoClockVal !== null) setIsEcoClockEnabled(JSON.parse(ecoClockVal));
         if (ecoBatteryVal !== null) setIsEcoBatteryEnabled(JSON.parse(ecoBatteryVal));
         if (ecoNavIconVal !== null) setIsEcoNavIconEnabled(JSON.parse(ecoNavIconVal));
+        if (ecoNavActiveDotVal !== null) setIsEcoNavActiveDot(JSON.parse(ecoNavActiveDotVal));
         if (ecoBorderVal !== null) setIsEcoBorderEnabled(JSON.parse(ecoBorderVal));
         if (proVal !== null) setIsProMode(JSON.parse(proVal));
         if (colorVal !== null) setIsColorIndicator(JSON.parse(colorVal));
@@ -66,6 +67,12 @@ export const AppProvider = ({ children }) => {
   const toggleEcoNavIcon = async (value) => {
     setIsEcoNavIconEnabled(value);
     await AsyncStorage.setItem('isEcoNavIconEnabled', JSON.stringify(value));
+  };
+
+  // エコモード(選択中タブのみ点表示)切替と保存
+  const toggleEcoNavActiveDot = async (value) => {
+    setIsEcoNavActiveDot(value);
+    await AsyncStorage.setItem('isEcoNavActiveDot', JSON.stringify(value));
   };
 
   // エコモード(境界線表示)切替と保存
@@ -109,6 +116,8 @@ export const AppProvider = ({ children }) => {
         toggleEcoBattery,
         isEcoNavIconEnabled,
         toggleEcoNavIcon,
+        isEcoNavActiveDot,
+        toggleEcoNavActiveDot,
         isEcoBorderEnabled,
         toggleEcoBorder,
         isProMode,

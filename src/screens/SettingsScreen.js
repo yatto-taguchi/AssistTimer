@@ -8,6 +8,7 @@ export default function SettingsScreen() {
     isEcoClockEnabled, toggleEcoClock,
     isEcoBatteryEnabled, toggleEcoBattery,
     isEcoNavIconEnabled, toggleEcoNavIcon,
+    isEcoNavActiveDot, toggleEcoNavActiveDot,
     isEcoBorderEnabled, toggleEcoBorder,
     isProMode, toggleProMode, 
     isColorIndicator, toggleColorIndicator,
@@ -85,6 +86,17 @@ export default function SettingsScreen() {
               style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
             />
           </View>
+          {isEcoNavIconEnabled && (
+            <View style={[styles.subSettingRow, { borderBottomColor: borderColor, paddingLeft: 20 }]}>
+              <Text style={[styles.subSettingText, { color: textColor }]}>    └ 選択中のタブだけ「点」にする</Text>
+              <Switch
+                value={isEcoNavActiveDot}
+                onValueChange={toggleEcoNavActiveDot}
+                trackColor={{ false: '#333', true: '#34C759' }}
+                style={{ transform: [{ scaleX: 0.7 }, { scaleY: 0.7 }] }} // 少し小さく
+              />
+            </View>
+          )}
           <View style={[styles.subSettingRow, { borderBottomColor: borderColor }]}>
             <Text style={[styles.subSettingText, { color: textColor }]}>  └ タブの境界線を表示</Text>
             <Switch
