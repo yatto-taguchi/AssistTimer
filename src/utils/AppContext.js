@@ -5,6 +5,8 @@ export const AppContext = createContext();
 
 export const AppProvider = ({ children }) => {
   const [isEcoMode, setIsEcoMode] = useState(false);
+  const [isEcoClockEnabled, setIsEcoClockEnabled] = useState(true);
+  const [isEcoBatteryEnabled, setIsEcoBatteryEnabled] = useState(true);
   const [isProMode, setIsProMode] = useState(false); // 課金・広告デモ用
   const [isColorIndicator, setIsColorIndicator] = useState(true); // カラーインジケーター（10分以下タイマー用）
   const [isCountdownEnabled, setIsCountdownEnabled] = useState(false); // スタート前カウントダウン
@@ -15,12 +17,16 @@ export const AppProvider = ({ children }) => {
     const loadSettings = async () => {
       try {
         const ecoVal = await AsyncStorage.getItem('isEcoMode');
+        const ecoClockVal = await AsyncStorage.getItem('isEcoClockEnabled');
+        const ecoBatteryVal = await AsyncStorage.getItem('isEcoBatteryEnabled');
         const proVal = await AsyncStorage.getItem('isProMode');
         const colorVal = await AsyncStorage.getItem('isColorIndicator');
         const countdownEnabledVal = await AsyncStorage.getItem('isCountdownEnabled');
         const countdownSecVal = await AsyncStorage.getItem('countdownSeconds');
         
         if (ecoVal !== null) setIsEcoMode(JSON.parse(ecoVal));
+        if (ecoClockVal !== null) setIsEcoClockEnabled(JSON.parse(ecoClockVal));
+        if (ecoBatteryVal !== null) setIsEcoBatteryEnabled(JSON.parse(ecoBatteryVal));
         if (proVal !== null) setIsProMode(JSON.parse(proVal));
         if (colorVal !== null) setIsColorIndicator(JSON.parse(colorVal));
         if (countdownEnabledVal !== null) setIsCountdownEnabled(JSON.parse(countdownEnabledVal));
@@ -36,6 +42,18 @@ export const AppProvider = ({ children }) => {
   const toggleEcoMode = async (value) => {
     setIsEcoMode(value);
     await AsyncStorage.setItem('isEcoMode', JSON.stringify(value));
+  };
+
+  // エコモード(時計)切替と保存
+  const toggleEcoClock = async (value) => {
+    setIsEcoClockEnabled(value);
+    await AsyncStorage.setItem('isEcoClockEnabled', JSON.stringify(value));
+  };
+
+  // エコモード(バッテリー)切替と保存
+  const toggleEcoBattery = async (value) => {
+    setIsEcoBatteryEnabled(value);
+    await AsyncStorage.setItem('isEcoBatteryEnabled', JSON.stringify(value));
   };
 
   // Proモード切替と保存
@@ -63,13 +81,24 @@ export const AppProvider = ({ children }) => {
   };
 
   return (
-    <AppContext.Provider value={{ 
-      isEcoMode, toggleEcoMode, 
-      isProMode, toggleProMode, 
-      isColorIndicator, toggleColorIndicator,
-      isCountdownEnabled, toggleCountdownEnabled,
-      countdownSeconds, saveCountdownSeconds
-    }}>
+    <AppContext.Provider
+      value={{
+        isEcoMode,
+        toggleEcoMode,
+        isEcoClockEnabled,
+        toggleEcoClock,
+        isEcoBatteryEnabled,
+        toggleEcoBattery,
+        isProMode,
+        toggleProMode,
+        isColorIndicator,
+        toggleColorIndicator,
+        isCountdownEnabled,
+        toggleCountdownEnabled,
+        countdownSeconds,
+        saveCountdownSeconds,
+      }}
+    >
       {children}
     </AppContext.Provider>
   );

@@ -5,6 +5,8 @@ import { AppContext } from '../utils/AppContext';
 export default function SettingsScreen() {
   const { 
     isEcoMode, toggleEcoMode, 
+    isEcoClockEnabled, toggleEcoClock,
+    isEcoBatteryEnabled, toggleEcoBattery,
     isProMode, toggleProMode, 
     isColorIndicator, toggleColorIndicator,
     isCountdownEnabled, toggleCountdownEnabled,
@@ -51,6 +53,29 @@ export default function SettingsScreen() {
           onValueChange={toggleEcoMode}
         />
       </View>
+
+      {isEcoMode && (
+        <View style={styles.subSettingsContainer}>
+          <View style={[styles.subSettingRow, { borderBottomColor: borderColor }]}>
+            <Text style={[styles.subSettingText, { color: textColor }]}>  └ 時計を表示</Text>
+            <Switch
+              value={isEcoClockEnabled}
+              onValueChange={toggleEcoClock}
+              trackColor={{ false: '#333', true: '#34C759' }}
+              style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }} // 小さくしてサブ設定感を出す
+            />
+          </View>
+          <View style={[styles.subSettingRow, { borderBottomColor: borderColor }]}>
+            <Text style={[styles.subSettingText, { color: textColor }]}>  └ 電池残量を表示</Text>
+            <Switch
+              value={isEcoBatteryEnabled}
+              onValueChange={toggleEcoBattery}
+              trackColor={{ false: '#333', true: '#34C759' }}
+              style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+            />
+          </View>
+        </View>
+      )}
 
       <View style={[styles.settingRow, { borderBottomColor: borderColor }]}>
         <Text style={[styles.settingText, { color: textColor }]}>Proモード（広告非表示デモ）</Text>
@@ -156,8 +181,22 @@ const styles = StyleSheet.create({
     paddingVertical: 15,
     borderBottomWidth: 1,
   },
+  subSettingsContainer: {
+    paddingLeft: 10,
+  },
+  subSettingRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+  },
   settingText: {
     fontSize: 18,
+  },
+  subSettingText: {
+    fontSize: 16,
+    color: '#8E8E93',
   },
   settingTextContainer: {
     flex: 1,

@@ -5,7 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { AppContext } from '../utils/AppContext';
 
 export default function CustomBatteryIndicator() {
-  const { isEcoMode } = useContext(AppContext);
+  const { isEcoMode, isEcoClockEnabled, isEcoBatteryEnabled } = useContext(AppContext);
   const [batteryLevel, setBatteryLevel] = useState(null);
   const [timeStr, setTimeStr] = useState('');
 
@@ -59,12 +59,12 @@ export default function CustomBatteryIndicator() {
     <View style={[styles.container, { top: Math.max(10, statusBarHeight - 10) }]} pointerEvents="none">
       {/* 左側のドット（記録一覧）の上：時刻 */}
       <View style={styles.leftSide}>
-        <Text style={styles.text}>{timeStr}</Text>
+        {isEcoClockEnabled && <Text style={styles.text}>{timeStr}</Text>}
       </View>
 
       {/* 右側のドット（設定）の上：電池残量 */}
       <View style={styles.rightSide}>
-        {percentage !== null && (
+        {isEcoBatteryEnabled && percentage !== null && (
           <>
             <Ionicons name={iconName} size={14} color="#aaa" />
             <Text style={styles.text}>{percentage}%</Text>
