@@ -7,50 +7,70 @@ import { AppContext } from '../utils/AppContext';
 export default function CustomBatteryIndicator() {
   const { isEcoMode } = useContext(AppContext);
   const [batteryLevel, setBatteryLevel] = useState(null);
+  const [timeStr, setTimeStr] = useState('');
 
+  // 電池残量の取得
   useEffect(() => {
     let subscription;
     const initBattery = async () => {
-      // getBatteryLevelAsync returns a value between 0 and 1, or -1 on web/unsupported
       const level = await Battery.getBatteryLevelAsync();
-      if (level >= 0) {
-        setBatteryLevel(level);
-      }
+      if (level >= 0) setBatteryLevel(level);
       
       subscription = Battery.addBatteryLevelListener(({ batteryLevel }) => {
-        if (batteryLevel >= 0) {
-          setBatteryLevel(batteryLevel);
-        }
+        if (batteryLevel >= 0) setBatteryLevel(batteryLevel);
       });
     };
-    
     initBattery();
     
     return () => {
-      if (subscription) {
-        subscription.remove();
-      }
+      if (subscription) subscription.remove();
     };
   }, []);
 
-  if (!isEcoMode || batteryLevel === null) {
+  // 時刻の取得と更新
+  useEffect(() => {
+    const updateTime = () => {
+      const now = new Date();
+      const h = now.getHours().toString().padStart(2, '0');
+      const m = now.getMinutes().toString().padStart(2, '0');
+      setTimeStr(`${h}:${m}`);
+    };
+    updateTime();
+    const interval = setInterval(updateTime, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (!isEcoMode) {
     return null;
   }
 
-  const percentage = Math.round(batteryLevel * 100);
-  
-  // OS StatusBar height approximation for top positioning
-  // iOS is typically ~47 on notched phones, Android varies
+  const percentage = batteryLevel !== null ? Math.round(batteryLevel * 100) : null;
   const statusBarHeight = Platform.OS === 'ios' ? 44 : RNStatusBar.currentHeight || 24;
 
   let iconName = "battery-full";
-  if (percentage <= 20) iconName = "battery-dead";
-  else if (percentage <= 60) iconName = "battery-half";
+  if (percentage !== null) {
+    if (percentage <= 20) iconName = "battery-dead";
+    else if (percentage <= 60) iconName = "battery-half";
+  }
 
+  // OSのステータスバー領域に被りすぎない範囲で、できるだけ上（ドットの真上あたり）に配置する
+  // 3つのタブが均等配置されているため、左右から約16%の位置がドットの中心になります
   return (
-    <View style={[styles.container, { top: statusBarHeight }]} pointerEvents="none">
-      <Ionicons name={iconName} size={14} color="#aaa" />
-      <Text style={styles.text}>{percentage}%</Text>
+    <View style={[styles.container, { top: Math.max(10, statusBarHeight - 10) }]} pointerEvents="none">
+      {/* 左側のドット（記録一覧）の上：時刻 */}
+      <View style={styles.leftSide}>
+        <Text style={styles.text}>{timeStr}</Text>
+      </View>
+
+      {/* 右側のドット（設定）の上：電池残量 */}
+      <View style={styles.rightSide}>
+        {percentage !== null && (
+          <>
+            <Ionicons name={iconName} size={14} color="#aaa" />
+            <Text style={styles.text}>{percentage}%</Text>
+          </>
+        )}
+      </View>
     </View>
   );
 }
@@ -58,10 +78,23 @@ export default function CustomBatteryIndicator() {
 const styles = StyleSheet.create({
   container: {
     position: 'absolute',
-    right: 15,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: '12%', // ドットの真上付近に合うように調整
+    zIndex: 9999,
+  },
+  leftSide: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 50,
+  },
+  rightSide: {
     flexDirection: 'row',
     alignItems: 'center',
-    zIndex: 9999,
+    justifyContent: 'center',
+    width: 60,
   },
   text: {
     color: '#aaa',
