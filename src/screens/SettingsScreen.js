@@ -8,6 +8,7 @@ export default function SettingsScreen() {
     isEcoClockEnabled, toggleEcoClock,
     isEcoBatteryEnabled, toggleEcoBattery,
     isEcoNavIconEnabled, toggleEcoNavIcon,
+    isEcoBorderEnabled, toggleEcoBorder,
     isProMode, toggleProMode, 
     isColorIndicator, toggleColorIndicator,
     isCountdownEnabled, toggleCountdownEnabled,
@@ -80,6 +81,15 @@ export default function SettingsScreen() {
             <Switch
               value={isEcoNavIconEnabled}
               onValueChange={toggleEcoNavIcon}
+              trackColor={{ false: '#333', true: '#34C759' }}
+              style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+            />
+          </View>
+          <View style={[styles.subSettingRow, { borderBottomColor: borderColor }]}>
+            <Text style={[styles.subSettingText, { color: textColor }]}>  └ タブの境界線を表示</Text>
+            <Switch
+              value={isEcoBorderEnabled}
+              onValueChange={toggleEcoBorder}
               trackColor={{ false: '#333', true: '#34C759' }}
               style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
             />

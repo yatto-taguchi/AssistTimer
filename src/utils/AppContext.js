@@ -8,6 +8,7 @@ export const AppProvider = ({ children }) => {
   const [isEcoClockEnabled, setIsEcoClockEnabled] = useState(true);
   const [isEcoBatteryEnabled, setIsEcoBatteryEnabled] = useState(true);
   const [isEcoNavIconEnabled, setIsEcoNavIconEnabled] = useState(false); // trueでアイコン、falseで点
+  const [isEcoBorderEnabled, setIsEcoBorderEnabled] = useState(false); // trueで境界線あり、falseでなし
   const [isProMode, setIsProMode] = useState(false); // 課金・広告デモ用
   const [isColorIndicator, setIsColorIndicator] = useState(true); // カラーインジケーター（10分以下タイマー用）
   const [isCountdownEnabled, setIsCountdownEnabled] = useState(false); // スタート前カウントダウン
@@ -21,6 +22,7 @@ export const AppProvider = ({ children }) => {
         const ecoClockVal = await AsyncStorage.getItem('isEcoClockEnabled');
         const ecoBatteryVal = await AsyncStorage.getItem('isEcoBatteryEnabled');
         const ecoNavIconVal = await AsyncStorage.getItem('isEcoNavIconEnabled');
+        const ecoBorderVal = await AsyncStorage.getItem('isEcoBorderEnabled');
         const proVal = await AsyncStorage.getItem('isProMode');
         const colorVal = await AsyncStorage.getItem('isColorIndicator');
         const countdownEnabledVal = await AsyncStorage.getItem('isCountdownEnabled');
@@ -30,6 +32,7 @@ export const AppProvider = ({ children }) => {
         if (ecoClockVal !== null) setIsEcoClockEnabled(JSON.parse(ecoClockVal));
         if (ecoBatteryVal !== null) setIsEcoBatteryEnabled(JSON.parse(ecoBatteryVal));
         if (ecoNavIconVal !== null) setIsEcoNavIconEnabled(JSON.parse(ecoNavIconVal));
+        if (ecoBorderVal !== null) setIsEcoBorderEnabled(JSON.parse(ecoBorderVal));
         if (proVal !== null) setIsProMode(JSON.parse(proVal));
         if (colorVal !== null) setIsColorIndicator(JSON.parse(colorVal));
         if (countdownEnabledVal !== null) setIsCountdownEnabled(JSON.parse(countdownEnabledVal));
@@ -63,6 +66,12 @@ export const AppProvider = ({ children }) => {
   const toggleEcoNavIcon = async (value) => {
     setIsEcoNavIconEnabled(value);
     await AsyncStorage.setItem('isEcoNavIconEnabled', JSON.stringify(value));
+  };
+
+  // エコモード(境界線表示)切替と保存
+  const toggleEcoBorder = async (value) => {
+    setIsEcoBorderEnabled(value);
+    await AsyncStorage.setItem('isEcoBorderEnabled', JSON.stringify(value));
   };
 
   // Proモード切替と保存
@@ -100,6 +109,8 @@ export const AppProvider = ({ children }) => {
         toggleEcoBattery,
         isEcoNavIconEnabled,
         toggleEcoNavIcon,
+        isEcoBorderEnabled,
+        toggleEcoBorder,
         isProMode,
         toggleProMode,
         isColorIndicator,

@@ -14,7 +14,7 @@ import CustomBatteryIndicator from './src/components/CustomBatteryIndicator';
 const Tab = createBottomTabNavigator();
 
 function MainTabs() {
-  const { isEcoMode, isEcoNavIconEnabled } = useContext(AppContext);
+  const { isEcoMode, isEcoNavIconEnabled, isEcoBorderEnabled } = useContext(AppContext);
 
   return (
     <>
@@ -29,7 +29,10 @@ function MainTabs() {
           tabBarShowLabel: !isEcoMode,
           tabBarStyle: {
             backgroundColor: isEcoMode ? '#000' : '#fff',
-            borderTopWidth: 0,
+            borderTopWidth: isEcoMode && !isEcoBorderEnabled ? 0 : undefined,
+            borderBottomWidth: isEcoMode && !isEcoBorderEnabled ? 0 : undefined,
+            elevation: isEcoMode && !isEcoBorderEnabled ? 0 : undefined, // Androidの影を消す
+            shadowOpacity: isEcoMode && !isEcoBorderEnabled ? 0 : undefined, // iOSの影を消す
           },
           tabBarPosition: 'top',
           tabBarIcon: ({ focused, color, size }) => {
