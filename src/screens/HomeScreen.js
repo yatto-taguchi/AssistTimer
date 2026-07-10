@@ -20,7 +20,7 @@ export default function HomeScreen() {
   const [selectedCategory, setSelectedCategory] = useState('');
   const [photoUri, setPhotoUri] = useState(null);
 
-  const { isEcoMode, isProMode } = useContext(AppContext);
+  const { isEcoMode, isProMode, isColorIndicator } = useContext(AppContext);
   const timerRef = useRef(null);
 
   // 音声のロードと再生用関数
@@ -138,10 +138,27 @@ export default function HomeScreen() {
 
   const progress = isCountUp ? 0 : Math.max(0, remainingTime / targetTime);
 
-  let ringColor = '#007AFF'; // ブルー
+  // カラーインジケーターのロジック
+  // isColorIndicator ON かつ タイマーが10分（600秒）以下の場合:
+  //   残量100%〜30%: ブルー、30%〜10%: イエロー、10%以下: レッド
+  // それ以外は従来のロジック
+  let ringColor = '#007AFF'; // デフォルト: ブルー
   if (!isCountUp) {
-    if (remainingTime <= 60) ringColor = '#FF3B30';
-    else if (remainingTime <= 300) ringColor = '#FFCC00';
+    if (isColorIndicator && targetTime <= 600) {
+      // 残量パーセントに基づく色変更
+      const remainingPercent = targetTime > 0 ? remainingTime / targetTime : 0;
+      if (remainingPercent <= 0.10) {
+        ringColor = '#FF3B30'; // レッド（残り10%以下）
+      } else if (remainingPercent <= 0.30) {
+        ringColor = '#FFCC00'; // イエロー（残り30%以下）
+      } else {
+        ringColor = '#007AFF'; // ブルー（残り30%超）
+      }
+    } else {
+      // 従来のロジック（固定秒数ベース）
+      if (remainingTime <= 60) ringColor = '#FF3B30';
+      else if (remainingTime <= 300) ringColor = '#FFCC00';
+    }
   } else {
     ringColor = '#FF3B30';
   }
