@@ -386,11 +386,8 @@ export default function HomeScreen() {
                 </View>
 
                 {/* スタート前準備時間設定への導線 */}
-                <Text style={{textAlign: 'center', fontSize: 13, color: isEcoMode ? '#888' : '#666', marginTop: 25, marginBottom: 8}}>
-                  準備時間を設定できます
-                </Text>
                 <TouchableOpacity 
-                  style={[styles.countdownSettingCard, { backgroundColor: '#007AFF', paddingVertical: 12, marginTop: 0 }]} 
+                  style={[styles.countdownSettingCard, { backgroundColor: '#007AFF', paddingVertical: 12, marginTop: 25 }]} 
                   onPress={() => {
                     setCountdownInputStr(countdownSeconds.toString());
                     setTimeModalMode('countdown');
@@ -403,6 +400,9 @@ export default function HomeScreen() {
                     ({isCountdownEnabled ? `現在${countdownSeconds}秒` : 'オフ'})
                   </Text>
                 </TouchableOpacity>
+                <Text style={{textAlign: 'center', fontSize: 13, color: isEcoMode ? '#888' : '#666', marginTop: 8, marginBottom: 5}}>
+                  準備時間を設定できます
+                </Text>
 
                 <TouchableOpacity style={styles.closeTimeModalButton} onPress={() => setTimeModalVisible(false)}>
                   <Text style={styles.closeTimeModalText}>閉じる</Text>
