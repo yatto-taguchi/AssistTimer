@@ -34,7 +34,7 @@ export default function RingProgress({
           stroke={color}
           strokeWidth={strokeWidth}
           strokeDasharray={`${circumference} ${circumference}`}
-          strokeDashoffset={circumference - progress * circumference}
+          strokeDashoffset={progress * circumference - circumference}
           strokeLinecap="round"
           // Rotate to start from top
           transform={`rotate(-90 ${radius} ${radius})`}
