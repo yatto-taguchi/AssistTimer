@@ -16,15 +16,7 @@ export default function RingProgress({
   return (
     <View style={styles.container}>
       <Svg style={{ width: radius * 2, height: radius * 2 }}>
-        {/* Background Circle */}
-        <Circle
-          r={innerRadius}
-          cx={radius}
-          cy={radius}
-          fill="transparent"
-          stroke={backgroundColor}
-          strokeWidth={strokeWidth}
-        />
+
         {/* Active Progress Circle */}
         <Circle
           r={innerRadius}
