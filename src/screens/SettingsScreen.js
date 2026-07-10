@@ -7,7 +7,7 @@ export default function SettingsScreen() {
     isEcoMode, toggleEcoMode, 
     isEcoClockEnabled, toggleEcoClock,
     isEcoBatteryEnabled, toggleEcoBattery,
-    isEcoNavDotMode, toggleEcoNavDotMode,
+    isEcoNavIconEnabled, toggleEcoNavIcon,
     isProMode, toggleProMode, 
     isColorIndicator, toggleColorIndicator,
     isCountdownEnabled, toggleCountdownEnabled,
@@ -76,10 +76,10 @@ export default function SettingsScreen() {
             />
           </View>
           <View style={[styles.subSettingRow, { borderBottomColor: borderColor }]}>
-            <Text style={[styles.subSettingText, { color: textColor }]}>  └ タブを点で表示（オフで暗いマーク）</Text>
+            <Text style={[styles.subSettingText, { color: textColor }]}>  └ タブをアイコンで表示（オフで点）</Text>
             <Switch
-              value={isEcoNavDotMode}
-              onValueChange={toggleEcoNavDotMode}
+              value={isEcoNavIconEnabled}
+              onValueChange={toggleEcoNavIcon}
               trackColor={{ false: '#333', true: '#34C759' }}
               style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
             />

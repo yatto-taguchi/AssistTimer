@@ -14,7 +14,7 @@ import CustomBatteryIndicator from './src/components/CustomBatteryIndicator';
 const Tab = createBottomTabNavigator();
 
 function MainTabs() {
-  const { isEcoMode, isEcoNavDotMode } = useContext(AppContext);
+  const { isEcoMode, isEcoNavIconEnabled } = useContext(AppContext);
 
   return (
     <>
@@ -33,7 +33,7 @@ function MainTabs() {
           },
           tabBarPosition: 'top',
           tabBarIcon: ({ focused, color, size }) => {
-            if (isEcoMode && isEcoNavDotMode) {
+            if (isEcoMode && !isEcoNavIconEnabled) {
               return <Ionicons name="ellipse" size={8} color={color} />;
             }
 
