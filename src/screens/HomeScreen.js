@@ -324,7 +324,7 @@ const styles = StyleSheet.create({
   },
   timeText: {
     fontSize: 48,
-    fontWeight: '300',
+    fontWeight: '500',
   },
   preCountdownText: {
     fontSize: 120, // 枠いっぱいの大きなサイズ
