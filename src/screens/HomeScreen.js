@@ -616,7 +616,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 40,
     borderRadius: 30,
     marginTop: 20,
-    width: '90%',
+    width: 260, // 上のボタン2つ（120px * 2 + 余白20px）と左右の幅を揃える
     alignItems: 'center',
     elevation: 3,
     shadowColor: '#000',
