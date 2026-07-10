@@ -27,7 +27,8 @@ export default function HomeScreen() {
   const PRESET_TIMES = [1, 3, 5, 10, 15, 20, 30, 60, 90];
 
   // 準備時間入力用State
-  const [countdownInputStr, setCountdownInputStr] = useState('');
+  const [countdownInputMinStr, setCountdownInputMinStr] = useState('');
+  const [countdownInputSecStr, setCountdownInputSecStr] = useState('');
 
   const { 
     isEcoMode, isProMode, isColorIndicator, 
@@ -387,9 +388,12 @@ export default function HomeScreen() {
 
                 {/* スタート前準備時間設定への導線 */}
                 <TouchableOpacity 
-                  style={[styles.countdownSettingCard, { backgroundColor: '#007AFF', paddingVertical: 12, marginTop: 25 }]} 
+                  style={[styles.countdownSettingCard, { backgroundColor: '#007AFF', paddingVertical: 12, marginTop: 0 }]} 
                   onPress={() => {
-                    setCountdownInputStr(countdownSeconds.toString());
+                    const m = Math.floor(countdownSeconds / 60);
+                    const s = countdownSeconds % 60;
+                    setCountdownInputMinStr(m > 0 ? m.toString() : '');
+                    setCountdownInputSecStr(s > 0 ? s.toString() : '');
                     setTimeModalMode('countdown');
                   }}
                 >
@@ -438,20 +442,37 @@ export default function HomeScreen() {
                   })}
                 </View>
 
-                <Text style={styles.countdownSectionLabel}>直接入力 (秒)</Text>
-                <TextInput 
-                  style={[styles.timeInput, { width: 100, color: isEcoMode ? '#fff' : '#000', borderColor: isEcoMode ? '#555' : '#ccc' }]}
-                  keyboardType="number-pad"
-                  value={countdownInputStr}
-                  onChangeText={setCountdownInputStr}
-                  returnKeyType="done"
-                />
+                <Text style={styles.countdownSectionLabel}>直接入力</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: 10 }}>
+                  <TextInput 
+                    style={[styles.timeInput, { width: 80, color: isEcoMode ? '#fff' : '#000', borderColor: isEcoMode ? '#555' : '#ccc' }]}
+                    keyboardType="number-pad"
+                    value={countdownInputMinStr}
+                    onChangeText={setCountdownInputMinStr}
+                    placeholder="0"
+                    placeholderTextColor="#888"
+                    returnKeyType="done"
+                  />
+                  <Text style={{ fontSize: 16, color: isEcoMode ? '#fff' : '#000', marginHorizontal: 10 }}>分</Text>
+                  <TextInput 
+                    style={[styles.timeInput, { width: 80, color: isEcoMode ? '#fff' : '#000', borderColor: isEcoMode ? '#555' : '#ccc' }]}
+                    keyboardType="number-pad"
+                    value={countdownInputSecStr}
+                    onChangeText={setCountdownInputSecStr}
+                    placeholder="0"
+                    placeholderTextColor="#888"
+                    returnKeyType="done"
+                  />
+                  <Text style={{ fontSize: 16, color: isEcoMode ? '#fff' : '#000', marginLeft: 10 }}>秒</Text>
+                </View>
 
-                <TouchableOpacity style={[styles.applyButton, {marginTop: 20}]} onPress={() => {
-                   const parsed = parseInt(countdownInputStr, 10);
-                   if (!isNaN(parsed) && parsed > 0) {
+                <TouchableOpacity style={[styles.applyButton, {marginTop: 10}]} onPress={() => {
+                   const m = parseInt(countdownInputMinStr, 10) || 0;
+                   const s = parseInt(countdownInputSecStr, 10) || 0;
+                   const totalSeconds = (m * 60) + s;
+                   if (totalSeconds > 0) {
                      if (!isCountdownEnabled) toggleCountdownEnabled(); // オンにする
-                     saveCountdownSeconds(parsed);
+                     saveCountdownSeconds(totalSeconds);
                    }
                    setTimeModalMode('time');
                 }}>
