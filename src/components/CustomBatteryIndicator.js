@@ -89,12 +89,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     width: 50,
+    transform: [{ translateX: -5 }], // 左に5ピクセル移動
   },
   rightSide: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     width: 60,
+    transform: [{ translateX: 5 }], // 右に5ピクセル移動
   },
   text: {
     color: '#aaa',
