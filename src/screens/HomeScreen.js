@@ -385,22 +385,22 @@ export default function HomeScreen() {
                   ))}
                 </View>
 
-                {/* スタート前準備時間設定への導線（ボタン風カードデザイン） */}
+                {/* スタート前準備時間設定への導線 */}
+                <Text style={{textAlign: 'center', fontSize: 13, color: isEcoMode ? '#888' : '#666', marginTop: 25, marginBottom: 8}}>
+                  準備時間を設定できます
+                </Text>
                 <TouchableOpacity 
-                  style={[styles.countdownSettingCard, { backgroundColor: isEcoMode ? '#333' : '#F2F2F7' }]} 
+                  style={[styles.countdownSettingCard, { backgroundColor: '#007AFF', paddingVertical: 12, marginTop: 0 }]} 
                   onPress={() => {
                     setCountdownInputStr(countdownSeconds.toString());
                     setTimeModalMode('countdown');
                   }}
                 >
-                  <Text style={[styles.countdownSettingCardTitle, { color: isEcoMode ? '#fff' : '#000' }]}>
+                  <Text style={[styles.countdownSettingCardTitle, { color: '#fff', marginBottom: 2 }]}>
                     スタート前カウントダウン
                   </Text>
-                  <Text style={[styles.countdownSettingCardSub, { color: isEcoMode ? '#bbb' : '#666' }]}>
-                    準備時間を設定
-                  </Text>
-                  <Text style={[styles.countdownSettingCardStatus, { color: isEcoMode ? '#aaa' : '#007AFF' }]}>
-                    現在: {isCountdownEnabled ? `${countdownSeconds}秒` : 'オフ'}
+                  <Text style={[styles.countdownSettingCardStatus, { color: '#E5F1FF', fontSize: 13, fontWeight: 'normal' }]}>
+                    ({isCountdownEnabled ? `現在${countdownSeconds}秒` : 'オフ'})
                   </Text>
                 </TouchableOpacity>
 
