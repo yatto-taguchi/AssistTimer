@@ -20,6 +20,11 @@ export default function HomeScreen() {
   const [selectedCategory, setSelectedCategory] = useState('');
   const [photoUri, setPhotoUri] = useState(null);
 
+  // 時間設定モーダル用State
+  const [timeModalVisible, setTimeModalVisible] = useState(false);
+  const [manualInputStr, setManualInputStr] = useState('');
+  const PRESET_TIMES = [1, 3, 5, 10, 15, 20, 30, 60, 90];
+
   const { isEcoMode, isProMode, isColorIndicator, isCountdownEnabled, countdownSeconds } = useContext(AppContext);
   
   // スタート前カウントダウン用State
@@ -118,6 +123,30 @@ export default function HomeScreen() {
     setIsPreCountingDown(false);
     setIsCountUp(false);
     setRemainingTime(targetTime);
+  };
+
+  // ---- 時間設定機能 ----
+  const handleOpenTimeModal = () => {
+    if (isRunning || isPreCountingDown) return;
+    setManualInputStr(Math.floor(targetTime / 60).toString());
+    setTimeModalVisible(true);
+  };
+
+  const applyTime = (minutes) => {
+    const secs = Math.max(1, Math.floor(minutes * 60));
+    setTargetTime(secs);
+    setRemainingTime(secs);
+    setIsCountUp(false);
+    setTimeModalVisible(false);
+  };
+
+  const handleManualApply = () => {
+    const min = parseFloat(manualInputStr);
+    if (!isNaN(min) && min > 0) {
+      applyTime(min);
+    } else {
+      Alert.alert("エラー", "有効な分数を入力してください。");
+    }
   };
 
   // ---- 記録・保存機能 ----
@@ -232,9 +261,11 @@ export default function HomeScreen() {
                 {preCountdownTime}
               </Text>
             ) : (
-              <Text style={[styles.timeText, { color: isCountUp ? '#FF3B30' : mainTextColor }]}>
-                {isCountUp ? '+' : ''}{formatTime(remainingTime)}
-              </Text>
+              <TouchableOpacity onPress={handleOpenTimeModal} disabled={isRunning}>
+                <Text style={[styles.timeText, { color: isCountUp ? '#FF3B30' : mainTextColor }]}>
+                  {isCountUp ? '+' : ''}{formatTime(remainingTime)}
+                </Text>
+              </TouchableOpacity>
             )}
           </View>
         </View>
@@ -299,6 +330,48 @@ export default function HomeScreen() {
              <Text style={{textAlign: 'center', color: '#000', fontWeight: 'bold'}}>キャンセル</Text>
           </TouchableOpacity>
         </ScrollView>
+      </Modal>
+
+      {/* タイマー時間設定モーダル */}
+      <Modal visible={timeModalVisible} animationType="fade" transparent={true}>
+        <View style={styles.timeModalOverlay}>
+          <View style={[styles.timeModalContent, { backgroundColor: isEcoMode ? '#222' : '#fff' }]}>
+            <Text style={[styles.timeModalTitle, { color: isEcoMode ? '#fff' : '#000' }]}>タイマー時間の設定</Text>
+            
+            {/* 任意入力エリア */}
+            <View style={styles.manualInputContainer}>
+              <TextInput
+                style={[styles.timeInput, { color: isEcoMode ? '#fff' : '#000', borderColor: isEcoMode ? '#555' : '#ccc' }]}
+                keyboardType="numeric"
+                value={manualInputStr}
+                onChangeText={setManualInputStr}
+                placeholder="分数"
+                placeholderTextColor="#888"
+              />
+              <Text style={[styles.timeInputLabel, { color: isEcoMode ? '#fff' : '#000' }]}>分</Text>
+              <TouchableOpacity style={styles.applyButton} onPress={handleManualApply}>
+                <Text style={styles.applyButtonText}>設定</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* 9つのタイルエリア */}
+            <View style={styles.presetTilesContainer}>
+              {PRESET_TIMES.map((m) => (
+                <TouchableOpacity 
+                  key={m} 
+                  style={[styles.presetTile, { backgroundColor: isEcoMode ? '#333' : '#F0F0F0' }]} 
+                  onPress={() => applyTime(m)}
+                >
+                  <Text style={[styles.presetTileText, { color: isEcoMode ? '#fff' : '#000' }]}>{m}分</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <TouchableOpacity style={styles.closeTimeModalButton} onPress={() => setTimeModalVisible(false)}>
+              <Text style={styles.closeTimeModalText}>キャンセル</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       </Modal>
 
     </View>
@@ -412,5 +485,82 @@ const styles = StyleSheet.create({
   photoButtonText: {
     color: '#fff',
     fontWeight: '600',
+  },
+  // 時間設定モーダル用スタイル
+  timeModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  timeModalContent: {
+    width: '90%',
+    borderRadius: 15,
+    padding: 20,
+    alignItems: 'center',
+    maxWidth: 400,
+  },
+  timeModalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 20,
+  },
+  manualInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 25,
+    justifyContent: 'center',
+  },
+  timeInput: {
+    borderWidth: 1,
+    borderRadius: 8,
+    width: 80,
+    height: 45,
+    textAlign: 'center',
+    fontSize: 20,
+  },
+  timeInputLabel: {
+    fontSize: 18,
+    marginHorizontal: 10,
+    fontWeight: 'bold',
+  },
+  applyButton: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 8,
+  },
+  applyButtonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  presetTilesContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 10,
+  },
+  presetTile: {
+    width: '30%',
+    aspectRatio: 2,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 10,
+    marginBottom: 10,
+  },
+  presetTileText: {
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  closeTimeModalButton: {
+    marginTop: 15,
+    padding: 10,
+  },
+  closeTimeModalText: {
+    fontSize: 16,
+    color: '#007AFF',
+    fontWeight: 'bold',
   },
 });
