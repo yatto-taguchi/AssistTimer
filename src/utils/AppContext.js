@@ -8,6 +8,7 @@ export const AppProvider = ({ children }) => {
   const [isEcoClockEnabled, setIsEcoClockEnabled] = useState(true);
   const [isEcoBatteryEnabled, setIsEcoBatteryEnabled] = useState(true);
   const [isEcoNavIconEnabled, setIsEcoNavIconEnabled] = useState(false); // trueでアイコン、falseで点
+  const [isEcoNavActiveDot, setIsEcoNavActiveDot] = useState(false); // アイコン表示時、選択中のみ点にする
   const [isEcoBorderEnabled, setIsEcoBorderEnabled] = useState(false); // trueで境界線あり、falseでなし
   const [isProMode, setIsProMode] = useState(false); // 課金・広告デモ用
   const [isColorIndicator, setIsColorIndicator] = useState(true); // カラーインジケーター（10分以下タイマー用）
@@ -22,6 +23,7 @@ export const AppProvider = ({ children }) => {
         const ecoClockVal = await AsyncStorage.getItem('isEcoClockEnabled');
         const ecoBatteryVal = await AsyncStorage.getItem('isEcoBatteryEnabled');
         const ecoNavIconVal = await AsyncStorage.getItem('isEcoNavIconEnabled');
+        const ecoNavActiveDotVal = await AsyncStorage.getItem('isEcoNavActiveDot');
         const ecoBorderVal = await AsyncStorage.getItem('isEcoBorderEnabled');
         const proVal = await AsyncStorage.getItem('isProMode');
         const colorVal = await AsyncStorage.getItem('isColorIndicator');
