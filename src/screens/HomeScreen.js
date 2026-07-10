@@ -20,7 +20,12 @@ export default function HomeScreen() {
   const [selectedCategory, setSelectedCategory] = useState('');
   const [photoUri, setPhotoUri] = useState(null);
 
-  const { isEcoMode, isProMode, isColorIndicator } = useContext(AppContext);
+  const { isEcoMode, isProMode, isColorIndicator, isCountdownEnabled, countdownSeconds } = useContext(AppContext);
+  
+  // スタート前カウントダウン用State
+  const [isPreCountingDown, setIsPreCountingDown] = useState(false);
+  const [preCountdownTime, setPreCountdownTime] = useState(0);
+
   const timerRef = useRef(null);
 
   // 音声のロードと再生用関数
@@ -39,7 +44,26 @@ export default function HomeScreen() {
     return sound ? () => sound.unloadAsync() : undefined;
   }, [sound]);
 
-  // タイマー進行のロジック
+  // 準備カウントダウン進行のロジック
+  useEffect(() => {
+    let interval;
+    if (isPreCountingDown) {
+      interval = setInterval(() => {
+        setPreCountdownTime(prev => {
+          if (prev <= 1) {
+            clearInterval(interval);
+            setIsPreCountingDown(false);
+            setIsRunning(true); // カウントダウン終了後、メインタイマー開始
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [isPreCountingDown]);
+
+  // メインタイマー進行のロジック
   useEffect(() => {
     if (isRunning) {
       timerRef.current = setInterval(() => {
@@ -74,11 +98,24 @@ export default function HomeScreen() {
   };
 
   const toggleTimer = () => {
-    setIsRunning(!isRunning);
+    if (!isRunning && !isPreCountingDown && remainingTime === targetTime && isCountdownEnabled && countdownSeconds > 0) {
+      // 初期状態からのスタートでカウントダウン有効の場合、準備カウントダウンを開始
+      setPreCountdownTime(countdownSeconds);
+      setIsPreCountingDown(true);
+    } else {
+      if (isPreCountingDown) {
+        // カウントダウン中ならキャンセル
+        setIsPreCountingDown(false);
+      } else {
+        // 通常のタイマートグル
+        setIsRunning(!isRunning);
+      }
+    }
   };
 
   const resetTimer = () => {
     setIsRunning(false);
+    setIsPreCountingDown(false);
     setIsCountUp(false);
     setRemainingTime(targetTime);
   };
@@ -86,6 +123,7 @@ export default function HomeScreen() {
   // ---- 記録・保存機能 ----
   const handleOpenSaveModal = () => {
     setIsRunning(false); // タイマーを止める
+    setIsPreCountingDown(false);
     setSaveModalVisible(true);
   };
 
@@ -144,11 +182,14 @@ export default function HomeScreen() {
   const progress = isCountUp ? 0 : Math.max(0, remainingTime / targetTime);
 
   // カラーインジケーターのロジック
-  // isColorIndicator ON かつ タイマーが10分（600秒）以下の場合:
-  //   残量100%〜30%: ブルー、30%〜10%: イエロー、10%以下: レッド
-  // それ以外は従来のロジック
   let ringColor = '#007AFF'; // デフォルト: ブルー
-  if (!isCountUp) {
+  let activeProgress = progress;
+
+  if (isPreCountingDown) {
+    // 準備カウントダウン中はMAXブルー固定
+    activeProgress = 1;
+    ringColor = '#007AFF';
+  } else if (!isCountUp) {
     if (isColorIndicator && targetTime <= 600) {
       // 残量パーセントに基づく色変更
       const remainingPercent = targetTime > 0 ? remainingTime / targetTime : 0;
@@ -180,20 +221,26 @@ export default function HomeScreen() {
           <RingProgress 
             radius={140} 
             strokeWidth={15} 
-            progress={progress} 
+            progress={activeProgress} 
             color={ringColor}
             backgroundColor={ringBgColor}
           />
           <View style={styles.timeTextContainer}>
-            <Text style={[styles.timeText, { color: isCountUp ? '#FF3B30' : mainTextColor }]}>
-              {isCountUp ? '+' : ''}{formatTime(remainingTime)}
-            </Text>
+            {isPreCountingDown ? (
+              <Text style={[styles.preCountdownText, { color: ringColor }]}>
+                {preCountdownTime}
+              </Text>
+            ) : (
+              <Text style={[styles.timeText, { color: isCountUp ? '#FF3B30' : mainTextColor }]}>
+                {isCountUp ? '+' : ''}{formatTime(remainingTime)}
+              </Text>
+            )}
           </View>
         </View>
 
         <View style={styles.controlsContainer}>
           <TouchableOpacity style={styles.button} onPress={toggleTimer}>
-            <Text style={styles.buttonText}>{isRunning ? '一時停止' : 'スタート'}</Text>
+            <Text style={styles.buttonText}>{isRunning || isPreCountingDown ? '一時停止' : 'スタート'}</Text>
           </TouchableOpacity>
           <TouchableOpacity style={[styles.button, styles.resetButton]} onPress={resetTimer}>
             <Text style={[styles.buttonText, { color: '#000' }]}>リセット</Text>
@@ -201,7 +248,7 @@ export default function HomeScreen() {
         </View>
         
         {/* 記録ボタンは一時停止中か、タイマー進行中に表示 */}
-        {(!isRunning && remainingTime !== targetTime) || isCountUp ? (
+        {(!isRunning && !isPreCountingDown && remainingTime !== targetTime) || isCountUp ? (
           <TouchableOpacity style={styles.saveActionButton} onPress={handleOpenSaveModal}>
             <Text style={styles.saveActionText}>記録・保存する</Text>
           </TouchableOpacity>
@@ -277,6 +324,10 @@ const styles = StyleSheet.create({
   timeText: {
     fontSize: 48,
     fontWeight: '300',
+  },
+  preCountdownText: {
+    fontSize: 120, // 枠いっぱいの大きなサイズ
+    fontWeight: 'bold',
   },
   controlsContainer: {
     flexDirection: 'row',
