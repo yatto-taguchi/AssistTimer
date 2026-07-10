@@ -337,22 +337,29 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        <Animated.View style={[styles.controlsContainer, { opacity: controlsOpacity }]} pointerEvents={controlsVisible ? 'auto' : 'none'}>
-          <TouchableOpacity style={styles.button} onPress={toggleTimer} disabled={!controlsVisible}>
-            <Text style={styles.buttonText}>{isRunning || isPreCountingDown ? '一時停止' : 'スタート'}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.button, styles.resetButton]} onPress={resetTimer} disabled={!controlsVisible}>
-            <Text style={[styles.buttonText, { color: '#000' }]}>リセット</Text>
-          </TouchableOpacity>
-        </Animated.View>
-        
-        {/* 記録ボタンは一時停止中か、タイマー進行中に表示 */}
-        <Animated.View style={{ opacity: controlsOpacity }} pointerEvents={controlsVisible ? 'auto' : 'none'}>
-          {(!isRunning && !isPreCountingDown && remainingTime !== targetTime) || isCountUp ? (
+        <Animated.View style={[{ opacity: controlsOpacity, width: '100%', alignItems: 'center' }]} pointerEvents={controlsVisible ? 'auto' : 'none'}>
+          <View style={styles.controlsContainer}>
+            <TouchableOpacity style={styles.button} onPress={toggleTimer} disabled={!controlsVisible}>
+              <Text style={styles.buttonText}>{isRunning || isPreCountingDown ? '一時停止' : 'スタート'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.button, styles.resetButton]} onPress={resetTimer} disabled={!controlsVisible}>
+              <Text style={[styles.buttonText, { color: '#000' }]}>リセット</Text>
+            </TouchableOpacity>
+          </View>
+          
+          {/* 計測中のみ表示される計測終了ボタン */}
+          {isRunning && !isPreCountingDown && (
+            <TouchableOpacity style={styles.endMeasurementButton} onPress={handleOpenSaveModal} disabled={!controlsVisible}>
+              <Text style={styles.endMeasurementText}>計測終了</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* 記録ボタンは一時停止中か、カウントアップ中に表示 */}
+          {!isRunning && !isPreCountingDown && remainingTime !== targetTime && (
             <TouchableOpacity style={styles.saveActionButton} onPress={handleOpenSaveModal}>
               <Text style={styles.saveActionText}>記録・保存する</Text>
             </TouchableOpacity>
-          ) : null}
+          )}
         </Animated.View>
 
       </View>
@@ -602,6 +609,25 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     textAlign: 'center',
+  },
+  endMeasurementButton: {
+    backgroundColor: '#FF3B30',
+    paddingVertical: 15,
+    paddingHorizontal: 40,
+    borderRadius: 30,
+    marginTop: 20,
+    width: '90%',
+    alignItems: 'center',
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+  },
+  endMeasurementText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
   },
   adBanner: {
     height: 50,
