@@ -411,48 +411,46 @@ export default function HomeScreen() {
             ) : (
               <>
                 <Text style={[styles.timeModalTitle, { color: isEcoMode ? '#fff' : '#000' }]}>準備時間の設定</Text>
-                
-                <View style={styles.countdownSwitchRow}>
-                  <Text style={[{ color: isEcoMode ? '#fff' : '#000', fontSize: 16, marginRight: 15 }]}>有効にする</Text>
-                  <Switch
-                    value={isCountdownEnabled}
-                    onValueChange={toggleCountdownEnabled}
-                    trackColor={{ false: '#333', true: '#34C759' }}
-                  />
+
+                <Text style={styles.countdownSectionLabel}>クイック選択</Text>
+                <View style={styles.presetTilesContainer}>
+                  {['無し', 5, 10, 30, 60, 180].map((sec) => {
+                    const isNone = sec === '無し';
+                    const isActive = isNone ? !isCountdownEnabled : (isCountdownEnabled && countdownSeconds === sec);
+                    const label = isNone ? '無し' : (sec === 180 ? '3分' : `${sec}秒`);
+                    return (
+                      <TouchableOpacity 
+                        key={sec} 
+                        style={[styles.presetTile, { width: '31%', backgroundColor: isEcoMode ? '#222' : '#F2F2F7' }, isActive && {backgroundColor: '#007AFF'}]} 
+                        onPress={() => {
+                          if (isNone) {
+                            if (isCountdownEnabled) toggleCountdownEnabled(); // オフにする
+                          } else {
+                            if (!isCountdownEnabled) toggleCountdownEnabled(); // オンにする
+                            saveCountdownSeconds(sec);
+                          }
+                          setTimeModalMode('time');
+                        }}
+                      >
+                        <Text style={[styles.presetTileText, { fontSize: 16, color: isEcoMode ? '#fff' : '#000' }, isActive && {color: '#fff'}]}>{label}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
                 </View>
 
-                {isCountdownEnabled && (
-                  <>
-                    <Text style={styles.countdownSectionLabel}>直接入力 (秒)</Text>
-                    <TextInput 
-                      style={[styles.timeInput, { width: 100, color: isEcoMode ? '#fff' : '#000', borderColor: isEcoMode ? '#555' : '#ccc' }]}
-                      keyboardType="number-pad"
-                      value={countdownInputStr}
-                      onChangeText={setCountdownInputStr}
-                      returnKeyType="done"
-                    />
-
-                    <Text style={styles.countdownSectionLabel}>クイック選択</Text>
-                    <View style={styles.presetTilesContainer}>
-                      {[5, 10, 30, 60].map((sec) => (
-                        <TouchableOpacity 
-                          key={sec} 
-                          style={[styles.presetTile, { width: '47%', backgroundColor: isEcoMode ? '#222' : '#F2F2F7' }, countdownSeconds === sec && {backgroundColor: '#007AFF'}]} 
-                          onPress={() => {
-                            saveCountdownSeconds(sec);
-                            setTimeModalMode('time');
-                          }}
-                        >
-                          <Text style={[styles.presetTileText, { color: isEcoMode ? '#fff' : '#000' }, countdownSeconds === sec && {color: '#fff'}]}>{sec}秒</Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  </>
-                )}
+                <Text style={styles.countdownSectionLabel}>直接入力 (秒)</Text>
+                <TextInput 
+                  style={[styles.timeInput, { width: 100, color: isEcoMode ? '#fff' : '#000', borderColor: isEcoMode ? '#555' : '#ccc' }]}
+                  keyboardType="number-pad"
+                  value={countdownInputStr}
+                  onChangeText={setCountdownInputStr}
+                  returnKeyType="done"
+                />
 
                 <TouchableOpacity style={[styles.applyButton, {marginTop: 20}]} onPress={() => {
                    const parsed = parseInt(countdownInputStr, 10);
                    if (!isNaN(parsed) && parsed > 0) {
+                     if (!isCountdownEnabled) toggleCountdownEnabled(); // オンにする
                      saveCountdownSeconds(parsed);
                    }
                    setTimeModalMode('time');
