@@ -19,8 +19,8 @@ function MainTabs() {
       initialRouteName="Home"
       screenOptions={({ route }) => ({
         headerShown: false,
-        tabBarActiveTintColor: isEcoMode ? '#333' : '#007AFF',
-        tabBarInactiveTintColor: isEcoMode ? '#111' : '#8E8E93',
+        tabBarActiveTintColor: isEcoMode ? '#888' : '#007AFF', // 選択中を明るいグレーに
+        tabBarInactiveTintColor: isEcoMode ? '#333' : '#8E8E93', // 非選択中もうっすら見えるように
         tabBarShowLabel: !isEcoMode,
         tabBarStyle: {
           backgroundColor: isEcoMode ? '#000' : '#fff',
