@@ -224,10 +224,11 @@ export default function HomeScreen() {
             progress={activeProgress} 
             color={ringColor}
             backgroundColor={ringBgColor}
+            fillColor={isPreCountingDown ? ringColor : 'transparent'}
           />
           <View style={styles.timeTextContainer}>
             {isPreCountingDown ? (
-              <Text style={[styles.preCountdownText, { color: ringColor }]}>
+              <Text style={[styles.preCountdownText, { color: '#FFFFFF' }]}>
                 {preCountdownTime}
               </Text>
             ) : (

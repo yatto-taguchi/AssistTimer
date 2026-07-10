@@ -8,6 +8,7 @@ export default function RingProgress({
   progress = 0.5,
   color = '#007AFF', // 青色（変更可能）
   backgroundColor = '#E5E5EA', // トラック背景色
+  fillColor = 'transparent',
 }) {
   const innerRadius = radius - strokeWidth / 2;
   const circumference = 2 * Math.PI * innerRadius;
@@ -22,7 +23,7 @@ export default function RingProgress({
           r={innerRadius}
           cx={radius}
           cy={radius}
-          fill="transparent"
+          fill={fillColor}
           stroke={color}
           strokeWidth={strokeWidth}
           strokeDasharray={`${circumference} ${circumference}`}
