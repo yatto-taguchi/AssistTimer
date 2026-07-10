@@ -228,7 +228,7 @@ export default function HomeScreen() {
           />
           <View style={styles.timeTextContainer}>
             {isPreCountingDown ? (
-              <Text style={[styles.preCountdownText, { color: '#FFFFFF' }]}>
+              <Text style={[styles.preCountdownText, { color: mainTextColor }]}>
                 {preCountdownTime}
               </Text>
             ) : (
