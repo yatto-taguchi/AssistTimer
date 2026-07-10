@@ -2,12 +2,14 @@ import React, { useContext } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
+import { StatusBar } from 'expo-status-bar';
 
 import { AppProvider, AppContext } from './src/utils/AppContext';
 
 import HomeScreen from './src/screens/HomeScreen';
 import RecordsScreen from './src/screens/RecordsScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
+import CustomBatteryIndicator from './src/components/CustomBatteryIndicator';
 
 const Tab = createBottomTabNavigator();
 
@@ -15,8 +17,11 @@ function MainTabs() {
   const { isEcoMode } = useContext(AppContext);
 
   return (
-    <Tab.Navigator
-      initialRouteName="Home"
+    <>
+      <StatusBar hidden={isEcoMode} style={isEcoMode ? "light" : "auto"} />
+      <CustomBatteryIndicator />
+      <Tab.Navigator
+        initialRouteName="Home"
       screenOptions={({ route }) => ({
         headerShown: false,
         tabBarActiveTintColor: isEcoMode ? '#888' : '#007AFF', // 選択中を明るいグレーに
@@ -62,6 +67,7 @@ function MainTabs() {
         options={{ title: '設定' }}
       />
     </Tab.Navigator>
+    </>
   );
 }
 
