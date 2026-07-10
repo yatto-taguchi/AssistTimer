@@ -94,9 +94,13 @@ export default function HomeScreen() {
     const m = Math.floor((absTime % 3600) / 60);
     const s = absTime % 60;
     
-    let formatted = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    let formatted;
     if (h > 0) {
-      formatted = `${h.toString().padStart(2, '0')}:${formatted}`;
+      // 1時間以上の場合： h:mm:ss （時は0埋めなし、分と秒は2桁）
+      formatted = `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    } else {
+      // 1時間未満の場合： m:ss （分は0埋めなし、秒は2桁）
+      formatted = `${m}:${s.toString().padStart(2, '0')}`;
     }
     
     return isNegative ? `-${formatted}` : formatted;
@@ -398,10 +402,12 @@ const styles = StyleSheet.create({
   timeText: {
     fontSize: 48,
     fontWeight: '500',
+    fontVariant: ['tabular-nums'], // 数字の幅を等間隔にして揺れを防止
   },
   preCountdownText: {
     fontSize: 120, // 枠いっぱいの大きなサイズ
     fontWeight: 'bold',
+    fontVariant: ['tabular-nums'], // こちらも揺れを防止
   },
   controlsContainer: {
     flexDirection: 'row',
