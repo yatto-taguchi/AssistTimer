@@ -35,47 +35,52 @@ export default function SettingsScreen() {
     setModalVisible(false);
   };
 
+  const bgColor = isEcoMode ? '#000' : '#F5F5F5';
+  const textColor = isEcoMode ? '#fff' : '#000';
+  const subTextColor = isEcoMode ? '#aaa' : '#8E8E93';
+  const borderColor = isEcoMode ? '#333' : '#E5E5EA';
+
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>設定</Text>
+    <View style={[styles.container, { backgroundColor: bgColor }]}>
+      <Text style={[styles.title, { color: textColor }]}>設定</Text>
       
-      <View style={styles.settingRow}>
-        <Text style={styles.settingText}>エコモード（省電力・黒背景）</Text>
+      <View style={[styles.settingRow, { borderBottomColor: borderColor }]}>
+        <Text style={[styles.settingText, { color: textColor }]}>エコモード（極限省電力）</Text>
         <Switch
           value={isEcoMode}
           onValueChange={toggleEcoMode}
         />
       </View>
 
-      <View style={styles.settingRow}>
-        <Text style={styles.settingText}>Proモード（広告非表示デモ）</Text>
+      <View style={[styles.settingRow, { borderBottomColor: borderColor }]}>
+        <Text style={[styles.settingText, { color: textColor }]}>Proモード（広告非表示デモ）</Text>
         <Switch
           value={isProMode}
           onValueChange={toggleProMode}
         />
       </View>
 
-      <View style={styles.settingRow}>
+      <View style={[styles.settingRow, { borderBottomColor: borderColor }]}>
         <View style={styles.settingTextContainer}>
-          <Text style={styles.settingText}>カラーインジケーター</Text>
-          <Text style={styles.settingDescription}>10分以下のタイマーでリングの色が残量に応じて青→黄→赤に変化します</Text>
+          <Text style={[styles.settingText, { color: textColor }]}>カラーインジケーター</Text>
+          <Text style={[styles.settingDescription, { color: subTextColor }]}>10分以下のタイマーでリングの色が残量に応じて青→黄→赤に変化します</Text>
         </View>
         <Switch
           value={isColorIndicator}
           onValueChange={toggleColorIndicator}
-          trackColor={{ false: '#D1D1D6', true: '#34C759' }}
+          trackColor={{ false: '#333', true: '#34C759' }}
         />
       </View>
 
-      <View style={styles.settingRow}>
+      <View style={[styles.settingRow, { borderBottomColor: borderColor }]}>
         <View style={styles.settingTextContainer}>
-          <Text style={styles.settingText}>スタート前カウントダウン</Text>
-          <Text style={styles.settingDescription}>タイマー開始前に準備時間を設けます</Text>
+          <Text style={[styles.settingText, { color: textColor }]}>スタート前カウントダウン</Text>
+          <Text style={[styles.settingDescription, { color: subTextColor }]}>タイマー開始前に準備時間を設けます</Text>
         </View>
         <Switch
           value={isCountdownEnabled}
           onValueChange={toggleCountdownEnabled}
-          trackColor={{ false: '#D1D1D6', true: '#34C759' }}
+          trackColor={{ false: '#333', true: '#34C759' }}
         />
       </View>
 
@@ -91,12 +96,12 @@ export default function SettingsScreen() {
           style={styles.modalOverlay} 
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>準備時間の設定</Text>
+          <View style={[styles.modalContent, { backgroundColor: isEcoMode ? '#111' : '#fff' }]}>
+            <Text style={[styles.modalTitle, { color: isEcoMode ? '#fff' : '#000' }]}>準備時間の設定</Text>
             
-            <Text style={styles.modalLabel}>直接入力 (秒)</Text>
+            <Text style={[styles.modalLabel, { color: isEcoMode ? '#aaa' : '#333' }]}>直接入力 (秒)</Text>
             <TextInput 
-              style={styles.input}
+              style={[styles.input, { color: isEcoMode ? '#fff' : '#000', borderColor: isEcoMode ? '#555' : '#ccc' }]}
               keyboardType="number-pad"
               value={inputValue}
               onChangeText={setInputValue}
@@ -104,21 +109,21 @@ export default function SettingsScreen() {
               onSubmitEditing={handleSaveModal}
             />
 
-            <Text style={styles.modalLabel}>クイック選択</Text>
+            <Text style={[styles.modalLabel, { color: isEcoMode ? '#aaa' : '#333' }]}>クイック選択</Text>
             <View style={styles.tilesContainer}>
               {[5, 10, 30, 60].map((sec) => (
                 <TouchableOpacity 
                   key={sec} 
-                  style={[styles.tile, countdownSeconds === sec && styles.activeTile]} 
+                  style={[styles.tile, { backgroundColor: isEcoMode ? '#222' : '#F2F2F7' }, countdownSeconds === sec && styles.activeTile]} 
                   onPress={() => handleTilePress(sec)}
                 >
-                  <Text style={[styles.tileText, countdownSeconds === sec && styles.activeTileText]}>{sec}秒</Text>
+                  <Text style={[styles.tileText, { color: isEcoMode ? '#fff' : '#000' }, countdownSeconds === sec && styles.activeTileText]}>{sec}秒</Text>
                 </TouchableOpacity>
               ))}
             </View>
 
-            <TouchableOpacity style={styles.saveButton} onPress={handleSaveModal}>
-              <Text style={styles.saveButtonText}>決定</Text>
+            <TouchableOpacity style={[styles.saveButton, isEcoMode && { backgroundColor: '#333' }]} onPress={handleSaveModal}>
+              <Text style={[styles.saveButtonText, isEcoMode && { color: '#fff' }]}>決定</Text>
             </TouchableOpacity>
             
             <TouchableOpacity style={styles.closeButton} onPress={() => setModalVisible(false)}>
@@ -135,7 +140,6 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F5F5F5',
     padding: 20,
     justifyContent: 'flex-start',
   },
@@ -151,7 +155,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 15,
     borderBottomWidth: 1,
-    borderBottomColor: '#E5E5EA',
   },
   settingText: {
     fontSize: 18,
@@ -162,7 +165,6 @@ const styles = StyleSheet.create({
   },
   settingDescription: {
     fontSize: 13,
-    color: '#8E8E93',
     marginTop: 4,
   },
   configButton: {
@@ -180,10 +182,9 @@ const styles = StyleSheet.create({
   modalOverlay: {
     flex: 1,
     justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0,0,0,0.4)',
+    backgroundColor: 'rgba(0,0,0,0.7)',
   },
   modalContent: {
-    backgroundColor: '#fff',
     padding: 25,
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
@@ -200,11 +201,9 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginTop: 15,
     marginBottom: 10,
-    color: '#333',
   },
   input: {
     borderWidth: 1,
-    borderColor: '#ccc',
     padding: 15,
     borderRadius: 8,
     fontSize: 18,
@@ -220,7 +219,6 @@ const styles = StyleSheet.create({
   tile: {
     width: '47%',
     aspectRatio: 2,
-    backgroundColor: '#F2F2F7',
     justifyContent: 'center',
     alignItems: 'center',
     borderRadius: 12,
@@ -232,7 +230,6 @@ const styles = StyleSheet.create({
   tileText: {
     fontSize: 20,
     fontWeight: '600',
-    color: '#000',
   },
   activeTileText: {
     color: '#fff',

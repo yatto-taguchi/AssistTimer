@@ -1,12 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useContext } from 'react';
 import { StyleSheet, Text, View, FlatList, TouchableOpacity, Image, Modal, Button } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { getRecords, updateRecordPhoto } from '../utils/recordStorage';
+import { AppContext } from '../utils/AppContext';
 
 export default function RecordsScreen() {
   const [records, setRecords] = useState([]);
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
+  const { isEcoMode } = useContext(AppContext);
 
   // 画面が表示されるたびにデータを読み込むための簡易フック（ナビゲーションイベントを使うのがベターですが今回は仮）
   useEffect(() => {
@@ -45,12 +47,18 @@ export default function RecordsScreen() {
     }
   };
 
+  // カラー定義
+  const bgColor = isEcoMode ? '#000' : '#F2F2F7';
+  const tileBgColor = isEcoMode ? '#111' : '#fff';
+  const textColor = isEcoMode ? '#fff' : '#333';
+  const subTextColor = isEcoMode ? '#888' : '#8E8E93';
+
   // タイル（個別の記録行）の描画
   const renderItem = ({ item }) => {
     const dateStr = new Date(item.date).toLocaleDateString();
     return (
       <TouchableOpacity 
-        style={styles.recordTile} 
+        style={[styles.recordTile, { backgroundColor: tileBgColor, shadowColor: isEcoMode ? 'transparent' : '#000' }]} 
         onPress={() => {
           setSelectedRecord(item);
           setModalVisible(true);
@@ -59,14 +67,14 @@ export default function RecordsScreen() {
         {item.photoUri ? (
           <Image source={{ uri: item.photoUri }} style={styles.tileImage} />
         ) : (
-          <View style={[styles.tileImage, styles.placeholderImage]}>
+          <View style={[styles.tileImage, styles.placeholderImage, isEcoMode && { backgroundColor: '#222' }]}>
              <Text style={styles.placeholderText}>NO PHOTO</Text>
           </View>
         )}
         <View style={styles.tileInfo}>
-          <Text style={styles.tileDate}>{dateStr}</Text>
-          <Text style={styles.tileCategory}>{item.category || 'カテゴリ未設定'}</Text>
-          <Text style={styles.tileDuration}>タイム: {formatDuration(item.duration)}</Text>
+          <Text style={[styles.tileDate, { color: subTextColor }]}>{dateStr}</Text>
+          <Text style={[styles.tileCategory, { color: textColor }]}>{item.category || 'カテゴリ未設定'}</Text>
+          <Text style={[styles.tileDuration, { color: textColor }]}>タイム: {formatDuration(item.duration)}</Text>
         </View>
       </TouchableOpacity>
     );
@@ -79,10 +87,10 @@ export default function RecordsScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: bgColor }]}>
       {records.length === 0 ? (
         <View style={styles.emptyContainer}>
-          <Text style={styles.emptyText}>まだ記録がありません。タイマーから練習を記録しましょう！</Text>
+          <Text style={[styles.emptyText, { color: subTextColor }]}>まだ記録がありません。タイマーから練習を記録しましょう！</Text>
           {/* テスト用に再読み込みボタンを置く */}
           <Button title="再読み込み" onPress={loadData} />
         </View>
@@ -101,28 +109,28 @@ export default function RecordsScreen() {
         animationType="slide"
         transparent={false}
       >
-        <View style={styles.modalContainer}>
-          <Text style={styles.modalTitle}>練習の記録詳細</Text>
+        <View style={[styles.modalContainer, { backgroundColor: bgColor }]}>
+          <Text style={[styles.modalTitle, { color: textColor }]}>練習の記録詳細</Text>
           
           {selectedRecord && (
             <>
               {selectedRecord.photoUri ? (
                 <Image source={{ uri: selectedRecord.photoUri }} style={styles.modalDetailImage} />
               ) : (
-                <View style={[styles.modalDetailImage, styles.placeholderImage]}>
+                <View style={[styles.modalDetailImage, styles.placeholderImage, isEcoMode && { backgroundColor: '#222' }]}>
                   <Text style={styles.placeholderText}>No Photo Available</Text>
                 </View>
               )}
               
-              <View style={styles.modalInfoBox}>
-                <Text style={styles.infoText}>日付: {new Date(selectedRecord.date).toLocaleString()}</Text>
-                <Text style={styles.infoText}>ジャンル: {selectedRecord.category || 'なし'}</Text>
-                <Text style={styles.infoText}>かかった時間: {formatDuration(selectedRecord.duration)}</Text>
+              <View style={[styles.modalInfoBox, { backgroundColor: tileBgColor }]}>
+                <Text style={[styles.infoText, { color: textColor }]}>日付: {new Date(selectedRecord.date).toLocaleString()}</Text>
+                <Text style={[styles.infoText, { color: textColor }]}>ジャンル: {selectedRecord.category || 'なし'}</Text>
+                <Text style={[styles.infoText, { color: textColor }]}>かかった時間: {formatDuration(selectedRecord.duration)}</Text>
               </View>
 
               <View style={styles.modalActionButtons}>
-                <TouchableOpacity style={styles.actionButton} onPress={() => handleChangePhoto(selectedRecord.id)}>
-                   <Text style={styles.actionButtonText}>写真を変更する</Text>
+                <TouchableOpacity style={[styles.actionButton, isEcoMode && { backgroundColor: '#333' }]} onPress={() => handleChangePhoto(selectedRecord.id)}>
+                   <Text style={[styles.actionButtonText, isEcoMode && { color: '#fff' }]}>写真を変更する</Text>
                 </TouchableOpacity>
               </View>
             </>
@@ -144,7 +152,6 @@ export default function RecordsScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F2F2F7',
   },
   listContainer: {
     padding: 10,
@@ -157,17 +164,14 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 16,
-    color: '#8E8E93',
     textAlign: 'center',
     marginBottom: 20,
   },
   recordTile: {
     flexDirection: 'row',
-    backgroundColor: '#fff',
     borderRadius: 12,
     marginBottom: 10,
     padding: 10,
-    shadowColor: '#000',
     shadowOpacity: 0.1,
     shadowRadius: 5,
     shadowOffset: { width: 0, height: 2 },
@@ -194,7 +198,6 @@ const styles = StyleSheet.create({
   },
   tileDate: {
     fontSize: 14,
-    color: '#8E8E93',
     marginBottom: 4,
   },
   tileCategory: {
@@ -204,12 +207,10 @@ const styles = StyleSheet.create({
   },
   tileDuration: {
     fontSize: 16,
-    color: '#333',
   },
   // 以下 Modal用のスタイル
   modalContainer: {
     flex: 1,
-    backgroundColor: '#fff',
     padding: 20,
     marginTop: 40,
   },
@@ -226,7 +227,6 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   modalInfoBox: {
-    backgroundColor: '#F2F2F7',
     padding: 15,
     borderRadius: 12,
     marginBottom: 30,
@@ -234,7 +234,6 @@ const styles = StyleSheet.create({
   infoText: {
     fontSize: 18,
     marginBottom: 10,
-    color: '#333',
   },
   modalActionButtons: {
     marginBottom: 20,
