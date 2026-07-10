@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useContext } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback } from 'react-native';
 // 必要なモジュールのインポート
 import { Audio } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
@@ -42,7 +42,12 @@ export default function HomeScreen() {
 
   const timerRef = useRef(null);
 
-  // 音声のロードと再生用関数
+  // UI表示制御用State
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const controlsOpacity = useRef(new Animated.Value(1)).current;
+  const controlsTimeoutRef = useRef(null);
+
+  // 初回起動時のサウンドロード等と再生用関数
   const playAlarm = async () => {
     try {
       console.log('Play Alarm trigger: 0 seconds reached');
@@ -140,6 +145,50 @@ export default function HomeScreen() {
     setIsCountUp(false);
     setRemainingTime(targetTime);
   };
+
+  // ---- 操作ボタンの自動非表示ロジック ----
+  const showControls = () => {
+    setControlsVisible(true);
+    Animated.timing(controlsOpacity, {
+      toValue: 1,
+      duration: 200,
+      useNativeDriver: true,
+    }).start();
+
+    if (controlsTimeoutRef.current) {
+      clearTimeout(controlsTimeoutRef.current);
+    }
+
+    if (isRunning || isPreCountingDown) {
+      controlsTimeoutRef.current = setTimeout(() => {
+        Animated.timing(controlsOpacity, {
+          toValue: 0,
+          duration: 300,
+          useNativeDriver: true,
+        }).start(() => setControlsVisible(false));
+      }, 3000);
+    }
+  };
+
+  useEffect(() => {
+    if (isRunning || isPreCountingDown) {
+      showControls(); // 進行中は3秒後に隠す
+    } else {
+      // 停止中・準備前は常に表示
+      if (controlsTimeoutRef.current) {
+        clearTimeout(controlsTimeoutRef.current);
+      }
+      setControlsVisible(true);
+      Animated.timing(controlsOpacity, {
+        toValue: 1,
+        duration: 200,
+        useNativeDriver: true,
+      }).start();
+    }
+    return () => {
+      if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    };
+  }, [isRunning, isPreCountingDown]);
 
   // ---- 時間設定機能 ----
   const handleOpenTimeModal = () => {
@@ -261,8 +310,9 @@ export default function HomeScreen() {
   const ringBgColor = isEcoMode ? '#333' : '#E5E5EA';
 
   return (
-    <View style={[styles.container, { backgroundColor: bgColor }]}>
-      <View style={styles.content}>
+    <TouchableWithoutFeedback onPress={showControls}>
+      <View style={[styles.container, { backgroundColor: bgColor }]}>
+        <View style={styles.content}>
         <View style={styles.timerContainer}>
           <RingProgress 
             radius={140} 
@@ -287,21 +337,23 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        <View style={styles.controlsContainer}>
-          <TouchableOpacity style={styles.button} onPress={toggleTimer}>
+        <Animated.View style={[styles.controlsContainer, { opacity: controlsOpacity }]} pointerEvents={controlsVisible ? 'auto' : 'none'}>
+          <TouchableOpacity style={styles.button} onPress={toggleTimer} disabled={!controlsVisible}>
             <Text style={styles.buttonText}>{isRunning || isPreCountingDown ? '一時停止' : 'スタート'}</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={[styles.button, styles.resetButton]} onPress={resetTimer}>
+          <TouchableOpacity style={[styles.button, styles.resetButton]} onPress={resetTimer} disabled={!controlsVisible}>
             <Text style={[styles.buttonText, { color: '#000' }]}>リセット</Text>
           </TouchableOpacity>
-        </View>
+        </Animated.View>
         
         {/* 記録ボタンは一時停止中か、タイマー進行中に表示 */}
-        {(!isRunning && !isPreCountingDown && remainingTime !== targetTime) || isCountUp ? (
-          <TouchableOpacity style={styles.saveActionButton} onPress={handleOpenSaveModal}>
-            <Text style={styles.saveActionText}>記録・保存する</Text>
-          </TouchableOpacity>
-        ) : null}
+        <Animated.View style={{ opacity: controlsOpacity }} pointerEvents={controlsVisible ? 'auto' : 'none'}>
+          {(!isRunning && !isPreCountingDown && remainingTime !== targetTime) || isCountUp ? (
+            <TouchableOpacity style={styles.saveActionButton} onPress={handleOpenSaveModal}>
+              <Text style={styles.saveActionText}>記録・保存する</Text>
+            </TouchableOpacity>
+          ) : null}
+        </Animated.View>
 
       </View>
 
@@ -489,6 +541,7 @@ export default function HomeScreen() {
       </Modal>
 
     </View>
+    </TouchableWithoutFeedback>
   );
 }
 
