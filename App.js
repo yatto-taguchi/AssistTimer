@@ -36,14 +36,15 @@ function MainTabs() {
           },
           tabBarPosition: 'top',
           tabBarIcon: ({ focused, color, size }) => {
-            // アイコン表示がOFFの時は全て点
+            // アイコン表示がOFFの時（点モード）
             if (isEcoMode && !isEcoNavIconEnabled) {
-              return <Ionicons name="ellipse" size={8} color={color} />;
-            }
-            
-            // アイコン表示がONの時、かつ選択中タブのみ点にする設定がONで、フォーカスされている場合
-            if (isEcoMode && isEcoNavIconEnabled && isEcoNavActiveDot && focused) {
-              return <Ionicons name="ellipse" size={8} color={color} />;
+              if (isEcoNavActiveDot) {
+                // 選択中タブのみ点にする機能がON：選択中だけ点を表示し、他は非表示（真っ黒）
+                return focused ? <Ionicons name="ellipse" size={8} color={color} /> : null;
+              } else {
+                // 全てのタブに点を表示
+                return <Ionicons name="ellipse" size={8} color={color} />;
+              }
             }
 
             let iconName;
