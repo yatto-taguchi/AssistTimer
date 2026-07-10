@@ -64,7 +64,12 @@ export default function HomeScreen() {
     const h = Math.floor(absTime / 3600);
     const m = Math.floor((absTime % 3600) / 60);
     const s = absTime % 60;
-    const formatted = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    
+    let formatted = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    if (h > 0) {
+      formatted = `${h.toString().padStart(2, '0')}:${formatted}`;
+    }
+    
     return isNegative ? `-${formatted}` : formatted;
   };
 
