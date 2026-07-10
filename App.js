@@ -14,7 +14,7 @@ import CustomBatteryIndicator from './src/components/CustomBatteryIndicator';
 const Tab = createBottomTabNavigator();
 
 function MainTabs() {
-  const { isEcoMode } = useContext(AppContext);
+  const { isEcoMode, isEcoNavDotMode } = useContext(AppContext);
 
   return (
     <>
@@ -22,35 +22,35 @@ function MainTabs() {
       <CustomBatteryIndicator />
       <Tab.Navigator
         initialRouteName="Home"
-      screenOptions={({ route }) => ({
-        headerShown: false,
-        tabBarActiveTintColor: isEcoMode ? '#888' : '#007AFF', // 選択中を明るいグレーに
-        tabBarInactiveTintColor: isEcoMode ? '#333' : '#8E8E93', // 非選択中もうっすら見えるように
-        tabBarShowLabel: !isEcoMode,
-        tabBarStyle: {
-          backgroundColor: isEcoMode ? '#000' : '#fff',
-          borderTopWidth: 0,
-        },
-        tabBarPosition: 'top',
-        tabBarIcon: ({ focused, color, size }) => {
-          if (isEcoMode) {
-            return <Ionicons name="ellipse" size={8} color={color} />;
-          }
+        screenOptions={({ route }) => ({
+          headerShown: false,
+          tabBarActiveTintColor: isEcoMode ? '#888' : '#007AFF', // 選択中を明るいグレーに
+          tabBarInactiveTintColor: isEcoMode ? '#333' : '#8E8E93', // 非選択中もうっすら見えるように
+          tabBarShowLabel: !isEcoMode,
+          tabBarStyle: {
+            backgroundColor: isEcoMode ? '#000' : '#fff',
+            borderTopWidth: 0,
+          },
+          tabBarPosition: 'top',
+          tabBarIcon: ({ focused, color, size }) => {
+            if (isEcoMode && isEcoNavDotMode) {
+              return <Ionicons name="ellipse" size={8} color={color} />;
+            }
 
-          let iconName;
+            let iconName;
 
-          if (route.name === 'Records') {
-            iconName = focused ? 'book' : 'book-outline';
-          } else if (route.name === 'Home') {
-            iconName = focused ? 'time' : 'time-outline';
-          } else if (route.name === 'Settings') {
-            iconName = focused ? 'settings' : 'settings-outline';
-          }
+            if (route.name === 'Records') {
+              iconName = focused ? 'book' : 'book-outline';
+            } else if (route.name === 'Home') {
+              iconName = focused ? 'time' : 'time-outline';
+            } else if (route.name === 'Settings') {
+              iconName = focused ? 'settings' : 'settings-outline';
+            }
 
-          return <Ionicons name={iconName} size={size || 24} color={color} />;
-        },
-      })}
-    >
+            return <Ionicons name={iconName} size={size || 24} color={color} />;
+          },
+        })}
+      >
       <Tab.Screen 
         name="Records" 
         component={RecordsScreen} 
