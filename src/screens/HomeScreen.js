@@ -765,9 +765,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#FF3B30', // 赤色
     paddingVertical: 15,
     paddingHorizontal: 40,
-    borderRadius: 30,
+    borderRadius: 10,
     marginTop: 20,
-    width: 260, // 上のボタン2つ（120px * 2 + 余白20px）と左右の幅を揃える
+    width: 280, // 上のボタン2つ分と左右の幅を揃える
     alignItems: 'center',
     elevation: 3,
     shadowColor: '#000',
@@ -777,9 +777,9 @@ const styles = StyleSheet.create({
   },
   splitEndButtonContainer: {
     flexDirection: 'row',
-    width: 260,
+    width: 280,
     marginTop: 20,
-    borderRadius: 30,
+    borderRadius: 10,
     overflow: 'hidden',
     elevation: 3,
     shadowColor: '#000',
