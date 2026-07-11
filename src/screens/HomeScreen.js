@@ -24,6 +24,7 @@ export default function HomeScreen() {
   const [isAddingCategory, setIsAddingCategory] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [photoUri, setPhotoUri] = useState(null);
+  const [forceTargetTime, setForceTargetTime] = useState(false);
 
   // 時間設定モーダル用State
   const [timeModalVisible, setTimeModalVisible] = useState(false);
@@ -259,6 +260,15 @@ export default function HomeScreen() {
   const handleOpenSaveModal = () => {
     setIsRunning(false); // タイマーを止める
     setIsPreCountingDown(false);
+    setForceTargetTime(false);
+    setSelectedCategory(lastUsedCategory); // デフォルトで前回のカテゴリをセット
+    setSaveModalVisible(true);
+  };
+
+  const handleOpenSaveInTimeModal = () => {
+    setIsRunning(false); // タイマーを止める
+    setIsPreCountingDown(false);
+    setForceTargetTime(true); // 時間内に終わったことにしてターゲットタイムを記録する
     setSelectedCategory(lastUsedCategory); // デフォルトで前回のカテゴリをセット
     setSaveModalVisible(true);
   };
@@ -295,7 +305,11 @@ export default function HomeScreen() {
 
   const handleSaveRecord = async () => {
     // 経過秒数の計算
-    const duration = isCountUp ? targetTime + remainingTime : targetTime - remainingTime;
+    let duration = isCountUp ? targetTime + remainingTime : targetTime - remainingTime;
+    
+    if (forceTargetTime) {
+      duration = targetTime; // タイム内に入って終了した場合はターゲットタイムをそのまま記録
+    }
     
     await saveRecord({
       duration: duration,
@@ -405,11 +419,21 @@ export default function HomeScreen() {
             </TouchableOpacity>
           </View>
           
-          {/* 計測中のみ表示される計測終了ボタン */}
-          {isRunning && !isPreCountingDown && (
-            <TouchableOpacity style={styles.endMeasurementButton} onPress={handleOpenSaveModal} disabled={!controlsVisible}>
-              <Text style={styles.endMeasurementText}>計測終了</Text>
-            </TouchableOpacity>
+          {/* 計測中のみ表示される「計測終了」ボタン群 */}
+          {isRunning && (
+            <Animated.View style={{ opacity: controlsOpacity, width: '100%', alignItems: 'center' }}>
+              <TouchableOpacity style={styles.endMeasurementButton} onPress={handleOpenSaveModal}>
+                <Text style={[styles.buttonText, { fontWeight: 'bold' }]}>計測終了</Text>
+              </TouchableOpacity>
+              {isCountUp && (
+                <TouchableOpacity 
+                  style={[styles.endMeasurementButton, { backgroundColor: '#34C759', marginTop: 15 }]} 
+                  onPress={handleOpenSaveInTimeModal}
+                >
+                  <Text style={[styles.buttonText, { fontWeight: 'bold' }]}>タイム内に入って計測終了</Text>
+                </TouchableOpacity>
+              )}
+            </Animated.View>
           )}
 
           {/* 記録ボタンは一時停止中か、カウントアップ中に表示 */}
