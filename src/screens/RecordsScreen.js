@@ -31,18 +31,24 @@ export default function RecordsScreen() {
 
     const pickerResult = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
-      allowsEditing: true,
+      allowsMultipleSelection: true,
       quality: 0.8,
     });
 
     if (!pickerResult.canceled) {
-      // 写真を更新
-      const newUri = pickerResult.assets[0].uri;
-      const updated = await updateRecordPhoto(recordId, newUri);
-      setRecords(updated);
-      // 開いているモーダル等の情報も更新
+      const newUris = pickerResult.assets.map(a => a.uri).slice(0, 4);
+      // AsyncStorageの更新
+      const stored = await AsyncStorage.getItem('practice_records');
+      if (stored) {
+        const records = JSON.parse(stored);
+        const updated = records.map(r => r.id === recordId ? { ...r, photoUris: newUris, photoUri: newUris[0] } : r);
+        await AsyncStorage.setItem('practice_records', JSON.stringify(updated));
+        loadData();
+      }
+      
+      // 開いているモーダルの更新
       if (selectedRecord && selectedRecord.id === recordId) {
-          setSelectedRecord({ ...selectedRecord, photoUri: newUri });
+          setSelectedRecord({ ...selectedRecord, photoUris: newUris, photoUri: newUris[0] });
       }
     }
   };
@@ -64,8 +70,8 @@ export default function RecordsScreen() {
           setModalVisible(true);
         }}
       >
-        {item.photoUri ? (
-          <Image source={{ uri: item.photoUri }} style={styles.tileImage} />
+        {((item.photoUris && item.photoUris.length > 0) ? item.photoUris[0] : item.photoUri) ? (
+          <Image source={{ uri: (item.photoUris && item.photoUris.length > 0) ? item.photoUris[0] : item.photoUri }} style={styles.tileImage} />
         ) : (
           <View style={[styles.tileImage, styles.placeholderImage, isEcoMode && { backgroundColor: '#222' }]}>
              <Text style={styles.placeholderText}>NO PHOTO</Text>
@@ -114,7 +120,13 @@ export default function RecordsScreen() {
           
           {selectedRecord && (
             <>
-              {selectedRecord.photoUri ? (
+              {selectedRecord.photoUris && selectedRecord.photoUris.length > 0 ? (
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', marginBottom: 15 }}>
+                  {selectedRecord.photoUris.map((uri, idx) => (
+                    <Image key={idx} source={{ uri }} style={[styles.modalDetailImage, { width: 140, height: 140, margin: 5 }]} />
+                  ))}
+                </View>
+              ) : selectedRecord.photoUri ? (
                 <Image source={{ uri: selectedRecord.photoUri }} style={styles.modalDetailImage} />
               ) : (
                 <View style={[styles.modalDetailImage, styles.placeholderImage, isEcoMode && { backgroundColor: '#222' }]}>

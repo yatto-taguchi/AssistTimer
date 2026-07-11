@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useContext } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback, Image } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 // 必要なモジュールのインポート
 import { Audio } from 'expo-av';
@@ -23,7 +23,7 @@ export default function HomeScreen() {
   const [lastUsedCategory, setLastUsedCategory] = useState('');
   const [isAddingCategory, setIsAddingCategory] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
-  const [photoUri, setPhotoUri] = useState(null);
+  const [photoUris, setPhotoUris] = useState([]);
   const [forceTargetTime, setForceTargetTime] = useState(false);
   const [selectedTags, setSelectedTags] = useState([]);
 
@@ -279,32 +279,44 @@ export default function HomeScreen() {
   };
 
   const handleTakePhoto = async () => {
+    if (photoUris.length >= 4) {
+      Alert.alert('制限', '写真は最大4枚までです。');
+      return;
+    }
     const permission = await ImagePicker.requestCameraPermissionsAsync();
     if (!permission.granted) {
       Alert.alert('カメラの許可', '設定からカメラへのアクセスを許可してください。');
       return;
     }
     const result = await ImagePicker.launchCameraAsync({
-      allowsEditing: true,
+      allowsEditing: false, // 複数対応のために一旦false
       quality: 0.8,
     });
-    if (!result.canceled) {
-      setPhotoUri(result.assets[0].uri);
+    if (!result.canceled && result.assets && result.assets.length > 0) {
+      setPhotoUris([...photoUris, result.assets[0].uri]);
     }
   };
 
   const handlePickPhoto = async () => {
+    if (photoUris.length >= 4) {
+      Alert.alert('制限', '写真は最大4枚までです。');
+      return;
+    }
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) {
       Alert.alert('写真の許可', '設定から写真へのアクセスを許可してください。');
       return;
     }
     const result = await ImagePicker.launchImageLibraryAsync({
-      allowsEditing: true,
+      allowsEditing: false,
+      allowsMultipleSelection: true,
+      selectionLimit: 4 - photoUris.length,
       quality: 0.8,
     });
-    if (!result.canceled) {
-      setPhotoUri(result.assets[0].uri);
+    if (!result.canceled && result.assets) {
+      const newUris = result.assets.map(a => a.uri);
+      const combined = [...photoUris, ...newUris].slice(0, 4);
+      setPhotoUris(combined);
     }
   };
 
@@ -319,7 +331,7 @@ export default function HomeScreen() {
     await saveRecord({
       duration: duration,
       category: selectedCategory || '未分類',
-      photoUri: photoUri,
+      photoUris: photoUris,
       tags: selectedTags,
     });
     
@@ -555,7 +567,7 @@ export default function HomeScreen() {
             </View>
           )}
           
-          <Text style={styles.label}>写真を追加</Text>
+          <Text style={styles.label}>写真を追加（最大4枚）</Text>
           <View style={styles.photoActionBox}>
              <TouchableOpacity style={styles.photoButton} onPress={handleTakePhoto}>
                <Text style={styles.photoButtonText}>カメラで撮影</Text>
@@ -565,8 +577,22 @@ export default function HomeScreen() {
              </TouchableOpacity>
           </View>
 
-          {photoUri && (
-            <Text style={{color: 'green', marginVertical: 10, textAlign: 'center'}}>✓ 写真が選択されました</Text>
+          {photoUris.length > 0 && (
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginVertical: 10, justifyContent: 'center' }}>
+              {photoUris.map((uri, index) => (
+                <View key={`photo-${index}`} style={{ margin: 5 }}>
+                  <Image source={{ uri }} style={{ width: 60, height: 60, borderRadius: 8 }} />
+                  <TouchableOpacity 
+                    style={{ position: 'absolute', top: -8, right: -8, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 12, width: 24, height: 24, justifyContent: 'center', alignItems: 'center' }}
+                    onPress={() => {
+                      setPhotoUris(photoUris.filter((_, i) => i !== index));
+                    }}
+                  >
+                    <Text style={{ color: '#fff', fontSize: 14, fontWeight: 'bold' }}>×</Text>
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </View>
           )}
 
           <Text style={[styles.label, { marginTop: 20 }]}>タグをつける</Text>
