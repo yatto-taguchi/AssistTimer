@@ -763,7 +763,7 @@ const styles = StyleSheet.create({
   },
   endMeasurementButton: {
     backgroundColor: '#FF3B30', // 赤色
-    paddingVertical: 15,
+    paddingVertical: 20,
     paddingHorizontal: 40,
     borderRadius: 10,
     marginTop: 20,
@@ -789,7 +789,7 @@ const styles = StyleSheet.create({
   },
   splitEndButtonHalf: {
     flex: 1,
-    paddingVertical: 10,
+    paddingVertical: 15,
     alignItems: 'center',
     justifyContent: 'center',
   },
