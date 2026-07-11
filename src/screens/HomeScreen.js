@@ -516,6 +516,8 @@ export default function HomeScreen() {
                     keyboardType="number-pad"
                     value={manualInputMinStr}
                     onChangeText={setManualInputMinStr}
+                    onFocus={() => setManualInputMinStr('')}
+                    selectTextOnFocus={true}
                     placeholder="0"
                     placeholderTextColor="#888"
                     returnKeyType="done"
@@ -526,6 +528,8 @@ export default function HomeScreen() {
                     keyboardType="number-pad"
                     value={manualInputSecStr}
                     onChangeText={setManualInputSecStr}
+                    onFocus={() => setManualInputSecStr('')}
+                    selectTextOnFocus={true}
                     placeholder="0"
                     placeholderTextColor="#888"
                     returnKeyType="done"
@@ -613,6 +617,8 @@ export default function HomeScreen() {
                     keyboardType="number-pad"
                     value={countdownInputMinStr}
                     onChangeText={setCountdownInputMinStr}
+                    onFocus={() => setCountdownInputMinStr('')}
+                    selectTextOnFocus={true}
                     placeholder="0"
                     placeholderTextColor="#888"
                     returnKeyType="done"
@@ -623,6 +629,8 @@ export default function HomeScreen() {
                     keyboardType="number-pad"
                     value={countdownInputSecStr}
                     onChangeText={setCountdownInputSecStr}
+                    onFocus={() => setCountdownInputSecStr('')}
+                    selectTextOnFocus={true}
                     placeholder="0"
                     placeholderTextColor="#888"
                     returnKeyType="done"
