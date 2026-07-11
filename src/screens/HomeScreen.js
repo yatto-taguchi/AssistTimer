@@ -28,7 +28,8 @@ export default function HomeScreen() {
   // 時間設定モーダル用State
   const [timeModalVisible, setTimeModalVisible] = useState(false);
   const [timeModalMode, setTimeModalMode] = useState('time'); // 'time' or 'countdown'
-  const [manualInputStr, setManualInputStr] = useState('');
+  const [manualInputMinStr, setManualInputMinStr] = useState('');
+  const [manualInputSecStr, setManualInputSecStr] = useState('');
   const PRESET_TIMES = [1, 3, 5, 10, 15, 20, 30, 60, 90];
 
   // 準備時間入力用State
@@ -223,7 +224,10 @@ export default function HomeScreen() {
   // ---- 時間設定機能 ----
   const handleOpenTimeModal = () => {
     if (isRunning || isPreCountingDown) return;
-    setManualInputStr(Math.floor(targetTime / 60).toString());
+    const m = Math.floor(targetTime / 60);
+    const s = targetTime % 60;
+    setManualInputMinStr(m > 0 ? m.toString() : '');
+    setManualInputSecStr(s > 0 ? s.toString() : '');
     setTimeModalMode('time');
     setTimeModalVisible(true);
   };
@@ -237,11 +241,17 @@ export default function HomeScreen() {
   };
 
   const handleManualApply = () => {
-    const min = parseFloat(manualInputStr);
-    if (!isNaN(min) && min > 0) {
-      applyTime(min);
+    const min = parseInt(manualInputMinStr, 10) || 0;
+    const sec = parseInt(manualInputSecStr, 10) || 0;
+    const totalSecs = min * 60 + sec;
+    
+    if (totalSecs > 0) {
+      setTargetTime(totalSecs);
+      setRemainingTime(totalSecs);
+      setIsCountUp(false);
+      setTimeModalVisible(false);
     } else {
-      Alert.alert("エラー", "有効な分数を入力してください。");
+      Alert.alert("エラー", "有効な時間を入力してください。");
     }
   };
 
@@ -499,20 +509,33 @@ export default function HomeScreen() {
                 <Text style={[styles.timeModalTitle, { color: isEcoMode ? '#fff' : '#000' }]}>タイマー時間の設定</Text>
                 
                 {/* 任意入力エリア */}
-                <View style={styles.manualInputContainer}>
-                  <TextInput
-                    style={[styles.timeInput, { color: isEcoMode ? '#fff' : '#000', borderColor: isEcoMode ? '#555' : '#ccc' }]}
-                    keyboardType="numeric"
-                    value={manualInputStr}
-                    onChangeText={setManualInputStr}
-                    placeholder="分数"
+                <Text style={[styles.countdownSectionLabel, {marginTop: 0, marginBottom: 10}]}>直接入力</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: 15 }}>
+                  <TextInput 
+                    style={[styles.timeInput, { width: 80, color: isEcoMode ? '#fff' : '#000', borderColor: isEcoMode ? '#555' : '#ccc' }]}
+                    keyboardType="number-pad"
+                    value={manualInputMinStr}
+                    onChangeText={setManualInputMinStr}
+                    placeholder="0"
                     placeholderTextColor="#888"
+                    returnKeyType="done"
                   />
-                  <Text style={[styles.timeInputLabel, { color: isEcoMode ? '#fff' : '#000' }]}>分</Text>
-                  <TouchableOpacity style={styles.applyButton} onPress={handleManualApply}>
-                    <Text style={styles.applyButtonText}>設定</Text>
-                  </TouchableOpacity>
+                  <Text style={{ fontSize: 16, color: isEcoMode ? '#fff' : '#000', marginHorizontal: 10 }}>分</Text>
+                  <TextInput 
+                    style={[styles.timeInput, { width: 80, color: isEcoMode ? '#fff' : '#000', borderColor: isEcoMode ? '#555' : '#ccc' }]}
+                    keyboardType="number-pad"
+                    value={manualInputSecStr}
+                    onChangeText={setManualInputSecStr}
+                    placeholder="0"
+                    placeholderTextColor="#888"
+                    returnKeyType="done"
+                  />
+                  <Text style={{ fontSize: 16, color: isEcoMode ? '#fff' : '#000', marginLeft: 10 }}>秒</Text>
                 </View>
+
+                <TouchableOpacity style={[styles.applyButton, { alignSelf: 'center', marginBottom: 20 }]} onPress={handleManualApply}>
+                  <Text style={styles.applyButtonText}>設定</Text>
+                </TouchableOpacity>
 
                 {/* 9つのタイルエリア */}
                 <View style={[styles.presetTilesContainer, { borderBottomWidth: 1, borderBottomColor: isEcoMode ? '#333' : '#E5E5EA', paddingBottom: 20 }]}>
