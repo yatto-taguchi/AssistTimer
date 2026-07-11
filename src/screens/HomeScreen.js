@@ -19,7 +19,7 @@ export default function HomeScreen() {
   // 記録・保存用State
   const [saveModalVisible, setSaveModalVisible] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState('');
-  const [savedCategories, setSavedCategories] = useState(['カット', 'カラー']);
+  const [savedCategories, setSavedCategories] = useState(['カット', 'カラー', 'ワインディング', 'アップスタイル']);
   const [lastUsedCategory, setLastUsedCategory] = useState('');
   const [isAddingCategory, setIsAddingCategory] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
@@ -74,8 +74,12 @@ export default function HomeScreen() {
       try {
         const storedCategories = await AsyncStorage.getItem('savedCategories');
         if (storedCategories) {
-          setSavedCategories(JSON.parse(storedCategories));
+          const parsed = JSON.parse(storedCategories);
+          // 新しいデフォルトを確実に追加するためマージして重複排除する
+          const merged = Array.from(new Set(['カット', 'カラー', 'ワインディング', 'アップスタイル', ...parsed]));
+          setSavedCategories(merged);
         }
+
         const lastCat = await AsyncStorage.getItem('lastUsedCategory');
         if (lastCat) {
           setLastUsedCategory(lastCat);
