@@ -471,10 +471,45 @@ export default function HomeScreen() {
       <Modal visible={saveModalVisible} animationType="slide">
         <ScrollView contentContainerStyle={styles.modalContainer}>
           <Text style={styles.modalTitle}>練習結果の記録</Text>
-          
-          <Text style={styles.label}>ジャンルを追加・選択</Text>
+
+          {/* 計測時間の詳細表示 */}
+          <View style={{ backgroundColor: isEcoMode ? '#333' : '#F2F2F7', padding: 15, borderRadius: 10, width: '100%', marginBottom: 20, alignItems: 'center' }}>
+            {(() => {
+              let actualDuration = isCountUp ? targetTime + remainingTime : targetTime - remainingTime;
+              if (forceTargetTime) actualDuration = targetTime;
+              
+              const isOver = isCountUp && !forceTargetTime;
+              const overSeconds = isCountUp && !forceTargetTime ? remainingTime : 0;
+              
+              const m = Math.floor(actualDuration / 60);
+              const s = actualDuration % 60;
+              const timeStr = `${m}分${s}秒`;
+
+              if (isOver) {
+                const om = Math.floor(overSeconds / 60);
+                const os = overSeconds % 60;
+                const overStr = `+${om > 0 ? om + '分' : ''}${os}秒`;
+                return (
+                  <>
+                    <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#FF3B30', marginBottom: 5 }}>タイムオーバー</Text>
+                    <Text style={{ fontSize: 24, fontWeight: 'bold', color: isEcoMode ? '#fff' : '#000' }}>{timeStr} <Text style={{ fontSize: 16, color: '#FF3B30' }}>({overStr})</Text></Text>
+                  </>
+                );
+              } else {
+                return (
+                  <>
+                    <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#34C759', marginBottom: 5 }}>タイム内</Text>
+                    <Text style={{ fontSize: 24, fontWeight: 'bold', color: isEcoMode ? '#fff' : '#000' }}>{timeStr}</Text>
+                  </>
+                );
+              }
+            })()}
+          </View>
+
+          <Text style={[styles.label, {alignSelf: 'flex-start', color: isEcoMode ? '#aaa' : '#666'}]}>ジャンルを選択</Text>
           <View style={styles.categoryChipsContainer}>
-            {savedCategories.map((cat, index) => (
+            {/* 選択中のものを先頭に並び替えて表示 */}
+            {[...savedCategories].sort((a, b) => a === selectedCategory ? -1 : b === selectedCategory ? 1 : 0).map((cat, index) => (
               <TouchableOpacity 
                 key={index}
                 style={[styles.categoryChip, selectedCategory === cat && styles.categoryChipSelected]}
