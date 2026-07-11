@@ -33,7 +33,6 @@ export default function RecordsScreen() {
     }
 
     const pickerResult = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
       allowsMultipleSelection: true,
       quality: 0.8,
     });
