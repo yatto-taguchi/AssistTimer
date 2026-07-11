@@ -422,15 +422,29 @@ export default function HomeScreen() {
           {/* 計測中のみ表示される「計測終了」ボタン群 */}
           {isRunning && (
             <Animated.View style={{ opacity: controlsOpacity, width: '100%', alignItems: 'center' }}>
-              <TouchableOpacity style={styles.endMeasurementButton} onPress={handleOpenSaveModal}>
-                <Text style={[styles.buttonText, { fontWeight: 'bold' }]}>計測終了</Text>
-              </TouchableOpacity>
-              {isCountUp && (
-                <TouchableOpacity 
-                  style={[styles.endMeasurementButton, { backgroundColor: '#34C759', marginTop: 15 }]} 
-                  onPress={handleOpenSaveInTimeModal}
-                >
-                  <Text style={[styles.buttonText, { fontWeight: 'bold' }]}>タイム内に入って計測終了</Text>
+              {isCountUp ? (
+                <View style={styles.splitEndButtonContainer}>
+                  <TouchableOpacity 
+                    style={[styles.splitEndButtonHalf, { backgroundColor: '#34C759' }]} 
+                    onPress={handleOpenSaveInTimeModal}
+                  >
+                    <Text style={styles.splitEndButtonMainText}>計測終了</Text>
+                    <Text style={styles.splitEndButtonSubText}>タイム内</Text>
+                  </TouchableOpacity>
+                  
+                  <View style={styles.splitEndButtonDivider} />
+
+                  <TouchableOpacity 
+                    style={[styles.splitEndButtonHalf, { backgroundColor: '#FF3B30' }]} 
+                    onPress={handleOpenSaveModal}
+                  >
+                    <Text style={styles.splitEndButtonMainText}>計測終了</Text>
+                    <Text style={styles.splitEndButtonSubText}>タイムオーバー</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <TouchableOpacity style={styles.endMeasurementButton} onPress={handleOpenSaveModal}>
+                  <Text style={[styles.buttonText, { fontWeight: 'bold' }]}>計測終了</Text>
                 </TouchableOpacity>
               )}
             </Animated.View>
@@ -748,7 +762,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   endMeasurementButton: {
-    backgroundColor: '#FF3B30',
+    backgroundColor: '#FF3B30', // 赤色
     paddingVertical: 15,
     paddingHorizontal: 40,
     borderRadius: 30,
@@ -760,6 +774,39 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.2,
     shadowRadius: 4,
+  },
+  splitEndButtonContainer: {
+    flexDirection: 'row',
+    width: 260,
+    marginTop: 20,
+    borderRadius: 30,
+    overflow: 'hidden',
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+  },
+  splitEndButtonHalf: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  splitEndButtonDivider: {
+    width: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.4)',
+  },
+  splitEndButtonMainText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  splitEndButtonSubText: {
+    color: '#fff',
+    fontSize: 11,
+    marginTop: 2,
+    fontWeight: '600',
   },
   endMeasurementText: {
     color: '#fff',
