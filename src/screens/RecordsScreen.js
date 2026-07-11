@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useContext } from 'react';
-import { StyleSheet, Text, View, FlatList, TouchableOpacity, Image, Modal, Button, ScrollView } from 'react-native';
+import { StyleSheet, Text, View, FlatList, TouchableOpacity, Image, Modal, Button, ScrollView, Dimensions } from 'react-native';
+const { width: screenWidth } = Dimensions.get('window');
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getRecords, updateRecordPhoto } from '../utils/recordStorage';
@@ -9,7 +10,7 @@ export default function RecordsScreen() {
   const [records, setRecords] = useState([]);
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
-  const [fullScreenImageUri, setFullScreenImageUri] = useState(null);
+  const [fullScreenIndex, setFullScreenIndex] = useState(null);
   const { isEcoMode } = useContext(AppContext);
 
   // 画面が表示されるたびにデータを読み込むための簡易フック（ナビゲーションイベントを使うのがベターですが今回は仮）
@@ -129,13 +130,13 @@ export default function RecordsScreen() {
               {selectedRecord.photoUris && selectedRecord.photoUris.length > 0 ? (
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', marginBottom: 15 }}>
                   {selectedRecord.photoUris.map((uri, idx) => (
-                    <TouchableOpacity key={idx} onPress={() => setFullScreenImageUri(uri)}>
+                    <TouchableOpacity key={idx} onPress={() => setFullScreenIndex(idx)}>
                       <Image source={{ uri }} style={[styles.modalDetailImage, { width: 140, height: 140, margin: 5 }]} />
                     </TouchableOpacity>
                   ))}
                 </View>
               ) : selectedRecord.photoUri ? (
-                <TouchableOpacity onPress={() => setFullScreenImageUri(selectedRecord.photoUri)}>
+                <TouchableOpacity onPress={() => setFullScreenIndex(0)}>
                   <Image source={{ uri: selectedRecord.photoUri }} style={styles.modalDetailImage} />
                 </TouchableOpacity>
               ) : (
@@ -167,12 +168,25 @@ export default function RecordsScreen() {
         </ScrollView>
         
         {/* 写真の全画面プレビュー用オーバーレイ */}
-        {fullScreenImageUri && (
+        {fullScreenIndex !== null && (
           <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center', alignItems: 'center', zIndex: 1000, elevation: 100 }}>
-            <Image source={{ uri: fullScreenImageUri }} style={{ width: '100%', height: '80%' }} resizeMode="contain" />
+            <FlatList
+              data={selectedRecord.photoUris && selectedRecord.photoUris.length > 0 ? selectedRecord.photoUris : [selectedRecord.photoUri]}
+              keyExtractor={(_, i) => String(i)}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              initialScrollIndex={fullScreenIndex}
+              getItemLayout={(data, index) => ({ length: screenWidth, offset: screenWidth * index, index })}
+              renderItem={({ item: uri }) => (
+                <View style={{ width: screenWidth, justifyContent: 'center', alignItems: 'center' }}>
+                  <Image source={{ uri }} style={{ width: '100%', height: '80%' }} resizeMode="contain" />
+                </View>
+              )}
+            />
             <TouchableOpacity 
               style={{ position: 'absolute', top: 50, right: 20, padding: 10, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20 }}
-              onPress={() => setFullScreenImageUri(null)}
+              onPress={() => setFullScreenIndex(null)}
             >
               <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>閉じる</Text>
             </TouchableOpacity>

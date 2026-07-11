@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useContext } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback, Image } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback, Image, FlatList, Dimensions } from 'react-native';
+const { width: screenWidth } = Dimensions.get('window');
 import AsyncStorage from '@react-native-async-storage/async-storage';
 // 必要なモジュールのインポート
 import { Audio } from 'expo-av';
@@ -24,7 +25,7 @@ export default function HomeScreen() {
   const [isAddingCategory, setIsAddingCategory] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [photoUris, setPhotoUris] = useState([]);
-  const [fullScreenImageUri, setFullScreenImageUri] = useState(null);
+  const [fullScreenIndex, setFullScreenIndex] = useState(null);
   const [forceTargetTime, setForceTargetTime] = useState(false);
   const [selectedTags, setSelectedTags] = useState([]);
 
@@ -582,7 +583,7 @@ export default function HomeScreen() {
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginVertical: 10, justifyContent: 'center' }}>
               {photoUris.map((uri, index) => (
                 <View key={`photo-${index}`} style={{ margin: 5 }}>
-                  <TouchableOpacity onPress={() => setFullScreenImageUri(uri)}>
+                  <TouchableOpacity onPress={() => setFullScreenIndex(index)}>
                     <Image source={{ uri }} style={{ width: 80, height: 80, borderRadius: 8 }} />
                   </TouchableOpacity>
                   <TouchableOpacity 
@@ -630,12 +631,25 @@ export default function HomeScreen() {
         </ScrollView>
         
         {/* 写真の全画面プレビュー用オーバーレイ（二重Modalを避けるためViewの絶対配置を使用） */}
-        {fullScreenImageUri && (
+        {fullScreenIndex !== null && (
           <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center', alignItems: 'center', zIndex: 1000, elevation: 100 }}>
-            <Image source={{ uri: fullScreenImageUri }} style={{ width: '100%', height: '80%' }} resizeMode="contain" />
+            <FlatList
+              data={photoUris}
+              keyExtractor={(_, i) => String(i)}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              initialScrollIndex={fullScreenIndex}
+              getItemLayout={(data, index) => ({ length: screenWidth, offset: screenWidth * index, index })}
+              renderItem={({ item: uri }) => (
+                <View style={{ width: screenWidth, justifyContent: 'center', alignItems: 'center' }}>
+                  <Image source={{ uri }} style={{ width: '100%', height: '80%' }} resizeMode="contain" />
+                </View>
+              )}
+            />
             <TouchableOpacity 
               style={{ position: 'absolute', top: 50, right: 20, padding: 10, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20 }}
-              onPress={() => setFullScreenImageUri(null)}
+              onPress={() => setFullScreenIndex(null)}
             >
               <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>閉じる</Text>
             </TouchableOpacity>
