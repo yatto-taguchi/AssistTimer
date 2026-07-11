@@ -25,6 +25,9 @@ export default function HomeScreen() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [photoUri, setPhotoUri] = useState(null);
   const [forceTargetTime, setForceTargetTime] = useState(false);
+  const [selectedTags, setSelectedTags] = useState([]);
+
+  const DEFAULT_TAGS = ['お気に入り', 'タイム'];
 
   // 時間設定モーダル用State
   const [timeModalVisible, setTimeModalVisible] = useState(false);
@@ -262,6 +265,7 @@ export default function HomeScreen() {
     setIsPreCountingDown(false);
     setForceTargetTime(false);
     setSelectedCategory(lastUsedCategory); // デフォルトで前回のカテゴリをセット
+    setSelectedTags([]); // タグを初期化
     setSaveModalVisible(true);
   };
 
@@ -270,6 +274,7 @@ export default function HomeScreen() {
     setIsPreCountingDown(false);
     setForceTargetTime(true); // 時間内に終わったことにしてターゲットタイムを記録する
     setSelectedCategory(lastUsedCategory); // デフォルトで前回のカテゴリをセット
+    setSelectedTags([]); // タグを初期化
     setSaveModalVisible(true);
   };
 
@@ -315,6 +320,7 @@ export default function HomeScreen() {
       duration: duration,
       category: selectedCategory || '未分類',
       photoUri: photoUri,
+      tags: selectedTags,
     });
     
     if (selectedCategory) {
@@ -506,6 +512,14 @@ export default function HomeScreen() {
             })()}
           </View>
 
+          <Text style={styles.label}>選択中のジャンル</Text>
+          <TextInput 
+            style={[styles.input, { backgroundColor: '#f0f0f0', color: '#333', marginBottom: 20 }]} 
+            placeholder="未選択"
+            value={selectedCategory}
+            editable={false}
+          />
+
           <Text style={[styles.label, {alignSelf: 'flex-start', color: isEcoMode ? '#aaa' : '#666'}]}>ジャンルを選択</Text>
           <View style={styles.categoryChipsContainer}>
             {/* 選択中のものを先頭に並び替えて表示 */}
@@ -540,14 +554,6 @@ export default function HomeScreen() {
               </TouchableOpacity>
             </View>
           )}
-
-          <Text style={styles.label}>選択中のジャンル</Text>
-          <TextInput 
-            style={[styles.input, { backgroundColor: '#f0f0f0', color: '#333' }]} 
-            placeholder="未選択"
-            value={selectedCategory}
-            editable={false}
-          />
           
           <Text style={styles.label}>写真を追加</Text>
           <View style={styles.photoActionBox}>
@@ -562,6 +568,28 @@ export default function HomeScreen() {
           {photoUri && (
             <Text style={{color: 'green', marginVertical: 10, textAlign: 'center'}}>✓ 写真が選択されました</Text>
           )}
+
+          <Text style={[styles.label, { marginTop: 20 }]}>タグをつける</Text>
+          <View style={styles.categoryChipsContainer}>
+            {DEFAULT_TAGS.map((tag, index) => {
+              const isSelected = selectedTags.includes(tag);
+              return (
+                <TouchableOpacity
+                  key={`tag-${index}`}
+                  style={[styles.categoryChip, isSelected && styles.categoryChipSelected]}
+                  onPress={() => {
+                    if (isSelected) {
+                      setSelectedTags(selectedTags.filter(t => t !== tag));
+                    } else {
+                      setSelectedTags([...selectedTags, tag]);
+                    }
+                  }}
+                >
+                  <Text style={[styles.categoryChipText, isSelected && styles.categoryChipTextSelected]}>{tag}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
 
           <TouchableOpacity style={[styles.saveActionButton, {marginTop: 40}]} onPress={handleSaveRecord}>
              <Text style={styles.saveActionText}>記録を保存してリセット</Text>
