@@ -346,7 +346,7 @@ export default function HomeScreen() {
     
     // モーダルを閉じ、タイマーをリセットする
     setSaveModalVisible(false);
-    setPhotoUri(null);
+    setPhotoUris([]);
     resetTimer();
   };
 
