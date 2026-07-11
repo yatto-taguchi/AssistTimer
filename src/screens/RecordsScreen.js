@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useContext } from 'react';
-import { StyleSheet, Text, View, FlatList, TouchableOpacity, Image, Modal, Button } from 'react-native';
+import { StyleSheet, Text, View, FlatList, TouchableOpacity, Image, Modal, Button, ScrollView } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getRecords, updateRecordPhoto } from '../utils/recordStorage';
 import { AppContext } from '../utils/AppContext';
 
@@ -8,6 +9,7 @@ export default function RecordsScreen() {
   const [records, setRecords] = useState([]);
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
+  const [fullScreenImageUri, setFullScreenImageUri] = useState(null);
   const { isEcoMode } = useContext(AppContext);
 
   // 画面が表示されるたびにデータを読み込むための簡易フック（ナビゲーションイベントを使うのがベターですが今回は仮）
@@ -71,7 +73,11 @@ export default function RecordsScreen() {
         }}
       >
         {((item.photoUris && item.photoUris.length > 0) ? item.photoUris[0] : item.photoUri) ? (
-          <Image source={{ uri: (item.photoUris && item.photoUris.length > 0) ? item.photoUris[0] : item.photoUri }} style={styles.tileImage} />
+          <Image 
+            source={{ uri: (item.photoUris && item.photoUris.length > 0) ? item.photoUris[0] : item.photoUri }} 
+            style={styles.tileImage} 
+            resizeMode="contain"
+          />
         ) : (
           <View style={[styles.tileImage, styles.placeholderImage, isEcoMode && { backgroundColor: '#222' }]}>
              <Text style={styles.placeholderText}>NO PHOTO</Text>
@@ -115,7 +121,7 @@ export default function RecordsScreen() {
         animationType="slide"
         transparent={false}
       >
-        <View style={[styles.modalContainer, { backgroundColor: bgColor }]}>
+        <ScrollView style={[styles.modalContainer, { backgroundColor: bgColor }]}>
           <Text style={[styles.modalTitle, { color: textColor }]}>練習の記録詳細</Text>
           
           {selectedRecord && (
@@ -123,11 +129,15 @@ export default function RecordsScreen() {
               {selectedRecord.photoUris && selectedRecord.photoUris.length > 0 ? (
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', marginBottom: 15 }}>
                   {selectedRecord.photoUris.map((uri, idx) => (
-                    <Image key={idx} source={{ uri }} style={[styles.modalDetailImage, { width: 140, height: 140, margin: 5 }]} />
+                    <TouchableOpacity key={idx} onPress={() => setFullScreenImageUri(uri)}>
+                      <Image source={{ uri }} style={[styles.modalDetailImage, { width: 140, height: 140, margin: 5 }]} resizeMode="contain" />
+                    </TouchableOpacity>
                   ))}
                 </View>
               ) : selectedRecord.photoUri ? (
-                <Image source={{ uri: selectedRecord.photoUri }} style={styles.modalDetailImage} />
+                <TouchableOpacity onPress={() => setFullScreenImageUri(selectedRecord.photoUri)}>
+                  <Image source={{ uri: selectedRecord.photoUri }} style={styles.modalDetailImage} resizeMode="contain" />
+                </TouchableOpacity>
               ) : (
                 <View style={[styles.modalDetailImage, styles.placeholderImage, isEcoMode && { backgroundColor: '#222' }]}>
                   <Text style={styles.placeholderText}>No Photo Available</Text>
@@ -153,6 +163,21 @@ export default function RecordsScreen() {
              onPress={() => setModalVisible(false)}
           >
              <Text style={styles.actionButtonText}>閉じる</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </Modal>
+
+      {/* 写真の全画面プレビュー用モーダル */}
+      <Modal visible={!!fullScreenImageUri} transparent={true} animationType="fade">
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' }}>
+          {fullScreenImageUri && (
+            <Image source={{ uri: fullScreenImageUri }} style={{ width: '100%', height: '80%' }} resizeMode="contain" />
+          )}
+          <TouchableOpacity 
+            style={{ position: 'absolute', top: 50, right: 20, padding: 10, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20 }}
+            onPress={() => setFullScreenImageUri(null)}
+          >
+            <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>閉じる</Text>
           </TouchableOpacity>
         </View>
       </Modal>

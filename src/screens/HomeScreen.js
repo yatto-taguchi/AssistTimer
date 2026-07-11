@@ -24,6 +24,7 @@ export default function HomeScreen() {
   const [isAddingCategory, setIsAddingCategory] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [photoUris, setPhotoUris] = useState([]);
+  const [fullScreenImageUri, setFullScreenImageUri] = useState(null);
   const [forceTargetTime, setForceTargetTime] = useState(false);
   const [selectedTags, setSelectedTags] = useState([]);
 
@@ -581,7 +582,9 @@ export default function HomeScreen() {
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', marginVertical: 10, justifyContent: 'center' }}>
               {photoUris.map((uri, index) => (
                 <View key={`photo-${index}`} style={{ margin: 5 }}>
-                  <Image source={{ uri }} style={{ width: 60, height: 60, borderRadius: 8 }} />
+                  <TouchableOpacity onPress={() => setFullScreenImageUri(uri)}>
+                    <Image source={{ uri }} style={{ width: 80, height: 80, borderRadius: 8 }} resizeMode="contain" />
+                  </TouchableOpacity>
                   <TouchableOpacity 
                     style={{ position: 'absolute', top: -8, right: -8, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 12, width: 24, height: 24, justifyContent: 'center', alignItems: 'center' }}
                     onPress={() => {
@@ -625,6 +628,21 @@ export default function HomeScreen() {
              <Text style={{textAlign: 'center', color: '#000', fontWeight: 'bold'}}>キャンセル</Text>
           </TouchableOpacity>
         </ScrollView>
+      </Modal>
+
+      {/* 写真の全画面プレビュー用モーダル */}
+      <Modal visible={!!fullScreenImageUri} transparent={true} animationType="fade">
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' }}>
+          {fullScreenImageUri && (
+            <Image source={{ uri: fullScreenImageUri }} style={{ width: '100%', height: '80%' }} resizeMode="contain" />
+          )}
+          <TouchableOpacity 
+            style={{ position: 'absolute', top: 50, right: 20, padding: 10, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20 }}
+            onPress={() => setFullScreenImageUri(null)}
+          >
+            <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>閉じる</Text>
+          </TouchableOpacity>
+        </View>
       </Modal>
 
       {/* タイマー・カウントダウン設定モーダル（1つのモーダルで中身を切り替える） */}
