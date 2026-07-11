@@ -130,13 +130,13 @@ export default function RecordsScreen() {
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', marginBottom: 15 }}>
                   {selectedRecord.photoUris.map((uri, idx) => (
                     <TouchableOpacity key={idx} onPress={() => setFullScreenImageUri(uri)}>
-                      <Image source={{ uri }} style={[styles.modalDetailImage, { width: 140, height: 140, margin: 5 }]} resizeMode="contain" />
+                      <Image source={{ uri }} style={[styles.modalDetailImage, { width: 140, height: 140, margin: 5 }]} />
                     </TouchableOpacity>
                   ))}
                 </View>
               ) : selectedRecord.photoUri ? (
                 <TouchableOpacity onPress={() => setFullScreenImageUri(selectedRecord.photoUri)}>
-                  <Image source={{ uri: selectedRecord.photoUri }} style={styles.modalDetailImage} resizeMode="contain" />
+                  <Image source={{ uri: selectedRecord.photoUri }} style={styles.modalDetailImage} />
                 </TouchableOpacity>
               ) : (
                 <View style={[styles.modalDetailImage, styles.placeholderImage, isEcoMode && { backgroundColor: '#222' }]}>
@@ -165,21 +165,19 @@ export default function RecordsScreen() {
              <Text style={styles.actionButtonText}>閉じる</Text>
           </TouchableOpacity>
         </ScrollView>
-      </Modal>
-
-      {/* 写真の全画面プレビュー用モーダル */}
-      <Modal visible={!!fullScreenImageUri} transparent={true} animationType="fade">
-        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' }}>
-          {fullScreenImageUri && (
+        
+        {/* 写真の全画面プレビュー用オーバーレイ */}
+        {fullScreenImageUri && (
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center', alignItems: 'center', zIndex: 1000, elevation: 100 }}>
             <Image source={{ uri: fullScreenImageUri }} style={{ width: '100%', height: '80%' }} resizeMode="contain" />
-          )}
-          <TouchableOpacity 
-            style={{ position: 'absolute', top: 50, right: 20, padding: 10, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20 }}
-            onPress={() => setFullScreenImageUri(null)}
-          >
-            <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>閉じる</Text>
-          </TouchableOpacity>
-        </View>
+            <TouchableOpacity 
+              style={{ position: 'absolute', top: 50, right: 20, padding: 10, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20 }}
+              onPress={() => setFullScreenImageUri(null)}
+            >
+              <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>閉じる</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </Modal>
 
     </View>
