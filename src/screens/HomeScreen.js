@@ -642,12 +642,6 @@ export default function HomeScreen() {
               enableSwipeDown={true}
               renderIndicator={() => null}
             />
-            <TouchableOpacity 
-              style={{ position: 'absolute', top: 50, right: 20, width: 44, height: 44, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 22, justifyContent: 'center', alignItems: 'center', zIndex: 101 }}
-              onPress={() => setFullScreenIndex(null)}
-            >
-              <Text style={{ color: '#fff', fontSize: 28, fontWeight: 'bold', lineHeight: 32 }}>×</Text>
-            </TouchableOpacity>
           </View>
         )}
       </Modal>
