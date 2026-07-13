@@ -174,14 +174,15 @@ export default function RecordsScreen() {
               imageUrls={(selectedRecord?.photoUris && selectedRecord.photoUris.length > 0 ? selectedRecord.photoUris : [selectedRecord?.photoUri]).filter(Boolean).map(uri => ({ url: uri }))}
               index={fullScreenIndex}
               onSwipeDown={() => setFullScreenIndex(null)}
+              onClick={() => setFullScreenIndex(null)}
               enableSwipeDown={true}
               renderIndicator={() => null}
             />
             <TouchableOpacity 
-              style={{ position: 'absolute', top: 50, right: 20, padding: 10, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 20, zIndex: 101 }}
+              style={{ position: 'absolute', top: 50, right: 20, width: 44, height: 44, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 22, justifyContent: 'center', alignItems: 'center', zIndex: 101 }}
               onPress={() => setFullScreenIndex(null)}
             >
-              <Text style={{ color: '#fff', fontSize: 18, fontWeight: 'bold' }}>閉じる</Text>
+              <Text style={{ color: '#fff', fontSize: 28, fontWeight: 'bold', lineHeight: 32 }}>×</Text>
             </TouchableOpacity>
           </View>
         )}
