@@ -5,7 +5,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { AppContext } from '../utils/AppContext';
 
 export default function CustomBatteryIndicator() {
-  const { isEcoMode, isEcoClockEnabled, isEcoBatteryEnabled } = useContext(AppContext);
+  const { 
+    isEcoMode, 
+    isEcoClockEnabled, isEcoBatteryEnabled,
+    isNormalClockEnabled, isNormalBatteryEnabled 
+  } = useContext(AppContext);
   const [batteryLevel, setBatteryLevel] = useState(null);
   const [timeStr, setTimeStr] = useState('');
 
@@ -40,7 +44,10 @@ export default function CustomBatteryIndicator() {
     return () => clearInterval(interval);
   }, []);
 
-  if (!isEcoMode) {
+  const showClock = isEcoMode ? isEcoClockEnabled : isNormalClockEnabled;
+  const showBattery = isEcoMode ? isEcoBatteryEnabled : isNormalBatteryEnabled;
+
+  if (!showClock && !showBattery) {
     return null;
   }
 
@@ -59,15 +66,15 @@ export default function CustomBatteryIndicator() {
     <View style={[styles.container, { top: Math.max(10, statusBarHeight - 10) }]} pointerEvents="none">
       {/* 左側のドット（記録一覧）の上：時刻 */}
       <View style={styles.leftSide}>
-        {isEcoClockEnabled && <Text style={styles.text}>{timeStr}</Text>}
+        {showClock && <Text style={[styles.text, !isEcoMode && { color: '#666' }]}>{timeStr}</Text>}
       </View>
 
       {/* 右側のドット（設定）の上：電池残量 */}
       <View style={styles.rightSide}>
-        {isEcoBatteryEnabled && percentage !== null && (
+        {showBattery && percentage !== null && (
           <>
-            <Ionicons name={iconName} size={14} color="#aaa" />
-            <Text style={styles.text}>{percentage}%</Text>
+            <Ionicons name={iconName} size={14} color={isEcoMode ? "#aaa" : "#666"} />
+            <Text style={[styles.text, !isEcoMode && { color: '#666' }]}>{percentage}%</Text>
           </>
         )}
       </View>

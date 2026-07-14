@@ -10,6 +10,10 @@ export const AppProvider = ({ children }) => {
   const [isEcoNavIconEnabled, setIsEcoNavIconEnabled] = useState(false); // trueでアイコン、falseで点
   const [isEcoNavActiveDot, setIsEcoNavActiveDot] = useState(false); // アイコン表示時、選択中のみ点にする
   const [isEcoBorderEnabled, setIsEcoBorderEnabled] = useState(false); // trueで境界線あり、falseでなし
+  const [isEcoIndicatorEnabled, setIsEcoIndicatorEnabled] = useState(true); // エコモードでのタイマーリング表示
+  const [isNormalClockEnabled, setIsNormalClockEnabled] = useState(false); // 通常モードでの時計表示
+  const [isNormalBatteryEnabled, setIsNormalBatteryEnabled] = useState(false); // 通常モードでの電池表示
+  const [isNormalIndicatorEnabled, setIsNormalIndicatorEnabled] = useState(true); // 通常モードでのタイマーリング表示
   const [isProMode, setIsProMode] = useState(false); // 課金・広告デモ用
   const [isColorIndicator, setIsColorIndicator] = useState(true); // カラーインジケーター（10分以下タイマー用）
   const [isCountdownEnabled, setIsCountdownEnabled] = useState(false); // スタート前カウントダウン
@@ -25,6 +29,10 @@ export const AppProvider = ({ children }) => {
         const ecoNavIconVal = await AsyncStorage.getItem('isEcoNavIconEnabled');
         const ecoNavActiveDotVal = await AsyncStorage.getItem('isEcoNavActiveDot');
         const ecoBorderVal = await AsyncStorage.getItem('isEcoBorderEnabled');
+        const ecoIndicatorVal = await AsyncStorage.getItem('isEcoIndicatorEnabled');
+        const normalClockVal = await AsyncStorage.getItem('isNormalClockEnabled');
+        const normalBatteryVal = await AsyncStorage.getItem('isNormalBatteryEnabled');
+        const normalIndicatorVal = await AsyncStorage.getItem('isNormalIndicatorEnabled');
         const proVal = await AsyncStorage.getItem('isProMode');
         const colorVal = await AsyncStorage.getItem('isColorIndicator');
         const countdownEnabledVal = await AsyncStorage.getItem('isCountdownEnabled');
@@ -36,6 +44,10 @@ export const AppProvider = ({ children }) => {
         if (ecoNavIconVal !== null) setIsEcoNavIconEnabled(JSON.parse(ecoNavIconVal));
         if (ecoNavActiveDotVal !== null) setIsEcoNavActiveDot(JSON.parse(ecoNavActiveDotVal));
         if (ecoBorderVal !== null) setIsEcoBorderEnabled(JSON.parse(ecoBorderVal));
+        if (ecoIndicatorVal !== null) setIsEcoIndicatorEnabled(JSON.parse(ecoIndicatorVal));
+        if (normalClockVal !== null) setIsNormalClockEnabled(JSON.parse(normalClockVal));
+        if (normalBatteryVal !== null) setIsNormalBatteryEnabled(JSON.parse(normalBatteryVal));
+        if (normalIndicatorVal !== null) setIsNormalIndicatorEnabled(JSON.parse(normalIndicatorVal));
         if (proVal !== null) setIsProMode(JSON.parse(proVal));
         if (colorVal !== null) setIsColorIndicator(JSON.parse(colorVal));
         if (countdownEnabledVal !== null) setIsCountdownEnabled(JSON.parse(countdownEnabledVal));
@@ -83,6 +95,26 @@ export const AppProvider = ({ children }) => {
     await AsyncStorage.setItem('isEcoBorderEnabled', JSON.stringify(value));
   };
 
+  const toggleEcoIndicator = async (value) => {
+    setIsEcoIndicatorEnabled(value);
+    await AsyncStorage.setItem('isEcoIndicatorEnabled', JSON.stringify(value));
+  };
+
+  const toggleNormalClock = async (value) => {
+    setIsNormalClockEnabled(value);
+    await AsyncStorage.setItem('isNormalClockEnabled', JSON.stringify(value));
+  };
+
+  const toggleNormalBattery = async (value) => {
+    setIsNormalBatteryEnabled(value);
+    await AsyncStorage.setItem('isNormalBatteryEnabled', JSON.stringify(value));
+  };
+
+  const toggleNormalIndicator = async (value) => {
+    setIsNormalIndicatorEnabled(value);
+    await AsyncStorage.setItem('isNormalIndicatorEnabled', JSON.stringify(value));
+  };
+
   // Proモード切替と保存
   const toggleProMode = async (value) => {
     setIsProMode(value);
@@ -122,6 +154,14 @@ export const AppProvider = ({ children }) => {
         toggleEcoNavActiveDot,
         isEcoBorderEnabled,
         toggleEcoBorder,
+        isEcoIndicatorEnabled,
+        toggleEcoIndicator,
+        isNormalClockEnabled,
+        toggleNormalClock,
+        isNormalBatteryEnabled,
+        toggleNormalBattery,
+        isNormalIndicatorEnabled,
+        toggleNormalIndicator,
         isProMode,
         toggleProMode,
         isColorIndicator,

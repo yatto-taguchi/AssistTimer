@@ -46,7 +46,10 @@ export default function HomeScreen() {
   const { 
     isEcoMode, isProMode, isColorIndicator, 
     isCountdownEnabled, toggleCountdownEnabled, 
-    countdownSeconds, saveCountdownSeconds 
+    countdownSeconds, saveCountdownSeconds,
+    isEcoNavActiveDot,
+    isEcoIndicatorEnabled,
+    isNormalIndicatorEnabled
   } = useContext(AppContext);
   
   // スタート前カウントダウン用State
@@ -407,14 +410,16 @@ export default function HomeScreen() {
       <View style={[styles.container, { backgroundColor: bgColor }]}>
         <View style={styles.content}>
         <View style={styles.timerContainer}>
-          <RingProgress 
-            radius={140} 
-            strokeWidth={15} 
-            progress={activeProgress} 
-            color={ringColor}
-            backgroundColor={ringBgColor}
-            fillColor="transparent"
-          />
+          {(isEcoMode ? isEcoIndicatorEnabled : isNormalIndicatorEnabled) && (
+            <RingProgress 
+              radius={140} 
+              strokeWidth={15} 
+              progress={activeProgress} 
+              color={ringColor}
+              backgroundColor={ringBgColor}
+              fillColor="transparent"
+            />
+          )}
           <View style={styles.timeTextContainer}>
             {isPreCountingDown ? (
               <Text style={[styles.preCountdownText, { color: mainTextColor }]}>

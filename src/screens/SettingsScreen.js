@@ -10,6 +10,10 @@ export default function SettingsScreen() {
     isEcoNavIconEnabled, toggleEcoNavIcon,
     isEcoNavActiveDot, toggleEcoNavActiveDot,
     isEcoBorderEnabled, toggleEcoBorder,
+    isEcoIndicatorEnabled, toggleEcoIndicator,
+    isNormalClockEnabled, toggleNormalClock,
+    isNormalBatteryEnabled, toggleNormalBattery,
+    isNormalIndicatorEnabled, toggleNormalIndicator,
     isProMode, toggleProMode, 
     isColorIndicator, toggleColorIndicator,
     isCountdownEnabled, toggleCountdownEnabled,
@@ -84,8 +88,50 @@ export default function SettingsScreen() {
               style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
             />
           </View>
+          <View style={[styles.subSettingRow, { borderBottomColor: borderColor }]}>
+            <Text style={[styles.subSettingText, { color: textColor }]}>  └ タイマーリングを表示</Text>
+            <Switch
+              value={isEcoIndicatorEnabled}
+              onValueChange={toggleEcoIndicator}
+              trackColor={{ false: '#333', true: '#34C759' }}
+              style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+            />
+          </View>
         </View>
       )}
+
+      <View style={[styles.settingRow, { borderBottomColor: borderColor, marginTop: 15 }]}>
+        <Text style={[styles.settingText, { color: textColor }]}>通常モード設定</Text>
+      </View>
+      <View style={styles.subSettingsContainer}>
+        <View style={[styles.subSettingRow, { borderBottomColor: borderColor }]}>
+          <Text style={[styles.subSettingText, { color: textColor }]}>  └ 時計を表示</Text>
+          <Switch
+            value={isNormalClockEnabled}
+            onValueChange={toggleNormalClock}
+            trackColor={{ false: '#333', true: '#34C759' }}
+            style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+          />
+        </View>
+        <View style={[styles.subSettingRow, { borderBottomColor: borderColor }]}>
+          <Text style={[styles.subSettingText, { color: textColor }]}>  └ 電池残量を表示</Text>
+          <Switch
+            value={isNormalBatteryEnabled}
+            onValueChange={toggleNormalBattery}
+            trackColor={{ false: '#333', true: '#34C759' }}
+            style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+          />
+        </View>
+        <View style={[styles.subSettingRow, { borderBottomColor: borderColor }]}>
+          <Text style={[styles.subSettingText, { color: textColor }]}>  └ タイマーリングを表示</Text>
+          <Switch
+            value={isNormalIndicatorEnabled}
+            onValueChange={toggleNormalIndicator}
+            trackColor={{ false: '#333', true: '#34C759' }}
+            style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+          />
+        </View>
+      </View>
 
       <View style={[styles.settingRow, { borderBottomColor: borderColor }]}>
         <Text style={[styles.settingText, { color: textColor }]}>Proモード（広告非表示デモ）</Text>
