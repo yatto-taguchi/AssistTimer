@@ -1,0 +1,139 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Image } from 'react-native';
+
+const RECORDS_KEY = 'ASSISTIMER_RECORDS';
+
+// デモ用画像URIの取得
+const cutUri = Image.resolveAssetSource(require('../../assets/demo/cut.jpg')).uri;
+const windingUri = Image.resolveAssetSource(require('../../assets/demo/winding.jpg')).uri;
+const colorUri = Image.resolveAssetSource(require('../../assets/demo/color.jpg')).uri;
+const updoUri = Image.resolveAssetSource(require('../../assets/demo/updo.jpg')).uri;
+
+// デモ用サンプルデータ
+export const DEMO_RECORDS = [
+  {
+    id: 'demo-1',
+    date: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString(), // 2時間前
+    duration: 1200, // 20分00秒
+    category: 'カット',
+    photoUris: [cutUri],
+    photoUri: cutUri,
+    tags: ['お気に入り', 'タイム'],
+    memo: 'ワンレングスカットの練習。タイム内におさまりラインも綺麗に出せた。'
+  },
+  {
+    id: 'demo-2',
+    date: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(), // 1日前
+    duration: 1725, // 28分45秒
+    category: 'ワインディング',
+    photoUris: [windingUri],
+    photoUri: windingUri,
+    tags: ['タイム'],
+    memo: 'センターロッド巻きスピード意識。ゴム掛けのテンション安定してきた。'
+  },
+  {
+    id: 'demo-3',
+    date: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(), // 2日前
+    duration: 930, // 15分30秒
+    category: 'カラー',
+    photoUris: [colorUri],
+    photoUri: colorUri,
+    tags: ['お気に入り'],
+    memo: 'リタッチ塗布練習。コーミングの手数を減らして時短できた。'
+  },
+  {
+    id: 'demo-4',
+    date: new Date(Date.now() - 1000 * 60 * 60 * 72).toISOString(), // 3日前
+    duration: 2110, // 35分10秒
+    category: 'アップスタイル',
+    photoUris: [updoUri],
+    photoUri: updoUri,
+    tags: [],
+    memo: '夜会巻きのベース作りとピン打ちの練習。'
+  }
+];
+
+// 記録の保存
+export const saveRecord = async (record) => {
+  try {
+    const existingRecords = await getRecords();
+    // record = { id, date, duration, category, photoUri, ... }
+    const newRecord = {
+      id: Date.now().toString(),
+      date: new Date().toISOString(),
+      ...record
+    };
+    const updatedRecords = [newRecord, ...existingRecords];
+    await AsyncStorage.setItem(RECORDS_KEY, JSON.stringify(updatedRecords));
+    return updatedRecords;
+  } catch (e) {
+    console.error("Failed to save record", e);
+    return [];
+  }
+};
+
+// 全記録の取得（デモデータが含まれていて写真がない場合は写真を補完して保存）
+export const getRecords = async () => {
+  try {
+    const jsonValue = await AsyncStorage.getItem(RECORDS_KEY);
+    if (jsonValue !== null) {
+      const records = JSON.parse(jsonValue);
+      // デモデータの写真が未設定の場合は写真付きにアップデート
+      let hasUpdates = false;
+      const enrichedRecords = records.map(r => {
+        if (r.id === 'demo-1' && (!r.photoUris || r.photoUris.length === 0)) {
+          hasUpdates = true;
+          return { ...r, photoUris: [cutUri], photoUri: cutUri };
+        }
+        if (r.id === 'demo-2' && (!r.photoUris || r.photoUris.length === 0)) {
+          hasUpdates = true;
+          return { ...r, photoUris: [windingUri], photoUri: windingUri };
+        }
+        if (r.id === 'demo-3' && (!r.photoUris || r.photoUris.length === 0)) {
+          hasUpdates = true;
+          return { ...r, photoUris: [colorUri], photoUri: colorUri };
+        }
+        if (r.id === 'demo-4' && (!r.photoUris || r.photoUris.length === 0)) {
+          hasUpdates = true;
+          return { ...r, photoUris: [updoUri], photoUri: updoUri };
+        }
+        return r;
+      });
+      if (hasUpdates) {
+        await AsyncStorage.setItem(RECORDS_KEY, JSON.stringify(enrichedRecords));
+      }
+      return enrichedRecords;
+    } else {
+      // 初回起動時など空の場合はデモデータをセット
+      await AsyncStorage.setItem(RECORDS_KEY, JSON.stringify(DEMO_RECORDS));
+      return DEMO_RECORDS;
+    }
+  } catch (e) {
+    console.error("Failed to load records", e);
+    return DEMO_RECORDS;
+  }
+};
+
+// 特定の記録の写真（や他項目）を更新する
+export const updateRecordPhoto = async (recordId, newPhotoUri) => {
+    try {
+        const records = await getRecords();
+        const updatedRecords = records.map(record => {
+            if (record.id === recordId) {
+                return { ...record, photoUri: newPhotoUri };
+            }
+            return record;
+        });
+        await AsyncStorage.setItem(RECORDS_KEY, JSON.stringify(updatedRecords));
+        return updatedRecords;
+    } catch (e) {
+        console.error("Failed to update record", e);
+        return [];
+    }
+};
+
+// 練習回数（合計回数）の取得用ヘルパー
+export const getTotalPracticeCount = async () => {
+    const records = await getRecords();
+    return records.length;
+};
