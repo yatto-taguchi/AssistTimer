@@ -11,6 +11,15 @@ import RingProgress from '../components/RingProgress';
 import { AppContext } from '../utils/AppContext';
 import { saveRecord } from '../utils/recordStorage';
 
+const ALARM_SOUNDS = {
+  kitchen: require('../../assets/alarm_kitchen.wav'),
+  fast: require('../../assets/alarm_fast.wav'),
+  digital: require('../../assets/alarm_digital.wav'),
+  buzzer: require('../../assets/alarm_buzzer.wav'),
+  bell: require('../../assets/alarm_bell.wav'),
+  gong: require('../../assets/alarm_gong.wav'),
+};
+
 export default function HomeScreen() {
   const DEFAULT_SECONDS = 180; // モック: 3分のテスト用
   const [targetTime, setTargetTime] = useState(DEFAULT_SECONDS);
@@ -48,6 +57,7 @@ export default function HomeScreen() {
     isEcoMode, isProMode, isColorIndicator, 
     isCountdownEnabled, toggleCountdownEnabled, 
     countdownSeconds, saveCountdownSeconds,
+    alarmSoundType, playsInSilentMode,
     isEcoNavActiveDot,
     isEcoIndicatorEnabled,
     isNormalIndicatorEnabled,
@@ -69,9 +79,17 @@ export default function HomeScreen() {
   const playAlarm = async () => {
     try {
       console.log('Play Alarm trigger: 0 seconds reached');
-      // const { sound } = await Audio.Sound.createAsync(require('../../assets/alarm.mp3'));
-      // setSound(sound);
-      // await sound.playAsync();
+      if (sound) {
+        await sound.unloadAsync();
+      }
+      await Audio.setAudioModeAsync({
+        playsInSilentModeIOS: playsInSilentMode,
+        shouldDuckAndroid: true,
+      });
+      const soundFile = ALARM_SOUNDS[alarmSoundType] || ALARM_SOUNDS.digital;
+      const { sound: newSound } = await Audio.Sound.createAsync(soundFile);
+      setSound(newSound);
+      await newSound.playAsync();
     } catch (e) {
       console.log("Audio play error", e);
     }
@@ -722,9 +740,9 @@ export default function HomeScreen() {
                         style={[styles.presetTile, { width: '31%', backgroundColor: isEcoMode ? '#222' : '#F2F2F7' }, isActive && {backgroundColor: '#007AFF'}]} 
                         onPress={() => {
                           if (isNone) {
-                            if (isCountdownEnabled) toggleCountdownEnabled(); // オフにする
+                            toggleCountdownEnabled(false); // オフにする
                           } else {
-                            if (!isCountdownEnabled) toggleCountdownEnabled(); // オンにする
+                            toggleCountdownEnabled(true); // オンにする
                             saveCountdownSeconds(sec);
                           }
                           setTimeModalMode('time');
@@ -769,8 +787,10 @@ export default function HomeScreen() {
                    const s = parseInt(countdownInputSecStr, 10) || 0;
                    const totalSeconds = (m * 60) + s;
                    if (totalSeconds > 0) {
-                     if (!isCountdownEnabled) toggleCountdownEnabled(); // オンにする
+                     toggleCountdownEnabled(true); // オンにする
                      saveCountdownSeconds(totalSeconds);
+                   } else {
+                     toggleCountdownEnabled(false); // 0秒ならオフ
                    }
                    setTimeModalMode('time');
                 }}>

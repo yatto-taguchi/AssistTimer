@@ -1,7 +1,40 @@
-import React, { useContext, useState } from 'react';
+import React, { useContext, useState, useEffect } from 'react';
 import { StyleSheet, Text, View, Switch, TouchableOpacity, Modal, TextInput, KeyboardAvoidingView, Platform, ScrollView } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Audio } from 'expo-av';
 import { AppContext } from '../utils/AppContext';
+
+const ALARM_SOUNDS = {
+  kitchen: require('../../assets/alarm_kitchen.wav'),
+  fast: require('../../assets/alarm_fast.wav'),
+  digital: require('../../assets/alarm_digital.wav'),
+  buzzer: require('../../assets/alarm_buzzer.wav'),
+  bell: require('../../assets/alarm_bell.wav'),
+  gong: require('../../assets/alarm_gong.wav'),
+};
+
+const ALARM_SOUND_OPTIONS = [
+  { key: 'kitchen', label: 'キッチンタイマー', desc: 'ピッピッピッピッ！' },
+  { key: 'fast', label: '高速アラーム', desc: 'ピピピピピピ！' },
+  { key: 'digital', label: 'デジタル電子音', desc: 'ピピピピ' },
+  { key: 'buzzer', label: '競技ブザー', desc: 'ブーッ！' },
+  { key: 'bell', label: 'ベル・チャイム', desc: 'ポーン…' },
+  { key: 'gong', label: 'クリアゴング', desc: 'キーン…' },
+];
+
+const VOICE_SAMPLES = {
+  v_1min: require('../../assets/voice_1min.wav'),
+  v_30sec: require('../../assets/voice_30sec.wav'),
+  v_10sec: require('../../assets/voice_10sec.wav'),
+  v_finish: require('../../assets/voice_finish.wav'),
+};
+
+const VOICE_OPTIONS = [
+  { key: 'v_1min', label: '残り1分', phrase: '「残り、1分です」' },
+  { key: 'v_30sec', label: '残り30秒', phrase: '「残り、30秒です」' },
+  { key: 'v_10sec', label: '残り10秒', phrase: '「残り、10秒」' },
+  { key: 'v_finish', label: 'カウント終了', phrase: '「5,4,3,2,1 終了」' },
+];
 
 export default function SettingsScreen() {
   const { 
@@ -19,10 +52,60 @@ export default function SettingsScreen() {
     isColorIndicator, toggleColorIndicator,
     isCountdownEnabled, toggleCountdownEnabled,
     countdownSeconds, saveCountdownSeconds,
+    alarmSoundType, toggleAlarmSoundType,
+    playsInSilentMode, togglePlaysInSilentMode,
     hasSeenEcoExplanation, markEcoExplanationSeen
   } = useContext(AppContext);
 
   const [ecoModalVisible, setEcoModalVisible] = useState(false);
+  const [previewSound, setPreviewSound] = useState(null);
+  const [playingVoiceKey, setPlayingVoiceKey] = useState(null);
+
+  useEffect(() => {
+    return previewSound ? () => previewSound.unloadAsync() : undefined;
+  }, [previewSound]);
+
+  const handleSelectSound = async (type) => {
+    toggleAlarmSoundType(type);
+    try {
+      if (previewSound) {
+        await previewSound.unloadAsync();
+      }
+      await Audio.setAudioModeAsync({
+        playsInSilentModeIOS: playsInSilentMode,
+        shouldDuckAndroid: true,
+      });
+      const { sound: newSound } = await Audio.Sound.createAsync(ALARM_SOUNDS[type]);
+      setPreviewSound(newSound);
+      await newSound.playAsync();
+    } catch (e) {
+      console.log('Preview sound error', e);
+    }
+  };
+
+  const handlePlayVoice = async (key) => {
+    try {
+      if (previewSound) {
+        await previewSound.unloadAsync();
+      }
+      setPlayingVoiceKey(key);
+      await Audio.setAudioModeAsync({
+        playsInSilentModeIOS: playsInSilentMode,
+        shouldDuckAndroid: true,
+      });
+      const { sound: newSound } = await Audio.Sound.createAsync(VOICE_SAMPLES[key]);
+      setPreviewSound(newSound);
+      newSound.setOnPlaybackStatusUpdate((status) => {
+        if (status.didJustFinish) {
+          setPlayingVoiceKey(null);
+        }
+      });
+      await newSound.playAsync();
+    } catch (e) {
+      console.log('Play voice error', e);
+      setPlayingVoiceKey(null);
+    }
+  };
 
   const handleToggleEcoMode = (value) => {
     toggleEcoMode(value);
@@ -172,7 +255,108 @@ export default function SettingsScreen() {
         </View>
       </View>
 
-      {/* 3. その他設定グループカード */}
+      {/* 3. アラーム・サウンド設定グループカード */}
+      <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>アラーム・サウンド設定</Text>
+      <View style={[styles.groupCard, { backgroundColor: cardBgColor, borderColor: cardBorderColor }]}>
+        {/* マナーモード時でも鳴らすトグル */}
+        <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
+          <View style={styles.settingTextContainer}>
+            <Text style={[styles.settingText, { color: textColor }]}>マナーモード時でも鳴らす</Text>
+            <Text style={[styles.settingDescription, { color: subTextColor }]}>端末の消音スイッチ（サイレントモード）時でもアラーム音を再生します</Text>
+          </View>
+          <Switch
+            value={playsInSilentMode}
+            onValueChange={togglePlaysInSilentMode}
+            trackColor={{ false: '#333', true: '#34C759' }}
+          />
+        </View>
+
+        {/* アラーム音の選択（2列グリッド） */}
+        <View style={{ paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: innerBorderColor }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
+            <Ionicons name="musical-notes-outline" size={18} color={textColor} style={{ marginRight: 6 }} />
+            <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>アラーム音の選択（タップで試聴）</Text>
+          </View>
+          <View style={styles.soundGrid}>
+            {ALARM_SOUND_OPTIONS.map((item) => {
+              const isSelected = alarmSoundType === item.key;
+              return (
+                <TouchableOpacity
+                  key={item.key}
+                  style={[
+                    styles.soundOptionTile,
+                    { 
+                      backgroundColor: isEcoMode ? (isSelected ? '#1C2C3E' : '#141414') : (isSelected ? '#EBF4FF' : '#F2F2F7'), 
+                      borderColor: isSelected ? '#007AFF' : (isEcoMode ? '#2C2C2E' : '#E5E5EA') 
+                    },
+                    isSelected && { borderWidth: 2 }
+                  ]}
+                  onPress={() => handleSelectSound(item.key)}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons 
+                    name={isSelected ? "volume-high" : "volume-medium-outline"} 
+                    size={22} 
+                    color={isSelected ? '#007AFF' : (isEcoMode ? '#888' : '#666')} 
+                    style={{ marginBottom: 4 }}
+                  />
+                  <Text style={[styles.soundOptionTitle, { color: isSelected ? '#007AFF' : textColor, fontWeight: isSelected ? 'bold' : '600' }]}>
+                    {item.label}
+                  </Text>
+                  <Text style={{ fontSize: 11, color: isSelected ? '#007AFF' : subTextColor, marginTop: 2 }}>
+                    {item.desc}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+
+        {/* 音声アナウンス・サンプル試聴 */}
+        <View style={{ paddingVertical: 14, paddingHorizontal: 16 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
+            <Ionicons name="megaphone-outline" size={18} color={textColor} style={{ marginRight: 6 }} />
+            <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>音声アナウンス（サンプル試聴）</Text>
+          </View>
+          <View style={styles.voiceGrid}>
+            {VOICE_OPTIONS.map((item) => {
+              const isPlaying = playingVoiceKey === item.key;
+              return (
+                <TouchableOpacity
+                  key={item.key}
+                  style={[
+                    styles.voiceOptionTile,
+                    { 
+                      backgroundColor: isEcoMode ? (isPlaying ? '#1E3A2B' : '#141414') : (isPlaying ? '#E8F8EE' : '#F2F2F7'),
+                      borderColor: isPlaying ? '#34C759' : (isEcoMode ? '#2C2C2E' : '#E5E5EA')
+                    },
+                    isPlaying && { borderWidth: 1.5 }
+                  ]}
+                  onPress={() => handlePlayVoice(item.key)}
+                  activeOpacity={0.7}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 2 }}>
+                    <Ionicons 
+                      name={isPlaying ? "pause-circle" : "play-circle"} 
+                      size={18} 
+                      color={isPlaying ? '#34C759' : '#007AFF'} 
+                      style={{ marginRight: 6 }}
+                    />
+                    <Text style={[styles.voiceOptionLabel, { color: isPlaying ? '#34C759' : textColor }]}>
+                      {item.label}
+                    </Text>
+                  </View>
+                  <Text style={{ fontSize: 11, color: isPlaying ? '#34C759' : subTextColor }}>
+                    {item.phrase}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+      </View>
+
+      {/* 4. その他設定グループカード */}
       <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>機能・表示設定</Text>
       <View style={[styles.groupCard, { backgroundColor: cardBgColor, borderColor: cardBorderColor }]}>
         <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
@@ -400,5 +584,45 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  ecoCloseButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  soundGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  soundOptionTile: {
+    width: '48%',
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  soundOptionTitle: {
+    fontSize: 13,
+    textAlign: 'center',
+  },
+  voiceGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  voiceOptionTile: {
+    width: '48%',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    justifyContent: 'center',
+  },
+  voiceOptionLabel: {
+    fontSize: 13,
+    fontWeight: '600',
   },
 });

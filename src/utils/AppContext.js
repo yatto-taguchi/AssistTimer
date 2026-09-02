@@ -21,6 +21,9 @@ export const AppProvider = ({ children }) => {
   const [countdownSeconds, setCountdownSeconds] = useState(10); // カウントダウン秒数
   const [hasSeenEcoExplanation, setHasSeenEcoExplanation] = useState(false); // エコモード説明モーダル閲覧済みフラグ
 
+  const [alarmSoundType, setAlarmSoundType] = useState('digital'); // 'digital' | 'bell' | 'beep'
+  const [playsInSilentMode, setPlaysInSilentMode] = useState(true); // マナーモード時でも鳴らす
+
   // UI（操作ボタン・上部タブバー等）表示・フェード制御用
   const [controlsVisible, setControlsVisible] = useState(true);
   const controlsOpacity = useRef(new Animated.Value(1)).current;
@@ -80,6 +83,8 @@ export const AppProvider = ({ children }) => {
         const countdownEnabledVal = await AsyncStorage.getItem('isCountdownEnabled');
         const countdownSecVal = await AsyncStorage.getItem('countdownSeconds');
         const seenEcoVal = await AsyncStorage.getItem('hasSeenEcoExplanation');
+        const soundTypeVal = await AsyncStorage.getItem('alarmSoundType');
+        const silentModeVal = await AsyncStorage.getItem('playsInSilentMode');
         
         if (ecoVal !== null) setIsEcoMode(JSON.parse(ecoVal));
         if (ecoClockVal !== null) setIsEcoClockEnabled(JSON.parse(ecoClockVal));
@@ -96,6 +101,8 @@ export const AppProvider = ({ children }) => {
         if (countdownEnabledVal !== null) setIsCountdownEnabled(JSON.parse(countdownEnabledVal));
         if (countdownSecVal !== null) setCountdownSeconds(parseInt(countdownSecVal, 10));
         if (seenEcoVal !== null) setHasSeenEcoExplanation(JSON.parse(seenEcoVal));
+        if (soundTypeVal !== null) setAlarmSoundType(soundTypeVal);
+        if (silentModeVal !== null) setPlaysInSilentMode(JSON.parse(silentModeVal));
       } catch (e) {
         console.error("Failed to load settings.", e);
       }
@@ -173,8 +180,9 @@ export const AppProvider = ({ children }) => {
 
   // カウントダウン機能切替と保存
   const toggleCountdownEnabled = async (value) => {
-    setIsCountdownEnabled(value);
-    await AsyncStorage.setItem('isCountdownEnabled', JSON.stringify(value));
+    const nextVal = typeof value === 'boolean' ? value : !isCountdownEnabled;
+    setIsCountdownEnabled(nextVal);
+    await AsyncStorage.setItem('isCountdownEnabled', JSON.stringify(nextVal));
   };
 
   // カウントダウン秒数保存
@@ -182,6 +190,20 @@ export const AppProvider = ({ children }) => {
     setCountdownSeconds(value);
     await AsyncStorage.setItem('countdownSeconds', value.toString());
   };
+
+  // アラーム音種類変更と保存
+  const toggleAlarmSoundType = async (type) => {
+    setAlarmSoundType(type);
+    await AsyncStorage.setItem('alarmSoundType', type);
+  };
+
+  // マナーモード時再生切替と保存
+  const togglePlaysInSilentMode = async (value) => {
+    setIsPlaysInSilentMode(value);
+    await AsyncStorage.setItem('playsInSilentMode', JSON.stringify(value));
+  };
+
+  const setIsPlaysInSilentMode = setPlaysInSilentMode;
 
   // エコモード説明モーダル閲覧済みフラグ保存
   const markEcoExplanationSeen = async () => {
@@ -220,6 +242,10 @@ export const AppProvider = ({ children }) => {
         toggleCountdownEnabled,
         countdownSeconds,
         saveCountdownSeconds,
+        alarmSoundType,
+        toggleAlarmSoundType,
+        playsInSilentMode,
+        togglePlaysInSilentMode,
         hasSeenEcoExplanation,
         markEcoExplanationSeen,
         controlsOpacity,
