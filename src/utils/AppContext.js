@@ -23,8 +23,13 @@ export const AppProvider = ({ children }) => {
 
   const [alarmSoundType, setAlarmSoundType] = useState('digital'); // 'digital' | 'bell' | 'buzzer' | 'kitchen' | 'fast' | 'gong' | 'none'
   const [playsInSilentMode, setPlaysInSilentMode] = useState(true); // マナーモード時でも鳴らす
-  const [isVibrationEnabled, setIsVibrationEnabled] = useState(true); // バイブレーション（振動）有効/無効
+  const [isVibrationEnabled, setIsVibrationEnabled] = useState(true); // バイブレーション（振動）全体有効/無効
   const [isVibration3SecOnly, setIsVibration3SecOnly] = useState(true); // タイムアップ時3秒で自動停止
+  const [vibrationIntensity, setVibrationIntensity] = useState('strong'); // 'strong' | 'normal' | 'gentle'
+  const [isVibPrepEnabled, setIsVibPrepEnabled] = useState(true); // 事前準備時間
+  const [isVibWarningEnabled, setIsVibWarningEnabled] = useState(true); // 計測中警告（1分/30秒/10秒）
+  const [isVibFinishEnabled, setIsVibFinishEnabled] = useState(true); // 終了時（タイムアップ）
+  const [isVibOvertimeEnabled, setIsVibOvertimeEnabled] = useState(true); // カウントアップ（超過時間）
 
   // 本番タイマー中の音声アナウンス個別有効/無効
   const [isVoice5MinEnabled, setIsVoice5MinEnabled] = useState(true);
@@ -117,6 +122,11 @@ export const AppProvider = ({ children }) => {
         const silentModeVal = await AsyncStorage.getItem('playsInSilentMode');
         const vibrationVal = await AsyncStorage.getItem('isVibrationEnabled');
         const vibration3SecVal = await AsyncStorage.getItem('isVibration3SecOnly');
+        const vibIntensityVal = await AsyncStorage.getItem('vibrationIntensity');
+        const vibPrepVal = await AsyncStorage.getItem('isVibPrepEnabled');
+        const vibWarningVal = await AsyncStorage.getItem('isVibWarningEnabled');
+        const vibFinishVal = await AsyncStorage.getItem('isVibFinishEnabled');
+        const vibOvertimeVal = await AsyncStorage.getItem('isVibOvertimeEnabled');
         
         const voice5MinVal = await AsyncStorage.getItem('isVoice5MinEnabled');
         const voice3MinVal = await AsyncStorage.getItem('isVoice3MinEnabled');
@@ -162,6 +172,11 @@ export const AppProvider = ({ children }) => {
         if (silentModeVal !== null) setPlaysInSilentMode(JSON.parse(silentModeVal));
         if (vibrationVal !== null) setIsVibrationEnabled(JSON.parse(vibrationVal));
         if (vibration3SecVal !== null) setIsVibration3SecOnly(JSON.parse(vibration3SecVal));
+        if (vibIntensityVal !== null) setVibrationIntensity(vibIntensityVal);
+        if (vibPrepVal !== null) setIsVibPrepEnabled(JSON.parse(vibPrepVal));
+        if (vibWarningVal !== null) setIsVibWarningEnabled(JSON.parse(vibWarningVal));
+        if (vibFinishVal !== null) setIsVibFinishEnabled(JSON.parse(vibFinishVal));
+        if (vibOvertimeVal !== null) setIsVibOvertimeEnabled(JSON.parse(vibOvertimeVal));
 
         if (voice5MinVal !== null) setIsVoice5MinEnabled(JSON.parse(voice5MinVal));
         if (voice3MinVal !== null) setIsVoice3MinEnabled(JSON.parse(voice3MinVal));
@@ -299,6 +314,37 @@ export const AppProvider = ({ children }) => {
     const nextVal = typeof value === 'boolean' ? value : !isVibration3SecOnly;
     setIsVibration3SecOnly(nextVal);
     await AsyncStorage.setItem('isVibration3SecOnly', JSON.stringify(nextVal));
+  };
+
+  // 振動の強さ切替と保存
+  const saveVibrationIntensity = async (value) => {
+    setVibrationIntensity(value);
+    await AsyncStorage.setItem('vibrationIntensity', value);
+  };
+
+  // タイミング別バイブレーショントグルと保存
+  const toggleVibPrep = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVibPrepEnabled;
+    setIsVibPrepEnabled(nextVal);
+    await AsyncStorage.setItem('isVibPrepEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleVibWarning = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVibWarningEnabled;
+    setIsVibWarningEnabled(nextVal);
+    await AsyncStorage.setItem('isVibWarningEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleVibFinish = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVibFinishEnabled;
+    setIsVibFinishEnabled(nextVal);
+    await AsyncStorage.setItem('isVibFinishEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleVibOvertime = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVibOvertimeEnabled;
+    setIsVibOvertimeEnabled(nextVal);
+    await AsyncStorage.setItem('isVibOvertimeEnabled', JSON.stringify(nextVal));
   };
 
   // 本番タイマー用 音声アナウンス各トグルと保存
@@ -481,6 +527,16 @@ export const AppProvider = ({ children }) => {
         toggleVibrationEnabled,
         isVibration3SecOnly,
         toggleVibration3SecOnly,
+        vibrationIntensity,
+        saveVibrationIntensity,
+        isVibPrepEnabled,
+        toggleVibPrep,
+        isVibWarningEnabled,
+        toggleVibWarning,
+        isVibFinishEnabled,
+        toggleVibFinish,
+        isVibOvertimeEnabled,
+        toggleVibOvertime,
         isVoice5MinEnabled,
         toggleVoice5Min,
         isVoice3MinEnabled,

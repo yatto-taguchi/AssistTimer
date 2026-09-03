@@ -98,6 +98,9 @@ export default function HomeScreen() {
     countdownSeconds, saveCountdownSeconds,
     alarmSoundType, playsInSilentMode,
     isVibrationEnabled, isVibration3SecOnly,
+    vibrationIntensity,
+    isVibPrepEnabled, isVibWarningEnabled,
+    isVibFinishEnabled, isVibOvertimeEnabled,
     isVoice5MinEnabled, isVoice3MinEnabled,
     isVoice1MinEnabled, isVoice30SecEnabled,
     isVoice10SecEnabled, isVoiceFinishEnabled,
@@ -138,32 +141,70 @@ export default function HomeScreen() {
   const triggeredOverVoicesRef = useRef(new Set());
   const vibrationTimeoutRef = useRef(null);
 
-  // バイブレーション制御ヘルパー
+  // バイブレーション制御ヘルパー（強度およびタイミング個別設定対応）
   const triggerVibration = (type) => {
     if (!isVibrationEnabled) return;
     try {
       if (type === 'finish') {
+        if (!isVibFinishEnabled) return;
         if (vibrationTimeoutRef.current) {
           clearTimeout(vibrationTimeoutRef.current);
           vibrationTimeoutRef.current = null;
         }
+        let pattern;
+        if (vibrationIntensity === 'strong') {
+          pattern = [0, 800, 150, 800, 150, 800]; // 激しい強力パルス
+        } else if (vibrationIntensity === 'gentle') {
+          pattern = [0, 250, 250, 250, 250, 250]; // 控えめ
+        } else {
+          pattern = [0, 500, 200, 500, 200, 500]; // 標準
+        }
+
         if (isVibration3SecOnly) {
           // 3秒間だけ振動して自動停止
-          Vibration.vibrate([0, 500, 200, 500, 200, 500]);
+          Vibration.vibrate(pattern);
           vibrationTimeoutRef.current = setTimeout(() => {
             Vibration.cancel();
             vibrationTimeoutRef.current = null;
           }, 3000);
         } else {
           // 停止操作があるまでリピート継続
-          Vibration.vibrate([0, 500, 200, 500, 200, 500], true);
+          Vibration.vibrate(pattern, true);
         }
       } else if (type === 'warning') {
-        // 残り時間警告（短い2回パルス）
-        Vibration.vibrate([0, 200, 100, 200]);
+        if (!isVibWarningEnabled) return;
+        // 残り時間警告（2回パルス）
+        if (vibrationIntensity === 'strong') {
+          Vibration.vibrate([0, 350, 120, 350]);
+        } else if (vibrationIntensity === 'gentle') {
+          Vibration.vibrate([0, 100, 100, 100]);
+        } else {
+          Vibration.vibrate([0, 200, 100, 200]);
+        }
+      } else if (type === 'prep') {
+        if (!isVibPrepEnabled) return;
+        // 準備時間コール時の振動
+        if (vibrationIntensity === 'strong') {
+          Vibration.vibrate([0, 300, 120, 300]);
+        } else if (vibrationIntensity === 'gentle') {
+          Vibration.vibrate(80);
+        } else {
+          Vibration.vibrate([0, 150, 80, 150]);
+        }
       } else if (type === 'countdown') {
-        // カウントダウン微振動
-        Vibration.vibrate(80);
+        // カウントダウン微振動（5,4,3,2,1）
+        const dur = vibrationIntensity === 'strong' ? 150 : (vibrationIntensity === 'gentle' ? 40 : 80);
+        Vibration.vibrate(dur);
+      } else if (type === 'overtime') {
+        if (!isVibOvertimeEnabled) return;
+        // 超過時間コール時の振動
+        if (vibrationIntensity === 'strong') {
+          Vibration.vibrate([0, 400, 120, 400]);
+        } else if (vibrationIntensity === 'gentle') {
+          Vibration.vibrate([0, 100, 100, 100]);
+        } else {
+          Vibration.vibrate([0, 200, 100, 200]);
+        }
       }
     } catch (e) {
       console.log("Vibration trigger error", e);
@@ -386,7 +427,7 @@ export default function HomeScreen() {
         } else if (nextTime === 10 && countdownSeconds > 10 && isPrepVoice10SecEnabled && !triggeredPrepVoicesRef.current.has(10)) {
           triggeredPrepVoicesRef.current.add(10);
           playVoice('prep_10sec');
-          triggerVibration('warning');
+          triggerVibration('prep');
         } else if (nextTime === 5 && countdownSeconds > 5 && isPrepVoiceCountdownEnabled && !triggeredPrepVoicesRef.current.has(5)) {
           triggeredPrepVoicesRef.current.add(5);
           playVoice('prep_countdown_5'); // 5秒前から「5,4,3,2,1 スタート！」
@@ -414,7 +455,7 @@ export default function HomeScreen() {
     isPrepVoice15MinEnabled, isPrepVoice10MinEnabled,
     isPrepVoice5MinEnabled, isPrepVoice4MinEnabled, isPrepVoice3MinEnabled, isPrepVoice2MinEnabled,
     isPrepVoice1MinEnabled, isPrepVoice30SecEnabled, isPrepVoice10SecEnabled, isPrepVoiceCountdownEnabled,
-    playsInSilentMode, isVibrationEnabled
+    playsInSilentMode, isVibrationEnabled, isVibPrepEnabled, vibrationIntensity
   ]);
 
   // メインタイマー進行のロジック（タイムスタンプ基準）
@@ -489,25 +530,31 @@ export default function HomeScreen() {
             setRemainingTime(nextTime);
           }
 
-          // カウントアップ（超過時間）アナウンスのトリガー
+          // カウントアップ（超過時間）アナウンス＆バイブレーションのトリガー
           if (nextTime >= 2 && isOverVoiceStartEnabled && !triggeredOverVoicesRef.current.has('start')) {
             triggeredOverVoicesRef.current.add('start');
             playVoice('over_start'); // アラーム音終了直後（+2秒）に「カウントアップを始めます」
+            triggerVibration('overtime');
           } else if (nextTime >= 60 && isOverVoice1MinEnabled && !triggeredOverVoicesRef.current.has(60)) {
             triggeredOverVoicesRef.current.add(60);
             playVoice('over_1min');
+            triggerVibration('overtime');
           } else if (nextTime >= 180 && isOverVoice3MinEnabled && !triggeredOverVoicesRef.current.has(180)) {
             triggeredOverVoicesRef.current.add(180);
             playVoice('over_3min');
+            triggerVibration('overtime');
           } else if (nextTime >= 300 && isOverVoice5MinEnabled && !triggeredOverVoicesRef.current.has(300)) {
             triggeredOverVoicesRef.current.add(300);
             playVoice('over_5min');
+            triggerVibration('overtime');
           } else if (nextTime >= 600 && isOverVoice10MinEnabled && !triggeredOverVoicesRef.current.has(600)) {
             triggeredOverVoicesRef.current.add(600);
             playVoice('over_10min');
+            triggerVibration('overtime');
           } else if (nextTime >= 900 && isOverVoice15MinEnabled && !triggeredOverVoicesRef.current.has(900)) {
             triggeredOverVoicesRef.current.add(900);
             playVoice('over_15min');
+            triggerVibration('overtime');
           }
         }
       }, 250);
@@ -521,7 +568,8 @@ export default function HomeScreen() {
     isRunning, isCountUp, 
     isVoice5MinEnabled, isVoice3MinEnabled, isVoice1MinEnabled, isVoice30SecEnabled, isVoice10SecEnabled, isVoiceFinishEnabled,
     isOverVoiceStartEnabled, isOverVoice1MinEnabled, isOverVoice3MinEnabled, isOverVoice5MinEnabled, isOverVoice10MinEnabled, isOverVoice15MinEnabled,
-    alarmSoundType, playsInSilentMode, isVibrationEnabled, isVibration3SecOnly
+    alarmSoundType, playsInSilentMode, isVibrationEnabled, isVibration3SecOnly,
+    vibrationIntensity, isVibWarningEnabled, isVibFinishEnabled, isVibOvertimeEnabled
   ]);
 
   const formatTime = (timeInSeconds) => {

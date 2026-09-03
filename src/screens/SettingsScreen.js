@@ -79,6 +79,11 @@ export default function SettingsScreen() {
     playsInSilentMode, togglePlaysInSilentMode,
     isVibrationEnabled, toggleVibrationEnabled,
     isVibration3SecOnly, toggleVibration3SecOnly,
+    vibrationIntensity, saveVibrationIntensity,
+    isVibPrepEnabled, toggleVibPrep,
+    isVibWarningEnabled, toggleVibWarning,
+    isVibFinishEnabled, toggleVibFinish,
+    isVibOvertimeEnabled, toggleVibOvertime,
     isVoice5MinEnabled, toggleVoice5Min,
     isVoice3MinEnabled, toggleVoice3Min,
     isVoice1MinEnabled, toggleVoice1Min,
@@ -118,7 +123,15 @@ export default function SettingsScreen() {
       return;
     }
     setIsTestingVibration(true);
-    Vibration.vibrate([0, 500, 200, 500, 200, 500]);
+    let pattern;
+    if (vibrationIntensity === 'strong') {
+      pattern = [0, 800, 150, 800, 150, 800]; // 激しい強力パルス
+    } else if (vibrationIntensity === 'gentle') {
+      pattern = [0, 250, 250, 250, 250, 250]; // 控えめな短いパルス
+    } else {
+      pattern = [0, 500, 200, 500, 200, 500]; // 標準
+    }
+    Vibration.vibrate(pattern);
     testVibrationTimeoutRef.current = setTimeout(() => {
       Vibration.cancel();
       setIsTestingVibration(false);
@@ -511,38 +524,210 @@ export default function SettingsScreen() {
             />
           </View>
 
-          {/* バイブレーションのサブ設定（枠線付きインセットカード） */}
+          {/* バイブレーション設定（強度切替 ＆ タイミング個別設定） */}
           {isVibrationEnabled && (
-            <View style={{
-              marginHorizontal: 16,
-              marginBottom: 14,
-              marginTop: 2,
-              padding: 12,
-              borderRadius: 10,
-              backgroundColor: isEcoMode ? '#121212' : '#F2F4F8',
-              borderLeftWidth: 3,
-              borderLeftColor: '#34C759',
-              borderWidth: 1,
-              borderColor: isEcoMode ? '#222' : '#E5E8EF',
-            }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                <View style={{ flex: 1, paddingRight: 10 }}>
+            <View style={{ marginHorizontal: 16, marginBottom: 14 }}>
+              {/* 1. 振動の強さセレクター */}
+              <View style={{
+                marginBottom: 10,
+                padding: 10,
+                borderRadius: 10,
+                backgroundColor: isEcoMode ? '#141414' : '#F2F4F8',
+                borderWidth: 1,
+                borderColor: isEcoMode ? '#222' : '#E2E6EE',
+              }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                    <Ionicons name="timer-outline" size={15} color={isEcoMode ? '#34C759' : '#007AFF'} style={{ marginRight: 5 }} />
-                    <Text style={{ fontSize: 14, fontWeight: '600', color: textColor }}>
-                      終了時3秒で自動停止
-                    </Text>
+                    <Ionicons name="speedometer-outline" size={14} color={isEcoMode ? '#34C759' : '#007AFF'} style={{ marginRight: 5 }} />
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: textColor }}>振動の強さ</Text>
                   </View>
-                  <Text style={{ fontSize: 12, color: subTextColor, marginTop: 4, lineHeight: 16 }}>
-                    タイムアップ時に3秒間だけ振動して停止します（超過時間中の連続振動を防止）
+                  <Text style={{ fontSize: 11, color: subTextColor }}>
+                    {vibrationIntensity === 'strong' ? '激しい連続振動（気付きやすい）' : (vibrationIntensity === 'gentle' ? '手元だけの静かな振動' : 'バランスの良い標準振動')}
                   </Text>
                 </View>
-                <Switch
-                  value={isVibration3SecOnly}
-                  onValueChange={toggleVibration3SecOnly}
-                  trackColor={{ false: '#333', true: '#34C759' }}
-                  style={{ transform: [{ scaleX: 0.85 }, { scaleY: 0.85 }] }}
-                />
+                {/* 3分割セグメントボタン */}
+                <View style={{
+                  flexDirection: 'row',
+                  backgroundColor: isEcoMode ? '#000000' : '#E1E5EC',
+                  borderRadius: 8,
+                  padding: 2,
+                }}>
+                  {[
+                    { key: 'gentle', label: '控えめ' },
+                    { key: 'normal', label: '標準' },
+                    { key: 'strong', label: '★ 強力 (推奨)' },
+                  ].map((item) => {
+                    const isSelected = vibrationIntensity === item.key;
+                    return (
+                      <TouchableOpacity
+                        key={item.key}
+                        style={{
+                          flex: 1,
+                          paddingVertical: 7,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          borderRadius: 6,
+                          backgroundColor: isSelected ? (isEcoMode ? '#34C759' : '#007AFF') : 'transparent',
+                        }}
+                        onPress={() => {
+                          saveVibrationIntensity(item.key);
+                          // 切り替え時にその強さのプレビューパルスを発生
+                          if (item.key === 'strong') {
+                            Vibration.vibrate([0, 400, 100, 400]);
+                          } else if (item.key === 'gentle') {
+                            Vibration.vibrate(50);
+                          } else {
+                            Vibration.vibrate([0, 150, 80, 150]);
+                          }
+                        }}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={{
+                          fontSize: 12,
+                          fontWeight: isSelected ? '700' : '500',
+                          color: isSelected ? '#FFFFFF' : subTextColor,
+                        }}>
+                          {item.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+
+              {/* 2. タイミング個別設定インセットカード */}
+              <View style={{
+                borderRadius: 10,
+                backgroundColor: isEcoMode ? '#141414' : '#F2F4F8',
+                borderLeftWidth: 3,
+                borderLeftColor: '#34C759',
+                borderWidth: 1,
+                borderColor: isEcoMode ? '#222' : '#E2E6EE',
+                paddingVertical: 4,
+                paddingHorizontal: 12,
+              }}>
+                <Text style={{ fontSize: 12, fontWeight: '700', color: subTextColor, marginTop: 6, marginBottom: 4, letterSpacing: 0.5 }}>
+                  振動するタイミング
+                </Text>
+
+                {/* ① スタート事前準備時間 */}
+                <View style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  paddingVertical: 8,
+                  borderBottomWidth: 1,
+                  borderBottomColor: innerBorderColor,
+                }}>
+                  <View style={{ flex: 1, paddingRight: 8 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Ionicons name="hourglass-outline" size={14} color={isEcoMode ? '#FF9500' : '#D97706'} style={{ marginRight: 6 }} />
+                      <Text style={{ fontSize: 13, fontWeight: '600', color: textColor }}>スタート事前準備時間</Text>
+                    </View>
+                    <Text style={{ fontSize: 11, color: subTextColor, marginTop: 2 }}>開始コール・直前カウントダウン時の振動</Text>
+                  </View>
+                  <Switch
+                    value={isVibPrepEnabled}
+                    onValueChange={toggleVibPrep}
+                    trackColor={{ false: '#333', true: '#34C759' }}
+                    style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                  />
+                </View>
+
+                {/* ② タイマー計測中（警告） */}
+                <View style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  paddingVertical: 8,
+                  borderBottomWidth: 1,
+                  borderBottomColor: innerBorderColor,
+                }}>
+                  <View style={{ flex: 1, paddingRight: 8 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Ionicons name="warning-outline" size={14} color={isEcoMode ? '#FFD60A' : '#CA8A04'} style={{ marginRight: 6 }} />
+                      <Text style={{ fontSize: 13, fontWeight: '600', color: textColor }}>タイマー計測中（残り時間警告）</Text>
+                    </View>
+                    <Text style={{ fontSize: 11, color: subTextColor, marginTop: 2 }}>残り1分・30秒・10秒到達時のパルス振動</Text>
+                  </View>
+                  <Switch
+                    value={isVibWarningEnabled}
+                    onValueChange={toggleVibWarning}
+                    trackColor={{ false: '#333', true: '#34C759' }}
+                    style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                  />
+                </View>
+
+                {/* ③ 終了時（タイムアップ） */}
+                <View style={{
+                  paddingVertical: 8,
+                  borderBottomWidth: 1,
+                  borderBottomColor: innerBorderColor,
+                }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <View style={{ flex: 1, paddingRight: 8 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <Ionicons name="notifications-outline" size={14} color={isEcoMode ? '#34C759' : '#007AFF'} style={{ marginRight: 6 }} />
+                        <Text style={{ fontSize: 13, fontWeight: '600', color: textColor }}>終了時（タイムアップ）</Text>
+                      </View>
+                      <Text style={{ fontSize: 11, color: subTextColor, marginTop: 2 }}>0秒到達時のアラーム連動振動</Text>
+                    </View>
+                    <Switch
+                      value={isVibFinishEnabled}
+                      onValueChange={toggleVibFinish}
+                      trackColor={{ false: '#333', true: '#34C759' }}
+                      style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                    />
+                  </View>
+
+                  {/* └ 終了時3秒で自動停止（サブトグル） */}
+                  {isVibFinishEnabled && (
+                    <View style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      marginTop: 6,
+                      marginLeft: 16,
+                      paddingVertical: 4,
+                      paddingHorizontal: 8,
+                      borderRadius: 6,
+                      backgroundColor: isEcoMode ? '#0A0A0A' : '#E8ECF2',
+                    }}>
+                      <View style={{ flex: 1, paddingRight: 6 }}>
+                        <Text style={{ fontSize: 12, fontWeight: '600', color: textColor }}>└ 3秒で自動停止</Text>
+                        <Text style={{ fontSize: 10, color: subTextColor }}>超過時間中の連続振動を防止します</Text>
+                      </View>
+                      <Switch
+                        value={isVibration3SecOnly}
+                        onValueChange={toggleVibration3SecOnly}
+                        trackColor={{ false: '#333', true: '#34C759' }}
+                        style={{ transform: [{ scaleX: 0.75 }, { scaleY: 0.75 }] }}
+                      />
+                    </View>
+                  )}
+                </View>
+
+                {/* ④ カウントアップ（超過時間） */}
+                <View style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  paddingVertical: 8,
+                }}>
+                  <View style={{ flex: 1, paddingRight: 8 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Ionicons name="trending-up-outline" size={14} color={isEcoMode ? '#FF453A' : '#DC2626'} style={{ marginRight: 6 }} />
+                      <Text style={{ fontSize: 13, fontWeight: '600', color: textColor }}>カウントアップ（超過時間）</Text>
+                    </View>
+                    <Text style={{ fontSize: 11, color: subTextColor, marginTop: 2 }}>超過時間突入・経過コール時の振動</Text>
+                  </View>
+                  <Switch
+                    value={isVibOvertimeEnabled}
+                    onValueChange={toggleVibOvertime}
+                    trackColor={{ false: '#333', true: '#34C759' }}
+                    style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                  />
+                </View>
               </View>
             </View>
           )}
