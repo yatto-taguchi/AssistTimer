@@ -21,8 +21,36 @@ export const AppProvider = ({ children }) => {
   const [countdownSeconds, setCountdownSeconds] = useState(10); // カウントダウン秒数
   const [hasSeenEcoExplanation, setHasSeenEcoExplanation] = useState(false); // エコモード説明モーダル閲覧済みフラグ
 
-  const [alarmSoundType, setAlarmSoundType] = useState('digital'); // 'digital' | 'bell' | 'beep'
+  const [alarmSoundType, setAlarmSoundType] = useState('digital'); // 'digital' | 'bell' | 'buzzer' | 'kitchen' | 'fast' | 'gong' | 'none'
   const [playsInSilentMode, setPlaysInSilentMode] = useState(true); // マナーモード時でも鳴らす
+
+  // 本番タイマー中の音声アナウンス個別有効/無効
+  const [isVoice5MinEnabled, setIsVoice5MinEnabled] = useState(true);
+  const [isVoice3MinEnabled, setIsVoice3MinEnabled] = useState(true);
+  const [isVoice1MinEnabled, setIsVoice1MinEnabled] = useState(true);
+  const [isVoice30SecEnabled, setIsVoice30SecEnabled] = useState(true);
+  const [isVoice10SecEnabled, setIsVoice10SecEnabled] = useState(true);
+  const [isVoiceFinishEnabled, setIsVoiceFinishEnabled] = useState(true);
+
+  // スタート事前準備時間中の音声アナウンス個別有効/無効
+  const [isPrepVoice15MinEnabled, setIsPrepVoice15MinEnabled] = useState(true);
+  const [isPrepVoice10MinEnabled, setIsPrepVoice10MinEnabled] = useState(true);
+  const [isPrepVoice5MinEnabled, setIsPrepVoice5MinEnabled] = useState(true);
+  const [isPrepVoice4MinEnabled, setIsPrepVoice4MinEnabled] = useState(true);
+  const [isPrepVoice3MinEnabled, setIsPrepVoice3MinEnabled] = useState(true);
+  const [isPrepVoice2MinEnabled, setIsPrepVoice2MinEnabled] = useState(true);
+  const [isPrepVoice1MinEnabled, setIsPrepVoice1MinEnabled] = useState(true);
+  const [isPrepVoice30SecEnabled, setIsPrepVoice30SecEnabled] = useState(true);
+  const [isPrepVoice10SecEnabled, setIsPrepVoice10SecEnabled] = useState(true);
+  const [isPrepVoiceCountdownEnabled, setIsPrepVoiceCountdownEnabled] = useState(true);
+
+  // カウントアップ（超過時間）中の音声アナウンス個別有効/無効
+  const [isOverVoiceStartEnabled, setIsOverVoiceStartEnabled] = useState(true);
+  const [isOverVoice1MinEnabled, setIsOverVoice1MinEnabled] = useState(true);
+  const [isOverVoice3MinEnabled, setIsOverVoice3MinEnabled] = useState(true);
+  const [isOverVoice5MinEnabled, setIsOverVoice5MinEnabled] = useState(true);
+  const [isOverVoice10MinEnabled, setIsOverVoice10MinEnabled] = useState(true);
+  const [isOverVoice15MinEnabled, setIsOverVoice15MinEnabled] = useState(true);
 
   // UI（操作ボタン・上部タブバー等）表示・フェード制御用
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -86,6 +114,31 @@ export const AppProvider = ({ children }) => {
         const soundTypeVal = await AsyncStorage.getItem('alarmSoundType');
         const silentModeVal = await AsyncStorage.getItem('playsInSilentMode');
         
+        const voice5MinVal = await AsyncStorage.getItem('isVoice5MinEnabled');
+        const voice3MinVal = await AsyncStorage.getItem('isVoice3MinEnabled');
+        const voice1MinVal = await AsyncStorage.getItem('isVoice1MinEnabled');
+        const voice30SecVal = await AsyncStorage.getItem('isVoice30SecEnabled');
+        const voice10SecVal = await AsyncStorage.getItem('isVoice10SecEnabled');
+        const voiceFinishVal = await AsyncStorage.getItem('isVoiceFinishEnabled');
+
+        const prep15MinVal = await AsyncStorage.getItem('isPrepVoice15MinEnabled');
+        const prep10MinVal = await AsyncStorage.getItem('isPrepVoice10MinEnabled');
+        const prep5MinVal = await AsyncStorage.getItem('isPrepVoice5MinEnabled');
+        const prep4MinVal = await AsyncStorage.getItem('isPrepVoice4MinEnabled');
+        const prep3MinVal = await AsyncStorage.getItem('isPrepVoice3MinEnabled');
+        const prep2MinVal = await AsyncStorage.getItem('isPrepVoice2MinEnabled');
+        const prep1MinVal = await AsyncStorage.getItem('isPrepVoice1MinEnabled');
+        const prep30SecVal = await AsyncStorage.getItem('isPrepVoice30SecEnabled');
+        const prep10SecVal = await AsyncStorage.getItem('isPrepVoice10SecEnabled');
+        const prepCdVal = await AsyncStorage.getItem('isPrepVoiceCountdownEnabled');
+
+        const overStartVal = await AsyncStorage.getItem('isOverVoiceStartEnabled');
+        const over1MinVal = await AsyncStorage.getItem('isOverVoice1MinEnabled');
+        const over3MinVal = await AsyncStorage.getItem('isOverVoice3MinEnabled');
+        const over5MinVal = await AsyncStorage.getItem('isOverVoice5MinEnabled');
+        const over10MinVal = await AsyncStorage.getItem('isOverVoice10MinEnabled');
+        const over15MinVal = await AsyncStorage.getItem('isOverVoice15MinEnabled');
+        
         if (ecoVal !== null) setIsEcoMode(JSON.parse(ecoVal));
         if (ecoClockVal !== null) setIsEcoClockEnabled(JSON.parse(ecoClockVal));
         if (ecoBatteryVal !== null) setIsEcoBatteryEnabled(JSON.parse(ecoBatteryVal));
@@ -103,6 +156,31 @@ export const AppProvider = ({ children }) => {
         if (seenEcoVal !== null) setHasSeenEcoExplanation(JSON.parse(seenEcoVal));
         if (soundTypeVal !== null) setAlarmSoundType(soundTypeVal);
         if (silentModeVal !== null) setPlaysInSilentMode(JSON.parse(silentModeVal));
+
+        if (voice5MinVal !== null) setIsVoice5MinEnabled(JSON.parse(voice5MinVal));
+        if (voice3MinVal !== null) setIsVoice3MinEnabled(JSON.parse(voice3MinVal));
+        if (voice1MinVal !== null) setIsVoice1MinEnabled(JSON.parse(voice1MinVal));
+        if (voice30SecVal !== null) setIsVoice30SecEnabled(JSON.parse(voice30SecVal));
+        if (voice10SecVal !== null) setIsVoice10SecEnabled(JSON.parse(voice10SecVal));
+        if (voiceFinishVal !== null) setIsVoiceFinishEnabled(JSON.parse(voiceFinishVal));
+
+        if (prep15MinVal !== null) setIsPrepVoice15MinEnabled(JSON.parse(prep15MinVal));
+        if (prep10MinVal !== null) setIsPrepVoice10MinEnabled(JSON.parse(prep10MinVal));
+        if (prep5MinVal !== null) setIsPrepVoice5MinEnabled(JSON.parse(prep5MinVal));
+        if (prep4MinVal !== null) setIsPrepVoice4MinEnabled(JSON.parse(prep4MinVal));
+        if (prep3MinVal !== null) setIsPrepVoice3MinEnabled(JSON.parse(prep3MinVal));
+        if (prep2MinVal !== null) setIsPrepVoice2MinEnabled(JSON.parse(prep2MinVal));
+        if (prep1MinVal !== null) setIsPrepVoice1MinEnabled(JSON.parse(prep1MinVal));
+        if (prep30SecVal !== null) setIsPrepVoice30SecEnabled(JSON.parse(prep30SecVal));
+        if (prep10SecVal !== null) setIsPrepVoice10SecEnabled(JSON.parse(prep10SecVal));
+        if (prepCdVal !== null) setIsPrepVoiceCountdownEnabled(JSON.parse(prepCdVal));
+
+        if (overStartVal !== null) setIsOverVoiceStartEnabled(JSON.parse(overStartVal));
+        if (over1MinVal !== null) setIsOverVoice1MinEnabled(JSON.parse(over1MinVal));
+        if (over3MinVal !== null) setIsOverVoice3MinEnabled(JSON.parse(over3MinVal));
+        if (over5MinVal !== null) setIsOverVoice5MinEnabled(JSON.parse(over5MinVal));
+        if (over10MinVal !== null) setIsOverVoice10MinEnabled(JSON.parse(over10MinVal));
+        if (over15MinVal !== null) setIsOverVoice15MinEnabled(JSON.parse(over15MinVal));
       } catch (e) {
         console.error("Failed to load settings.", e);
       }
@@ -199,11 +277,144 @@ export const AppProvider = ({ children }) => {
 
   // マナーモード時再生切替と保存
   const togglePlaysInSilentMode = async (value) => {
-    setIsPlaysInSilentMode(value);
+    setPlaysInSilentMode(value);
     await AsyncStorage.setItem('playsInSilentMode', JSON.stringify(value));
   };
 
-  const setIsPlaysInSilentMode = setPlaysInSilentMode;
+  // 本番タイマー用 音声アナウンス各トグルと保存
+  const toggleVoice5Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVoice5MinEnabled;
+    setIsVoice5MinEnabled(nextVal);
+    await AsyncStorage.setItem('isVoice5MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleVoice3Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVoice3MinEnabled;
+    setIsVoice3MinEnabled(nextVal);
+    await AsyncStorage.setItem('isVoice3MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleVoice1Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVoice1MinEnabled;
+    setIsVoice1MinEnabled(nextVal);
+    await AsyncStorage.setItem('isVoice1MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleVoice30Sec = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVoice30SecEnabled;
+    setIsVoice30SecEnabled(nextVal);
+    await AsyncStorage.setItem('isVoice30SecEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleVoice10Sec = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVoice10SecEnabled;
+    setIsVoice10SecEnabled(nextVal);
+    await AsyncStorage.setItem('isVoice10SecEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleVoiceFinish = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVoiceFinishEnabled;
+    setIsVoiceFinishEnabled(nextVal);
+    await AsyncStorage.setItem('isVoiceFinishEnabled', JSON.stringify(nextVal));
+  };
+
+  // スタート事前準備時間用 音声アナウンス各トグルと保存
+  const togglePrepVoice15Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isPrepVoice15MinEnabled;
+    setIsPrepVoice15MinEnabled(nextVal);
+    await AsyncStorage.setItem('isPrepVoice15MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const togglePrepVoice10Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isPrepVoice10MinEnabled;
+    setIsPrepVoice10MinEnabled(nextVal);
+    await AsyncStorage.setItem('isPrepVoice10MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const togglePrepVoice5Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isPrepVoice5MinEnabled;
+    setIsPrepVoice5MinEnabled(nextVal);
+    await AsyncStorage.setItem('isPrepVoice5MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const togglePrepVoice4Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isPrepVoice4MinEnabled;
+    setIsPrepVoice4MinEnabled(nextVal);
+    await AsyncStorage.setItem('isPrepVoice4MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const togglePrepVoice3Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isPrepVoice3MinEnabled;
+    setIsPrepVoice3MinEnabled(nextVal);
+    await AsyncStorage.setItem('isPrepVoice3MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const togglePrepVoice2Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isPrepVoice2MinEnabled;
+    setIsPrepVoice2MinEnabled(nextVal);
+    await AsyncStorage.setItem('isPrepVoice2MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const togglePrepVoice1Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isPrepVoice1MinEnabled;
+    setIsPrepVoice1MinEnabled(nextVal);
+    await AsyncStorage.setItem('isPrepVoice1MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const togglePrepVoice30Sec = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isPrepVoice30SecEnabled;
+    setIsPrepVoice30SecEnabled(nextVal);
+    await AsyncStorage.setItem('isPrepVoice30SecEnabled', JSON.stringify(nextVal));
+  };
+
+  const togglePrepVoice10Sec = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isPrepVoice10SecEnabled;
+    setIsPrepVoice10SecEnabled(nextVal);
+    await AsyncStorage.setItem('isPrepVoice10SecEnabled', JSON.stringify(nextVal));
+  };
+
+  const togglePrepVoiceCountdown = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isPrepVoiceCountdownEnabled;
+    setIsPrepVoiceCountdownEnabled(nextVal);
+    await AsyncStorage.setItem('isPrepVoiceCountdownEnabled', JSON.stringify(nextVal));
+  };
+
+  // カウントアップ（超過時間）用 音声アナウンス各トグルと保存
+  const toggleOverVoiceStart = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isOverVoiceStartEnabled;
+    setIsOverVoiceStartEnabled(nextVal);
+    await AsyncStorage.setItem('isOverVoiceStartEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleOverVoice1Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isOverVoice1MinEnabled;
+    setIsOverVoice1MinEnabled(nextVal);
+    await AsyncStorage.setItem('isOverVoice1MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleOverVoice3Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isOverVoice3MinEnabled;
+    setIsOverVoice3MinEnabled(nextVal);
+    await AsyncStorage.setItem('isOverVoice3MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleOverVoice5Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isOverVoice5MinEnabled;
+    setIsOverVoice5MinEnabled(nextVal);
+    await AsyncStorage.setItem('isOverVoice5MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleOverVoice10Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isOverVoice10MinEnabled;
+    setIsOverVoice10MinEnabled(nextVal);
+    await AsyncStorage.setItem('isOverVoice10MinEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleOverVoice15Min = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isOverVoice15MinEnabled;
+    setIsOverVoice15MinEnabled(nextVal);
+    await AsyncStorage.setItem('isOverVoice15MinEnabled', JSON.stringify(nextVal));
+  };
 
   // エコモード説明モーダル閲覧済みフラグ保存
   const markEcoExplanationSeen = async () => {
@@ -246,6 +457,50 @@ export const AppProvider = ({ children }) => {
         toggleAlarmSoundType,
         playsInSilentMode,
         togglePlaysInSilentMode,
+        isVoice5MinEnabled,
+        toggleVoice5Min,
+        isVoice3MinEnabled,
+        toggleVoice3Min,
+        isVoice1MinEnabled,
+        toggleVoice1Min,
+        isVoice30SecEnabled,
+        toggleVoice30Sec,
+        isVoice10SecEnabled,
+        toggleVoice10Sec,
+        isVoiceFinishEnabled,
+        toggleVoiceFinish,
+        isPrepVoice15MinEnabled,
+        togglePrepVoice15Min,
+        isPrepVoice10MinEnabled,
+        togglePrepVoice10Min,
+        isPrepVoice5MinEnabled,
+        togglePrepVoice5Min,
+        isPrepVoice4MinEnabled,
+        togglePrepVoice4Min,
+        isPrepVoice3MinEnabled,
+        togglePrepVoice3Min,
+        isPrepVoice2MinEnabled,
+        togglePrepVoice2Min,
+        isPrepVoice1MinEnabled,
+        togglePrepVoice1Min,
+        isPrepVoice30SecEnabled,
+        togglePrepVoice30Sec,
+        isPrepVoice10SecEnabled,
+        togglePrepVoice10Sec,
+        isPrepVoiceCountdownEnabled,
+        togglePrepVoiceCountdown,
+        isOverVoiceStartEnabled,
+        toggleOverVoiceStart,
+        isOverVoice1MinEnabled,
+        toggleOverVoice1Min,
+        isOverVoice3MinEnabled,
+        toggleOverVoice3Min,
+        isOverVoice5MinEnabled,
+        toggleOverVoice5Min,
+        isOverVoice10MinEnabled,
+        toggleOverVoice10Min,
+        isOverVoice15MinEnabled,
+        toggleOverVoice15Min,
         hasSeenEcoExplanation,
         markEcoExplanationSeen,
         controlsOpacity,

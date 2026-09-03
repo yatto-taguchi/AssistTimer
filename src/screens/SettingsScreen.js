@@ -1,8 +1,16 @@
 import React, { useContext, useState, useEffect } from 'react';
-import { StyleSheet, Text, View, Switch, TouchableOpacity, Modal, TextInput, KeyboardAvoidingView, Platform, ScrollView } from 'react-native';
+import { 
+  StyleSheet, Text, View, Switch, TouchableOpacity, Modal, 
+  TextInput, KeyboardAvoidingView, Platform, ScrollView,
+  LayoutAnimation, UIManager 
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import { AppContext } from '../utils/AppContext';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 
 const ALARM_SOUNDS = {
   kitchen: require('../../assets/alarm_kitchen.wav'),
@@ -20,21 +28,36 @@ const ALARM_SOUND_OPTIONS = [
   { key: 'buzzer', label: '競技ブザー', desc: 'ブーッ！' },
   { key: 'bell', label: 'ベル・チャイム', desc: 'ポーン…' },
   { key: 'gong', label: 'クリアゴング', desc: 'キーン…' },
+  { key: 'none', label: '無音（なし）', desc: 'アラーム音を鳴らさない' },
 ];
 
 const VOICE_SAMPLES = {
+  // タイマー計測中用
+  v_5min: require('../../assets/voice_5min.wav'),
+  v_3min: require('../../assets/voice_3min.wav'),
   v_1min: require('../../assets/voice_1min.wav'),
   v_30sec: require('../../assets/voice_30sec.wav'),
   v_10sec: require('../../assets/voice_10sec.wav'),
   v_finish: require('../../assets/voice_finish.wav'),
+  // スタート事前準備時間用
+  p_15min: require('../../assets/voice_prep_15min.wav'),
+  p_10min: require('../../assets/voice_prep_10min.wav'),
+  p_5min: require('../../assets/voice_prep_5min.wav'),
+  p_4min: require('../../assets/voice_prep_4min.wav'),
+  p_3min: require('../../assets/voice_prep_3min.wav'),
+  p_2min: require('../../assets/voice_prep_2min.wav'),
+  p_1min: require('../../assets/voice_prep_1min.wav'),
+  p_30sec: require('../../assets/voice_prep_30sec.wav'),
+  p_10sec: require('../../assets/voice_prep_10sec.wav'),
+  p_countdown: require('../../assets/voice_prep_countdown_5.wav'),
+  // カウントアップ・超過時間用
+  o_start: require('../../assets/voice_over_start.wav'),
+  o_1min: require('../../assets/voice_over_1min.wav'),
+  o_3min: require('../../assets/voice_over_3min.wav'),
+  o_5min: require('../../assets/voice_over_5min.wav'),
+  o_10min: require('../../assets/voice_over_10min.wav'),
+  o_15min: require('../../assets/voice_over_15min.wav'),
 };
-
-const VOICE_OPTIONS = [
-  { key: 'v_1min', label: '残り1分', phrase: '「残り、1分です」' },
-  { key: 'v_30sec', label: '残り30秒', phrase: '「残り、30秒です」' },
-  { key: 'v_10sec', label: '残り10秒', phrase: '「残り、10秒」' },
-  { key: 'v_finish', label: 'カウント終了', phrase: '「5,4,3,2,1 終了」' },
-];
 
 export default function SettingsScreen() {
   const { 
@@ -54,12 +77,76 @@ export default function SettingsScreen() {
     countdownSeconds, saveCountdownSeconds,
     alarmSoundType, toggleAlarmSoundType,
     playsInSilentMode, togglePlaysInSilentMode,
+    isVoice5MinEnabled, toggleVoice5Min,
+    isVoice3MinEnabled, toggleVoice3Min,
+    isVoice1MinEnabled, toggleVoice1Min,
+    isVoice30SecEnabled, toggleVoice30Sec,
+    isVoice10SecEnabled, toggleVoice10Sec,
+    isVoiceFinishEnabled, toggleVoiceFinish,
+    isPrepVoice15MinEnabled, togglePrepVoice15Min,
+    isPrepVoice10MinEnabled, togglePrepVoice10Min,
+    isPrepVoice5MinEnabled, togglePrepVoice5Min,
+    isPrepVoice4MinEnabled, togglePrepVoice4Min,
+    isPrepVoice3MinEnabled, togglePrepVoice3Min,
+    isPrepVoice2MinEnabled, togglePrepVoice2Min,
+    isPrepVoice1MinEnabled, togglePrepVoice1Min,
+    isPrepVoice30SecEnabled, togglePrepVoice30Sec,
+    isPrepVoice10SecEnabled, togglePrepVoice10Sec,
+    isPrepVoiceCountdownEnabled, togglePrepVoiceCountdown,
+    isOverVoiceStartEnabled, toggleOverVoiceStart,
+    isOverVoice1MinEnabled, toggleOverVoice1Min,
+    isOverVoice3MinEnabled, toggleOverVoice3Min,
+    isOverVoice5MinEnabled, toggleOverVoice5Min,
+    isOverVoice10MinEnabled, toggleOverVoice10Min,
+    isOverVoice15MinEnabled, toggleOverVoice15Min,
     hasSeenEcoExplanation, markEcoExplanationSeen
   } = useContext(AppContext);
 
   const [ecoModalVisible, setEcoModalVisible] = useState(false);
   const [previewSound, setPreviewSound] = useState(null);
   const [playingVoiceKey, setPlayingVoiceKey] = useState(null);
+
+  // アコーディオン開閉状態（初期値: すべて閉じてコンパクトに表示）
+  const [isAlarmSoundOpen, setIsAlarmSoundOpen] = useState(false);
+  const [isMainVoiceOpen, setIsMainVoiceOpen] = useState(false);
+  const [isPrepVoiceOpen, setIsPrepVoiceOpen] = useState(false);
+  const [isOverVoiceOpen, setIsOverVoiceOpen] = useState(false);
+
+  const toggleAccordion = (setter) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setter(prev => !prev);
+  };
+
+  const MAIN_VOICE_OPTIONS = [
+    { key: 'v_5min', label: '残り5分', phrase: '「残り、5分です」', isEnabled: isVoice5MinEnabled, toggle: toggleVoice5Min },
+    { key: 'v_3min', label: '残り3分', phrase: '「残り、3分です」', isEnabled: isVoice3MinEnabled, toggle: toggleVoice3Min },
+    { key: 'v_1min', label: '残り1分', phrase: '「残り、1分です」', isEnabled: isVoice1MinEnabled, toggle: toggleVoice1Min },
+    { key: 'v_30sec', label: '残り30秒', phrase: '「残り、30秒です」', isEnabled: isVoice30SecEnabled, toggle: toggleVoice30Sec },
+    { key: 'v_10sec', label: '残り10秒', phrase: '「残り、10秒」', isEnabled: isVoice10SecEnabled, toggle: toggleVoice10Sec },
+    { key: 'v_finish', label: 'カウント終了', phrase: '「5,4,3,2,1 終了」', isEnabled: isVoiceFinishEnabled, toggle: toggleVoiceFinish },
+  ];
+
+  const PREP_VOICE_OPTIONS = [
+    { key: 'p_15min', label: '15分前', phrase: '「15分前」（開始時:「計測開始、15分前」）', isEnabled: isPrepVoice15MinEnabled, toggle: togglePrepVoice15Min },
+    { key: 'p_10min', label: '10分前', phrase: '「10分前」（開始時:「計測開始、10分前」）', isEnabled: isPrepVoice10MinEnabled, toggle: togglePrepVoice10Min },
+    { key: 'p_5min', label: '5分前', phrase: '「5分前」（開始時:「計測開始、5分前」）', isEnabled: isPrepVoice5MinEnabled, toggle: togglePrepVoice5Min },
+    { key: 'p_4min', label: '4分前', phrase: '「4分前」', isEnabled: isPrepVoice4MinEnabled, toggle: togglePrepVoice4Min },
+    { key: 'p_3min', label: '3分前', phrase: '「3分前」（開始時:「計測開始、3分前」）', isEnabled: isPrepVoice3MinEnabled, toggle: togglePrepVoice3Min },
+    { key: 'p_2min', label: '2分前', phrase: '「2分前」', isEnabled: isPrepVoice2MinEnabled, toggle: togglePrepVoice2Min },
+    { key: 'p_1min', label: '1分前', phrase: '「1分前」（開始時:「計測開始、1分前」）', isEnabled: isPrepVoice1MinEnabled, toggle: togglePrepVoice1Min },
+    { key: 'p_30sec', label: '30秒前', phrase: '「30秒前」（開始時:「計測開始、30秒前」）', isEnabled: isPrepVoice30SecEnabled, toggle: togglePrepVoice30Sec },
+    { key: 'p_10sec', label: '10秒前', phrase: '「10秒前」（開始時:「計測開始、10秒前」）', isEnabled: isPrepVoice10SecEnabled, toggle: togglePrepVoice10Sec },
+    { key: 'p_countdown', label: '直前カウント', phrase: '「5、4、3、2、1、スタート！」', isEnabled: isPrepVoiceCountdownEnabled, toggle: togglePrepVoiceCountdown },
+  ];
+
+  const OVER_VOICE_OPTIONS = [
+    { key: 'o_start', label: 'カウントアップ開始', phrase: '「カウントアップを始めます」', isEnabled: isOverVoiceStartEnabled, toggle: toggleOverVoiceStart },
+    { key: 'o_1min', label: '1分超過', phrase: '「1分超過」', isEnabled: isOverVoice1MinEnabled, toggle: toggleOverVoice1Min },
+    { key: 'o_3min', label: '3分超過', phrase: '「3分超過」', isEnabled: isOverVoice3MinEnabled, toggle: toggleOverVoice3Min },
+    { key: 'o_5min', label: '5分超過', phrase: '「5分超過」', isEnabled: isOverVoice5MinEnabled, toggle: toggleOverVoice5Min },
+    { key: 'o_10min', label: '10分超過', phrase: '「10分超過」', isEnabled: isOverVoice10MinEnabled, toggle: toggleOverVoice10Min },
+    { key: 'o_15min', label: '15分超過', phrase: '「15分超過」', isEnabled: isOverVoice15MinEnabled, toggle: toggleOverVoice15Min },
+  ];
 
   useEffect(() => {
     return previewSound ? () => previewSound.unloadAsync() : undefined;
@@ -70,6 +157,9 @@ export default function SettingsScreen() {
     try {
       if (previewSound) {
         await previewSound.unloadAsync();
+      }
+      if (type === 'none') {
+        return; // 無音の場合はプレビュー再生なし
       }
       await Audio.setAudioModeAsync({
         playsInSilentModeIOS: playsInSilentMode,
@@ -122,6 +212,86 @@ export default function SettingsScreen() {
   const cardBorderColor = isEcoMode ? '#2C2C2E' : '#E5E5EA';
   const innerBorderColor = isEcoMode ? '#1C1C1E' : '#F2F2F7';
   const sectionHeaderColor = isEcoMode ? '#8E8E93' : '#6E6E73';
+  const groupSubHeaderColor = isEcoMode ? '#34C759' : '#007AFF';
+
+  // サマリーバッジ表示用テキスト計算
+  const currentAlarmLabel = ALARM_SOUND_OPTIONS.find(o => o.key === alarmSoundType)?.label || '未設定';
+
+  const mainVoiceActiveCount = MAIN_VOICE_OPTIONS.filter(o => o.isEnabled).length;
+  const mainVoiceSummary = mainVoiceActiveCount === MAIN_VOICE_OPTIONS.length 
+    ? '全項目 ON' 
+    : (mainVoiceActiveCount === 0 ? 'すべて OFF' : `${mainVoiceActiveCount}/${MAIN_VOICE_OPTIONS.length} 項目`);
+
+  const prepVoiceActiveCount = PREP_VOICE_OPTIONS.filter(o => o.isEnabled).length;
+  const prepVoiceSummary = prepVoiceActiveCount === PREP_VOICE_OPTIONS.length 
+    ? '全項目 ON' 
+    : (prepVoiceActiveCount === 0 ? 'すべて OFF' : `${prepVoiceActiveCount}/${PREP_VOICE_OPTIONS.length} 項目`);
+
+  const overVoiceActiveCount = OVER_VOICE_OPTIONS.filter(o => o.isEnabled).length;
+  const overVoiceSummary = overVoiceActiveCount === OVER_VOICE_OPTIONS.length 
+    ? '全項目 ON' 
+    : (overVoiceActiveCount === 0 ? 'すべて OFF' : `${overVoiceActiveCount}/${OVER_VOICE_OPTIONS.length} 項目`);
+
+  const renderVoiceList = (options) => (
+    <View style={[styles.voiceListContainer, { borderColor: innerBorderColor }]}>
+      {options.map((item, index) => {
+        const isPlaying = playingVoiceKey === item.key;
+        const isLast = index === options.length - 1;
+        return (
+          <View 
+            key={item.key} 
+            style={[
+              styles.voiceListRow, 
+              { borderBottomColor: innerBorderColor },
+              !isLast && { borderBottomWidth: 1 }
+            ]}
+          >
+            {/* 左側: 試聴ボタン＋テキスト */}
+            <TouchableOpacity
+              style={styles.voicePreviewTouchArea}
+              onPress={() => handlePlayVoice(item.key)}
+              activeOpacity={0.7}
+            >
+              <View style={[
+                styles.voicePlayIconWrapper, 
+                { backgroundColor: isPlaying ? '#34C759' : (isEcoMode ? '#222' : '#E5E5EA') }
+              ]}>
+                <Ionicons 
+                  name={isPlaying ? "volume-high" : "play"} 
+                  size={15} 
+                  color={isPlaying ? '#FFFFFF' : (isEcoMode ? '#FFFFFF' : '#007AFF')} 
+                  style={!isPlaying ? { marginLeft: 2 } : {}}
+                />
+              </View>
+              <View style={styles.voiceInfoTextContainer}>
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <Text style={[styles.voiceRowLabel, { color: textColor }]}>
+                    {item.label}
+                  </Text>
+                  {isPlaying && (
+                    <Text style={{ fontSize: 11, color: '#34C759', fontWeight: 'bold', marginLeft: 6 }}>
+                      再生中...
+                    </Text>
+                  )}
+                </View>
+                <Text style={[styles.voiceRowPhrase, { color: subTextColor }]}>
+                  {item.phrase}
+                </Text>
+              </View>
+            </TouchableOpacity>
+
+            {/* 右側: ON/OFFトグルスイッチ */}
+            <Switch
+              value={item.isEnabled}
+              onValueChange={item.toggle}
+              trackColor={{ false: '#333', true: '#34C759' }}
+              style={{ transform: [{ scaleX: 0.85 }, { scaleY: 0.85 }] }}
+            />
+          </View>
+        );
+      })}
+    </View>
+  );
 
   return (
     <ScrollView 
@@ -262,7 +432,7 @@ export default function SettingsScreen() {
         <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
           <View style={styles.settingTextContainer}>
             <Text style={[styles.settingText, { color: textColor }]}>マナーモード時でも鳴らす</Text>
-            <Text style={[styles.settingDescription, { color: subTextColor }]}>端末の消音スイッチ（サイレントモード）時でもアラーム音を再生します</Text>
+            <Text style={[styles.settingDescription, { color: subTextColor }]}>端末の消音スイッチ（サイレントモード）時でもアラーム音・音声を再生します</Text>
           </View>
           <Switch
             value={playsInSilentMode}
@@ -271,88 +441,186 @@ export default function SettingsScreen() {
           />
         </View>
 
-        {/* アラーム音の選択（2列グリッド） */}
-        <View style={{ paddingVertical: 14, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: innerBorderColor }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
-            <Ionicons name="musical-notes-outline" size={18} color={textColor} style={{ marginRight: 6 }} />
-            <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>アラーム音の選択（タップで試聴）</Text>
-          </View>
-          <View style={styles.soundGrid}>
-            {ALARM_SOUND_OPTIONS.map((item) => {
-              const isSelected = alarmSoundType === item.key;
-              return (
-                <TouchableOpacity
-                  key={item.key}
-                  style={[
-                    styles.soundOptionTile,
-                    { 
-                      backgroundColor: isEcoMode ? (isSelected ? '#1C2C3E' : '#141414') : (isSelected ? '#EBF4FF' : '#F2F2F7'), 
-                      borderColor: isSelected ? '#007AFF' : (isEcoMode ? '#2C2C2E' : '#E5E5EA') 
-                    },
-                    isSelected && { borderWidth: 2 }
-                  ]}
-                  onPress={() => handleSelectSound(item.key)}
-                  activeOpacity={0.7}
-                >
-                  <Ionicons 
-                    name={isSelected ? "volume-high" : "volume-medium-outline"} 
-                    size={22} 
-                    color={isSelected ? '#007AFF' : (isEcoMode ? '#888' : '#666')} 
-                    style={{ marginBottom: 4 }}
-                  />
-                  <Text style={[styles.soundOptionTitle, { color: isSelected ? '#007AFF' : textColor, fontWeight: isSelected ? 'bold' : '600' }]}>
-                    {item.label}
-                  </Text>
-                  <Text style={{ fontSize: 11, color: isSelected ? '#007AFF' : subTextColor, marginTop: 2 }}>
-                    {item.desc}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+        {/* 2. アラーム音の選択（アコーディオン） */}
+        <View style={{ borderBottomWidth: 1, borderBottomColor: innerBorderColor }}>
+          <TouchableOpacity
+            style={styles.accordionHeader}
+            onPress={() => toggleAccordion(setIsAlarmSoundOpen)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.accordionTitleContainer}>
+              <Ionicons name="musical-notes-outline" size={18} color={textColor} style={{ marginRight: 8 }} />
+              <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>アラーム音の選択</Text>
+            </View>
+            <View style={styles.accordionRightContainer}>
+              <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? '#1C2E42' : '#EBF4FF' }]}>
+                <Text style={[styles.summaryBadgeText, { color: '#007AFF' }]}>{currentAlarmLabel}</Text>
+              </View>
+              <Ionicons 
+                name={isAlarmSoundOpen ? "chevron-up" : "chevron-down"} 
+                size={18} 
+                color={subTextColor} 
+                style={{ marginLeft: 6 }}
+              />
+            </View>
+          </TouchableOpacity>
+
+          {isAlarmSoundOpen && (
+            <View style={styles.accordionContentContainer}>
+              <Text style={{ fontSize: 12, color: subTextColor, marginBottom: 12 }}>
+                タップして試聴・選択できます
+              </Text>
+              <View style={styles.soundGrid}>
+                {ALARM_SOUND_OPTIONS.map((item) => {
+                  const isSelected = alarmSoundType === item.key;
+                  const isNone = item.key === 'none';
+                  return (
+                    <TouchableOpacity
+                      key={item.key}
+                      style={[
+                        styles.soundOptionTile,
+                        { 
+                          backgroundColor: isEcoMode ? (isSelected ? '#13283E' : '#141414') : (isSelected ? '#EBF4FF' : '#F2F2F7'), 
+                          borderColor: isSelected ? '#007AFF' : (isEcoMode ? '#2C2C2E' : '#E5E5EA') 
+                        },
+                        isSelected && { borderWidth: 2 }
+                      ]}
+                      onPress={() => handleSelectSound(item.key)}
+                      activeOpacity={0.7}
+                    >
+                      {/* 選択中チェックバッジ */}
+                      {isSelected && (
+                        <View style={styles.selectedCheckBadge}>
+                          <Ionicons name="checkmark" size={12} color="#FFFFFF" />
+                        </View>
+                      )}
+
+                      <Ionicons 
+                        name={isNone ? (isSelected ? "volume-mute" : "volume-mute-outline") : (isSelected ? "volume-high" : "volume-medium-outline")} 
+                        size={22} 
+                        color={isSelected ? '#007AFF' : (isEcoMode ? '#888' : '#666')} 
+                        style={{ marginBottom: 4 }}
+                      />
+                      <Text style={[styles.soundOptionTitle, { color: isSelected ? '#007AFF' : textColor, fontWeight: isSelected ? 'bold' : '600' }]}>
+                        {item.label}
+                      </Text>
+                      <Text style={{ fontSize: 11, color: isSelected ? '#007AFF' : subTextColor, marginTop: 2, textAlign: 'center' }}>
+                        {item.desc}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+          )}
         </View>
 
-        {/* 音声アナウンス・サンプル試聴 */}
-        <View style={{ paddingVertical: 14, paddingHorizontal: 16 }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
-            <Ionicons name="megaphone-outline" size={18} color={textColor} style={{ marginRight: 6 }} />
-            <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>音声アナウンス（サンプル試聴）</Text>
-          </View>
-          <View style={styles.voiceGrid}>
-            {VOICE_OPTIONS.map((item) => {
-              const isPlaying = playingVoiceKey === item.key;
-              return (
-                <TouchableOpacity
-                  key={item.key}
-                  style={[
-                    styles.voiceOptionTile,
-                    { 
-                      backgroundColor: isEcoMode ? (isPlaying ? '#1E3A2B' : '#141414') : (isPlaying ? '#E8F8EE' : '#F2F2F7'),
-                      borderColor: isPlaying ? '#34C759' : (isEcoMode ? '#2C2C2E' : '#E5E5EA')
-                    },
-                    isPlaying && { borderWidth: 1.5 }
-                  ]}
-                  onPress={() => handlePlayVoice(item.key)}
-                  activeOpacity={0.7}
-                >
-                  <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 2 }}>
-                    <Ionicons 
-                      name={isPlaying ? "pause-circle" : "play-circle"} 
-                      size={18} 
-                      color={isPlaying ? '#34C759' : '#007AFF'} 
-                      style={{ marginRight: 6 }}
-                    />
-                    <Text style={[styles.voiceOptionLabel, { color: isPlaying ? '#34C759' : textColor }]}>
-                      {item.label}
-                    </Text>
-                  </View>
-                  <Text style={{ fontSize: 11, color: isPlaying ? '#34C759' : subTextColor }}>
-                    {item.phrase}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+        {/* 3. タイマー計測中 アナウンス（アコーディオン） */}
+        <View style={{ borderBottomWidth: 1, borderBottomColor: innerBorderColor }}>
+          <TouchableOpacity
+            style={styles.accordionHeader}
+            onPress={() => toggleAccordion(setIsMainVoiceOpen)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.accordionTitleContainer}>
+              <Ionicons name="timer-outline" size={18} color={textColor} style={{ marginRight: 8 }} />
+              <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>タイマー計測中</Text>
+            </View>
+            <View style={styles.accordionRightContainer}>
+              <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? (mainVoiceActiveCount > 0 ? '#1C2E42' : '#222') : (mainVoiceActiveCount > 0 ? '#EBF4FF' : '#F2F2F7') }]}>
+                <Text style={[styles.summaryBadgeText, { color: mainVoiceActiveCount > 0 ? '#007AFF' : subTextColor }]}>
+                  {mainVoiceSummary}
+                </Text>
+              </View>
+              <Ionicons 
+                name={isMainVoiceOpen ? "chevron-up" : "chevron-down"} 
+                size={18} 
+                color={subTextColor} 
+                style={{ marginLeft: 6 }}
+              />
+            </View>
+          </TouchableOpacity>
+
+          {isMainVoiceOpen && (
+            <View style={styles.accordionContentContainer}>
+              <Text style={{ fontSize: 12, color: subTextColor, marginBottom: 12 }}>
+                タイマー計測中に鳴らす音声を個別に設定できます。左側タップで試聴可能です。
+              </Text>
+              {renderVoiceList(MAIN_VOICE_OPTIONS)}
+            </View>
+          )}
+        </View>
+
+        {/* 4. スタート事前準備時間 アナウンス（アコーディオン） */}
+        <View style={{ borderBottomWidth: 1, borderBottomColor: innerBorderColor }}>
+          <TouchableOpacity
+            style={styles.accordionHeader}
+            onPress={() => toggleAccordion(setIsPrepVoiceOpen)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.accordionTitleContainer}>
+              <Ionicons name="hourglass-outline" size={18} color={textColor} style={{ marginRight: 8 }} />
+              <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>スタート事前準備時間</Text>
+            </View>
+            <View style={styles.accordionRightContainer}>
+              <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? (prepVoiceActiveCount > 0 ? '#1C2E42' : '#222') : (prepVoiceActiveCount > 0 ? '#EBF4FF' : '#F2F2F7') }]}>
+                <Text style={[styles.summaryBadgeText, { color: prepVoiceActiveCount > 0 ? '#007AFF' : subTextColor }]}>
+                  {prepVoiceSummary}
+                </Text>
+              </View>
+              <Ionicons 
+                name={isPrepVoiceOpen ? "chevron-up" : "chevron-down"} 
+                size={18} 
+                color={subTextColor} 
+                style={{ marginLeft: 6 }}
+              />
+            </View>
+          </TouchableOpacity>
+
+          {isPrepVoiceOpen && (
+            <View style={styles.accordionContentContainer}>
+              <Text style={{ fontSize: 12, color: subTextColor, marginBottom: 12 }}>
+                事前準備時間中に鳴らす音声を個別に設定できます。左側タップで試聴可能です。
+              </Text>
+              {renderVoiceList(PREP_VOICE_OPTIONS)}
+            </View>
+          )}
+        </View>
+
+        {/* 5. カウントアップ・超過時間 アナウンス（アコーディオン） */}
+        <View style={{ borderBottomWidth: 0 }}>
+          <TouchableOpacity
+            style={styles.accordionHeader}
+            onPress={() => toggleAccordion(setIsOverVoiceOpen)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.accordionTitleContainer}>
+              <Ionicons name="trending-up-outline" size={18} color={textColor} style={{ marginRight: 8 }} />
+              <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>カウントアップ・超過時間</Text>
+            </View>
+            <View style={styles.accordionRightContainer}>
+              <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? (overVoiceActiveCount > 0 ? '#1C2E42' : '#222') : (overVoiceActiveCount > 0 ? '#EBF4FF' : '#F2F2F7') }]}>
+                <Text style={[styles.summaryBadgeText, { color: overVoiceActiveCount > 0 ? '#007AFF' : subTextColor }]}>
+                  {overVoiceSummary}
+                </Text>
+              </View>
+              <Ionicons 
+                name={isOverVoiceOpen ? "chevron-up" : "chevron-down"} 
+                size={18} 
+                color={subTextColor} 
+                style={{ marginLeft: 6 }}
+              />
+            </View>
+          </TouchableOpacity>
+
+          {isOverVoiceOpen && (
+            <View style={styles.accordionContentContainer}>
+              <Text style={{ fontSize: 12, color: subTextColor, marginBottom: 12 }}>
+                目標タイム終了後のカウントアップ中に鳴らす音声を個別に設定できます。左側タップで試聴可能です。
+              </Text>
+              {renderVoiceList(OVER_VOICE_OPTIONS)}
+            </View>
+          )}
         </View>
       </View>
 
@@ -371,6 +639,30 @@ export default function SettingsScreen() {
           <View style={styles.settingTextContainer}>
             <Text style={[styles.settingText, { color: textColor }]}>カラーインジケーター</Text>
             <Text style={[styles.settingDescription, { color: subTextColor }]}>10分以下のタイマーでリングの色が残量に応じて青→黄→赤に変化します</Text>
+            {/* 視覚的カラーバー（実比率7:2:1 & 凡例） */}
+            <View style={styles.colorIndicatorBarWrapper}>
+              <View style={styles.colorIndicatorBar}>
+                <View style={[styles.colorSegment, { flex: 7, backgroundColor: '#007AFF', borderTopLeftRadius: 4, borderBottomLeftRadius: 4 }]} />
+                <View style={[styles.colorBarDivider, { backgroundColor: cardBgColor }]} />
+                <View style={[styles.colorSegment, { flex: 2, backgroundColor: '#FFCC00' }]} />
+                <View style={[styles.colorBarDivider, { backgroundColor: cardBgColor }]} />
+                <View style={[styles.colorSegment, { flex: 1, backgroundColor: '#FF3B30', borderTopRightRadius: 4, borderBottomRightRadius: 4 }]} />
+              </View>
+              <View style={styles.colorBarLegend}>
+                <View style={styles.legendItem}>
+                  <View style={[styles.legendDot, { backgroundColor: '#007AFF' }]} />
+                  <Text style={[styles.legendText, { color: subTextColor }]}>青: 30%超</Text>
+                </View>
+                <View style={styles.legendItem}>
+                  <View style={[styles.legendDot, { backgroundColor: '#FFCC00' }]} />
+                  <Text style={[styles.legendText, { color: subTextColor }]}>黄: 30%以下</Text>
+                </View>
+                <View style={styles.legendItem}>
+                  <View style={[styles.legendDot, { backgroundColor: '#FF3B30' }]} />
+                  <Text style={[styles.legendText, { color: subTextColor }]}>赤: 10%以下</Text>
+                </View>
+              </View>
+            </View>
           </View>
           <Switch
             value={isColorIndicator}
@@ -603,26 +895,133 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     alignItems: 'center',
     justifyContent: 'center',
+    position: 'relative',
+  },
+  selectedCheckBadge: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#007AFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
   },
   soundOptionTitle: {
     fontSize: 13,
     textAlign: 'center',
   },
-  voiceGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    gap: 10,
-  },
-  voiceOptionTile: {
-    width: '48%',
+  voiceListContainer: {
     borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    justifyContent: 'center',
+    borderWidth: 1,
+    overflow: 'hidden',
   },
-  voiceOptionLabel: {
-    fontSize: 13,
+  voiceListRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
+  voicePreviewTouchArea: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: 10,
+  },
+  voicePlayIconWrapper: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  voiceInfoTextContainer: {
+    flex: 1,
+  },
+  voiceRowLabel: {
+    fontSize: 14,
     fontWeight: '600',
   },
+  voiceRowPhrase: {
+    fontSize: 12,
+    marginTop: 2,
+  },
+  accordionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+  },
+  accordionTitleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  accordionRightContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  summaryBadge: {
+    paddingHorizontal: 9,
+    paddingVertical: 3,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  summaryBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  accordionContentContainer: {
+    paddingHorizontal: 16,
+    paddingBottom: 16,
+    paddingTop: 4,
+  },
+  colorIndicatorBarWrapper: {
+    marginTop: 8,
+  },
+  colorIndicatorBar: {
+    flexDirection: 'row',
+    height: 7,
+    borderRadius: 3.5,
+    overflow: 'hidden',
+    marginBottom: 6,
+  },
+  colorSegment: {
+    height: '100%',
+  },
+  colorBarDivider: {
+    width: 1.5,
+    height: '100%',
+  },
+  colorBarLegend: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 1,
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  legendDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 4,
+  },
+  legendText: {
+    fontSize: 10,
+    fontWeight: '500',
+  },
 });
+
