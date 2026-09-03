@@ -1,8 +1,8 @@
-import React, { useContext, useState, useEffect } from 'react';
+import React, { useContext, useState, useEffect, useRef } from 'react';
 import { 
   StyleSheet, Text, View, Switch, TouchableOpacity, Modal, 
   TextInput, KeyboardAvoidingView, Platform, ScrollView,
-  LayoutAnimation, UIManager 
+  LayoutAnimation, UIManager, Vibration 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
@@ -77,6 +77,8 @@ export default function SettingsScreen() {
     countdownSeconds, saveCountdownSeconds,
     alarmSoundType, toggleAlarmSoundType,
     playsInSilentMode, togglePlaysInSilentMode,
+    isVibrationEnabled, toggleVibrationEnabled,
+    isVibration3SecOnly, toggleVibration3SecOnly,
     isVoice5MinEnabled, toggleVoice5Min,
     isVoice3MinEnabled, toggleVoice3Min,
     isVoice1MinEnabled, toggleVoice1Min,
@@ -105,6 +107,30 @@ export default function SettingsScreen() {
   const [ecoModalVisible, setEcoModalVisible] = useState(false);
   const [previewSound, setPreviewSound] = useState(null);
   const [playingVoiceKey, setPlayingVoiceKey] = useState(null);
+  const [isTestingVibration, setIsTestingVibration] = useState(false);
+  const testVibrationTimeoutRef = useRef(null);
+
+  const handleTestVibration = () => {
+    if (isTestingVibration) {
+      if (testVibrationTimeoutRef.current) clearTimeout(testVibrationTimeoutRef.current);
+      Vibration.cancel();
+      setIsTestingVibration(false);
+      return;
+    }
+    setIsTestingVibration(true);
+    Vibration.vibrate([0, 500, 200, 500, 200, 500]);
+    testVibrationTimeoutRef.current = setTimeout(() => {
+      Vibration.cancel();
+      setIsTestingVibration(false);
+    }, 3000);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (testVibrationTimeoutRef.current) clearTimeout(testVibrationTimeoutRef.current);
+      Vibration.cancel();
+    };
+  }, []);
 
   // アコーディオン開閉状態（初期値: すべて閉じてコンパクトに表示）
   const [isAlarmSoundOpen, setIsAlarmSoundOpen] = useState(false);
@@ -440,6 +466,66 @@ export default function SettingsScreen() {
             trackColor={{ false: '#333', true: '#34C759' }}
           />
         </View>
+
+        {/* バイブレーション（振動）トグル & テスト */}
+        <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
+          <View style={styles.settingTextContainer}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' }}>
+              <Text style={[styles.settingText, { color: textColor }]}>バイブレーション（振動）</Text>
+              {isVibrationEnabled && (
+                <TouchableOpacity 
+                  onPress={handleTestVibration} 
+                  style={{ 
+                    marginLeft: 10, 
+                    flexDirection: 'row', 
+                    alignItems: 'center', 
+                    paddingVertical: 3, 
+                    paddingHorizontal: 8, 
+                    borderRadius: 12, 
+                    backgroundColor: isTestingVibration ? '#FF3B30' : (isEcoMode ? '#1C2E42' : '#EBF4FF') 
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons 
+                    name={isTestingVibration ? "stop-circle-outline" : "radio-outline"} 
+                    size={13} 
+                    color={isTestingVibration ? '#FFF' : '#007AFF'} 
+                    style={{ marginRight: 3 }} 
+                  />
+                  <Text style={{ fontSize: 11, fontWeight: '600', color: isTestingVibration ? '#FFF' : '#007AFF' }}>
+                    {isTestingVibration ? "停止" : "振動テスト"}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+            <Text style={[styles.settingDescription, { color: subTextColor }]}>
+              タイマー終了時や警告タイミングで端末を振動させます
+            </Text>
+          </View>
+          <Switch
+            value={isVibrationEnabled}
+            onValueChange={toggleVibrationEnabled}
+            trackColor={{ false: '#333', true: '#34C759' }}
+          />
+        </View>
+
+        {/* 終了時3秒で自動停止（サブトグル） */}
+        {isVibrationEnabled && (
+          <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor, paddingLeft: 24, backgroundColor: isEcoMode ? '#080808' : '#F9F9FB' }]}>
+            <View style={styles.settingTextContainer}>
+              <Text style={[styles.settingText, { color: textColor, fontSize: 14 }]}>└ 終了時3秒で自動停止</Text>
+              <Text style={[styles.settingDescription, { color: subTextColor, fontSize: 12 }]}>
+                0秒到達時に3秒間だけ振動して自動停止します（超過時間中の連続振動を防止）
+              </Text>
+            </View>
+            <Switch
+              value={isVibration3SecOnly}
+              onValueChange={toggleVibration3SecOnly}
+              trackColor={{ false: '#333', true: '#34C759' }}
+              style={{ transform: [{ scaleX: 0.85 }, { scaleY: 0.85 }] }}
+            />
+          </View>
+        )}
 
         {/* 2. アラーム音の選択（アコーディオン） */}
         <View style={{ borderBottomWidth: 1, borderBottomColor: innerBorderColor }}>

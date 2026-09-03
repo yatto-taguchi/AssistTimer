@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useContext } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback, Image, FlatList, Dimensions, AppState } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback, Image, FlatList, Dimensions, AppState, Vibration } from 'react-native';
 const { width: screenWidth } = Dimensions.get('window');
 import { useIsFocused } from '@react-navigation/native';
 import ImageViewer from 'react-native-image-zoom-viewer';
@@ -97,6 +97,7 @@ export default function HomeScreen() {
     isCountdownEnabled, toggleCountdownEnabled, 
     countdownSeconds, saveCountdownSeconds,
     alarmSoundType, playsInSilentMode,
+    isVibrationEnabled, isVibration3SecOnly,
     isVoice5MinEnabled, isVoice3MinEnabled,
     isVoice1MinEnabled, isVoice30SecEnabled,
     isVoice10SecEnabled, isVoiceFinishEnabled,
@@ -135,9 +136,53 @@ export default function HomeScreen() {
   const triggeredVoicesRef = useRef(new Set());
   const triggeredPrepVoicesRef = useRef(new Set());
   const triggeredOverVoicesRef = useRef(new Set());
+  const vibrationTimeoutRef = useRef(null);
+
+  // バイブレーション制御ヘルパー
+  const triggerVibration = (type) => {
+    if (!isVibrationEnabled) return;
+    try {
+      if (type === 'finish') {
+        if (vibrationTimeoutRef.current) {
+          clearTimeout(vibrationTimeoutRef.current);
+          vibrationTimeoutRef.current = null;
+        }
+        if (isVibration3SecOnly) {
+          // 3秒間だけ振動して自動停止
+          Vibration.vibrate([0, 500, 200, 500, 200, 500]);
+          vibrationTimeoutRef.current = setTimeout(() => {
+            Vibration.cancel();
+            vibrationTimeoutRef.current = null;
+          }, 3000);
+        } else {
+          // 停止操作があるまでリピート継続
+          Vibration.vibrate([0, 500, 200, 500, 200, 500], true);
+        }
+      } else if (type === 'warning') {
+        // 残り時間警告（短い2回パルス）
+        Vibration.vibrate([0, 200, 100, 200]);
+      } else if (type === 'countdown') {
+        // カウントダウン微振動
+        Vibration.vibrate(80);
+      }
+    } catch (e) {
+      console.log("Vibration trigger error", e);
+    }
+  };
+
+  const cancelVibration = () => {
+    if (vibrationTimeoutRef.current) {
+      clearTimeout(vibrationTimeoutRef.current);
+      vibrationTimeoutRef.current = null;
+    }
+    try {
+      Vibration.cancel();
+    } catch (e) {}
+  };
 
   // 初回起動時のサウンドロード等と再生用関数
   const playAlarm = async () => {
+    triggerVibration('finish');
     if (alarmSoundType === 'none') {
       console.log('Alarm sound is set to none (silent)');
       return;
@@ -186,6 +231,12 @@ export default function HomeScreen() {
   useEffect(() => {
     return voiceSound ? () => voiceSound.unloadAsync() : undefined;
   }, [voiceSound]);
+
+  useEffect(() => {
+    return () => {
+      cancelVibration();
+    };
+  }, []);
 
   // ジャンル履歴のロード
   useEffect(() => {
@@ -335,9 +386,11 @@ export default function HomeScreen() {
         } else if (nextTime === 10 && countdownSeconds > 10 && isPrepVoice10SecEnabled && !triggeredPrepVoicesRef.current.has(10)) {
           triggeredPrepVoicesRef.current.add(10);
           playVoice('prep_10sec');
+          triggerVibration('warning');
         } else if (nextTime === 5 && countdownSeconds > 5 && isPrepVoiceCountdownEnabled && !triggeredPrepVoicesRef.current.has(5)) {
           triggeredPrepVoicesRef.current.add(5);
           playVoice('prep_countdown_5'); // 5秒前から「5,4,3,2,1 スタート！」
+          triggerVibration('countdown');
         }
 
         if (diffMs <= 0) {
@@ -361,7 +414,7 @@ export default function HomeScreen() {
     isPrepVoice15MinEnabled, isPrepVoice10MinEnabled,
     isPrepVoice5MinEnabled, isPrepVoice4MinEnabled, isPrepVoice3MinEnabled, isPrepVoice2MinEnabled,
     isPrepVoice1MinEnabled, isPrepVoice30SecEnabled, isPrepVoice10SecEnabled, isPrepVoiceCountdownEnabled,
-    playsInSilentMode
+    playsInSilentMode, isVibrationEnabled
   ]);
 
   // メインタイマー進行のロジック（タイムスタンプ基準）
@@ -389,7 +442,7 @@ export default function HomeScreen() {
             setRemainingTime(nextTime);
           }
 
-          // 音声アナウンスのトリガー（残り時間到達時）
+          // 音声アナウンス＆バイブレーションのトリガー（残り時間到達時）
           if (nextTime === 300 && isVoice5MinEnabled && !triggeredVoicesRef.current.has(300)) {
             triggeredVoicesRef.current.add(300);
             playVoice('v_5min');
@@ -399,15 +452,19 @@ export default function HomeScreen() {
           } else if (nextTime === 60 && isVoice1MinEnabled && !triggeredVoicesRef.current.has(60)) {
             triggeredVoicesRef.current.add(60);
             playVoice('v_1min');
+            triggerVibration('warning');
           } else if (nextTime === 30 && isVoice30SecEnabled && !triggeredVoicesRef.current.has(30)) {
             triggeredVoicesRef.current.add(30);
             playVoice('v_30sec');
+            triggerVibration('warning');
           } else if (nextTime === 10 && isVoice10SecEnabled && !triggeredVoicesRef.current.has(10)) {
             triggeredVoicesRef.current.add(10);
             playVoice('v_10sec');
+            triggerVibration('warning');
           } else if (nextTime === 5 && isVoiceFinishEnabled && !triggeredVoicesRef.current.has(5)) {
             triggeredVoicesRef.current.add(5);
             playVoice('v_finish'); // 「5,4,3,2,1 終了」カウントダウン開始
+            triggerVibration('countdown');
           }
 
           // 0秒到達（タイムアップ）
@@ -464,7 +521,7 @@ export default function HomeScreen() {
     isRunning, isCountUp, 
     isVoice5MinEnabled, isVoice3MinEnabled, isVoice1MinEnabled, isVoice30SecEnabled, isVoice10SecEnabled, isVoiceFinishEnabled,
     isOverVoiceStartEnabled, isOverVoice1MinEnabled, isOverVoice3MinEnabled, isOverVoice5MinEnabled, isOverVoice10MinEnabled, isOverVoice15MinEnabled,
-    alarmSoundType, playsInSilentMode
+    alarmSoundType, playsInSilentMode, isVibrationEnabled, isVibration3SecOnly
   ]);
 
   const formatTime = (timeInSeconds) => {
@@ -527,6 +584,7 @@ export default function HomeScreen() {
         // カウントダウン中ならキャンセル
         setIsPreCountingDown(false);
         prepEndTimeRef.current = null;
+        cancelVibration();
         if (voiceSound) {
           voiceSound.stopAsync().catch(() => {});
         }
@@ -547,6 +605,7 @@ export default function HomeScreen() {
           // 一時停止
           targetEndTimeRef.current = null;
           overStartTimeRef.current = null;
+          cancelVibration();
           setIsRunning(false);
         }
       }
@@ -557,6 +616,7 @@ export default function HomeScreen() {
     setIsRunning(false);
     setIsPreCountingDown(false);
     setIsCountUp(false);
+    cancelVibration();
     targetEndTimeRef.current = null;
     prepEndTimeRef.current = null;
     overStartTimeRef.current = null;
@@ -638,6 +698,7 @@ export default function HomeScreen() {
   const handleOpenSaveModal = () => {
     setIsRunning(false); // タイマーを止める
     setIsPreCountingDown(false);
+    cancelVibration();
     targetEndTimeRef.current = null;
     prepEndTimeRef.current = null;
     overStartTimeRef.current = null;
@@ -650,6 +711,7 @@ export default function HomeScreen() {
   const handleOpenSaveInTimeModal = () => {
     setIsRunning(false); // タイマーを止める
     setIsPreCountingDown(false);
+    cancelVibration();
     targetEndTimeRef.current = null;
     prepEndTimeRef.current = null;
     overStartTimeRef.current = null;

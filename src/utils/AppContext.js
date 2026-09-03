@@ -23,6 +23,8 @@ export const AppProvider = ({ children }) => {
 
   const [alarmSoundType, setAlarmSoundType] = useState('digital'); // 'digital' | 'bell' | 'buzzer' | 'kitchen' | 'fast' | 'gong' | 'none'
   const [playsInSilentMode, setPlaysInSilentMode] = useState(true); // マナーモード時でも鳴らす
+  const [isVibrationEnabled, setIsVibrationEnabled] = useState(true); // バイブレーション（振動）有効/無効
+  const [isVibration3SecOnly, setIsVibration3SecOnly] = useState(true); // タイムアップ時3秒で自動停止
 
   // 本番タイマー中の音声アナウンス個別有効/無効
   const [isVoice5MinEnabled, setIsVoice5MinEnabled] = useState(true);
@@ -113,6 +115,8 @@ export const AppProvider = ({ children }) => {
         const seenEcoVal = await AsyncStorage.getItem('hasSeenEcoExplanation');
         const soundTypeVal = await AsyncStorage.getItem('alarmSoundType');
         const silentModeVal = await AsyncStorage.getItem('playsInSilentMode');
+        const vibrationVal = await AsyncStorage.getItem('isVibrationEnabled');
+        const vibration3SecVal = await AsyncStorage.getItem('isVibration3SecOnly');
         
         const voice5MinVal = await AsyncStorage.getItem('isVoice5MinEnabled');
         const voice3MinVal = await AsyncStorage.getItem('isVoice3MinEnabled');
@@ -156,6 +160,8 @@ export const AppProvider = ({ children }) => {
         if (seenEcoVal !== null) setHasSeenEcoExplanation(JSON.parse(seenEcoVal));
         if (soundTypeVal !== null) setAlarmSoundType(soundTypeVal);
         if (silentModeVal !== null) setPlaysInSilentMode(JSON.parse(silentModeVal));
+        if (vibrationVal !== null) setIsVibrationEnabled(JSON.parse(vibrationVal));
+        if (vibration3SecVal !== null) setIsVibration3SecOnly(JSON.parse(vibration3SecVal));
 
         if (voice5MinVal !== null) setIsVoice5MinEnabled(JSON.parse(voice5MinVal));
         if (voice3MinVal !== null) setIsVoice3MinEnabled(JSON.parse(voice3MinVal));
@@ -279,6 +285,20 @@ export const AppProvider = ({ children }) => {
   const togglePlaysInSilentMode = async (value) => {
     setPlaysInSilentMode(value);
     await AsyncStorage.setItem('playsInSilentMode', JSON.stringify(value));
+  };
+
+  // バイブレーション（振動）切替と保存
+  const toggleVibrationEnabled = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVibrationEnabled;
+    setIsVibrationEnabled(nextVal);
+    await AsyncStorage.setItem('isVibrationEnabled', JSON.stringify(nextVal));
+  };
+
+  // タイムアップ時3秒自動停止切替と保存
+  const toggleVibration3SecOnly = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVibration3SecOnly;
+    setIsVibration3SecOnly(nextVal);
+    await AsyncStorage.setItem('isVibration3SecOnly', JSON.stringify(nextVal));
   };
 
   // 本番タイマー用 音声アナウンス各トグルと保存
@@ -457,6 +477,10 @@ export const AppProvider = ({ children }) => {
         toggleAlarmSoundType,
         playsInSilentMode,
         togglePlaysInSilentMode,
+        isVibrationEnabled,
+        toggleVibrationEnabled,
+        isVibration3SecOnly,
+        toggleVibration3SecOnly,
         isVoice5MinEnabled,
         toggleVoice5Min,
         isVoice3MinEnabled,
