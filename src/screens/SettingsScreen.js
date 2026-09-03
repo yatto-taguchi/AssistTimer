@@ -467,65 +467,86 @@ export default function SettingsScreen() {
           />
         </View>
 
-        {/* バイブレーション（振動）トグル & テスト */}
-        <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
-          <View style={styles.settingTextContainer}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' }}>
-              <Text style={[styles.settingText, { color: textColor }]}>バイブレーション（振動）</Text>
-              {isVibrationEnabled && (
-                <TouchableOpacity 
-                  onPress={handleTestVibration} 
-                  style={{ 
-                    marginLeft: 10, 
-                    flexDirection: 'row', 
-                    alignItems: 'center', 
-                    paddingVertical: 3, 
-                    paddingHorizontal: 8, 
-                    borderRadius: 12, 
-                    backgroundColor: isTestingVibration ? '#FF3B30' : (isEcoMode ? '#1C2E42' : '#EBF4FF') 
-                  }}
-                  activeOpacity={0.7}
-                >
-                  <Ionicons 
-                    name={isTestingVibration ? "stop-circle-outline" : "radio-outline"} 
-                    size={13} 
-                    color={isTestingVibration ? '#FFF' : '#007AFF'} 
-                    style={{ marginRight: 3 }} 
-                  />
-                  <Text style={{ fontSize: 11, fontWeight: '600', color: isTestingVibration ? '#FFF' : '#007AFF' }}>
-                    {isTestingVibration ? "停止" : "振動テスト"}
-                  </Text>
-                </TouchableOpacity>
-              )}
-            </View>
-            <Text style={[styles.settingDescription, { color: subTextColor }]}>
-              タイマー終了時や警告タイミングで端末を振動させます
-            </Text>
-          </View>
-          <Switch
-            value={isVibrationEnabled}
-            onValueChange={toggleVibrationEnabled}
-            trackColor={{ false: '#333', true: '#34C759' }}
-          />
-        </View>
-
-        {/* 終了時3秒で自動停止（サブトグル） */}
-        {isVibrationEnabled && (
-          <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor, paddingLeft: 24, backgroundColor: isEcoMode ? '#080808' : '#F9F9FB' }]}>
+        {/* バイブレーション設定ブロック（親トグル＋インセットサブ設定） */}
+        <View style={{ borderBottomWidth: 1, borderBottomColor: innerBorderColor }}>
+          <View style={[styles.settingRowInCard, { borderBottomWidth: 0, paddingBottom: isVibrationEnabled ? 8 : 14 }]}>
             <View style={styles.settingTextContainer}>
-              <Text style={[styles.settingText, { color: textColor, fontSize: 14 }]}>└ 終了時3秒で自動停止</Text>
-              <Text style={[styles.settingDescription, { color: subTextColor, fontSize: 12 }]}>
-                0秒到達時に3秒間だけ振動して自動停止します（超過時間中の連続振動を防止）
+              <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' }}>
+                <Ionicons name="phone-portrait-outline" size={18} color={textColor} style={{ marginRight: 6 }} />
+                <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>バイブレーション（振動）</Text>
+                {isVibrationEnabled && (
+                  <TouchableOpacity 
+                    onPress={handleTestVibration} 
+                    style={{ 
+                      marginLeft: 8, 
+                      flexDirection: 'row', 
+                      alignItems: 'center', 
+                      paddingVertical: 3, 
+                      paddingHorizontal: 8, 
+                      borderRadius: 12, 
+                      backgroundColor: isTestingVibration ? '#FF3B30' : (isEcoMode ? '#1C2E42' : '#EBF4FF') 
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={isTestingVibration ? "stop-circle-outline" : "radio-outline"} 
+                      size={13} 
+                      color={isTestingVibration ? '#FFF' : '#007AFF'} 
+                      style={{ marginRight: 3 }} 
+                    />
+                    <Text style={{ fontSize: 11, fontWeight: '600', color: isTestingVibration ? '#FFF' : '#007AFF' }}>
+                      {isTestingVibration ? "停止" : "振動テスト"}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+              <Text style={[styles.settingDescription, { color: subTextColor, marginTop: 2 }]}>
+                タイマー終了時や警告タイミングで端末を振動させます
               </Text>
             </View>
             <Switch
-              value={isVibration3SecOnly}
-              onValueChange={toggleVibration3SecOnly}
+              value={isVibrationEnabled}
+              onValueChange={toggleVibrationEnabled}
               trackColor={{ false: '#333', true: '#34C759' }}
-              style={{ transform: [{ scaleX: 0.85 }, { scaleY: 0.85 }] }}
             />
           </View>
-        )}
+
+          {/* バイブレーションのサブ設定（枠線付きインセットカード） */}
+          {isVibrationEnabled && (
+            <View style={{
+              marginHorizontal: 16,
+              marginBottom: 14,
+              marginTop: 2,
+              padding: 12,
+              borderRadius: 10,
+              backgroundColor: isEcoMode ? '#121212' : '#F2F4F8',
+              borderLeftWidth: 3,
+              borderLeftColor: '#34C759',
+              borderWidth: 1,
+              borderColor: isEcoMode ? '#222' : '#E5E8EF',
+            }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <View style={{ flex: 1, paddingRight: 10 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <Ionicons name="timer-outline" size={15} color={isEcoMode ? '#34C759' : '#007AFF'} style={{ marginRight: 5 }} />
+                    <Text style={{ fontSize: 14, fontWeight: '600', color: textColor }}>
+                      終了時3秒で自動停止
+                    </Text>
+                  </View>
+                  <Text style={{ fontSize: 12, color: subTextColor, marginTop: 4, lineHeight: 16 }}>
+                    タイムアップ時に3秒間だけ振動して停止します（超過時間中の連続振動を防止）
+                  </Text>
+                </View>
+                <Switch
+                  value={isVibration3SecOnly}
+                  onValueChange={toggleVibration3SecOnly}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.85 }, { scaleY: 0.85 }] }}
+                />
+              </View>
+            </View>
+          )}
+        </View>
 
         {/* 2. アラーム音の選択（アコーディオン） */}
         <View style={{ borderBottomWidth: 1, borderBottomColor: innerBorderColor }}>
