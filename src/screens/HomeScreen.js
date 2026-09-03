@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useContext } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback, Image, FlatList, Dimensions } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback, Image, FlatList, Dimensions, AppState } from 'react-native';
 const { width: screenWidth } = Dimensions.get('window');
 import { useIsFocused } from '@react-navigation/native';
 import ImageViewer from 'react-native-image-zoom-viewer';
@@ -124,6 +124,17 @@ export default function HomeScreen() {
   const [preCountdownTime, setPreCountdownTime] = useState(0);
 
   const timerRef = useRef(null);
+  const targetEndTimeRef = useRef(null);
+  const prepEndTimeRef = useRef(null);
+  const overStartTimeRef = useRef(null);
+  const remainingTimeRef = useRef(DEFAULT_SECONDS);
+  const preCountdownTimeRef = useRef(0);
+  const isRunningRef = useRef(false);
+  const isCountUpRef = useRef(false);
+  const isPreCountingDownRef = useRef(false);
+  const triggeredVoicesRef = useRef(new Set());
+  const triggeredPrepVoicesRef = useRef(new Set());
+  const triggeredOverVoicesRef = useRef(new Set());
 
   // 初回起動時のサウンドロード等と再生用関数
   const playAlarm = async () => {
@@ -201,110 +212,252 @@ export default function HomeScreen() {
     loadCategoryData();
   }, []);
 
-  // 準備カウントダウン進行のロジック
+  // Stateと同期するRefの更新
+  useEffect(() => {
+    isRunningRef.current = isRunning;
+  }, [isRunning]);
+
+  useEffect(() => {
+    isCountUpRef.current = isCountUp;
+  }, [isCountUp]);
+
+  useEffect(() => {
+    isPreCountingDownRef.current = isPreCountingDown;
+  }, [isPreCountingDown]);
+
+  useEffect(() => {
+    remainingTimeRef.current = remainingTime;
+  }, [remainingTime]);
+
+  useEffect(() => {
+    preCountdownTimeRef.current = preCountdownTime;
+  }, [preCountdownTime]);
+
+  // バックグラウンド・スリープ復帰（AppState）検知時のタイムスタンプ即時同期
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', nextAppState => {
+      if (nextAppState === 'active') {
+        const now = Date.now();
+        if (isPreCountingDownRef.current && prepEndTimeRef.current) {
+          const diffMs = prepEndTimeRef.current - now;
+          const nextPrep = Math.max(0, Math.ceil(diffMs / 1000));
+          preCountdownTimeRef.current = nextPrep;
+          setPreCountdownTime(nextPrep);
+
+          if (diffMs <= 0) {
+            setIsPreCountingDown(false);
+            prepEndTimeRef.current = null;
+            // 準備カウント終了、本番タイマー開始
+            const newTargetEnd = now + targetTime * 1000;
+            targetEndTimeRef.current = newTargetEnd;
+            triggeredVoicesRef.current.clear();
+            remainingTimeRef.current = targetTime;
+            setRemainingTime(targetTime);
+            setIsRunning(true);
+          }
+        } else if (isRunningRef.current) {
+          if (!isCountUpRef.current && targetEndTimeRef.current) {
+            const diffMs = targetEndTimeRef.current - now;
+            const nextTime = Math.max(0, Math.ceil(diffMs / 1000));
+
+            if (diffMs <= 0) {
+              isCountUpRef.current = true;
+              setIsCountUp(true);
+              overStartTimeRef.current = targetEndTimeRef.current;
+              triggeredOverVoicesRef.current.clear();
+              const overTime = Math.max(0, Math.floor((now - targetEndTimeRef.current) / 1000));
+              remainingTimeRef.current = overTime;
+              setRemainingTime(overTime);
+              if (!triggeredVoicesRef.current.has('alarm')) {
+                triggeredVoicesRef.current.add('alarm');
+                playAlarm();
+              }
+            } else {
+              remainingTimeRef.current = nextTime;
+              setRemainingTime(nextTime);
+            }
+          } else if (isCountUpRef.current && overStartTimeRef.current) {
+            const overTime = Math.max(0, Math.floor((now - overStartTimeRef.current) / 1000));
+            remainingTimeRef.current = overTime;
+            setRemainingTime(overTime);
+          }
+        }
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [targetTime]);
+
+  // 準備カウントダウン進行のロジック（タイムスタンプ基準）
   useEffect(() => {
     let interval;
     if (isPreCountingDown) {
+      if (!prepEndTimeRef.current) {
+        prepEndTimeRef.current = Date.now() + preCountdownTimeRef.current * 1000;
+      }
       interval = setInterval(() => {
-        setPreCountdownTime(prev => {
-          const nextTime = prev - 1;
+        const now = Date.now();
+        const diffMs = prepEndTimeRef.current - now;
+        const nextTime = Math.max(0, Math.ceil(diffMs / 1000));
 
-          // カウント進行中の経過コール
-          if (nextTime === 900 && countdownSeconds > 900 && isPrepVoice15MinEnabled) {
-            playVoice('prep_15min');
-          } else if (nextTime === 600 && countdownSeconds > 600 && isPrepVoice10MinEnabled) {
-            playVoice('prep_10min');
-          } else if (nextTime === 300 && countdownSeconds > 300 && isPrepVoice5MinEnabled) {
-            playVoice('prep_5min');
-          } else if (nextTime === 240 && countdownSeconds > 240 && isPrepVoice4MinEnabled) {
-            playVoice('prep_4min');
-          } else if (nextTime === 180 && countdownSeconds > 180 && isPrepVoice3MinEnabled) {
-            playVoice('prep_3min');
-          } else if (nextTime === 120 && countdownSeconds > 120 && isPrepVoice2MinEnabled) {
-            playVoice('prep_2min');
-          } else if (nextTime === 60 && countdownSeconds > 60 && isPrepVoice1MinEnabled) {
-            playVoice('prep_1min');
-          } else if (nextTime === 30 && countdownSeconds > 30 && isPrepVoice30SecEnabled) {
-            playVoice('prep_30sec');
-          } else if (nextTime === 10 && countdownSeconds > 10 && isPrepVoice10SecEnabled) {
-            playVoice('prep_10sec');
-          } else if (nextTime === 5 && countdownSeconds > 5 && isPrepVoiceCountdownEnabled) {
-            playVoice('prep_countdown_5'); // 5秒前から「5,4,3,2,1 スタート！」
-          }
+        if (nextTime !== preCountdownTimeRef.current) {
+          preCountdownTimeRef.current = nextTime;
+          setPreCountdownTime(nextTime);
+        }
 
-          if (nextTime <= 0) {
-            clearInterval(interval);
-            setIsPreCountingDown(false);
-            setIsRunning(true); // カウントダウン終了後、メインタイマー開始
-            return 0;
-          }
-          return nextTime;
-        });
-      }, 1000);
+        // カウント進行中の経過コール
+        if (nextTime === 900 && countdownSeconds > 900 && isPrepVoice15MinEnabled && !triggeredPrepVoicesRef.current.has(900)) {
+          triggeredPrepVoicesRef.current.add(900);
+          playVoice('prep_15min');
+        } else if (nextTime === 600 && countdownSeconds > 600 && isPrepVoice10MinEnabled && !triggeredPrepVoicesRef.current.has(600)) {
+          triggeredPrepVoicesRef.current.add(600);
+          playVoice('prep_10min');
+        } else if (nextTime === 300 && countdownSeconds > 300 && isPrepVoice5MinEnabled && !triggeredPrepVoicesRef.current.has(300)) {
+          triggeredPrepVoicesRef.current.add(300);
+          playVoice('prep_5min');
+        } else if (nextTime === 240 && countdownSeconds > 240 && isPrepVoice4MinEnabled && !triggeredPrepVoicesRef.current.has(240)) {
+          triggeredPrepVoicesRef.current.add(240);
+          playVoice('prep_4min');
+        } else if (nextTime === 180 && countdownSeconds > 180 && isPrepVoice3MinEnabled && !triggeredPrepVoicesRef.current.has(180)) {
+          triggeredPrepVoicesRef.current.add(180);
+          playVoice('prep_3min');
+        } else if (nextTime === 120 && countdownSeconds > 120 && isPrepVoice2MinEnabled && !triggeredPrepVoicesRef.current.has(120)) {
+          triggeredPrepVoicesRef.current.add(120);
+          playVoice('prep_2min');
+        } else if (nextTime === 60 && countdownSeconds > 60 && isPrepVoice1MinEnabled && !triggeredPrepVoicesRef.current.has(60)) {
+          triggeredPrepVoicesRef.current.add(60);
+          playVoice('prep_1min');
+        } else if (nextTime === 30 && countdownSeconds > 30 && isPrepVoice30SecEnabled && !triggeredPrepVoicesRef.current.has(30)) {
+          triggeredPrepVoicesRef.current.add(30);
+          playVoice('prep_30sec');
+        } else if (nextTime === 10 && countdownSeconds > 10 && isPrepVoice10SecEnabled && !triggeredPrepVoicesRef.current.has(10)) {
+          triggeredPrepVoicesRef.current.add(10);
+          playVoice('prep_10sec');
+        } else if (nextTime === 5 && countdownSeconds > 5 && isPrepVoiceCountdownEnabled && !triggeredPrepVoicesRef.current.has(5)) {
+          triggeredPrepVoicesRef.current.add(5);
+          playVoice('prep_countdown_5'); // 5秒前から「5,4,3,2,1 スタート！」
+        }
+
+        if (diffMs <= 0) {
+          clearInterval(interval);
+          prepEndTimeRef.current = null;
+          setIsPreCountingDown(false);
+          // カウントダウン終了後、メインタイマー開始
+          targetEndTimeRef.current = now + targetTime * 1000;
+          triggeredVoicesRef.current.clear();
+          remainingTimeRef.current = targetTime;
+          setRemainingTime(targetTime);
+          setIsRunning(true);
+        }
+      }, 250);
+    } else {
+      prepEndTimeRef.current = null;
     }
     return () => clearInterval(interval);
   }, [
-    isPreCountingDown, countdownSeconds, 
+    isPreCountingDown, countdownSeconds, targetTime,
     isPrepVoice15MinEnabled, isPrepVoice10MinEnabled,
     isPrepVoice5MinEnabled, isPrepVoice4MinEnabled, isPrepVoice3MinEnabled, isPrepVoice2MinEnabled,
     isPrepVoice1MinEnabled, isPrepVoice30SecEnabled, isPrepVoice10SecEnabled, isPrepVoiceCountdownEnabled,
     playsInSilentMode
   ]);
 
-  // メインタイマー進行のロジック
+  // メインタイマー進行のロジック（タイムスタンプ基準）
   useEffect(() => {
     if (isRunning) {
+      if (!isCountUp) {
+        if (!targetEndTimeRef.current) {
+          targetEndTimeRef.current = Date.now() + remainingTimeRef.current * 1000;
+        }
+      } else {
+        if (!overStartTimeRef.current) {
+          overStartTimeRef.current = Date.now() - remainingTimeRef.current * 1000;
+        }
+      }
+
       timerRef.current = setInterval(() => {
-        setRemainingTime(prev => {
-          if (!isCountUp) {
-            const nextTime = prev - 1;
-            
-            // 音声アナウンスのトリガー（残り時間到達時）
-            if (nextTime === 300 && isVoice5MinEnabled) {
-              playVoice('v_5min');
-            } else if (nextTime === 180 && isVoice3MinEnabled) {
-              playVoice('v_3min');
-            } else if (nextTime === 60 && isVoice1MinEnabled) {
-              playVoice('v_1min');
-            } else if (nextTime === 30 && isVoice30SecEnabled) {
-              playVoice('v_30sec');
-            } else if (nextTime === 10 && isVoice10SecEnabled) {
-              playVoice('v_10sec');
-            } else if (nextTime === 5 && isVoiceFinishEnabled) {
-              playVoice('v_finish'); // 「5,4,3,2,1 終了」カウントダウン開始
-            }
+        const now = Date.now();
 
-            // 0秒到達（タイムアップ）
-            if (prev <= 1) {
-              setIsCountUp(true);
-              playAlarm();
-              return 0; // 次の瞬間に+1で 1 になる
-            }
-            return nextTime;
-          } else {
-            const nextTime = prev + 1;
+        if (!isCountUpRef.current) {
+          const diffMs = targetEndTimeRef.current - now;
+          const nextTime = Math.max(0, Math.ceil(diffMs / 1000));
 
-            // カウントアップ（超過時間）アナウンスのトリガー
-            if (nextTime === 2 && isOverVoiceStartEnabled) {
-              playVoice('over_start'); // アラーム音終了直後（+2秒）に「カウントアップを始めます」
-            } else if (nextTime === 60 && isOverVoice1MinEnabled) {
-              playVoice('over_1min');
-            } else if (nextTime === 180 && isOverVoice3MinEnabled) {
-              playVoice('over_3min');
-            } else if (nextTime === 300 && isOverVoice5MinEnabled) {
-              playVoice('over_5min');
-            } else if (nextTime === 600 && isOverVoice10MinEnabled) {
-              playVoice('over_10min');
-            } else if (nextTime === 900 && isOverVoice15MinEnabled) {
-              playVoice('over_15min');
-            }
-
-            return nextTime;
+          if (nextTime !== remainingTimeRef.current) {
+            remainingTimeRef.current = nextTime;
+            setRemainingTime(nextTime);
           }
-        });
-      }, 1000);
-    } else if (!isRunning && timerRef.current) {
-      clearInterval(timerRef.current);
+
+          // 音声アナウンスのトリガー（残り時間到達時）
+          if (nextTime === 300 && isVoice5MinEnabled && !triggeredVoicesRef.current.has(300)) {
+            triggeredVoicesRef.current.add(300);
+            playVoice('v_5min');
+          } else if (nextTime === 180 && isVoice3MinEnabled && !triggeredVoicesRef.current.has(180)) {
+            triggeredVoicesRef.current.add(180);
+            playVoice('v_3min');
+          } else if (nextTime === 60 && isVoice1MinEnabled && !triggeredVoicesRef.current.has(60)) {
+            triggeredVoicesRef.current.add(60);
+            playVoice('v_1min');
+          } else if (nextTime === 30 && isVoice30SecEnabled && !triggeredVoicesRef.current.has(30)) {
+            triggeredVoicesRef.current.add(30);
+            playVoice('v_30sec');
+          } else if (nextTime === 10 && isVoice10SecEnabled && !triggeredVoicesRef.current.has(10)) {
+            triggeredVoicesRef.current.add(10);
+            playVoice('v_10sec');
+          } else if (nextTime === 5 && isVoiceFinishEnabled && !triggeredVoicesRef.current.has(5)) {
+            triggeredVoicesRef.current.add(5);
+            playVoice('v_finish'); // 「5,4,3,2,1 終了」カウントダウン開始
+          }
+
+          // 0秒到達（タイムアップ）
+          if (diffMs <= 0) {
+            isCountUpRef.current = true;
+            setIsCountUp(true);
+            overStartTimeRef.current = targetEndTimeRef.current || now;
+            triggeredOverVoicesRef.current.clear();
+            if (!triggeredVoicesRef.current.has('alarm')) {
+              triggeredVoicesRef.current.add('alarm');
+              playAlarm();
+            }
+            remainingTimeRef.current = 0;
+            setRemainingTime(0);
+          }
+        } else {
+          const overMs = now - (overStartTimeRef.current || now);
+          const nextTime = Math.max(0, Math.floor(overMs / 1000));
+
+          if (nextTime !== remainingTimeRef.current) {
+            remainingTimeRef.current = nextTime;
+            setRemainingTime(nextTime);
+          }
+
+          // カウントアップ（超過時間）アナウンスのトリガー
+          if (nextTime >= 2 && isOverVoiceStartEnabled && !triggeredOverVoicesRef.current.has('start')) {
+            triggeredOverVoicesRef.current.add('start');
+            playVoice('over_start'); // アラーム音終了直後（+2秒）に「カウントアップを始めます」
+          } else if (nextTime >= 60 && isOverVoice1MinEnabled && !triggeredOverVoicesRef.current.has(60)) {
+            triggeredOverVoicesRef.current.add(60);
+            playVoice('over_1min');
+          } else if (nextTime >= 180 && isOverVoice3MinEnabled && !triggeredOverVoicesRef.current.has(180)) {
+            triggeredOverVoicesRef.current.add(180);
+            playVoice('over_3min');
+          } else if (nextTime >= 300 && isOverVoice5MinEnabled && !triggeredOverVoicesRef.current.has(300)) {
+            triggeredOverVoicesRef.current.add(300);
+            playVoice('over_5min');
+          } else if (nextTime >= 600 && isOverVoice10MinEnabled && !triggeredOverVoicesRef.current.has(600)) {
+            triggeredOverVoicesRef.current.add(600);
+            playVoice('over_10min');
+          } else if (nextTime >= 900 && isOverVoice15MinEnabled && !triggeredOverVoicesRef.current.has(900)) {
+            triggeredOverVoicesRef.current.add(900);
+            playVoice('over_15min');
+          }
+        }
+      }, 250);
+    } else {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
     }
     return () => clearInterval(timerRef.current);
   }, [
@@ -339,6 +492,9 @@ export default function HomeScreen() {
   const toggleTimer = () => {
     if (!isRunning && !isPreCountingDown && remainingTime === targetTime && isCountdownEnabled && countdownSeconds > 0) {
       // 初期状態からのスタートでカウントダウン有効の場合、準備カウントダウンを開始
+      prepEndTimeRef.current = Date.now() + countdownSeconds * 1000;
+      triggeredPrepVoicesRef.current.clear();
+      preCountdownTimeRef.current = countdownSeconds;
       setPreCountdownTime(countdownSeconds);
       setIsPreCountingDown(true);
 
@@ -370,12 +526,29 @@ export default function HomeScreen() {
       if (isPreCountingDown) {
         // カウントダウン中ならキャンセル
         setIsPreCountingDown(false);
+        prepEndTimeRef.current = null;
         if (voiceSound) {
           voiceSound.stopAsync().catch(() => {});
         }
       } else {
         // 通常のタイマートグル
-        setIsRunning(!isRunning);
+        if (!isRunning) {
+          // スタート/再開
+          if (!isCountUp) {
+            targetEndTimeRef.current = Date.now() + remainingTimeRef.current * 1000;
+            if (remainingTimeRef.current === targetTime) {
+              triggeredVoicesRef.current.clear();
+            }
+          } else {
+            overStartTimeRef.current = Date.now() - remainingTimeRef.current * 1000;
+          }
+          setIsRunning(true);
+        } else {
+          // 一時停止
+          targetEndTimeRef.current = null;
+          overStartTimeRef.current = null;
+          setIsRunning(false);
+        }
       }
     }
   };
@@ -384,6 +557,13 @@ export default function HomeScreen() {
     setIsRunning(false);
     setIsPreCountingDown(false);
     setIsCountUp(false);
+    targetEndTimeRef.current = null;
+    prepEndTimeRef.current = null;
+    overStartTimeRef.current = null;
+    triggeredVoicesRef.current.clear();
+    triggeredPrepVoicesRef.current.clear();
+    triggeredOverVoicesRef.current.clear();
+    remainingTimeRef.current = targetTime;
     setRemainingTime(targetTime);
     if (sound) {
       sound.stopAsync().catch(() => {});
@@ -424,8 +604,13 @@ export default function HomeScreen() {
   const applyTime = (minutes) => {
     const secs = Math.max(1, Math.floor(minutes * 60));
     setTargetTime(secs);
+    remainingTimeRef.current = secs;
     setRemainingTime(secs);
     setIsCountUp(false);
+    targetEndTimeRef.current = null;
+    overStartTimeRef.current = null;
+    triggeredVoicesRef.current.clear();
+    triggeredOverVoicesRef.current.clear();
     setTimeModalVisible(false);
   };
 
@@ -436,8 +621,13 @@ export default function HomeScreen() {
     
     if (totalSecs > 0) {
       setTargetTime(totalSecs);
+      remainingTimeRef.current = totalSecs;
       setRemainingTime(totalSecs);
       setIsCountUp(false);
+      targetEndTimeRef.current = null;
+      overStartTimeRef.current = null;
+      triggeredVoicesRef.current.clear();
+      triggeredOverVoicesRef.current.clear();
       setTimeModalVisible(false);
     } else {
       Alert.alert("エラー", "有効な時間を入力してください。");
@@ -448,6 +638,9 @@ export default function HomeScreen() {
   const handleOpenSaveModal = () => {
     setIsRunning(false); // タイマーを止める
     setIsPreCountingDown(false);
+    targetEndTimeRef.current = null;
+    prepEndTimeRef.current = null;
+    overStartTimeRef.current = null;
     setForceTargetTime(false);
     setSelectedCategory(lastUsedCategory); // デフォルトで前回のカテゴリをセット
     setSelectedTags([]); // タグを初期化
@@ -457,6 +650,9 @@ export default function HomeScreen() {
   const handleOpenSaveInTimeModal = () => {
     setIsRunning(false); // タイマーを止める
     setIsPreCountingDown(false);
+    targetEndTimeRef.current = null;
+    prepEndTimeRef.current = null;
+    overStartTimeRef.current = null;
     setForceTargetTime(true); // 時間内に終わったことにしてターゲットタイムを記録する
     setSelectedCategory(lastUsedCategory); // デフォルトで前回のカテゴリをセット
     setSelectedTags([]); // タグを初期化
