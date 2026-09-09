@@ -7,13 +7,16 @@ import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getRecords, updateRecordPhoto } from '../utils/recordStorage';
 import { AppContext } from '../utils/AppContext';
+import AdBannerComponent from '../components/AdBannerComponent';
+import ProSubscriptionModal from '../components/ProSubscriptionModal';
 
 export default function RecordsScreen() {
   const [records, setRecords] = useState([]);
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [fullScreenIndex, setFullScreenIndex] = useState(null);
-  const { isEcoMode } = useContext(AppContext);
+  const [proModalVisible, setProModalVisible] = useState(false);
+  const { isEcoMode, isProMode } = useContext(AppContext);
   const isFocused = useIsFocused();
 
   // 画面が表示されるたびにデータを読み込む
@@ -108,6 +111,27 @@ export default function RecordsScreen() {
 
   return (
     <View style={[styles.container, { backgroundColor: bgColor }]}>
+      {/* 無料枠の件数ステータスバー */}
+      {!isProMode && (
+        <TouchableOpacity 
+          style={[
+            styles.tierBar, 
+            { 
+              backgroundColor: records.length >= 50 ? '#3A1515' : (isEcoMode ? '#1C1C1E' : '#E5E5EA'),
+              borderColor: records.length >= 50 ? '#FF3B30' : 'transparent',
+            }
+          ]}
+          onPress={() => setProModalVisible(true)}
+          activeOpacity={0.8}
+        >
+          <Text style={[styles.tierBarText, { color: records.length >= 50 ? '#FF3B30' : textColor }]}>
+            {records.length >= 50 
+              ? '⚠️ 記録枠（50件）に達しました。Proプランで無制限に保存' 
+              : `📊 練習記録: ${records.length}/50件（無料枠） ★ Proで無制限`}
+          </Text>
+        </TouchableOpacity>
+      )}
+
       {records.length === 0 ? (
         <View style={styles.emptyContainer}>
           <Text style={[styles.emptyText, { color: subTextColor }]}>まだ記録がありません。タイマーから練習を記録しましょう！</Text>
@@ -122,6 +146,9 @@ export default function RecordsScreen() {
           contentContainerStyle={styles.listContainer}
         />
       )}
+
+      {/* 広告バナー（AdMob / Proモード時は非表示） */}
+      <AdBannerComponent />
 
       {/* 詳細・写真変更用モーダル */}
       <Modal
@@ -201,6 +228,9 @@ export default function RecordsScreen() {
         )}
       </Modal>
 
+      {/* Proプラン（月額100円）購入モーダル */}
+      <ProSubscriptionModal visible={proModalVisible} onClose={() => setProModalVisible(false)} />
+
     </View>
   );
 }
@@ -208,6 +238,20 @@ export default function RecordsScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+  },
+  tierBar: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    marginHorizontal: 12,
+    marginTop: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tierBarText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
   listContainer: {
     padding: 10,

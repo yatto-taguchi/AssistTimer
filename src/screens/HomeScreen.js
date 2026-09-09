@@ -9,7 +9,9 @@ import { Audio } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
 import RingProgress from '../components/RingProgress';
 import { AppContext } from '../utils/AppContext';
-import { saveRecord } from '../utils/recordStorage';
+import { saveRecord, getRecords } from '../utils/recordStorage';
+import AdBannerComponent from '../components/AdBannerComponent';
+import ProSubscriptionModal from '../components/ProSubscriptionModal';
 
 const ALARM_SOUNDS = {
   kitchen: require('../../assets/alarm_kitchen.wav'),
@@ -91,6 +93,7 @@ export default function HomeScreen() {
   // 準備時間入力用State
   const [countdownInputMinStr, setCountdownInputMinStr] = useState('');
   const [countdownInputSecStr, setCountdownInputSecStr] = useState('');
+  const [proModalVisible, setProModalVisible] = useState(false);
 
   const { 
     isEcoMode, isProMode, isColorIndicator, 
@@ -812,6 +815,26 @@ export default function HomeScreen() {
   };
 
   const handleSaveRecord = async () => {
+    // 無料ユーザーの50件保存上限チェック
+    if (!isProMode) {
+      try {
+        const currentRecords = await getRecords();
+        if (currentRecords && currentRecords.length >= 50) {
+          Alert.alert(
+            "無料枠の上限（50件）に達しました",
+            "練習記録の保存は無料版では50件までとなります。Proプラン（月額100円）にご加入いただくと、広告が非表示になり、記録を無制限に保存できるようになります。",
+            [
+              { text: "キャンセル", style: "cancel" },
+              { text: "Proプランを見る", onPress: () => setProModalVisible(true) }
+            ]
+          );
+          return;
+        }
+      } catch (e) {
+        console.error("Error checking records count", e);
+      }
+    }
+
     // 経過秒数の計算
     let duration = isCountUp ? targetTime + remainingTime : targetTime - remainingTime;
     
@@ -971,12 +994,8 @@ export default function HomeScreen() {
 
       </View>
 
-      {/* 広告バナー（デモ） */}
-      {!isProMode && (
-        <View style={styles.adBanner}>
-          <Text style={styles.adText}>Demo Ad Banner</Text>
-        </View>
-      )}
+      {/* 広告バナー（AdMob / Proモード時は非表示） */}
+      <AdBannerComponent />
 
       {/* 記録保存用モーダル */}
       <Modal visible={saveModalVisible} animationType="slide">
@@ -1297,6 +1316,9 @@ export default function HomeScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Proプラン（月額100円）購入モーダル */}
+      <ProSubscriptionModal visible={proModalVisible} onClose={() => setProModalVisible(false)} />
 
     </View>
     </TouchableWithoutFeedback>

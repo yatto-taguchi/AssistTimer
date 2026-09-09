@@ -2,11 +2,12 @@ import React, { useContext, useState, useEffect, useRef } from 'react';
 import { 
   StyleSheet, Text, View, Switch, TouchableOpacity, Modal, 
   TextInput, KeyboardAvoidingView, Platform, ScrollView,
-  LayoutAnimation, UIManager, Vibration 
+  LayoutAnimation, UIManager, Vibration, Linking 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import { AppContext } from '../utils/AppContext';
+import ProSubscriptionModal from '../components/ProSubscriptionModal';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -110,6 +111,7 @@ export default function SettingsScreen() {
   } = useContext(AppContext);
 
   const [ecoModalVisible, setEcoModalVisible] = useState(false);
+  const [proModalVisible, setProModalVisible] = useState(false);
   const [previewSound, setPreviewSound] = useState(null);
   const [playingVoiceKey, setPlayingVoiceKey] = useState(null);
   const [isTestingVibration, setIsTestingVibration] = useState(false);
@@ -919,13 +921,33 @@ export default function SettingsScreen() {
       {/* 4. その他設定グループカード */}
       <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>機能・表示設定</Text>
       <View style={[styles.groupCard, { backgroundColor: cardBgColor, borderColor: cardBorderColor }]}>
-        <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
-          <Text style={[styles.settingText, { color: textColor }]}>Proモード（広告非表示デモ）</Text>
-          <Switch
-            value={isProMode}
-            onValueChange={toggleProMode}
-          />
-        </View>
+        {/* Proプラン（プレミアム会員）行 */}
+        <TouchableOpacity 
+          style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}
+          onPress={() => setProModalVisible(true)}
+          activeOpacity={0.7}
+        >
+          <View style={styles.settingTextContainer}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Text style={{ fontSize: 16, marginRight: 6 }}>👑</Text>
+              <Text style={[styles.settingText, { color: textColor }]}>Proプラン（月額100円）</Text>
+            </View>
+            <Text style={[styles.settingDescription, { color: subTextColor }]}>
+              広告の完全非表示 ＆ 練習記録を無制限に保存
+            </Text>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {isProMode ? (
+              <View style={[styles.summaryBadge, { backgroundColor: '#1C3A27', borderColor: '#34C759', borderWidth: 1 }]}>
+                <Text style={[styles.summaryBadgeText, { color: '#34C759', fontWeight: '700' }]}>有効 ✓</Text>
+              </View>
+            ) : (
+              <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? '#222' : '#E5E5EA' }]}>
+                <Text style={[styles.summaryBadgeText, { color: '#007AFF' }]}>詳細を見る ›</Text>
+              </View>
+            )}
+          </View>
+        </TouchableOpacity>
 
         <View style={[styles.settingRowInCard, { borderBottomWidth: 0 }]}>
           <View style={styles.settingTextContainer}>
@@ -962,6 +984,67 @@ export default function SettingsScreen() {
             trackColor={{ false: '#333', true: '#34C759' }}
           />
         </View>
+      </View>
+
+      {/* 5. 情報・利用規約セクション（Apple審査必須要件） */}
+      <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>情報・規約</Text>
+      <View style={[styles.groupCard, { backgroundColor: cardBgColor, borderColor: cardBorderColor }]}>
+        <TouchableOpacity 
+          style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}
+          onPress={() => Linking.openURL('https://www.apple.com/legal/internet-services/itunes/dev/stdeula/')}
+        >
+          <Text style={[styles.settingText, { color: textColor }]}>利用規約（EULA）</Text>
+          <Ionicons name="chevron-forward" size={18} color={subTextColor} />
+        </TouchableOpacity>
+
+        <TouchableOpacity 
+          style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}
+          onPress={() => Linking.openURL('https://litthairdesign.notion.site/AssistTimer-Privacy-Policy')}
+        >
+          <Text style={[styles.settingText, { color: textColor }]}>プライバシーポリシー</Text>
+          <Ionicons name="chevron-forward" size={18} color={subTextColor} />
+        </TouchableOpacity>
+
+        <TouchableOpacity 
+          style={[styles.settingRowInCard, { borderBottomWidth: 0 }]}
+          onPress={() => setProModalVisible(true)}
+        >
+          <Text style={[styles.settingText, { color: textColor }]}>購入の復元（Restore）</Text>
+          <Ionicons name="chevron-forward" size={18} color={subTextColor} />
+        </TouchableOpacity>
+      </View>
+
+      {/* 6. 最下部 PROモード案内・購入ボタン */}
+      <View style={{ marginTop: 28, marginBottom: 30, alignItems: 'center' }}>
+        {isProMode ? (
+          <TouchableOpacity 
+            style={[styles.proStatusCard, { backgroundColor: isEcoMode ? '#0D2818' : '#1C3A27', borderColor: '#34C759' }]}
+            onPress={() => setProModalVisible(true)}
+            activeOpacity={0.8}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+              <Text style={{ fontSize: 18, marginRight: 6 }}>👑</Text>
+              <Text style={{ color: '#34C759', fontSize: 17, fontWeight: '700' }}>PROモード有効中</Text>
+            </View>
+            <Text style={{ color: '#88D49E', fontSize: 13, textAlign: 'center' }}>
+              広告なし・記録機能の無制限解放が適用されています
+            </Text>
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity 
+            style={[styles.proCtaButton, { shadowColor: '#007AFF' }]}
+            onPress={() => setProModalVisible(true)}
+            activeOpacity={0.85}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+              <Text style={{ fontSize: 20, marginRight: 8 }}>👑</Text>
+              <Text style={styles.proCtaTitle}>PROモードにする</Text>
+            </View>
+            <Text style={styles.proCtaDesc}>
+              広告なし ＆ 記録機能の無制限解放（初月1ヶ月無料・月額100円）
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* エコモード説明モーダル */}
@@ -1012,6 +1095,9 @@ export default function SettingsScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Proプラン（月額100円）購入・管理モーダル */}
+      <ProSubscriptionModal visible={proModalVisible} onClose={() => setProModalVisible(false)} />
 
     </ScrollView>
   );
@@ -1314,6 +1400,40 @@ const styles = StyleSheet.create({
   legendText: {
     fontSize: 10,
     fontWeight: '500',
+  },
+  proCtaButton: {
+    width: '100%',
+    backgroundColor: '#007AFF',
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+  proCtaTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  proCtaDesc: {
+    color: 'rgba(255, 255, 255, 0.9)',
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  proStatusCard: {
+    width: '100%',
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });
 

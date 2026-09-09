@@ -1,6 +1,17 @@
 import React, { createContext, useState, useEffect, useRef } from 'react';
-import { Animated } from 'react-native';
+import { Animated, Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// ネイティブPurchasesモジュールの安全インポート
+let Purchases = null;
+try {
+  Purchases = require('react-native-purchases').default;
+} catch (e) {
+  // ネイティブモジュール未ロード時のフォールバック
+}
+
+// RevenueCat APIキー設定
+export const REVENUECAT_PUBLIC_APPLE_KEY = 'appl_jEzBjFMGADnabxXSYPQqMxFYKXJ';
 
 export const AppContext = createContext();
 
@@ -15,7 +26,7 @@ export const AppProvider = ({ children }) => {
   const [isNormalClockEnabled, setIsNormalClockEnabled] = useState(false); // 通常モードでの時計表示
   const [isNormalBatteryEnabled, setIsNormalBatteryEnabled] = useState(false); // 通常モードでの電池表示
   const [isNormalIndicatorEnabled, setIsNormalIndicatorEnabled] = useState(true); // 通常モードでのタイマーリング表示
-  const [isProMode, setIsProMode] = useState(false); // 課金・広告デモ用
+  const [isProMode, setIsProModeState] = useState(false); // 課金（Proプラン）状態
   const [isColorIndicator, setIsColorIndicator] = useState(true); // カラーインジケーター（10分以下タイマー用）
   const [isCountdownEnabled, setIsCountdownEnabled] = useState(false); // スタート前カウントダウン
   const [countdownSeconds, setCountdownSeconds] = useState(10); // カウントダウン秒数
@@ -163,7 +174,7 @@ export const AppProvider = ({ children }) => {
         if (normalClockVal !== null) setIsNormalClockEnabled(JSON.parse(normalClockVal));
         if (normalBatteryVal !== null) setIsNormalBatteryEnabled(JSON.parse(normalBatteryVal));
         if (normalIndicatorVal !== null) setIsNormalIndicatorEnabled(JSON.parse(normalIndicatorVal));
-        if (proVal !== null) setIsProMode(JSON.parse(proVal));
+        if (proVal !== null) setIsProModeState(JSON.parse(proVal));
         if (colorVal !== null) setIsColorIndicator(JSON.parse(colorVal));
         if (countdownEnabledVal !== null) setIsCountdownEnabled(JSON.parse(countdownEnabledVal));
         if (countdownSecVal !== null) setCountdownSeconds(parseInt(countdownSecVal, 10));
@@ -207,6 +218,27 @@ export const AppProvider = ({ children }) => {
       }
     };
     loadSettings();
+  }, []);
+
+  // RevenueCat の初期化とサブスクリプション状態の自動同期
+  useEffect(() => {
+    const initPurchases = async () => {
+      if (Purchases && REVENUECAT_PUBLIC_APPLE_KEY && REVENUECAT_PUBLIC_APPLE_KEY !== 'appl_placeholder_key') {
+        try {
+          Purchases.configure({ apiKey: REVENUECAT_PUBLIC_APPLE_KEY });
+          const customerInfo = await Purchases.getCustomerInfo();
+          const isPro = typeof customerInfo.entitlements.active['pro'] !== 'undefined' ||
+                        typeof customerInfo.entitlements.active['premium'] !== 'undefined';
+          if (isPro) {
+            setIsProModeState(true);
+            await AsyncStorage.setItem('isProMode', JSON.stringify(true));
+          }
+        } catch (e) {
+          console.log('RevenueCat init error:', e);
+        }
+      }
+    };
+    initPurchases();
   }, []);
 
   // エコモード切替と保存
@@ -265,10 +297,16 @@ export const AppProvider = ({ children }) => {
     await AsyncStorage.setItem('isNormalIndicatorEnabled', JSON.stringify(value));
   };
 
+  // Proモード明示的セット
+  const setIsProMode = async (value) => {
+    setIsProModeState(value);
+    await AsyncStorage.setItem('isProMode', JSON.stringify(value));
+  };
+
   // Proモード切替と保存
   const toggleProMode = async (value) => {
-    setIsProMode(value);
-    await AsyncStorage.setItem('isProMode', JSON.stringify(value));
+    const nextVal = typeof value === 'boolean' ? value : !isProMode;
+    await setIsProMode(nextVal);
   };
 
   // カラーインジケーター切替と保存
@@ -512,6 +550,7 @@ export const AppProvider = ({ children }) => {
         isNormalIndicatorEnabled,
         toggleNormalIndicator,
         isProMode,
+        setIsProMode,
         toggleProMode,
         isColorIndicator,
         toggleColorIndicator,
