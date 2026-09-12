@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useContext } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback, Image, FlatList, Dimensions, AppState, Vibration, LayoutAnimation } from 'react-native';
-const { width: screenWidth } = Dimensions.get('window');
+const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 import { useIsFocused } from '@react-navigation/native';
 import ImageViewer from 'react-native-image-zoom-viewer';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -1271,7 +1271,8 @@ export default function HomeScreen() {
     <TouchableWithoutFeedback onPress={handleScreenPress}>
       <View style={[styles.container, { backgroundColor: bgColor }]}>
         <View style={styles.content}>
-        <View style={styles.timerContainer}>
+          <View style={styles.topBalanceSpacer} pointerEvents="none" />
+          <View style={styles.timerContainer}>
           {(isEcoMode ? isEcoIndicatorEnabled : isNormalIndicatorEnabled) && (
             <RingProgress 
               radius={140} 
@@ -1307,10 +1308,10 @@ export default function HomeScreen() {
             </TouchableOpacity>
           </View>
           
-          {/* 計測中のみ表示される「計測終了」ボタン群 */}
-          {isRunning && (
-            <Animated.View style={{ opacity: controlsOpacity, width: '100%', alignItems: 'center' }}>
-              {isCountUp ? (
+          {/* 下部アクションボタン領域（スタート前後・一時停止時で位置がずれないよう高さを常に確保） */}
+          <View style={styles.bottomActionArea} pointerEvents="box-none">
+            {isRunning ? (
+              isCountUp ? (
                 <View style={styles.splitEndButtonContainer}>
                   <TouchableOpacity 
                     style={[styles.splitEndButtonHalf, { backgroundColor: '#34C759' }]} 
@@ -1334,16 +1335,13 @@ export default function HomeScreen() {
                 <TouchableOpacity style={styles.endMeasurementButton} onPress={handleOpenSaveModal}>
                   <Text style={[styles.buttonText, { fontWeight: 'bold' }]}>計測終了</Text>
                 </TouchableOpacity>
-              )}
-            </Animated.View>
-          )}
-
-          {/* 記録ボタンは一時停止中か、カウントアップ中に表示 */}
-          {!isRunning && !isPreCountingDown && remainingTime !== targetTime && (
-            <TouchableOpacity style={styles.saveActionButton} onPress={handleOpenSaveModal}>
-              <Text style={styles.saveActionText}>記録・保存する</Text>
-            </TouchableOpacity>
-          )}
+              )
+            ) : !isPreCountingDown && remainingTime !== targetTime ? (
+              <TouchableOpacity style={styles.saveActionButton} onPress={handleOpenSaveModal}>
+                <Text style={styles.saveActionText}>記録・保存する</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
         </Animated.View>
 
       </View>
@@ -2382,10 +2380,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  topBalanceSpacer: {
+    height: screenHeight < 700 ? 0 : 84, // bottomActionArea (height 64 + marginTop 20) と釣り合わせ、タイマー位置をスタート前（画像1）の落ち着いた中央位置に完全一致させる
+  },
   timerContainer: {
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 60,
+    marginBottom: screenHeight < 700 ? 30 : 60,
   },
   timeTextContainer: {
     position: 'absolute',
@@ -2407,6 +2408,13 @@ const styles = StyleSheet.create({
     gap: 20,
     marginBottom: 30, // saveボタンなどの余白
   },
+  bottomActionArea: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 64, // 計測終了ボタンの高さに合わせて固定領域を確保し、スタート前後の位置ズレを防止
+    marginTop: 20,
+  },
   button: {
     backgroundColor: '#007AFF', // ブルー
     paddingVertical: 15,
@@ -2423,9 +2431,11 @@ const styles = StyleSheet.create({
   },
   saveActionButton: {
     backgroundColor: '#34C759', // グリーン
-    paddingVertical: 15,
+    height: 54,
     paddingHorizontal: 40,
     borderRadius: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   saveActionText: {
     color: '#fff',
@@ -2435,12 +2445,12 @@ const styles = StyleSheet.create({
   },
   endMeasurementButton: {
     backgroundColor: '#FF3B30', // 赤色
-    paddingVertical: 20,
+    height: 64,
     paddingHorizontal: 40,
     borderRadius: 10,
-    marginTop: 20,
     width: 280, // 上のボタン2つ分と左右の幅を揃える
     alignItems: 'center',
+    justifyContent: 'center',
     elevation: 3,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
@@ -2450,7 +2460,7 @@ const styles = StyleSheet.create({
   splitEndButtonContainer: {
     flexDirection: 'row',
     width: 280,
-    marginTop: 20,
+    height: 64,
     borderRadius: 10,
     overflow: 'hidden',
     elevation: 3,
@@ -2461,7 +2471,7 @@ const styles = StyleSheet.create({
   },
   splitEndButtonHalf: {
     flex: 1,
-    paddingVertical: 15,
+    paddingVertical: 12,
     alignItems: 'center',
     justifyContent: 'center',
   },
