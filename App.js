@@ -1,6 +1,6 @@
 import React, { useContext } from 'react';
-import { Animated } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
+import { Animated, View } from 'react-native';
+import { NavigationContainer, DefaultTheme, DarkTheme } from '@react-navigation/native';
 import { createBottomTabNavigator, BottomTabBar } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 import { StatusBar } from 'expo-status-bar';
@@ -20,19 +20,39 @@ function MainTabs() {
     isEcoNavIconEnabled, 
     isEcoNavActiveDot, 
     isEcoBorderEnabled,
+    isNormalStatusBarEnabled,
+    isNormalStatusBarAutoHide,
     controlsOpacity,
     controlsVisible
   } = useContext(AppContext);
 
+  // ステータスバーの非表示判定:
+  // エコモード時は常に非表示
+  // 通常モード時は、ステータスバー無効時または「自動で消す」有効かつUIフェードアウト時にスッと非表示
+  const isStatusBarHidden = isEcoMode 
+    ? true 
+    : (!isNormalStatusBarEnabled || (isNormalStatusBarAutoHide && !controlsVisible));
+
+  const appBgColor = isEcoMode ? '#000000' : '#F5F5F5';
+
   return (
-    <>
-      <StatusBar hidden={isEcoMode} style={isEcoMode ? "light" : "auto"} />
+    <View style={{ flex: 1, backgroundColor: appBgColor }}>
+      <StatusBar 
+        hidden={isStatusBarHidden} 
+        animated={true} 
+        hideTransitionAnimation="fade" 
+        style={isEcoMode ? "light" : "auto"} 
+      />
       <CustomBatteryIndicator />
       <Tab.Navigator
         initialRouteName="Home"
+        sceneContainerStyle={{ backgroundColor: appBgColor }}
         tabBar={(props) => (
           <Animated.View
-            style={{ opacity: controlsOpacity }}
+            style={{ 
+              opacity: controlsOpacity,
+              backgroundColor: isEcoMode ? '#000000' : '#FFFFFF'
+            }}
             pointerEvents={controlsVisible ? 'auto' : 'none'}
           >
             <BottomTabBar {...props} />
@@ -93,16 +113,33 @@ function MainTabs() {
         options={{ title: '設定' }}
       />
     </Tab.Navigator>
-    </>
+    </View>
+  );
+}
+
+function AppContent() {
+  const { isEcoMode } = useContext(AppContext);
+  const baseTheme = isEcoMode ? DarkTheme : DefaultTheme;
+  const navTheme = {
+    ...baseTheme,
+    colors: {
+      ...baseTheme.colors,
+      background: isEcoMode ? '#000000' : '#F5F5F5',
+      card: isEcoMode ? '#000000' : '#FFFFFF',
+    },
+  };
+
+  return (
+    <NavigationContainer theme={navTheme}>
+      <MainTabs />
+    </NavigationContainer>
   );
 }
 
 export default function App() {
   return (
     <AppProvider>
-      <NavigationContainer>
-        <MainTabs />
-      </NavigationContainer>
+      <AppContent />
     </AppProvider>
   );
 }

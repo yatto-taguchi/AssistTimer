@@ -8,7 +8,6 @@ export default function CustomBatteryIndicator() {
   const { 
     isEcoMode, 
     isEcoClockEnabled, isEcoBatteryEnabled,
-    isNormalClockEnabled, isNormalBatteryEnabled,
     controlsOpacity
   } = useContext(AppContext);
   const [batteryLevel, setBatteryLevel] = useState(null);
@@ -45,8 +44,13 @@ export default function CustomBatteryIndicator() {
     return () => clearInterval(interval);
   }, []);
 
-  const showClock = isEcoMode ? isEcoClockEnabled : isNormalClockEnabled;
-  const showBattery = isEcoMode ? isEcoBatteryEnabled : isNormalBatteryEnabled;
+  // 通常モードはOS標準ステータスバーがあるため、CustomBatteryIndicatorはエコモード専用
+  if (!isEcoMode) {
+    return null;
+  }
+
+  const showClock = isEcoClockEnabled;
+  const showBattery = isEcoBatteryEnabled;
 
   if (!showClock && !showBattery) {
     return null;
@@ -76,15 +80,15 @@ export default function CustomBatteryIndicator() {
     >
       {/* 左側のドット（記録一覧）の上：時刻 */}
       <View style={styles.leftSide}>
-        {showClock && <Text style={[styles.text, !isEcoMode && { color: '#666' }]}>{timeStr}</Text>}
+        {showClock && <Text style={styles.text}>{timeStr}</Text>}
       </View>
 
       {/* 右側のドット（設定）の上：電池残量 */}
       <View style={styles.rightSide}>
         {showBattery && percentage !== null && (
           <>
-            <Ionicons name={iconName} size={14} color={isEcoMode ? "#aaa" : "#666"} />
-            <Text style={[styles.text, !isEcoMode && { color: '#666' }]}>{percentage}%</Text>
+            <Ionicons name={iconName} size={14} color="#aaa" />
+            <Text style={styles.text}>{percentage}%</Text>
           </>
         )}
       </View>

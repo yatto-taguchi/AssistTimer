@@ -7,6 +7,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 // 必要なモジュールのインポート
 import { Audio } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
+import { Ionicons } from '@expo/vector-icons';
 import RingProgress from '../components/RingProgress';
 import { AppContext } from '../utils/AppContext';
 import { saveRecord, getRecords } from '../utils/recordStorage';
@@ -60,7 +61,7 @@ const VOICE_SOUNDS = {
   over_15min: require('../../assets/voice_over_15min.wav'),
 };
 
-export default function HomeScreen() {
+export default function HomeScreen({ navigation }) {
   const DEFAULT_SECONDS = 180; // モック: 3分のテスト用
   const [targetTime, setTargetTime] = useState(DEFAULT_SECONDS);
   const [remainingTime, setRemainingTime] = useState(DEFAULT_SECONDS);
@@ -125,6 +126,9 @@ export default function HomeScreen() {
     isCountdownEnabled, toggleCountdownEnabled, 
     countdownSeconds, saveCountdownSeconds,
     alarmSoundType, playsInSilentMode,
+    isAlarmSoundEnabled, toggleAlarmSoundEnabled,
+    isVoiceMasterEnabled, toggleVoiceMasterEnabled,
+    isCountUpEnabled, toggleCountUpEnabled,
     isVibrationEnabled, isVibration3SecOnly,
     vibrationIntensity,
     isVibPrepEnabled, isVibWarningEnabled,
@@ -252,8 +256,8 @@ export default function HomeScreen() {
   // 初回起動時のサウンドロード等と再生用関数
   const playAlarm = async () => {
     triggerVibration('finish');
-    if (alarmSoundType === 'none') {
-      console.log('Alarm sound is set to none (silent)');
+    if (!isAlarmSoundEnabled || alarmSoundType === 'none') {
+      console.log('Alarm sound is muted or set to none (silent)');
       return;
     }
     try {
@@ -275,6 +279,10 @@ export default function HomeScreen() {
   };
 
   const playVoice = async (key) => {
+    if (!isVoiceMasterEnabled) {
+      console.log('Voice announcement is muted by master switch');
+      return;
+    }
     try {
       if (voiceSound) {
         await voiceSound.unloadAsync();
@@ -411,16 +419,28 @@ export default function HomeScreen() {
             const nextTime = Math.max(0, Math.ceil(diffMs / 1000));
 
             if (diffMs <= 0) {
-              isCountUpRef.current = true;
-              setIsCountUp(true);
-              overStartTimeRef.current = targetEndTimeRef.current;
-              triggeredOverVoicesRef.current.clear();
-              const overTime = Math.max(0, Math.floor((now - targetEndTimeRef.current) / 1000));
-              remainingTimeRef.current = overTime;
-              setRemainingTime(overTime);
               if (!triggeredVoicesRef.current.has('alarm')) {
                 triggeredVoicesRef.current.add('alarm');
                 playAlarm();
+              }
+              if (isCountUpEnabled) {
+                isCountUpRef.current = true;
+                setIsCountUp(true);
+                overStartTimeRef.current = targetEndTimeRef.current;
+                triggeredOverVoicesRef.current.clear();
+                const overTime = Math.max(0, Math.floor((now - targetEndTimeRef.current) / 1000));
+                remainingTimeRef.current = overTime;
+                setRemainingTime(overTime);
+              } else {
+                isCountUpRef.current = false;
+                setIsCountUp(false);
+                isRunningRef.current = false;
+                setIsRunning(false);
+                targetEndTimeRef.current = null;
+                overStartTimeRef.current = null;
+                remainingTimeRef.current = 0;
+                setRemainingTime(0);
+                resetControlsVisible();
               }
             } else {
               remainingTimeRef.current = nextTime;
@@ -568,16 +588,28 @@ export default function HomeScreen() {
 
           // 0秒到達（タイムアップ）
           if (diffMs <= 0) {
-            isCountUpRef.current = true;
-            setIsCountUp(true);
-            overStartTimeRef.current = targetEndTimeRef.current || now;
-            triggeredOverVoicesRef.current.clear();
             if (!triggeredVoicesRef.current.has('alarm')) {
               triggeredVoicesRef.current.add('alarm');
               playAlarm();
             }
-            remainingTimeRef.current = 0;
-            setRemainingTime(0);
+            if (isCountUpEnabled) {
+              isCountUpRef.current = true;
+              setIsCountUp(true);
+              overStartTimeRef.current = targetEndTimeRef.current || now;
+              triggeredOverVoicesRef.current.clear();
+              remainingTimeRef.current = 0;
+              setRemainingTime(0);
+            } else {
+              isCountUpRef.current = false;
+              setIsCountUp(false);
+              isRunningRef.current = false;
+              setIsRunning(false);
+              targetEndTimeRef.current = null;
+              overStartTimeRef.current = null;
+              remainingTimeRef.current = 0;
+              setRemainingTime(0);
+              resetControlsVisible();
+            }
           }
         } else {
           const overMs = now - (overStartTimeRef.current || now);
@@ -623,7 +655,7 @@ export default function HomeScreen() {
     }
     return () => clearInterval(timerRef.current);
   }, [
-    isRunning, isCountUp, 
+    isRunning, isCountUp, isCountUpEnabled, isVoiceMasterEnabled, isAlarmSoundEnabled,
     isVoice5MinEnabled, isVoice3MinEnabled, isVoice1MinEnabled, isVoice30SecEnabled, isVoice10SecEnabled, isVoiceFinishEnabled,
     isOverVoiceStartEnabled, isOverVoice1MinEnabled, isOverVoice3MinEnabled, isOverVoice5MinEnabled, isOverVoice10MinEnabled, isOverVoice15MinEnabled,
     alarmSoundType, playsInSilentMode, isVibrationEnabled, isVibration3SecOnly,
@@ -1267,11 +1299,168 @@ export default function HomeScreen() {
     extrapolate: 'clamp',
   });
 
+  // クイックアクセスボタン用ハンドラー（触覚フィードバック＋トグル）
+  const handleToggleCountdown = () => {
+    Vibration.vibrate(30);
+    toggleCountdownEnabled();
+  };
+
+  const handleOpenCountdownDirectly = () => {
+    Vibration.vibrate(50);
+    setTimeModalMode('countdown');
+    setTimeModalVisible(true);
+  };
+
+  const handleToggleCountUp = () => {
+    Vibration.vibrate(30);
+    toggleCountUpEnabled();
+  };
+
+  const handleToggleVoice = () => {
+    Vibration.vibrate(30);
+    toggleVoiceMasterEnabled();
+  };
+
+  const handleToggleAlarm = () => {
+    Vibration.vibrate(30);
+    toggleAlarmSoundEnabled();
+  };
+
+  const handleLongPressToSettings = (targetSection) => {
+    Vibration.vibrate(50);
+    if (navigation && navigation.navigate) {
+      navigation.navigate('Settings', { scrollTo: targetSection });
+    }
+  };
+
   return (
     <TouchableWithoutFeedback onPress={handleScreenPress}>
       <View style={[styles.container, { backgroundColor: bgColor }]}>
         <View style={styles.content}>
-          <View style={styles.topBalanceSpacer} pointerEvents="none" />
+          {/* タイマー上部クイックアクセスバー ＆ バランサー領域 */}
+          <View style={styles.topBalanceContainer}>
+            <Animated.View 
+              style={[
+                styles.quickAccessBarWrapper, 
+                { opacity: controlsOpacity }
+              ]} 
+              pointerEvents={controlsVisible ? 'auto' : 'none'}
+            >
+              <View style={[
+                styles.quickAccessBar, 
+                { 
+                  backgroundColor: isEcoMode ? '#1C1C1E' : '#F2F2F7', 
+                  borderColor: isEcoMode ? '#2C2C2E' : '#E5E5EA' 
+                }
+              ]}>
+                {/* 1. 準備時間 */}
+                <TouchableOpacity 
+                  style={[
+                    styles.quickAccessButton, 
+                    isCountdownEnabled && (isEcoMode ? styles.quickAccessButtonActiveEco : styles.quickAccessButtonActive)
+                  ]} 
+                  onPress={handleToggleCountdown} 
+                  onLongPress={handleOpenCountdownDirectly}
+                  delayLongPress={350}
+                  activeOpacity={0.7}
+                  disabled={!controlsVisible || isRunning || isPreCountingDown}
+                >
+                  <Ionicons 
+                    name="hourglass-outline" 
+                    size={17} 
+                    color={isCountdownEnabled ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#666' : '#8E8E93')} 
+                  />
+                  <Text style={[
+                    styles.quickAccessLabel, 
+                    { color: isCountdownEnabled ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#666' : '#8E8E93') }
+                  ]}>
+                    準備
+                  </Text>
+                </TouchableOpacity>
+
+                <View style={[styles.quickAccessDivider, { backgroundColor: isEcoMode ? '#2C2C2E' : '#E0E0E5' }]} />
+
+                {/* 2. カウントアップ */}
+                <TouchableOpacity 
+                  style={[
+                    styles.quickAccessButton, 
+                    isCountUpEnabled && (isEcoMode ? styles.quickAccessButtonActiveEco : styles.quickAccessButtonActive)
+                  ]} 
+                  onPress={handleToggleCountUp} 
+                  onLongPress={() => handleLongPressToSettings('overtime')}
+                  delayLongPress={350}
+                  activeOpacity={0.7}
+                  disabled={!controlsVisible || isRunning || isPreCountingDown}
+                >
+                  <Ionicons 
+                    name="trending-up-outline" 
+                    size={17} 
+                    color={isCountUpEnabled ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#666' : '#8E8E93')} 
+                  />
+                  <Text style={[
+                    styles.quickAccessLabel, 
+                    { color: isCountUpEnabled ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#666' : '#8E8E93') }
+                  ]}>
+                    アップ
+                  </Text>
+                </TouchableOpacity>
+
+                <View style={[styles.quickAccessDivider, { backgroundColor: isEcoMode ? '#2C2C2E' : '#E0E0E5' }]} />
+
+                {/* 3. 音声 */}
+                <TouchableOpacity 
+                  style={[
+                    styles.quickAccessButton, 
+                    isVoiceMasterEnabled && (isEcoMode ? styles.quickAccessButtonActiveEco : styles.quickAccessButtonActive)
+                  ]} 
+                  onPress={handleToggleVoice} 
+                  onLongPress={() => handleLongPressToSettings('voice')}
+                  delayLongPress={350}
+                  activeOpacity={0.7}
+                  disabled={!controlsVisible}
+                >
+                  <Ionicons 
+                    name={isVoiceMasterEnabled ? "megaphone-outline" : "volume-mute-outline"} 
+                    size={17} 
+                    color={isVoiceMasterEnabled ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#666' : '#8E8E93')} 
+                  />
+                  <Text style={[
+                    styles.quickAccessLabel, 
+                    { color: isVoiceMasterEnabled ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#666' : '#8E8E93') }
+                  ]}>
+                    音声
+                  </Text>
+                </TouchableOpacity>
+
+                <View style={[styles.quickAccessDivider, { backgroundColor: isEcoMode ? '#2C2C2E' : '#E0E0E5' }]} />
+
+                {/* 4. アラーム */}
+                <TouchableOpacity 
+                  style={[
+                    styles.quickAccessButton, 
+                    (isAlarmSoundEnabled && alarmSoundType !== 'none') && (isEcoMode ? styles.quickAccessButtonActiveEco : styles.quickAccessButtonActive)
+                  ]} 
+                  onPress={handleToggleAlarm} 
+                  onLongPress={() => handleLongPressToSettings('alarm')}
+                  delayLongPress={350}
+                  activeOpacity={0.7}
+                  disabled={!controlsVisible}
+                >
+                  <Ionicons 
+                    name={(isAlarmSoundEnabled && alarmSoundType !== 'none') ? "notifications-outline" : "notifications-off-outline"} 
+                    size={17} 
+                    color={(isAlarmSoundEnabled && alarmSoundType !== 'none') ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#666' : '#8E8E93')} 
+                  />
+                  <Text style={[
+                    styles.quickAccessLabel, 
+                    { color: (isAlarmSoundEnabled && alarmSoundType !== 'none') ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#666' : '#8E8E93') }
+                  ]}>
+                    アラーム
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </Animated.View>
+          </View>
           <View style={styles.timerContainer}>
           {(isEcoMode ? isEcoIndicatorEnabled : isNormalIndicatorEnabled) && (
             <RingProgress 
@@ -2380,8 +2569,58 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  topBalanceSpacer: {
-    height: screenHeight < 700 ? 0 : 84, // bottomActionArea (height 64 + marginTop 20) と釣り合わせ、タイマー位置をスタート前（画像1）の落ち着いた中央位置に完全一致させる
+  topBalanceContainer: {
+    height: screenHeight < 700 ? 54 : 84, // bottomActionArea (height 64 + marginTop 20 = 84) と釣り合わせ、タイマー位置をスタート前の中央位置に完全一致させる
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quickAccessBarWrapper: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  quickAccessBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 4,
+    paddingHorizontal: 6,
+    borderRadius: 22,
+    borderWidth: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  quickAccessButton: {
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 4,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    minWidth: 52,
+  },
+  quickAccessButtonActive: {
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  quickAccessButtonActiveEco: {
+    backgroundColor: '#2C2C2E',
+  },
+  quickAccessLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  quickAccessDivider: {
+    width: 1,
+    height: 18,
+    marginHorizontal: 1,
   },
   timerContainer: {
     justifyContent: 'center',

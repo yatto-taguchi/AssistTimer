@@ -23,8 +23,8 @@ export const AppProvider = ({ children }) => {
   const [isEcoNavActiveDot, setIsEcoNavActiveDot] = useState(false); // アイコン表示時、選択中のみ点にする
   const [isEcoBorderEnabled, setIsEcoBorderEnabled] = useState(false); // trueで境界線あり、falseでなし
   const [isEcoIndicatorEnabled, setIsEcoIndicatorEnabled] = useState(true); // エコモードでのタイマーリング表示
-  const [isNormalClockEnabled, setIsNormalClockEnabled] = useState(false); // 通常モードでの時計表示
-  const [isNormalBatteryEnabled, setIsNormalBatteryEnabled] = useState(false); // 通常モードでの電池表示
+  const [isNormalStatusBarEnabled, setIsNormalStatusBarEnabled] = useState(true); // 通常モードでのステータスバー（時計・電池）表示
+  const [isNormalStatusBarAutoHide, setIsNormalStatusBarAutoHide] = useState(true); // 通常モードでのタイマー作動中ステータスバー自動非表示
   const [isNormalIndicatorEnabled, setIsNormalIndicatorEnabled] = useState(true); // 通常モードでのタイマーリング表示
   const [isProMode, setIsProModeState] = useState(false); // 課金（Proプラン）状態
   const [isColorIndicator, setIsColorIndicator] = useState(true); // カラーインジケーター（10分以下タイマー用）
@@ -33,6 +33,9 @@ export const AppProvider = ({ children }) => {
   const [hasSeenEcoExplanation, setHasSeenEcoExplanation] = useState(false); // エコモード説明モーダル閲覧済みフラグ
 
   const [alarmSoundType, setAlarmSoundType] = useState('digital'); // 'digital' | 'bell' | 'buzzer' | 'kitchen' | 'fast' | 'gong' | 'none'
+  const [isAlarmSoundEnabled, setIsAlarmSoundEnabled] = useState(true); // アラーム音のマスター有効/無効
+  const [isVoiceMasterEnabled, setIsVoiceMasterEnabled] = useState(true); // 音声アナウンス全体のマスター有効/無効
+  const [isCountUpEnabled, setIsCountUpEnabled] = useState(true); // カウントアップ（超過時間計測）有効/無効
   const [playsInSilentMode, setPlaysInSilentMode] = useState(true); // マナーモード時でも鳴らす
   const [isVibrationEnabled, setIsVibrationEnabled] = useState(true); // バイブレーション（振動）全体有効/無効
   const [isVibration3SecOnly, setIsVibration3SecOnly] = useState(true); // タイムアップ時3秒で自動停止
@@ -121,8 +124,8 @@ export const AppProvider = ({ children }) => {
         const ecoNavActiveDotVal = await AsyncStorage.getItem('isEcoNavActiveDot');
         const ecoBorderVal = await AsyncStorage.getItem('isEcoBorderEnabled');
         const ecoIndicatorVal = await AsyncStorage.getItem('isEcoIndicatorEnabled');
-        const normalClockVal = await AsyncStorage.getItem('isNormalClockEnabled');
-        const normalBatteryVal = await AsyncStorage.getItem('isNormalBatteryEnabled');
+        const normalStatusBarVal = await AsyncStorage.getItem('isNormalStatusBarEnabled');
+        const normalStatusBarAutoHideVal = await AsyncStorage.getItem('isNormalStatusBarAutoHide');
         const normalIndicatorVal = await AsyncStorage.getItem('isNormalIndicatorEnabled');
         const proVal = await AsyncStorage.getItem('isProMode');
         const colorVal = await AsyncStorage.getItem('isColorIndicator');
@@ -130,6 +133,9 @@ export const AppProvider = ({ children }) => {
         const countdownSecVal = await AsyncStorage.getItem('countdownSeconds');
         const seenEcoVal = await AsyncStorage.getItem('hasSeenEcoExplanation');
         const soundTypeVal = await AsyncStorage.getItem('alarmSoundType');
+        const alarmSoundEnabledVal = await AsyncStorage.getItem('isAlarmSoundEnabled');
+        const voiceMasterVal = await AsyncStorage.getItem('isVoiceMasterEnabled');
+        const countUpVal = await AsyncStorage.getItem('isCountUpEnabled');
         const silentModeVal = await AsyncStorage.getItem('playsInSilentMode');
         const vibrationVal = await AsyncStorage.getItem('isVibrationEnabled');
         const vibration3SecVal = await AsyncStorage.getItem('isVibration3SecOnly');
@@ -171,8 +177,8 @@ export const AppProvider = ({ children }) => {
         if (ecoNavActiveDotVal !== null) setIsEcoNavActiveDot(JSON.parse(ecoNavActiveDotVal));
         if (ecoBorderVal !== null) setIsEcoBorderEnabled(JSON.parse(ecoBorderVal));
         if (ecoIndicatorVal !== null) setIsEcoIndicatorEnabled(JSON.parse(ecoIndicatorVal));
-        if (normalClockVal !== null) setIsNormalClockEnabled(JSON.parse(normalClockVal));
-        if (normalBatteryVal !== null) setIsNormalBatteryEnabled(JSON.parse(normalBatteryVal));
+        if (normalStatusBarVal !== null) setIsNormalStatusBarEnabled(JSON.parse(normalStatusBarVal));
+        if (normalStatusBarAutoHideVal !== null) setIsNormalStatusBarAutoHide(JSON.parse(normalStatusBarAutoHideVal));
         if (normalIndicatorVal !== null) setIsNormalIndicatorEnabled(JSON.parse(normalIndicatorVal));
         if (proVal !== null) setIsProModeState(JSON.parse(proVal));
         if (colorVal !== null) setIsColorIndicator(JSON.parse(colorVal));
@@ -180,6 +186,9 @@ export const AppProvider = ({ children }) => {
         if (countdownSecVal !== null) setCountdownSeconds(parseInt(countdownSecVal, 10));
         if (seenEcoVal !== null) setHasSeenEcoExplanation(JSON.parse(seenEcoVal));
         if (soundTypeVal !== null) setAlarmSoundType(soundTypeVal);
+        if (alarmSoundEnabledVal !== null) setIsAlarmSoundEnabled(JSON.parse(alarmSoundEnabledVal));
+        if (voiceMasterVal !== null) setIsVoiceMasterEnabled(JSON.parse(voiceMasterVal));
+        if (countUpVal !== null) setIsCountUpEnabled(JSON.parse(countUpVal));
         if (silentModeVal !== null) setPlaysInSilentMode(JSON.parse(silentModeVal));
         if (vibrationVal !== null) setIsVibrationEnabled(JSON.parse(vibrationVal));
         if (vibration3SecVal !== null) setIsVibration3SecOnly(JSON.parse(vibration3SecVal));
@@ -282,14 +291,14 @@ export const AppProvider = ({ children }) => {
     await AsyncStorage.setItem('isEcoIndicatorEnabled', JSON.stringify(value));
   };
 
-  const toggleNormalClock = async (value) => {
-    setIsNormalClockEnabled(value);
-    await AsyncStorage.setItem('isNormalClockEnabled', JSON.stringify(value));
+  const toggleNormalStatusBar = async (value) => {
+    setIsNormalStatusBarEnabled(value);
+    await AsyncStorage.setItem('isNormalStatusBarEnabled', JSON.stringify(value));
   };
 
-  const toggleNormalBattery = async (value) => {
-    setIsNormalBatteryEnabled(value);
-    await AsyncStorage.setItem('isNormalBatteryEnabled', JSON.stringify(value));
+  const toggleNormalStatusBarAutoHide = async (value) => {
+    setIsNormalStatusBarAutoHide(value);
+    await AsyncStorage.setItem('isNormalStatusBarAutoHide', JSON.stringify(value));
   };
 
   const toggleNormalIndicator = async (value) => {
@@ -332,6 +341,27 @@ export const AppProvider = ({ children }) => {
   const toggleAlarmSoundType = async (type) => {
     setAlarmSoundType(type);
     await AsyncStorage.setItem('alarmSoundType', type);
+  };
+
+  // アラーム音全体の有効/無効切替と保存
+  const toggleAlarmSoundEnabled = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isAlarmSoundEnabled;
+    setIsAlarmSoundEnabled(nextVal);
+    await AsyncStorage.setItem('isAlarmSoundEnabled', JSON.stringify(nextVal));
+  };
+
+  // 音声アナウンス全体の有効/無効切替と保存
+  const toggleVoiceMasterEnabled = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isVoiceMasterEnabled;
+    setIsVoiceMasterEnabled(nextVal);
+    await AsyncStorage.setItem('isVoiceMasterEnabled', JSON.stringify(nextVal));
+  };
+
+  // カウントアップ（超過時間計測）の有効/無効切替と保存
+  const toggleCountUpEnabled = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isCountUpEnabled;
+    setIsCountUpEnabled(nextVal);
+    await AsyncStorage.setItem('isCountUpEnabled', JSON.stringify(nextVal));
   };
 
   // マナーモード時再生切替と保存
@@ -543,10 +573,10 @@ export const AppProvider = ({ children }) => {
         toggleEcoBorder,
         isEcoIndicatorEnabled,
         toggleEcoIndicator,
-        isNormalClockEnabled,
-        toggleNormalClock,
-        isNormalBatteryEnabled,
-        toggleNormalBattery,
+        isNormalStatusBarEnabled,
+        toggleNormalStatusBar,
+        isNormalStatusBarAutoHide,
+        toggleNormalStatusBarAutoHide,
         isNormalIndicatorEnabled,
         toggleNormalIndicator,
         isProMode,
@@ -560,6 +590,12 @@ export const AppProvider = ({ children }) => {
         saveCountdownSeconds,
         alarmSoundType,
         toggleAlarmSoundType,
+        isAlarmSoundEnabled,
+        toggleAlarmSoundEnabled,
+        isVoiceMasterEnabled,
+        toggleVoiceMasterEnabled,
+        isCountUpEnabled,
+        toggleCountUpEnabled,
         playsInSilentMode,
         togglePlaysInSilentMode,
         isVibrationEnabled,

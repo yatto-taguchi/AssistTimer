@@ -60,7 +60,7 @@ const VOICE_SAMPLES = {
   o_15min: require('../../assets/voice_over_15min.wav'),
 };
 
-export default function SettingsScreen() {
+export default function SettingsScreen({ route }) {
   const { 
     isEcoMode, toggleEcoMode, 
     isEcoClockEnabled, toggleEcoClock,
@@ -69,8 +69,8 @@ export default function SettingsScreen() {
     isEcoNavActiveDot, toggleEcoNavActiveDot,
     isEcoBorderEnabled, toggleEcoBorder,
     isEcoIndicatorEnabled, toggleEcoIndicator,
-    isNormalClockEnabled, toggleNormalClock,
-    isNormalBatteryEnabled, toggleNormalBattery,
+    isNormalStatusBarEnabled, toggleNormalStatusBar,
+    isNormalStatusBarAutoHide, toggleNormalStatusBarAutoHide,
     isNormalIndicatorEnabled, toggleNormalIndicator,
     isProMode, toggleProMode, 
     isColorIndicator, toggleColorIndicator,
@@ -152,6 +152,31 @@ export default function SettingsScreen() {
   const [isMainVoiceOpen, setIsMainVoiceOpen] = useState(false);
   const [isPrepVoiceOpen, setIsPrepVoiceOpen] = useState(false);
   const [isOverVoiceOpen, setIsOverVoiceOpen] = useState(false);
+  const scrollViewRef = useRef(null);
+
+  // タイマー画面のクイックアクセスバー長押しからの遷移時、該当アコーディオンを自動展開＆スクロール
+  useEffect(() => {
+    if (route?.params?.scrollTo) {
+      const target = route.params.scrollTo;
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      if (target === 'alarm') {
+        setIsAlarmSoundOpen(true);
+        setTimeout(() => {
+          scrollViewRef.current?.scrollTo({ y: 460, animated: true });
+        }, 200);
+      } else if (target === 'voice') {
+        setIsMainVoiceOpen(true);
+        setTimeout(() => {
+          scrollViewRef.current?.scrollTo({ y: 550, animated: true });
+        }, 200);
+      } else if (target === 'overtime') {
+        setIsOverVoiceOpen(true);
+        setTimeout(() => {
+          scrollViewRef.current?.scrollTo({ y: 640, animated: true });
+        }, 200);
+      }
+    }
+  }, [route?.params?.scrollTo]);
 
   const toggleAccordion = (setter) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -336,6 +361,7 @@ export default function SettingsScreen() {
 
   return (
     <ScrollView 
+      ref={scrollViewRef}
       style={[styles.container, { backgroundColor: bgColor }]}
       contentContainerStyle={styles.scrollContent}
       showsVerticalScrollIndicator={false}
@@ -436,27 +462,29 @@ export default function SettingsScreen() {
       <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>通常モード設定</Text>
       <View style={[styles.groupCard, { backgroundColor: cardBgColor, borderColor: cardBorderColor }]}>
         <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
-          <Text style={[styles.settingText, { color: textColor }]}>└ 時計を表示</Text>
+          <Text style={[styles.settingText, { color: textColor }]}>ステータスバー（時計・電池）を表示</Text>
           <Switch
-            value={isNormalClockEnabled}
-            onValueChange={toggleNormalClock}
+            value={isNormalStatusBarEnabled}
+            onValueChange={toggleNormalStatusBar}
             trackColor={{ false: '#333', true: '#34C759' }}
             style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
           />
         </View>
 
-        <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
-          <Text style={[styles.settingText, { color: textColor }]}>└ 電池残量を表示</Text>
-          <Switch
-            value={isNormalBatteryEnabled}
-            onValueChange={toggleNormalBattery}
-            trackColor={{ false: '#333', true: '#34C759' }}
-            style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
-          />
-        </View>
+        {isNormalStatusBarEnabled && (
+          <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor, paddingLeft: 24 }]}>
+            <Text style={[styles.settingText, { color: subTextColor }]}>└ タイマー作動中は自動で消す</Text>
+            <Switch
+              value={isNormalStatusBarAutoHide}
+              onValueChange={toggleNormalStatusBarAutoHide}
+              trackColor={{ false: '#333', true: '#34C759' }}
+              style={{ transform: [{ scaleX: 0.75 }, { scaleY: 0.75 }] }}
+            />
+          </View>
+        )}
 
         <View style={[styles.settingRowInCard, { borderBottomWidth: 0 }]}>
-          <Text style={[styles.settingText, { color: textColor }]}>└ タイマーリングを表示</Text>
+          <Text style={[styles.settingText, { color: textColor }]}>タイマーリングを表示</Text>
           <Switch
             value={isNormalIndicatorEnabled}
             onValueChange={toggleNormalIndicator}
