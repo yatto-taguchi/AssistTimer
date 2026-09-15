@@ -1470,6 +1470,8 @@ export default function HomeScreen({ navigation }) {
               color={ringColor}
               backgroundColor={ringBgColor}
               fillColor="transparent"
+              isIdle={!isRunning && !isPreCountingDown && !isCountUp && remainingTime === targetTime}
+              isEcoMode={isEcoMode}
             />
           )}
           <View style={styles.timeTextContainer}>
