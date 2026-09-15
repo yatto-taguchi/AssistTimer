@@ -10,23 +10,53 @@ export default function CustomBatteryIndicator() {
     isEcoClockEnabled, isEcoBatteryEnabled,
     controlsOpacity
   } = useContext(AppContext);
-  const [batteryLevel, setBatteryLevel] = useState(null);
+  const [batteryLevel, setBatteryLevel] = useState(1.0);
   const [timeStr, setTimeStr] = useState('');
 
   // 電池残量の取得
   useEffect(() => {
     let subscription;
-    const initBattery = async () => {
-      const level = await Battery.getBatteryLevelAsync();
-      if (level >= 0) setBatteryLevel(level);
-      
-      subscription = Battery.addBatteryLevelListener(({ batteryLevel }) => {
-        if (batteryLevel >= 0) setBatteryLevel(batteryLevel);
-      });
+    let isMounted = true;
+
+    const fetchBattery = async () => {
+      try {
+        const level = await Battery.getBatteryLevelAsync();
+        if (!isMounted) return;
+        if (level >= 0) {
+          setBatteryLevel(level);
+        } else {
+          // iOSシミュレーター環境等（level === -1）でのフォールバック表示（100%）
+          setBatteryLevel(1.0);
+        }
+      } catch (error) {
+        if (!isMounted) return;
+        // 例外時（API未対応等）もフォールバック
+        setBatteryLevel(1.0);
+      }
     };
-    initBattery();
-    
+
+    fetchBattery();
+
+    // 30秒ごとに定期ポーリング（実機での残量変化追従）
+    const interval = setInterval(fetchBattery, 30000);
+
+    // バッテリー残量変更リスナー
+    try {
+      subscription = Battery.addBatteryLevelListener(({ batteryLevel }) => {
+        if (!isMounted) return;
+        if (batteryLevel >= 0) {
+          setBatteryLevel(batteryLevel);
+        } else {
+          setBatteryLevel(1.0);
+        }
+      });
+    } catch (e) {
+      // リスナー登録不可時の保護
+    }
+
     return () => {
+      isMounted = false;
+      clearInterval(interval);
       if (subscription) subscription.remove();
     };
   }, []);
