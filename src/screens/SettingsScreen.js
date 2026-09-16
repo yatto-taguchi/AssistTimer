@@ -2,7 +2,7 @@ import React, { useContext, useState, useEffect, useRef } from 'react';
 import { 
   StyleSheet, Text, View, Switch, TouchableOpacity, Modal, 
   TextInput, KeyboardAvoidingView, Platform, ScrollView,
-  LayoutAnimation, UIManager, Vibration, Linking 
+  LayoutAnimation, UIManager, Vibration, Linking, Animated 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
@@ -148,17 +148,52 @@ export default function SettingsScreen({ route }) {
   }, []);
 
   // アコーディオン開閉状態（初期値: すべて閉じてコンパクトに表示）
+  const [isNormalModeSettingsOpen, setIsNormalModeSettingsOpen] = useState(false);
+  const [isEcoModeSettingsOpen, setIsEcoModeSettingsOpen] = useState(false);
+  const [isAlarmSectionOpen, setIsAlarmSectionOpen] = useState(false);
   const [isAlarmSoundOpen, setIsAlarmSoundOpen] = useState(false);
   const [isMainVoiceOpen, setIsMainVoiceOpen] = useState(false);
   const [isPrepVoiceOpen, setIsPrepVoiceOpen] = useState(false);
   const [isOverVoiceOpen, setIsOverVoiceOpen] = useState(false);
   const scrollViewRef = useRef(null);
 
+  // モード切替時のアコーディオン発光ハイライト演出（「こっちも調整しとく？」アピール）
+  const accordionHighlightAnim = useRef(new Animated.Value(0)).current;
+  const isInitialMount = useRef(true);
+
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+    accordionHighlightAnim.setValue(0);
+    const singlePulse = () => [
+      Animated.timing(accordionHighlightAnim, {
+        toValue: 1,
+        duration: 500,
+        useNativeDriver: false,
+      }),
+      Animated.timing(accordionHighlightAnim, {
+        toValue: 0,
+        duration: 700,
+        useNativeDriver: false,
+      }),
+    ];
+
+    Animated.sequence([
+      ...singlePulse(),
+      ...singlePulse(),
+      ...singlePulse(),
+    ]).start();
+  }, [isEcoMode]);
+
   // タイマー画面のクイックアクセスバー長押しからの遷移時、該当アコーディオンを自動展開＆スクロール
   useEffect(() => {
     if (route?.params?.scrollTo) {
       const target = route.params.scrollTo;
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      // 親のアラーム・サウンド設定アコーディオンを自動展開
+      setIsAlarmSectionOpen(true);
       if (target === 'alarm') {
         setIsAlarmSoundOpen(true);
         setTimeout(() => {
@@ -271,6 +306,14 @@ export default function SettingsScreen({ route }) {
     }
   };
 
+  const handleToggleNormalMode = (value) => {
+    if (value) {
+      handleToggleEcoMode(false);
+    } else {
+      handleToggleEcoMode(true);
+    }
+  };
+
   const bgColor = isEcoMode ? '#000' : '#F5F5F5';
   const textColor = isEcoMode ? '#fff' : '#000';
   const subTextColor = isEcoMode ? '#aaa' : '#8E8E93';
@@ -279,6 +322,31 @@ export default function SettingsScreen({ route }) {
   const innerBorderColor = isEcoMode ? '#1C1C1E' : '#F2F2F7';
   const sectionHeaderColor = isEcoMode ? '#8E8E93' : '#6E6E73';
   const groupSubHeaderColor = isEcoMode ? '#34C759' : '#007AFF';
+
+  // 動作モード設定カード専用の水色カラートークン
+  const modeCardBgColor = isEcoMode ? '#0B1B2B' : '#EBF5FF';
+  const modeCardBorderColor = isEcoMode ? '#1E4263' : '#BAE6FD';
+  const modeInnerBorderColor = isEcoMode ? '#152E46' : '#D6EBFF';
+  const modeSubTextColor = isEcoMode ? '#7FA6C7' : '#557086';
+
+  // 通常モード詳細設定サマリー
+  const normalSettingsActiveCount = (isNormalStatusBarEnabled ? 1 : 0) + (isNormalIndicatorEnabled ? 1 : 0);
+  const normalSettingsSummary = normalSettingsActiveCount === 2 
+    ? '全項目 ON' 
+    : (normalSettingsActiveCount === 0 ? 'すべて OFF' : (isNormalStatusBarEnabled ? 'ステータスバー ON' : 'タイマーリング ON'));
+
+  // エコモード詳細設定サマリー
+  const ecoSettingsList = [
+    isEcoClockEnabled,
+    isEcoBatteryEnabled,
+    isEcoNavIconEnabled,
+    isEcoBorderEnabled,
+    isEcoIndicatorEnabled
+  ];
+  const ecoSettingsActiveCount = ecoSettingsList.filter(Boolean).length;
+  const ecoSettingsSummary = ecoSettingsActiveCount === ecoSettingsList.length
+    ? '全項目 ON'
+    : (ecoSettingsActiveCount === 0 ? 'すべて OFF' : `${ecoSettingsActiveCount}/${ecoSettingsList.length} 項目 ON`);
 
   // サマリーバッジ表示用テキスト計算
   const currentAlarmLabel = ALARM_SOUND_OPTIONS.find(o => o.key === alarmSoundType)?.label || '未設定';
@@ -368,12 +436,29 @@ export default function SettingsScreen({ route }) {
     >
       <Text style={[styles.title, { color: textColor }]}>設定</Text>
       
-      {/* 1. エコモード設定グループカード */}
-      <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>エコモード設定</Text>
-      <View style={[styles.groupCard, { backgroundColor: cardBgColor, borderColor: cardBorderColor }]}>
-        {/* 親トグル */}
-        <View style={[styles.settingRowInCard, isEcoMode && { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
+      {/* 1. 動作モード設定グループカード（2項目のみの水色親カード） */}
+      <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>動作モード設定</Text>
+      <View style={[styles.groupCard, { backgroundColor: modeCardBgColor, borderColor: modeCardBorderColor, marginBottom: 12 }]}>
+        {/* 通常モード トグル行 */}
+        <View style={[
+          styles.settingRowInCard, 
+          { borderBottomWidth: 1, borderBottomColor: modeInnerBorderColor }
+        ]}>
           <View style={styles.settingTitleWithInfo}>
+            <Ionicons name="sunny" size={20} color={!isEcoMode ? '#FF9500' : (isEcoMode ? '#7FA6C7' : '#8E8E93')} style={{ marginRight: 8 }} />
+            <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>通常モード</Text>
+          </View>
+          <Switch
+            value={!isEcoMode}
+            onValueChange={handleToggleNormalMode}
+            trackColor={{ false: '#333', true: '#34C759' }}
+          />
+        </View>
+
+        {/* エコモード（極限省電力） トグル行 */}
+        <View style={[styles.settingRowInCard, { borderBottomWidth: 0 }]}>
+          <View style={styles.settingTitleWithInfo}>
+            <Ionicons name="leaf" size={20} color={isEcoMode ? '#34C759' : '#007AFF'} style={{ marginRight: 8 }} />
             <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>エコモード（極限省電力）</Text>
             <TouchableOpacity 
               onPress={() => setEcoModalVisible(true)}
@@ -387,117 +472,217 @@ export default function SettingsScreen({ route }) {
           <Switch
             value={isEcoMode}
             onValueChange={handleToggleEcoMode}
+            trackColor={{ false: '#333', true: '#34C759' }}
           />
         </View>
+      </View>
 
-        {/* サブ設定一覧 */}
-        {isEcoMode && (
-          <View style={styles.subSettingsContainer}>
-            <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
-              <Text style={[styles.subSettingText, { color: textColor }]}>└ 時計を表示</Text>
-              <Switch
-                value={isEcoClockEnabled}
-                onValueChange={toggleEcoClock}
-                trackColor={{ false: '#333', true: '#34C759' }}
-                style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+      {/* 2. 選択中モードの詳細設定アコーディオンカード（タップで伸びる・切替時発光演出） */}
+      {!isEcoMode ? (
+        /* 通常モード設定アコーディオンカード */
+        <Animated.View style={[
+          styles.groupCard, 
+          { 
+            backgroundColor: accordionHighlightAnim.interpolate({
+              inputRange: [0, 1],
+              outputRange: [cardBgColor, '#FFFBF2']
+            }), 
+            borderColor: accordionHighlightAnim.interpolate({
+              inputRange: [0, 1],
+              outputRange: [cardBorderColor, '#FF9500']
+            }) 
+          }
+        ]}>
+          <TouchableOpacity
+            style={styles.accordionHeader}
+            onPress={() => toggleAccordion(setIsNormalModeSettingsOpen)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.accordionTitleContainer}>
+              <Ionicons name="sunny" size={18} color="#FF9500" style={{ marginRight: 8 }} />
+              <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>通常モードの設定をする</Text>
+            </View>
+            <View style={styles.accordionRightContainer}>
+              <View style={[styles.summaryBadge, { backgroundColor: '#FFF5E5' }]}>
+                <Text style={[styles.summaryBadgeText, { color: '#FF9500' }]}>{normalSettingsSummary}</Text>
+              </View>
+              <Ionicons 
+                name={isNormalModeSettingsOpen ? "chevron-up" : "chevron-down"} 
+                size={18} 
+                color={subTextColor} 
+                style={{ marginLeft: 6 }}
               />
             </View>
+          </TouchableOpacity>
 
-            <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
-              <Text style={[styles.subSettingText, { color: textColor }]}>└ 電池残量を表示</Text>
-              <Switch
-                value={isEcoBatteryEnabled}
-                onValueChange={toggleEcoBattery}
-                trackColor={{ false: '#333', true: '#34C759' }}
-                style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
-              />
-            </View>
-
-            <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
-              <Text style={[styles.subSettingText, { color: textColor }]}>└ タブをアイコンで表示（オフで点）</Text>
-              <Switch
-                value={isEcoNavIconEnabled}
-                onValueChange={toggleEcoNavIcon}
-                trackColor={{ false: '#333', true: '#34C759' }}
-                style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
-              />
-            </View>
-
-            {!isEcoNavIconEnabled && (
-              <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor, paddingLeft: 24 }]}>
-                <Text style={[styles.subSettingText, { color: subTextColor }]}>└ 選択中のタブだけ表示する</Text>
+          {isNormalModeSettingsOpen && (
+            <View style={{ borderTopWidth: 1, borderTopColor: innerBorderColor }}>
+              <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>ステータスバー（時計・電池）を表示</Text>
                 <Switch
-                  value={isEcoNavActiveDot}
-                  onValueChange={toggleEcoNavActiveDot}
+                  value={isNormalStatusBarEnabled}
+                  onValueChange={toggleNormalStatusBar}
                   trackColor={{ false: '#333', true: '#34C759' }}
-                  style={{ transform: [{ scaleX: 0.75 }, { scaleY: 0.75 }] }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
                 />
               </View>
-            )}
 
-            <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
-              <Text style={[styles.subSettingText, { color: textColor }]}>└ タブの境界線を表示</Text>
-              <Switch
-                value={isEcoBorderEnabled}
-                onValueChange={toggleEcoBorder}
-                trackColor={{ false: '#333', true: '#34C759' }}
-                style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+              {isNormalStatusBarEnabled && (
+                <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor, paddingLeft: 24 }]}>
+                  <Text style={[styles.subSettingText, { color: subTextColor }]}>└ タイマー作動中は自動で消す</Text>
+                  <Switch
+                    value={isNormalStatusBarAutoHide}
+                    onValueChange={toggleNormalStatusBarAutoHide}
+                    trackColor={{ false: '#333', true: '#34C759' }}
+                    style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                  />
+                </View>
+              )}
+
+              <View style={[styles.subSettingRow, { borderBottomWidth: 0 }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>タイマーリングを表示</Text>
+                <Switch
+                  value={isNormalIndicatorEnabled}
+                  onValueChange={toggleNormalIndicator}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
+            </View>
+          )}
+        </Animated.View>
+      ) : (
+        /* エコモード設定アコーディオンカード */
+        <Animated.View style={[
+          styles.groupCard, 
+          { 
+            backgroundColor: accordionHighlightAnim.interpolate({
+              inputRange: [0, 1],
+              outputRange: [cardBgColor, '#0A1C12']
+            }), 
+            borderColor: accordionHighlightAnim.interpolate({
+              inputRange: [0, 1],
+              outputRange: [cardBorderColor, '#34C759']
+            }) 
+          }
+        ]}>
+          <TouchableOpacity
+            style={styles.accordionHeader}
+            onPress={() => toggleAccordion(setIsEcoModeSettingsOpen)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.accordionTitleContainer}>
+              <Ionicons name="leaf" size={18} color="#34C759" style={{ marginRight: 8 }} />
+              <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>エコモードの設定をする</Text>
+            </View>
+            <View style={styles.accordionRightContainer}>
+              <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? '#152E1D' : '#E8F5E9' }]}>
+                <Text style={[styles.summaryBadgeText, { color: '#34C759' }]}>{ecoSettingsSummary}</Text>
+              </View>
+              <Ionicons 
+                name={isEcoModeSettingsOpen ? "chevron-up" : "chevron-down"} 
+                size={18} 
+                color={subTextColor} 
+                style={{ marginLeft: 6 }}
               />
             </View>
+          </TouchableOpacity>
 
-            <View style={[styles.subSettingRow, { borderBottomWidth: 0 }]}>
-              <Text style={[styles.subSettingText, { color: textColor }]}>└ タイマーリングを表示</Text>
-              <Switch
-                value={isEcoIndicatorEnabled}
-                onValueChange={toggleEcoIndicator}
-                trackColor={{ false: '#333', true: '#34C759' }}
-                style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
-              />
+          {isEcoModeSettingsOpen && (
+            <View style={{ borderTopWidth: 1, borderTopColor: innerBorderColor }}>
+              <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>時計を表示</Text>
+                <Switch
+                  value={isEcoClockEnabled}
+                  onValueChange={toggleEcoClock}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
+
+              <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>電池残量を表示</Text>
+                <Switch
+                  value={isEcoBatteryEnabled}
+                  onValueChange={toggleEcoBattery}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
+
+              <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>タブをアイコンで表示（オフで点）</Text>
+                <Switch
+                  value={isEcoNavIconEnabled}
+                  onValueChange={toggleEcoNavIcon}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
+
+              {!isEcoNavIconEnabled && (
+                <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor, paddingLeft: 24 }]}>
+                  <Text style={[styles.subSettingText, { color: modeSubTextColor }]}>└ 選択中のタブだけ表示する</Text>
+                  <Switch
+                    value={isEcoNavActiveDot}
+                    onValueChange={toggleEcoNavActiveDot}
+                    trackColor={{ false: '#333', true: '#34C759' }}
+                    style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                  />
+                </View>
+              )}
+
+              <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>タブの境界線を表示</Text>
+                <Switch
+                  value={isEcoBorderEnabled}
+                  onValueChange={toggleEcoBorder}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
+
+              <View style={[styles.subSettingRow, { borderBottomWidth: 0 }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>タイマーリングを表示</Text>
+                <Switch
+                  value={isEcoIndicatorEnabled}
+                  onValueChange={toggleEcoIndicator}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
             </View>
-          </View>
-        )}
-      </View>
+          )}
+        </Animated.View>
+      )}
 
-      {/* 2. 通常モード設定グループカード */}
-      <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>通常モード設定</Text>
+      {/* 3. アラーム・サウンド設定アコーディオンカード */}
       <View style={[styles.groupCard, { backgroundColor: cardBgColor, borderColor: cardBorderColor }]}>
-        <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
-          <Text style={[styles.settingText, { color: textColor }]}>ステータスバー（時計・電池）を表示</Text>
-          <Switch
-            value={isNormalStatusBarEnabled}
-            onValueChange={toggleNormalStatusBar}
-            trackColor={{ false: '#333', true: '#34C759' }}
-            style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
-          />
-        </View>
-
-        {isNormalStatusBarEnabled && (
-          <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor, paddingLeft: 24 }]}>
-            <Text style={[styles.settingText, { color: subTextColor }]}>└ タイマー作動中は自動で消す</Text>
-            <Switch
-              value={isNormalStatusBarAutoHide}
-              onValueChange={toggleNormalStatusBarAutoHide}
-              trackColor={{ false: '#333', true: '#34C759' }}
-              style={{ transform: [{ scaleX: 0.75 }, { scaleY: 0.75 }] }}
+        <TouchableOpacity
+          style={styles.accordionHeader}
+          onPress={() => toggleAccordion(setIsAlarmSectionOpen)}
+          activeOpacity={0.7}
+        >
+          <View style={styles.accordionTitleContainer}>
+            <Ionicons name="musical-notes" size={18} color={isEcoMode ? "#38BDF8" : "#007AFF"} style={{ marginRight: 8 }} />
+            <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>アラーム・サウンド設定をする</Text>
+          </View>
+          <View style={styles.accordionRightContainer}>
+            <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? '#1C2E42' : '#EBF4FF' }]}>
+              <Text style={[styles.summaryBadgeText, { color: isEcoMode ? '#38BDF8' : '#007AFF' }]}>{currentAlarmLabel}</Text>
+            </View>
+            <Ionicons 
+              name={isAlarmSectionOpen ? "chevron-up" : "chevron-down"} 
+              size={18} 
+              color={subTextColor} 
+              style={{ marginLeft: 6 }}
             />
           </View>
-        )}
+        </TouchableOpacity>
 
-        <View style={[styles.settingRowInCard, { borderBottomWidth: 0 }]}>
-          <Text style={[styles.settingText, { color: textColor }]}>タイマーリングを表示</Text>
-          <Switch
-            value={isNormalIndicatorEnabled}
-            onValueChange={toggleNormalIndicator}
-            trackColor={{ false: '#333', true: '#34C759' }}
-            style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
-          />
-        </View>
-      </View>
-
-      {/* 3. アラーム・サウンド設定グループカード */}
-      <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>アラーム・サウンド設定</Text>
-      <View style={[styles.groupCard, { backgroundColor: cardBgColor, borderColor: cardBorderColor }]}>
-        {/* マナーモード時でも鳴らすトグル */}
+        {isAlarmSectionOpen && (
+          <View style={{ borderTopWidth: 1, borderTopColor: innerBorderColor }}>
+            {/* マナーモード時でも鳴らすトグル */}
         <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
           <View style={styles.settingTextContainer}>
             <Text style={[styles.settingText, { color: textColor }]}>マナーモード時でも鳴らす</Text>
@@ -717,21 +902,18 @@ export default function SettingsScreen({ route }) {
                       alignItems: 'center',
                       justifyContent: 'space-between',
                       marginTop: 6,
-                      marginLeft: 16,
-                      paddingVertical: 4,
-                      paddingHorizontal: 8,
-                      borderRadius: 6,
-                      backgroundColor: isEcoMode ? '#0A0A0A' : '#E8ECF2',
+                      paddingLeft: 16,
+                      paddingRight: 0,
                     }}>
-                      <View style={{ flex: 1, paddingRight: 6 }}>
-                        <Text style={{ fontSize: 12, fontWeight: '600', color: textColor }}>└ 3秒で自動停止</Text>
-                        <Text style={{ fontSize: 10, color: subTextColor }}>超過時間中の連続振動を防止します</Text>
+                      <View style={{ flex: 1, paddingRight: 8 }}>
+                        <Text style={{ fontSize: 12, fontWeight: '600', color: subTextColor }}>└ 3秒で自動停止</Text>
+                        <Text style={{ fontSize: 10, color: subTextColor, marginTop: 1 }}>超過時間中の連続振動を防止します</Text>
                       </View>
                       <Switch
                         value={isVibration3SecOnly}
                         onValueChange={toggleVibration3SecOnly}
                         trackColor={{ false: '#333', true: '#34C759' }}
-                        style={{ transform: [{ scaleX: 0.75 }, { scaleY: 0.75 }] }}
+                        style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
                       />
                     </View>
                   )}
@@ -776,7 +958,7 @@ export default function SettingsScreen({ route }) {
             </View>
             <View style={styles.accordionRightContainer}>
               <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? '#1C2E42' : '#EBF4FF' }]}>
-                <Text style={[styles.summaryBadgeText, { color: '#007AFF' }]}>{currentAlarmLabel}</Text>
+                <Text style={[styles.summaryBadgeText, { color: isEcoMode ? '#38BDF8' : '#007AFF' }]}>{currentAlarmLabel}</Text>
               </View>
               <Ionicons 
                 name={isAlarmSoundOpen ? "chevron-up" : "chevron-down"} 
@@ -944,6 +1126,8 @@ export default function SettingsScreen({ route }) {
             </View>
           )}
         </View>
+          </View>
+        )}
       </View>
 
       {/* 4. その他設定グループカード */}
