@@ -122,7 +122,7 @@ export default function HomeScreen({ navigation }) {
   const [proModalVisible, setProModalVisible] = useState(false);
 
   const { 
-    isEcoMode, isProMode, isColorIndicator, 
+    isEcoMode, toggleEcoMode, isProMode, isColorIndicator, 
     isCountdownEnabled, toggleCountdownEnabled, 
     countdownSeconds, saveCountdownSeconds,
     alarmSoundType, playsInSilentMode,
@@ -1326,6 +1326,11 @@ export default function HomeScreen({ navigation }) {
     toggleAlarmSoundEnabled();
   };
 
+  const handleToggleEco = () => {
+    Vibration.vibrate(30);
+    toggleEcoMode(!isEcoMode);
+  };
+
   const handleLongPressToSettings = (targetSection) => {
     Vibration.vibrate(50);
     if (navigation && navigation.navigate) {
@@ -1456,6 +1461,33 @@ export default function HomeScreen({ navigation }) {
                     { color: (isAlarmSoundEnabled && alarmSoundType !== 'none') ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#666' : '#8E8E93') }
                   ]}>
                     アラーム
+                  </Text>
+                </TouchableOpacity>
+
+                <View style={[styles.quickAccessDivider, { backgroundColor: isEcoMode ? '#2C2C2E' : '#E0E0E5' }]} />
+
+                {/* 5. エコモード */}
+                <TouchableOpacity 
+                  style={[
+                    styles.quickAccessButton, 
+                    isEcoMode && styles.quickAccessButtonActiveEco
+                  ]} 
+                  onPress={handleToggleEco} 
+                  onLongPress={() => handleLongPressToSettings('eco')}
+                  delayLongPress={350}
+                  activeOpacity={0.7}
+                  disabled={!controlsVisible}
+                >
+                  <Ionicons 
+                    name={isEcoMode ? "leaf" : "leaf-outline"} 
+                    size={17} 
+                    color={isEcoMode ? '#34C759' : '#8E8E93'} 
+                  />
+                  <Text style={[
+                    styles.quickAccessLabel, 
+                    { color: isEcoMode ? '#34C759' : '#8E8E93' }
+                  ]}>
+                    エコ
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -2599,9 +2631,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 4,
-    paddingHorizontal: 12,
+    paddingHorizontal: 9,
     borderRadius: 16,
-    minWidth: 52,
+    minWidth: 48,
   },
   quickAccessButtonActive: {
     backgroundColor: '#FFFFFF',

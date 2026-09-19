@@ -192,23 +192,33 @@ export default function SettingsScreen({ route }) {
     if (route?.params?.scrollTo) {
       const target = route.params.scrollTo;
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-      // 親のアラーム・サウンド設定アコーディオンを自動展開
-      setIsAlarmSectionOpen(true);
-      if (target === 'alarm') {
-        setIsAlarmSoundOpen(true);
+      if (target === 'eco') {
+        if (!isEcoMode) {
+          toggleEcoMode(true);
+        }
+        setIsEcoModeSettingsOpen(true);
         setTimeout(() => {
-          scrollViewRef.current?.scrollTo({ y: 460, animated: true });
+          scrollViewRef.current?.scrollTo({ y: 0, animated: true });
         }, 200);
-      } else if (target === 'voice') {
-        setIsMainVoiceOpen(true);
-        setTimeout(() => {
-          scrollViewRef.current?.scrollTo({ y: 550, animated: true });
-        }, 200);
-      } else if (target === 'overtime') {
-        setIsOverVoiceOpen(true);
-        setTimeout(() => {
-          scrollViewRef.current?.scrollTo({ y: 640, animated: true });
-        }, 200);
+      } else {
+        // 親のアラーム・サウンド設定アコーディオンを自動展開
+        setIsAlarmSectionOpen(true);
+        if (target === 'alarm') {
+          setIsAlarmSoundOpen(true);
+          setTimeout(() => {
+            scrollViewRef.current?.scrollTo({ y: 460, animated: true });
+          }, 200);
+        } else if (target === 'voice') {
+          setIsMainVoiceOpen(true);
+          setTimeout(() => {
+            scrollViewRef.current?.scrollTo({ y: 550, animated: true });
+          }, 200);
+        } else if (target === 'overtime') {
+          setIsOverVoiceOpen(true);
+          setTimeout(() => {
+            scrollViewRef.current?.scrollTo({ y: 640, animated: true });
+          }, 200);
+        }
       }
     }
   }, [route?.params?.scrollTo]);
