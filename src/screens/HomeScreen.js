@@ -82,6 +82,11 @@ export default function HomeScreen({ navigation }) {
   const [forceTargetTime, setForceTargetTime] = useState(false);
   const [selectedTags, setSelectedTags] = useState([]);
 
+  // ホーム画面ジャンル選択モーダル用State
+  const [genreModalVisible, setGenreModalVisible] = useState(false);
+  const [isAddingGenreModal, setIsAddingGenreModal] = useState(false);
+  const [newGenreNameInput, setNewGenreNameInput] = useState('');
+
   const DEFAULT_TAGS = ['お気に入り', 'タイム'];
 
   // 時間設定モーダル用State
@@ -152,7 +157,6 @@ export default function HomeScreen({ navigation }) {
     showControls,
     resetControlsVisible
   } = useContext(AppContext);
-  
   const isFocused = useIsFocused();
 
   // スタート前カウントダウン用State
@@ -1122,7 +1126,9 @@ export default function HomeScreen({ navigation }) {
     prepEndTimeRef.current = null;
     overStartTimeRef.current = null;
     setForceTargetTime(false);
-    setSelectedCategory(lastUsedCategory); // デフォルトで前回のカテゴリをセット
+    if (!selectedCategory && lastUsedCategory) {
+      setSelectedCategory(lastUsedCategory); // ホームで未設定の場合のみ前回のカテゴリをセット
+    }
     setSelectedTags([]); // タグを初期化
     setSaveModalVisible(true);
   };
@@ -1135,7 +1141,9 @@ export default function HomeScreen({ navigation }) {
     prepEndTimeRef.current = null;
     overStartTimeRef.current = null;
     setForceTargetTime(true); // 時間内に終わったことにしてターゲットタイムを記録する
-    setSelectedCategory(lastUsedCategory); // デフォルトで前回のカテゴリをセット
+    if (!selectedCategory && lastUsedCategory) {
+      setSelectedCategory(lastUsedCategory); // ホームで未設定の場合のみ前回のカテゴリをセット
+    }
     setSelectedTags([]); // タグを初期化
     setSaveModalVisible(true);
   };
@@ -1242,6 +1250,59 @@ export default function HomeScreen({ navigation }) {
         await AsyncStorage.setItem('savedCategories', JSON.stringify(uniqueCats));
       } catch (e) {
         console.error(e);
+      }
+    }
+  };
+
+  // ---- ホーム画面ジャンル選択モーダル操作ハンドラー ----
+  const handleOpenGenreModal = () => {
+    Vibration.vibrate(30);
+    setIsAddingGenreModal(false);
+    setNewGenreNameInput('');
+    setGenreModalVisible(true);
+  };
+
+  const handleSelectGenre = async (category) => {
+    Vibration.vibrate(30);
+    setSelectedCategory(category);
+    setGenreModalVisible(false);
+    try {
+      await AsyncStorage.setItem('lastUsedCategory', category);
+      setLastUsedCategory(category);
+    } catch (e) {
+      console.error('Error saving lastUsedCategory', e);
+    }
+  };
+
+  const handleClearGenre = async () => {
+    Vibration.vibrate(30);
+    setSelectedCategory('');
+    setGenreModalVisible(false);
+    try {
+      await AsyncStorage.removeItem('lastUsedCategory');
+      setLastUsedCategory('');
+    } catch (e) {
+      console.error('Error clearing lastUsedCategory', e);
+    }
+  };
+
+  const handleAddGenreFromModal = async () => {
+    const trimmed = newGenreNameInput.trim();
+    if (trimmed) {
+      Vibration.vibrate(30);
+      const newCats = [...savedCategories, trimmed];
+      const uniqueCats = Array.from(new Set(newCats));
+      setSavedCategories(uniqueCats);
+      setSelectedCategory(trimmed);
+      setNewGenreNameInput('');
+      setIsAddingGenreModal(false);
+      setGenreModalVisible(false);
+      try {
+        await AsyncStorage.setItem('savedCategories', JSON.stringify(uniqueCats));
+        await AsyncStorage.setItem('lastUsedCategory', trimmed);
+        setLastUsedCategory(trimmed);
+      } catch (e) {
+        console.error('Error saving new category', e);
       }
     }
   };
@@ -1491,6 +1552,52 @@ export default function HomeScreen({ navigation }) {
                   </Text>
                 </TouchableOpacity>
               </View>
+
+              {/* 計測ジャンル表示・選択バッジ */}
+              <TouchableOpacity
+                style={[
+                  styles.genreBadge,
+                  selectedCategory
+                    ? (isEcoMode ? styles.genreBadgeSelectedEco : styles.genreBadgeSelected)
+                    : (isEcoMode ? styles.genreBadgeEco : styles.genreBadgeNormal)
+                ]}
+                onPress={handleOpenGenreModal}
+                activeOpacity={0.7}
+                disabled={!controlsVisible}
+                hitSlop={{ top: 8, bottom: 8, left: 16, right: 16 }}
+              >
+                <Ionicons
+                  name={selectedCategory ? "pricetag" : "pricetag-outline"}
+                  size={12}
+                  color={
+                    selectedCategory
+                      ? (isEcoMode ? '#64D2FF' : '#007AFF')
+                      : (isEcoMode ? '#8E8E93' : '#687076')
+                  }
+                  style={{ marginRight: 5 }}
+                />
+                <Text
+                  style={[
+                    styles.genreBadgeText,
+                    selectedCategory
+                      ? (isEcoMode ? styles.genreBadgeTextSelectedEco : styles.genreBadgeTextSelected)
+                      : (isEcoMode ? styles.genreBadgeTextEco : styles.genreBadgeTextNormal)
+                  ]}
+                  numberOfLines={1}
+                >
+                  {selectedCategory || 'ジャンル未設定'}
+                </Text>
+                <Ionicons
+                  name="chevron-down"
+                  size={11}
+                  color={
+                    selectedCategory
+                      ? (isEcoMode ? '#64D2FF' : '#007AFF')
+                      : (isEcoMode ? '#666' : '#8E8E93')
+                  }
+                  style={{ marginLeft: 4 }}
+                />
+              </TouchableOpacity>
             </Animated.View>
           </View>
           <View style={styles.timerContainer}>
@@ -2588,6 +2695,171 @@ export default function HomeScreen({ navigation }) {
         </View>
       </Modal>
 
+      {/* ホーム画面 ジャンル選択モーダル */}
+      <Modal
+        visible={genreModalVisible}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => setGenreModalVisible(false)}
+      >
+        <TouchableWithoutFeedback onPress={() => setGenreModalVisible(false)}>
+          <View style={styles.genreModalOverlay}>
+            <TouchableWithoutFeedback onPress={() => {}}>
+              <View style={[
+                styles.genreModalContent,
+                { 
+                  backgroundColor: isEcoMode ? '#1C1C1E' : '#FFFFFF', 
+                  borderColor: isEcoMode ? '#2C2C2E' : '#E5E5EA' 
+                }
+              ]}>
+                {/* モーダルヘッダー */}
+                <View style={styles.genreModalHeader}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <Ionicons 
+                      name="pricetag-outline" 
+                      size={18} 
+                      color={isEcoMode ? '#64D2FF' : '#007AFF'} 
+                      style={{ marginRight: 8 }}
+                    />
+                    <Text style={[styles.genreModalTitle, { color: isEcoMode ? '#FFFFFF' : '#000000' }]}>
+                      ジャンルの選択
+                    </Text>
+                  </View>
+                  <TouchableOpacity 
+                    onPress={() => setGenreModalVisible(false)}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <Ionicons name="close" size={22} color={isEcoMode ? '#8E8E93' : '#8E8E93'} />
+                  </TouchableOpacity>
+                </View>
+
+                {/* 現在選択中のステータス ＆ 解除ボタン */}
+                <View style={[
+                  styles.genreModalCurrentBox,
+                  { backgroundColor: isEcoMode ? '#252528' : '#F2F2F7' }
+                ]}>
+                  <Text style={[styles.genreModalCurrentLabel, { color: isEcoMode ? '#AAA' : '#666' }]}>
+                    現在:
+                  </Text>
+                  <Text style={[
+                    styles.genreModalCurrentValue,
+                    { color: selectedCategory ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#888' : '#8E8E93') }
+                  ]}>
+                    {selectedCategory || '未設定'}
+                  </Text>
+                  {selectedCategory ? (
+                    <TouchableOpacity 
+                      style={styles.genreModalClearBtn}
+                      onPress={handleClearGenre}
+                    >
+                      <Text style={styles.genreModalClearBtnText}>未設定に戻す</Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+
+                {/* 登録済みジャンルチップ一覧 */}
+                <Text style={[styles.genreModalSectionTitle, { color: isEcoMode ? '#8E8E93' : '#8E8E93' }]}>
+                  登録ジャンルから選択
+                </Text>
+                <ScrollView style={{ maxHeight: 200 }} contentContainerStyle={styles.genreModalChipsContainer}>
+                  {savedCategories.map((cat, index) => {
+                    const isSelected = selectedCategory === cat;
+                    return (
+                      <TouchableOpacity
+                        key={`modal-genre-${index}-${cat}`}
+                        style={[
+                          styles.genreChip,
+                          isSelected
+                            ? (isEcoMode ? styles.genreChipSelectedEco : styles.genreChipSelected)
+                            : (isEcoMode ? styles.genreChipEco : styles.genreChipNormal)
+                        ]}
+                        onPress={() => handleSelectGenre(cat)}
+                        activeOpacity={0.7}
+                      >
+                        {isSelected && (
+                          <Ionicons 
+                            name="checkmark" 
+                            size={14} 
+                            color={isEcoMode ? '#64D2FF' : '#FFFFFF'} 
+                            style={{ marginRight: 4 }} 
+                          />
+                        )}
+                        <Text style={[
+                          styles.genreChipText,
+                          isSelected
+                            ? (isEcoMode ? styles.genreChipTextSelectedEco : styles.genreChipTextSelected)
+                            : (isEcoMode ? styles.genreChipTextEco : styles.genreChipTextNormal)
+                        ]}>
+                          {cat}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+
+                {/* 新規ジャンル追加エリア */}
+                {isAddingGenreModal ? (
+                  <View style={styles.genreModalAddInputRow}>
+                    <TextInput
+                      style={[
+                        styles.genreModalInput,
+                        { 
+                          backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7',
+                          color: isEcoMode ? '#FFF' : '#000',
+                          borderColor: isEcoMode ? '#3A3A3C' : '#E5E5EA'
+                        }
+                      ]}
+                      placeholder="新しいジャンル名を入力"
+                      placeholderTextColor={isEcoMode ? '#666' : '#999'}
+                      value={newGenreNameInput}
+                      onChangeText={setNewGenreNameInput}
+                      autoFocus={true}
+                      onSubmitEditing={handleAddGenreFromModal}
+                    />
+                    <TouchableOpacity
+                      style={[
+                        styles.genreModalAddConfirmBtn,
+                        { opacity: newGenreNameInput.trim() ? 1 : 0.5 }
+                      ]}
+                      onPress={handleAddGenreFromModal}
+                      disabled={!newGenreNameInput.trim()}
+                    >
+                      <Text style={styles.genreModalAddConfirmBtnText}>追加</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.genreModalAddCancelBtn}
+                      onPress={() => {
+                        setIsAddingGenreModal(false);
+                        setNewGenreNameInput('');
+                      }}
+                    >
+                      <Text style={[styles.genreModalAddCancelBtnText, { color: isEcoMode ? '#8E8E93' : '#8E8E93' }]}>取消</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={[
+                      styles.genreModalAddToggleBtn,
+                      { 
+                        borderColor: isEcoMode ? '#3A3A3C' : '#D1D1D6',
+                        backgroundColor: isEcoMode ? 'transparent' : '#FAFAFA'
+                      }
+                    ]}
+                    onPress={() => setIsAddingGenreModal(true)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="add" size={16} color={isEcoMode ? '#64D2FF' : '#007AFF'} style={{ marginRight: 4 }} />
+                    <Text style={[styles.genreModalAddToggleText, { color: isEcoMode ? '#64D2FF' : '#007AFF' }]}>
+                      新しいジャンルを追加
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            </TouchableWithoutFeedback>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+
       {/* Proプラン（月額100円）購入モーダル */}
       <ProSubscriptionModal visible={proModalVisible} onClose={() => setProModalVisible(false)} />
 
@@ -2656,7 +2928,66 @@ const styles = StyleSheet.create({
     height: 18,
     marginHorizontal: 1,
   },
+  genreBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 3,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginTop: 6,
+    maxWidth: 220,
+  },
+  genreBadgeNormal: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E5E5EA',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  genreBadgeSelected: {
+    backgroundColor: '#F0F8FF',
+    borderColor: '#B9DCFF',
+    shadowColor: '#007AFF',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  genreBadgeEco: {
+    backgroundColor: '#1C1C1E',
+    borderColor: '#2C2C2E',
+  },
+  genreBadgeSelectedEco: {
+    backgroundColor: '#15232D',
+    borderColor: '#1E3A4C',
+  },
+  genreBadgeText: {
+    fontSize: 11,
+    letterSpacing: -0.1,
+  },
+  genreBadgeTextNormal: {
+    color: '#687076',
+    fontWeight: '500',
+  },
+  genreBadgeTextSelected: {
+    color: '#007AFF',
+    fontWeight: '600',
+  },
+  genreBadgeTextEco: {
+    color: '#8E8E93',
+    fontWeight: '500',
+  },
+  genreBadgeTextSelectedEco: {
+    color: '#64D2FF',
+    fontWeight: '600',
+  },
   timerContainer: {
+    width: 280,
+    height: 280, // RingProgress (radius 140 * 2) と同寸に保つことで、インジケーター非表示時でもスイッチバーやボタンとのバランス・配置を完全維持
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: screenHeight < 700 ? 30 : 60,
@@ -3347,5 +3678,169 @@ const styles = StyleSheet.create({
     height: 3,
     borderRadius: 2,
     backgroundColor: '#38BDF8',
+  },
+
+  // ジャンル選択モーダル スタイル
+  genreModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  genreModalContent: {
+    width: '100%',
+    maxWidth: 340,
+    borderRadius: 20,
+    padding: 20,
+    borderWidth: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  genreModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 14,
+  },
+  genreModalTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  genreModalCurrentBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    marginBottom: 14,
+  },
+  genreModalCurrentLabel: {
+    fontSize: 12,
+    marginRight: 6,
+  },
+  genreModalCurrentValue: {
+    fontSize: 13,
+    fontWeight: '600',
+    flex: 1,
+  },
+  genreModalClearBtn: {
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255, 59, 48, 0.1)',
+  },
+  genreModalClearBtnText: {
+    fontSize: 11,
+    color: '#FF3B30',
+    fontWeight: '600',
+  },
+  genreModalSectionTitle: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginBottom: 8,
+    letterSpacing: 0.3,
+  },
+  genreModalChipsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingBottom: 4,
+  },
+  genreChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 7,
+    paddingHorizontal: 13,
+    borderRadius: 16,
+    borderWidth: 1,
+  },
+  genreChipNormal: {
+    backgroundColor: '#F2F2F7',
+    borderColor: '#E5E5EA',
+  },
+  genreChipSelected: {
+    backgroundColor: '#007AFF',
+    borderColor: '#007AFF',
+  },
+  genreChipEco: {
+    backgroundColor: '#2C2C2E',
+    borderColor: '#3A3A3C',
+  },
+  genreChipSelectedEco: {
+    backgroundColor: '#1E3A4C',
+    borderColor: '#64D2FF',
+  },
+  genreChipText: {
+    fontSize: 13,
+  },
+  genreChipTextNormal: {
+    color: '#1C1C1E',
+    fontWeight: '500',
+  },
+  genreChipTextSelected: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+  },
+  genreChipTextEco: {
+    color: '#E5E5EA',
+    fontWeight: '500',
+  },
+  genreChipTextSelectedEco: {
+    color: '#64D2FF',
+    fontWeight: '700',
+  },
+  genreModalAddToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 14,
+    paddingVertical: 9,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+  },
+  genreModalAddToggleText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  genreModalAddInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 14,
+    gap: 8,
+  },
+  genreModalInput: {
+    flex: 1,
+    height: 38,
+    borderRadius: 10,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    fontSize: 13,
+  },
+  genreModalAddConfirmBtn: {
+    backgroundColor: '#007AFF',
+    paddingVertical: 9,
+    paddingHorizontal: 13,
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  genreModalAddConfirmBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  genreModalAddCancelBtn: {
+    paddingVertical: 9,
+    paddingHorizontal: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  genreModalAddCancelBtnText: {
+    fontSize: 12,
   },
 });

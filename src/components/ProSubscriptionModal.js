@@ -23,8 +23,8 @@ try {
 
 // Apple標準EULA（利用規約）URL
 const TERMS_OF_USE_URL = 'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/';
-// プライバシーポリシーURL（必要に応じて変更可能）
-const PRIVACY_POLICY_URL = 'https://litthairdesign.notion.site/AssistTimer-Privacy-Policy';
+// プライバシーポリシーURL（公式Webサイトの正式なURL）
+const PRIVACY_POLICY_URL = 'https://litt-design.jp/wp1/%e5%96%b6%e8%80%85%e6%83%85%e5%a0%b1%e3%81%8a%e3%82%88%e3%81%b3%e3%82%b5%e3%83%9d%e3%83%bc%e3%83%88/';
 
 export default function ProSubscriptionModal({ visible, onClose }) {
   const { isEcoMode, isProMode, setIsProMode } = useContext(AppContext);
@@ -175,10 +175,10 @@ export default function ProSubscriptionModal({ visible, onClose }) {
   };
 
   const openUrl = async (url) => {
-    const supported = await Linking.canOpenURL(url);
-    if (supported) {
+    try {
       await Linking.openURL(url);
-    } else {
+    } catch (e) {
+      console.log('Error opening URL:', e);
       Alert.alert('エラー', 'リンクを開けませんでした: ' + url);
     }
   };
@@ -250,10 +250,13 @@ export default function ProSubscriptionModal({ visible, onClose }) {
             </View>
           </View>
 
-          {/* 料金プランカード（1ヶ月無料トライアル強調） */}
+          {/* 料金プランカード（Apple審査ガイドライン3.1.2(c)準拠: タイトル・期間・価格明記） */}
           <View style={[styles.planCard, { borderColor: accent, backgroundColor: cardBg }]}>
             <View style={styles.planHeader}>
-              <Text style={[styles.planName, { color: text }]}>月額プラン</Text>
+              <View>
+                <Text style={[styles.planName, { color: text }]}>AssistTimer Pro</Text>
+                <Text style={{ color: subText, fontSize: 12, marginTop: 2 }}>自動更新サブスクリプション（1ヶ月）</Text>
+              </View>
               <View style={[styles.activeTag, { backgroundColor: '#34C759' }]}>
                 <Text style={styles.activeTagText}>1ヶ月無料体験</Text>
               </View>
@@ -261,15 +264,15 @@ export default function ProSubscriptionModal({ visible, onClose }) {
             <View style={styles.priceRow}>
               <Text style={[styles.priceCurrency, { color: text }]}>¥</Text>
               <Text style={[styles.priceAmount, { color: text }]}>100</Text>
-              <Text style={[styles.pricePeriod, { color: subText }]}> / 月</Text>
+              <Text style={[styles.pricePeriod, { color: subText }]}> / 1ヶ月（月額自動更新）</Text>
             </View>
-            <View style={{ backgroundColor: isEcoMode ? '#1C3A27' : '#E8F5E9', paddingVertical: 4, paddingHorizontal: 12, borderRadius: 8, marginTop: 4, marginBottom: 8 }}>
+            <View style={{ backgroundColor: isEcoMode ? '#1C3A27' : '#E8F5E9', paddingVertical: 5, paddingHorizontal: 12, borderRadius: 8, marginTop: 4, marginBottom: 8 }}>
               <Text style={{ color: '#34C759', fontSize: 13, fontWeight: '700' }}>
-                最初の1ヶ月間は ¥0（無料体験）
+                最初の1ヶ月間は ¥0（無料トライアル）
               </Text>
             </View>
             <Text style={[styles.planNote, { color: subText }]}>
-              無料期間終了後は月額100円（いつでも解約可能）
+              初回1ヶ月無料体験終了後は、月額100円（税込）で自動更新されます。いつでも端末設定から解約可能です。
             </Text>
           </View>
 
@@ -281,18 +284,39 @@ export default function ProSubscriptionModal({ visible, onClose }) {
               </Text>
             </View>
           ) : (
-            <TouchableOpacity
-              style={[styles.purchaseButton, { backgroundColor: accent }]}
-              onPress={handlePurchase}
-              disabled={loading}
-              activeOpacity={0.8}
-            >
-              {loading ? (
-                <ActivityIndicator color="#FFFFFF" />
-              ) : (
-                <Text style={styles.purchaseButtonText}>まずは1ヶ月無料で試す</Text>
-              )}
-            </TouchableOpacity>
+            <View style={{ width: '100%', alignItems: 'center' }}>
+              <TouchableOpacity
+                style={[styles.purchaseButton, { backgroundColor: accent }]}
+                onPress={handlePurchase}
+                disabled={loading}
+                activeOpacity={0.8}
+              >
+                {loading ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.purchaseButtonText}>まずは1ヶ月無料で試す</Text>
+                )}
+              </TouchableOpacity>
+
+              {/* 購入ボタン直下の規約・ポリシー同意リンク（審査員が一目で確認可能） */}
+              <View style={styles.inlineConsentRow}>
+                <Text style={[styles.consentText, { color: subText }]}>登録により </Text>
+                <TouchableOpacity
+                  onPress={() => openUrl(TERMS_OF_USE_URL)}
+                  hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+                >
+                  <Text style={[styles.inlineLinkText, { color: accent }]}>利用規約（EULA）</Text>
+                </TouchableOpacity>
+                <Text style={[styles.consentText, { color: subText }]}> および </Text>
+                <TouchableOpacity
+                  onPress={() => openUrl(PRIVACY_POLICY_URL)}
+                  hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+                >
+                  <Text style={[styles.inlineLinkText, { color: accent }]}>プライバシーポリシー</Text>
+                </TouchableOpacity>
+                <Text style={[styles.consentText, { color: subText }]}> に同意したものとみなされます</Text>
+              </View>
+            </View>
           )}
 
           {/* 購入の復元ボタン（Apple審査必須） */}
@@ -300,29 +324,42 @@ export default function ProSubscriptionModal({ visible, onClose }) {
             style={styles.restoreButton}
             onPress={handleRestore}
             disabled={loading}
+            hitSlop={{ top: 10, bottom: 10, left: 16, right: 16 }}
           >
             <Text style={[styles.restoreButtonText, { color: accent }]}>
               以前購入された方はこちら（購入の復元）
             </Text>
           </TouchableOpacity>
 
-          {/* 規約・サブスクリプション説明（Apple審査必須要件） */}
+          {/* 規約・サブスクリプション説明（Apple審査ガイドライン3.1.2(c)必須要件） */}
           <View style={styles.termsContainer}>
             <Text style={[styles.legalText, { color: subText }]}>
-              【定期購読・無料トライアルについて】{'\n'}
-              ・初回登録時は「1ヶ月間の無料トライアル」が適用されます。無料期間中に解約した場合、料金は一切請求されません。{'\n'}
+              【定期購読（自動更新）および無料トライアルについて】{'\n'}
+              ・プラン名：AssistTimer Pro（月額プラン）{'\n'}
+              ・購読期間：1ヶ月間（月額自動更新）{'\n'}
+              ・価格：月額100円（税込）{'\n'}
+              ・初回登録時は「1ヶ月間の無料トライアル」が適用されます。無料体験期間中に解約した場合、料金は一切請求されません。{'\n'}
               ・無料トライアル終了後は月額100円の自動更新となります。{'\n'}
               ・現在の期間が終了する24時間前までに自動更新をオフにしない限り、登録は自動的に更新されます。{'\n'}
-              ・アカウントへの請求は、現在の期間が終了する24時間前以内に行われます。{'\n'}
+              ・アカウントへの請求は、現在の有効期間終了前24時間以内に行われます。{'\n'}
               ・購読の管理や自動更新の解除は、購入後に端末の「設定」＞「Apple ID」＞「サブスクリプション」からいつでも行えます。
             </Text>
 
+            {/* 明確なボタン形式のリンクボタン */}
             <View style={styles.linksRow}>
-              <TouchableOpacity onPress={() => openUrl(TERMS_OF_USE_URL)}>
+              <TouchableOpacity
+                style={styles.policyButton}
+                onPress={() => openUrl(TERMS_OF_USE_URL)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
                 <Text style={[styles.linkText, { color: accent }]}>利用規約（EULA）</Text>
               </TouchableOpacity>
-              <Text style={{ color: subText, marginHorizontal: 8 }}>・</Text>
-              <TouchableOpacity onPress={() => openUrl(PRIVACY_POLICY_URL)}>
+              <Text style={{ color: subText, marginHorizontal: 12 }}>|</Text>
+              <TouchableOpacity
+                style={styles.policyButton}
+                onPress={() => openUrl(PRIVACY_POLICY_URL)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
                 <Text style={[styles.linkText, { color: accent }]}>プライバシーポリシー</Text>
               </TouchableOpacity>
             </View>
@@ -518,10 +555,33 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 4,
+    marginTop: 6,
+    paddingVertical: 4,
+  },
+  policyButton: {
+    paddingVertical: 6,
+    paddingHorizontal: 8,
   },
   linkText: {
-    fontSize: 12,
+    fontSize: 13,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
+  inlineConsentRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 8,
+    paddingHorizontal: 12,
+  },
+  consentText: {
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  inlineLinkText: {
+    fontSize: 11,
+    lineHeight: 16,
     fontWeight: '600',
     textDecorationLine: 'underline',
   },

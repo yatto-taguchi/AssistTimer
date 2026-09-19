@@ -1213,7 +1213,13 @@ export default function SettingsScreen({ route }) {
       <View style={[styles.groupCard, { backgroundColor: cardBgColor, borderColor: cardBorderColor }]}>
         <TouchableOpacity 
           style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}
-          onPress={() => Linking.openURL('https://www.apple.com/legal/internet-services/itunes/dev/stdeula/')}
+          onPress={() => {
+            const url = 'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/';
+            Linking.openURL(url).catch(err => {
+              console.log('Error opening EULA:', err);
+              Alert.alert('エラー', '利用規約を開けませんでした。\n' + url);
+            });
+          }}
         >
           <Text style={[styles.settingText, { color: textColor }]}>利用規約（EULA）</Text>
           <Ionicons name="chevron-forward" size={18} color={subTextColor} />
@@ -1221,7 +1227,13 @@ export default function SettingsScreen({ route }) {
 
         <TouchableOpacity 
           style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}
-          onPress={() => Linking.openURL('https://litthairdesign.notion.site/AssistTimer-Privacy-Policy')}
+          onPress={() => {
+            const url = 'https://litt-design.jp/wp1/%e5%96%b6%e8%80%85%e6%83%85%e5%a0%b1%e3%81%8a%e3%82%88%e3%81%b3%e3%82%b5%e3%83%9d%e3%83%bc%e3%83%88/';
+            Linking.openURL(url).catch(err => {
+              console.log('Error opening privacy policy:', err);
+              Alert.alert('エラー', 'プライバシーポリシーを開けませんでした。\n' + url);
+            });
+          }}
         >
           <Text style={[styles.settingText, { color: textColor }]}>プライバシーポリシー</Text>
           <Ionicons name="chevron-forward" size={18} color={subTextColor} />
