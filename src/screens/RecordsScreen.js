@@ -6,12 +6,15 @@ import ImageViewer from 'react-native-image-zoom-viewer';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getRecords, updateRecordPhoto } from '../utils/recordStorage';
+import { getFullPracticeStats } from '../utils/practiceStats';
 import { AppContext } from '../utils/AppContext';
 import AdBannerComponent from '../components/AdBannerComponent';
 import ProSubscriptionModal from '../components/ProSubscriptionModal';
+import PracticeStatsCard from '../components/PracticeStatsCard';
 
 export default function RecordsScreen() {
   const [records, setRecords] = useState([]);
+  const [stats, setStats] = useState(null);
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [fullScreenIndex, setFullScreenIndex] = useState(null);
@@ -27,8 +30,12 @@ export default function RecordsScreen() {
   }, [isFocused]);
 
   const loadData = async () => {
-    const data = await getRecords();
+    const [data, fullStats] = await Promise.all([
+      getRecords(),
+      getFullPracticeStats(),
+    ]);
     setRecords(data);
+    setStats(fullStats);
   };
 
   // 画像変更機能
@@ -132,20 +139,19 @@ export default function RecordsScreen() {
         </TouchableOpacity>
       )}
 
-      {records.length === 0 ? (
-        <View style={styles.emptyContainer}>
-          <Text style={[styles.emptyText, { color: subTextColor }]}>まだ記録がありません。タイマーから練習を記録しましょう！</Text>
-          {/* テスト用に再読み込みボタンを置く */}
-          <Button title="再読み込み" onPress={loadData} />
-        </View>
-      ) : (
-        <FlatList
-          data={records}
-          keyExtractor={(item) => item.id}
-          renderItem={renderItem}
-          contentContainerStyle={styles.listContainer}
-        />
-      )}
+      <FlatList
+        data={records}
+        keyExtractor={(item) => item.id}
+        renderItem={renderItem}
+        ListHeaderComponent={stats ? <PracticeStatsCard stats={stats} /> : null}
+        ListEmptyComponent={
+          <View style={styles.emptyContainer}>
+            <Text style={[styles.emptyText, { color: subTextColor }]}>まだ記録がありません。タイマーから練習を記録しましょう！</Text>
+            <Button title="再読み込み" onPress={loadData} />
+          </View>
+        }
+        contentContainerStyle={[styles.listContainer, records.length === 0 && { flexGrow: 1 }]}
+      />
 
       {/* 広告バナー（AdMob / Proモード時は非表示） */}
       <AdBannerComponent />

@@ -11,6 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import RingProgress from '../components/RingProgress';
 import { AppContext } from '../utils/AppContext';
 import { saveRecord, getRecords } from '../utils/recordStorage';
+import { recordInterruption, getFullPracticeStats } from '../utils/practiceStats';
 import AdBannerComponent from '../components/AdBannerComponent';
 import ProSubscriptionModal from '../components/ProSubscriptionModal';
 
@@ -86,6 +87,7 @@ export default function HomeScreen({ navigation }) {
   const [genreModalVisible, setGenreModalVisible] = useState(false);
   const [isAddingGenreModal, setIsAddingGenreModal] = useState(false);
   const [newGenreNameInput, setNewGenreNameInput] = useState('');
+  const [genreStatsMap, setGenreStatsMap] = useState({});
 
   const DEFAULT_TAGS = ['お気に入り', 'タイム'];
 
@@ -754,7 +756,17 @@ export default function HomeScreen({ navigation }) {
     }
   };
 
-  const resetTimer = () => {
+  const resetTimer = (isFromSave = false) => {
+    // タイマーが10秒以上進行した状態での直接リセットは「途中終了（中断）」として自動カウント
+    if (!isFromSave) {
+      const elapsedSeconds = isCountUp 
+        ? targetTime + remainingTime 
+        : targetTime - remainingTime;
+      if (elapsedSeconds >= 10) {
+        recordInterruption(selectedCategory || null);
+      }
+    }
+
     setIsRunning(false);
     setIsPreCountingDown(false);
     setIsCountUp(false);
@@ -1218,11 +1230,15 @@ export default function HomeScreen({ navigation }) {
       duration = targetTime; // タイム内に入って終了した場合はターゲットタイムをそのまま記録
     }
     
+    // タイム内達成判定（タイム内ボタン押下またはカウントアップ前終了）
+    const isCompletedInTime = forceTargetTime || !isCountUp;
+
     await saveRecord({
       duration: duration,
       category: selectedCategory || '未分類',
       photoUris: photoUris,
       tags: selectedTags,
+      isCompletedInTime: isCompletedInTime,
     });
     
     if (selectedCategory) {
@@ -1232,10 +1248,11 @@ export default function HomeScreen({ navigation }) {
     
     Alert.alert("保存完了", "練習記録を保存しました！");
     
-    // モーダルを閉じ、タイマーをリセットする
+    // モーダルを閉じ、タイマーをリセットする（保存によるリセットのため中断カウントは行わない）
     setSaveModalVisible(false);
     setPhotoUris([]);
-    resetTimer();
+    resetTimer(true);
+    loadGenreStats();
   };
 
   const handleAddCategory = async () => {
@@ -1254,9 +1271,28 @@ export default function HomeScreen({ navigation }) {
     }
   };
 
+  // ジャンル別統計の取得
+  const loadGenreStats = async () => {
+    try {
+      const stats = await getFullPracticeStats();
+      if (stats && stats.genreMap) {
+        setGenreStatsMap(stats.genreMap);
+      }
+    } catch (e) {
+      console.error('Failed to load genre stats', e);
+    }
+  };
+
+  useEffect(() => {
+    if (isFocused) {
+      loadGenreStats();
+    }
+  }, [isFocused]);
+
   // ---- ホーム画面ジャンル選択モーダル操作ハンドラー ----
   const handleOpenGenreModal = () => {
     Vibration.vibrate(30);
+    loadGenreStats();
     setIsAddingGenreModal(false);
     setNewGenreNameInput('');
     setGenreModalVisible(true);
@@ -2761,37 +2797,67 @@ export default function HomeScreen({ navigation }) {
                 <Text style={[styles.genreModalSectionTitle, { color: isEcoMode ? '#8E8E93' : '#8E8E93' }]}>
                   登録ジャンルから選択
                 </Text>
-                <ScrollView style={{ maxHeight: 200 }} contentContainerStyle={styles.genreModalChipsContainer}>
+                <ScrollView style={{ maxHeight: 240 }} contentContainerStyle={styles.genreModalListContainer} showsVerticalScrollIndicator={true}>
                   {savedCategories.map((cat, index) => {
                     const isSelected = selectedCategory === cat;
+                    const stat = genreStatsMap && genreStatsMap[cat];
+                    const completedCount = stat ? stat.completed : 0;
+                    const lastDate = stat ? stat.lastPracticedRelative : '未実施';
+                    const streak = stat ? stat.streakDays : 0;
+
                     return (
                       <TouchableOpacity
                         key={`modal-genre-${index}-${cat}`}
                         style={[
-                          styles.genreChip,
+                          styles.genreListItem,
                           isSelected
-                            ? (isEcoMode ? styles.genreChipSelectedEco : styles.genreChipSelected)
-                            : (isEcoMode ? styles.genreChipEco : styles.genreChipNormal)
+                            ? (isEcoMode ? styles.genreListItemSelectedEco : styles.genreListItemSelected)
+                            : (isEcoMode ? styles.genreListItemEco : styles.genreListItemNormal)
                         ]}
                         onPress={() => handleSelectGenre(cat)}
                         activeOpacity={0.7}
                       >
-                        {isSelected && (
-                          <Ionicons 
-                            name="checkmark" 
-                            size={14} 
-                            color={isEcoMode ? '#64D2FF' : '#FFFFFF'} 
-                            style={{ marginRight: 4 }} 
-                          />
-                        )}
-                        <Text style={[
-                          styles.genreChipText,
-                          isSelected
-                            ? (isEcoMode ? styles.genreChipTextSelectedEco : styles.genreChipTextSelected)
-                            : (isEcoMode ? styles.genreChipTextEco : styles.genreChipTextNormal)
-                        ]}>
-                          {cat}
-                        </Text>
+                        <View style={styles.genreListItemLeft}>
+                          <View style={styles.genreListItemHeader}>
+                            {isSelected && (
+                              <Ionicons 
+                                name="checkmark-circle" 
+                                size={16} 
+                                color={isEcoMode ? '#64D2FF' : '#007AFF'} 
+                                style={{ marginRight: 6 }} 
+                              />
+                            )}
+                            <Text style={[
+                              styles.genreListItemTitle,
+                              isSelected
+                                ? (isEcoMode ? styles.genreListItemTitleSelectedEco : styles.genreListItemTitleSelected)
+                                : (isEcoMode ? styles.genreListItemTitleEco : styles.genreListItemTitleNormal)
+                            ]}>
+                              {cat}
+                            </Text>
+                          </View>
+                          
+                          <View style={styles.genreListItemSubRow}>
+                            <Text style={[styles.genreListItemSubText, { color: isEcoMode ? '#888' : '#8E8E93' }]}>
+                              📅 最終: {lastDate}
+                            </Text>
+                            {streak > 0 ? (
+                              <Text style={[styles.genreListItemSubText, { color: '#FF9500', fontWeight: '600' }]}>
+                                🔥 {streak}日連続
+                              </Text>
+                            ) : null}
+                          </View>
+                        </View>
+
+                        <View style={styles.genreListItemRight}>
+                          <Text style={[
+                            styles.genreListItemCountNum,
+                            { color: isSelected ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#AAA' : '#444') }
+                          ]}>
+                            {completedCount}
+                          </Text>
+                          <Text style={[styles.genreListItemCountUnit, { color: isEcoMode ? '#777' : '#8E8E93' }]}>回</Text>
+                        </View>
                       </TouchableOpacity>
                     );
                   })}
@@ -3750,11 +3816,81 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     letterSpacing: 0.3,
   },
-  genreModalChipsContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
+  genreModalListContainer: {
     paddingBottom: 4,
+    gap: 8,
+  },
+  genreListItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+  },
+  genreListItemNormal: {
+    backgroundColor: '#F8F9FA',
+    borderColor: '#E5E5EA',
+  },
+  genreListItemSelected: {
+    backgroundColor: '#EBF4FF',
+    borderColor: '#007AFF',
+  },
+  genreListItemEco: {
+    backgroundColor: '#252528',
+    borderColor: '#3A3A3C',
+  },
+  genreListItemSelectedEco: {
+    backgroundColor: '#1E3A4C',
+    borderColor: '#64D2FF',
+  },
+  genreListItemLeft: {
+    flex: 1,
+  },
+  genreListItemHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 3,
+  },
+  genreListItemTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  genreListItemTitleNormal: {
+    color: '#000000',
+  },
+  genreListItemTitleSelected: {
+    color: '#007AFF',
+  },
+  genreListItemTitleEco: {
+    color: '#FFFFFF',
+  },
+  genreListItemTitleSelectedEco: {
+    color: '#64D2FF',
+  },
+  genreListItemSubRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  genreListItemSubText: {
+    fontSize: 11,
+  },
+  genreListItemRight: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    marginLeft: 8,
+  },
+  genreListItemCountNum: {
+    fontSize: 17,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+  },
+  genreListItemCountUnit: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginLeft: 2,
   },
   genreChip: {
     flexDirection: 'row',
