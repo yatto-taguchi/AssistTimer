@@ -1564,17 +1564,17 @@ export default function HomeScreen({ navigation }) {
                 onPress={handleOpenGenreModal}
                 activeOpacity={0.7}
                 disabled={!controlsVisible}
-                hitSlop={{ top: 8, bottom: 8, left: 16, right: 16 }}
+                hitSlop={{ top: 10, bottom: 10, left: 16, right: 16 }}
               >
                 <Ionicons
                   name={selectedCategory ? "pricetag" : "pricetag-outline"}
-                  size={12}
+                  size={19}
                   color={
                     selectedCategory
                       ? (isEcoMode ? '#64D2FF' : '#007AFF')
                       : (isEcoMode ? '#8E8E93' : '#687076')
                   }
-                  style={{ marginRight: 5 }}
+                  style={{ marginRight: 7 }}
                 />
                 <Text
                   style={[
@@ -1589,13 +1589,13 @@ export default function HomeScreen({ navigation }) {
                 </Text>
                 <Ionicons
                   name="chevron-down"
-                  size={11}
+                  size={16}
                   color={
                     selectedCategory
                       ? (isEcoMode ? '#64D2FF' : '#007AFF')
                       : (isEcoMode ? '#666' : '#8E8E93')
                   }
-                  style={{ marginLeft: 4 }}
+                  style={{ marginLeft: 6 }}
                 />
               </TouchableOpacity>
             </Animated.View>
@@ -1628,7 +1628,7 @@ export default function HomeScreen({ navigation }) {
           </View>
         </View>
 
-        <Animated.View style={[{ opacity: controlsOpacity, width: '100%', alignItems: 'center' }]} pointerEvents={controlsVisible ? 'auto' : 'none'}>
+        <Animated.View style={[styles.bottomControlsWrapper, { opacity: controlsOpacity }]} pointerEvents={controlsVisible ? 'auto' : 'none'}>
           <View style={styles.controlsContainer}>
             <TouchableOpacity style={styles.button} onPress={toggleTimer} disabled={!controlsVisible}>
               <Text style={styles.buttonText}>{isRunning || isPreCountingDown ? '一時停止' : 'スタート'}</Text>
@@ -2932,30 +2932,30 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 3,
-    paddingHorizontal: 10,
-    borderRadius: 12,
+    paddingVertical: 7,
+    paddingHorizontal: 16,
+    borderRadius: 20,
     borderWidth: 1,
-    marginTop: 6,
-    maxWidth: 220,
+    marginTop: 10,
+    maxWidth: 280,
   },
   genreBadgeNormal: {
     backgroundColor: '#FFFFFF',
     borderColor: '#E5E5EA',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 2,
-    elevation: 1,
+    shadowOpacity: 0.06,
+    shadowRadius: 2.5,
+    elevation: 2,
   },
   genreBadgeSelected: {
     backgroundColor: '#F0F8FF',
     borderColor: '#B9DCFF',
     shadowColor: '#007AFF',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.08,
-    shadowRadius: 2,
-    elevation: 1,
+    shadowOpacity: 0.1,
+    shadowRadius: 2.5,
+    elevation: 2,
   },
   genreBadgeEco: {
     backgroundColor: '#1C1C1E',
@@ -2966,31 +2966,37 @@ const styles = StyleSheet.create({
     borderColor: '#1E3A4C',
   },
   genreBadgeText: {
-    fontSize: 11,
-    letterSpacing: -0.1,
+    fontSize: 18,
+    letterSpacing: 0.2,
   },
   genreBadgeTextNormal: {
     color: '#687076',
-    fontWeight: '500',
+    fontWeight: '600',
   },
   genreBadgeTextSelected: {
     color: '#007AFF',
-    fontWeight: '600',
+    fontWeight: '700',
   },
   genreBadgeTextEco: {
     color: '#8E8E93',
-    fontWeight: '500',
+    fontWeight: '600',
   },
   genreBadgeTextSelectedEco: {
     color: '#64D2FF',
-    fontWeight: '600',
+    fontWeight: '700',
   },
   timerContainer: {
+    top: 20,
     width: 280,
     height: 280, // RingProgress (radius 140 * 2) と同寸に保つことで、インジケーター非表示時でもスイッチバーやボタンとのバランス・配置を完全維持
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: screenHeight < 700 ? 30 : 60,
+  },
+  bottomControlsWrapper: {
+    top: 20,
+    width: '100%',
+    alignItems: 'center',
   },
   timeTextContainer: {
     position: 'absolute',
