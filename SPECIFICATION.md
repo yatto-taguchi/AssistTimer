@@ -322,7 +322,14 @@
    - 購入の復元（Restore Purchases）導線
 6. **広告機能（Google AdMob）**:
    - タイマー画面および記録一覧画面の下部にバナー広告（`AdBannerComponent`）を表示。
-   - Proプラン加入時はレンダリングを行わず完全に非表示化。
+   - **本番ID設定**:
+     - iOS アプリID: `ca-app-pub-3646959221255515~3936890861` (`app.json`)
+     - iOS バナー広告ユニットID: `ca-app-pub-3646959221255515/9534675780` (`AdBannerComponent.js`)
+   - **初期化 & 安全ポリシー遵守設計**:
+     - アプリ起動時（`AppContext.js`）で `mobileAds().initialize()` を自動実行。
+     - 開発環境（`__DEV__ === true`）ではポリシー違反（無効なトラフィック・自己インプレッション）を防止するため公式テストID（`TestIds.BANNER`）へ自動フォールバック。
+     - 本番ビルド（TestFlight / App Store公開版）では本番Ad Unit IDを使用して自動配信。
+   - **Proプラン連動**: Proプラン加入時はレンダリングを行わず完全に非表示化。
 
 ---
 

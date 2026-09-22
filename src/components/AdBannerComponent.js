@@ -16,12 +16,18 @@ try {
   // ネイティブモジュールが存在しない環境
 }
 
-// 本番Ad Unit ID設定用（未設定時はGoogle公式Test IDを使用）
-const AD_UNIT_ID = Platform.select({
-  ios: TestIds ? TestIds.BANNER : 'ca-app-pub-3940256099942544/2934735716',
-  android: TestIds ? TestIds.BANNER : 'ca-app-pub-3940256099942544/6300978111',
-  default: TestIds ? TestIds.BANNER : 'ca-app-pub-3940256099942544/2934735716',
+// 本番用バナー広告ユニットID（AdMob管理画面で発行されたユニットID）
+const PROD_BANNER_AD_UNIT_ID = Platform.select({
+  ios: 'ca-app-pub-3646959221255515/9534675780',
+  android: 'ca-app-pub-3940256099942544/6300978111',
+  default: 'ca-app-pub-3646959221255515/9534675780',
 });
+
+// 開発環境（__DEV__）ではポリシー違反（無効トラフィック）防止のため公式テストIDを使用
+// 本番ビルド（TestFlight / App Store公開版）では本番Ad Unit IDを使用
+const AD_UNIT_ID = __DEV__
+  ? (TestIds ? TestIds.BANNER : 'ca-app-pub-3940256099942544/2934735716')
+  : PROD_BANNER_AD_UNIT_ID;
 
 export default function AdBannerComponent({ style }) {
   const { isProMode, isEcoMode } = useContext(AppContext);

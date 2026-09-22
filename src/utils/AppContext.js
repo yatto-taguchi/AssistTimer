@@ -10,6 +10,14 @@ try {
   // ネイティブモジュール未ロード時のフォールバック
 }
 
+// Google Mobile Ads モジュールの安全インポート
+let mobileAds = null;
+try {
+  mobileAds = require('react-native-google-mobile-ads').default;
+} catch (e) {
+  // ネイティブモジュール未ロード時のフォールバック
+}
+
 // RevenueCat APIキー設定
 export const REVENUECAT_PUBLIC_APPLE_KEY = 'appl_jEzBjFMGADnabxXSYPQqMxFYKXJ';
 
@@ -263,6 +271,21 @@ export const AppProvider = ({ children }) => {
       }
     };
     initPurchases();
+  }, []);
+
+  // Google Mobile Ads (AdMob) のSDK初期化
+  useEffect(() => {
+    const initAdMob = async () => {
+      if (mobileAds) {
+        try {
+          await mobileAds().initialize();
+          console.log('Google Mobile Ads initialized successfully');
+        } catch (e) {
+          console.log('Google Mobile Ads init error:', e);
+        }
+      }
+    };
+    initAdMob();
   }, []);
 
   // エコモード切替と保存
