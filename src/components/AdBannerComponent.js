@@ -1,5 +1,6 @@
 import React, { useContext } from 'react';
 import { View, StyleSheet, Platform, Text } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppContext } from '../utils/AppContext';
 
 // ネイティブモジュールが読み込めない環境（Webやモック等）での安全ガード
@@ -31,6 +32,15 @@ const AD_UNIT_ID = __DEV__
 
 export default function AdBannerComponent({ style }) {
   const { isProMode, isEcoMode } = useContext(AppContext);
+  let insets = { bottom: 0 };
+  try {
+    insets = useSafeAreaInsets();
+  } catch (e) {
+    // Provider外等の安全フォールバック
+  }
+
+  // ホームバー（セーフエリア下部）との干渉・誤タップを防ぐクリアランス
+  const bottomPadding = Math.max(insets.bottom, 4);
 
   // Proモード加入中は広告を一切レンダリングしない
   if (isProMode) {
@@ -40,7 +50,7 @@ export default function AdBannerComponent({ style }) {
   // ライブラリがロードできない環境でのフォールバック
   if (!BannerAd || !BannerAdSize) {
     return (
-      <View style={[styles.fallbackContainer, { backgroundColor: isEcoMode ? '#111' : '#F2F2F7' }, style]}>
+      <View style={[styles.fallbackContainer, { backgroundColor: isEcoMode ? '#111' : '#F2F2F7', paddingBottom: bottomPadding }, style]}>
         <Text style={[styles.fallbackText, { color: isEcoMode ? '#666' : '#999' }]}>
           Ad Banner (Test Area)
         </Text>
@@ -49,12 +59,15 @@ export default function AdBannerComponent({ style }) {
   }
 
   return (
-    <View style={[styles.container, { backgroundColor: isEcoMode ? '#000' : '#F2F2F7' }, style]}>
+    <View style={[styles.container, { backgroundColor: isEcoMode ? '#000' : '#F2F2F7', paddingBottom: bottomPadding }, style]}>
       <BannerAd
         unitId={AD_UNIT_ID}
         size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
         requestOptions={{
           requestNonPersonalizedAdsOnly: true,
+        }}
+        onAdLoaded={() => {
+          console.log('Banner Ad loaded successfully');
         }}
         onAdFailedToLoad={(error) => {
           // 広告読み込み失敗時は静かにログ（UIを破壊しない）

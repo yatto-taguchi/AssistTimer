@@ -1,5 +1,6 @@
 import React, { useContext } from 'react';
 import { Animated, View } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer, DefaultTheme, DarkTheme } from '@react-navigation/native';
 import { createBottomTabNavigator, BottomTabBar } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
@@ -138,8 +139,10 @@ function AppContent() {
 
 export default function App() {
   return (
-    <AppProvider>
-      <AppContent />
-    </AppProvider>
+    <SafeAreaProvider>
+      <AppProvider>
+        <AppContent />
+      </AppProvider>
+    </SafeAreaProvider>
   );
 }
