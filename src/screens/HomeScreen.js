@@ -1738,10 +1738,13 @@ export default function HomeScreen({ navigation }) {
                 ]}
                 pointerEvents="none"
               >
-                <Text style={[
-                  styles.targetTimePillText,
-                  { color: isEcoMode ? '#8E8E93' : '#3A3A3C' }
-                ]}>
+                <Text 
+                  style={[
+                    styles.targetTimePillText,
+                    { color: isEcoMode ? '#8E8E93' : '#3A3A3C' }
+                  ]}
+                  numberOfLines={1}
+                >
                   {formatTargetTime(targetTime)}
                 </Text>
               </View>
@@ -3165,16 +3168,19 @@ const styles = StyleSheet.create({
     position: 'absolute',
     justifyContent: 'center',
     alignItems: 'center',
+    minWidth: 200, // 1文字（0秒や1桁秒など）時でもコンテナ幅が極端に縮小して下部ピルが縦潰れするのを防止
   },
   timeText: {
     fontSize: 48,
     fontWeight: '500',
     fontVariant: ['tabular-nums'], // 数字の幅を等間隔にして揺れを防止
+    textAlign: 'center',
   },
   preCountdownText: {
     fontSize: 120, // 枠いっぱいの大きなサイズ
     fontWeight: 'bold',
     fontVariant: ['tabular-nums'], // こちらも揺れを防止
+    textAlign: 'center',
   },
   targetTimePill: {
     position: 'absolute',
@@ -3185,6 +3191,7 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
     paddingHorizontal: 12,
     borderRadius: 12,
+    alignSelf: 'center',
   },
   targetTimePillNormal: {
     backgroundColor: '#EBECEF',
@@ -3200,6 +3207,8 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     fontVariant: ['tabular-nums'],
+    flexShrink: 0, // テキストの改行・縦潰れを防止
+    textAlign: 'center',
   },
   controlsContainer: {
     flexDirection: 'row',
