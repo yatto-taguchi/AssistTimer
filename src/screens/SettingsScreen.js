@@ -75,6 +75,7 @@ export default function SettingsScreen({ route }) {
     isNormalTargetTimeEnabled, toggleNormalTargetTime,
     isEcoTargetTimeEnabled, toggleEcoTargetTime,
     isHomeStatsEnabled, toggleHomeStatsEnabled,
+    isQuickAccessBarEnabled, toggleQuickAccessBar,
     isProMode, toggleProMode, 
     isColorIndicator, toggleColorIndicator,
     isCountdownEnabled, toggleCountdownEnabled,
@@ -347,6 +348,7 @@ export default function SettingsScreen({ route }) {
     isNormalStatusBarEnabled,
     isNormalIndicatorEnabled,
     isNormalTargetTimeEnabled,
+    isQuickAccessBarEnabled,
     isHomeStatsEnabled,
   ];
   const normalSettingsActiveCount = normalSettingsList.filter(Boolean).length;
@@ -362,6 +364,7 @@ export default function SettingsScreen({ route }) {
     isEcoBorderEnabled,
     isEcoIndicatorEnabled,
     isEcoTargetTimeEnabled,
+    isQuickAccessBarEnabled,
     isHomeStatsEnabled,
   ];
   const ecoSettingsActiveCount = ecoSettingsList.filter(Boolean).length;
@@ -580,6 +583,16 @@ export default function SettingsScreen({ route }) {
                 />
               </View>
 
+              <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>クイック操作ボタン（5種）を表示</Text>
+                <Switch
+                  value={isQuickAccessBarEnabled}
+                  onValueChange={toggleQuickAccessBar}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
+
               <View style={[styles.subSettingRow, { borderBottomWidth: 0 }]}>
                 <Text style={[styles.subSettingText, { color: textColor }]}>練習統計サマリーを表示</Text>
                 <Switch
@@ -698,6 +711,16 @@ export default function SettingsScreen({ route }) {
                 <Switch
                   value={isEcoTargetTimeEnabled}
                   onValueChange={toggleEcoTargetTime}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
+
+              <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>クイック操作ボタン（5種）を表示</Text>
+                <Switch
+                  value={isQuickAccessBarEnabled}
+                  onValueChange={toggleQuickAccessBar}
                   trackColor={{ false: '#333', true: '#34C759' }}
                   style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
                 />

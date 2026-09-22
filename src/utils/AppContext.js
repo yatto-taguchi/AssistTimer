@@ -30,6 +30,7 @@ export const AppProvider = ({ children }) => {
   const [isNormalTargetTimeEnabled, setIsNormalTargetTimeEnabled] = useState(true); // 通常モードでの設定タイム表示
   const [isHomeStatsEnabled, setIsHomeStatsEnabled] = useState(true); // ホーム画面での練習統計サマリー表示マスター
   const [isHomeStatsCollapsed, setIsHomeStatsCollapsed] = useState(false); // ホーム画面上での折りたたみ状態
+  const [isQuickAccessBarEnabled, setIsQuickAccessBarEnabled] = useState(true); // ホーム画面でのクイック操作ボタン（5種）表示マスター
   const [isProMode, setIsProModeState] = useState(false); // 課金（Proプラン）状態
   const [isColorIndicator, setIsColorIndicator] = useState(true); // カラーインジケーター（10分以下タイマー用）
   const [isCountdownEnabled, setIsCountdownEnabled] = useState(false); // スタート前カウントダウン
@@ -135,6 +136,7 @@ export const AppProvider = ({ children }) => {
         const ecoTargetTimeVal = await AsyncStorage.getItem('isEcoTargetTimeEnabled');
         const homeStatsEnabledVal = await AsyncStorage.getItem('isHomeStatsEnabled');
         const homeStatsCollapsedVal = await AsyncStorage.getItem('isHomeStatsCollapsed');
+        const quickAccessBarVal = await AsyncStorage.getItem('isQuickAccessBarEnabled');
         const proVal = await AsyncStorage.getItem('isProMode');
         const colorVal = await AsyncStorage.getItem('isColorIndicator');
         const countdownEnabledVal = await AsyncStorage.getItem('isCountdownEnabled');
@@ -192,6 +194,7 @@ export const AppProvider = ({ children }) => {
         if (ecoTargetTimeVal !== null) setIsEcoTargetTimeEnabled(JSON.parse(ecoTargetTimeVal));
         if (homeStatsEnabledVal !== null) setIsHomeStatsEnabled(JSON.parse(homeStatsEnabledVal));
         if (homeStatsCollapsedVal !== null) setIsHomeStatsCollapsed(JSON.parse(homeStatsCollapsedVal));
+        if (quickAccessBarVal !== null) setIsQuickAccessBarEnabled(JSON.parse(quickAccessBarVal));
         if (proVal !== null) setIsProModeState(JSON.parse(proVal));
         if (colorVal !== null) setIsColorIndicator(JSON.parse(colorVal));
         if (countdownEnabledVal !== null) setIsCountdownEnabled(JSON.parse(countdownEnabledVal));
@@ -338,6 +341,12 @@ export const AppProvider = ({ children }) => {
     const nextVal = typeof value === 'boolean' ? value : !isHomeStatsCollapsed;
     setIsHomeStatsCollapsed(nextVal);
     await AsyncStorage.setItem('isHomeStatsCollapsed', JSON.stringify(nextVal));
+  };
+
+  const toggleQuickAccessBar = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isQuickAccessBarEnabled;
+    setIsQuickAccessBarEnabled(nextVal);
+    await AsyncStorage.setItem('isQuickAccessBarEnabled', JSON.stringify(nextVal));
   };
 
   // Proモード明示的セット
@@ -621,6 +630,8 @@ export const AppProvider = ({ children }) => {
         toggleHomeStatsEnabled,
         isHomeStatsCollapsed,
         toggleHomeStatsCollapsed,
+        isQuickAccessBarEnabled,
+        toggleQuickAccessBar,
         isProMode,
         setIsProMode,
         toggleProMode,

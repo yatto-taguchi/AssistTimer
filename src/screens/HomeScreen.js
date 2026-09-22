@@ -161,6 +161,7 @@ export default function HomeScreen({ navigation }) {
     isHomeStatsEnabled,
     isHomeStatsCollapsed,
     toggleHomeStatsCollapsed,
+    isQuickAccessBarEnabled,
     controlsOpacity,
     controlsVisible,
     showControls,
@@ -1498,14 +1499,15 @@ export default function HomeScreen({ navigation }) {
               ]} 
               pointerEvents={controlsVisible ? 'auto' : 'none'}
             >
-              <View style={[
-                styles.quickAccessBar, 
-                { 
-                  backgroundColor: isEcoMode ? '#1C1C1E' : '#F2F2F7', 
-                  borderColor: isEcoMode ? '#2C2C2E' : '#E5E5EA' 
-                }
-              ]}>
-                {/* 1. 準備時間 */}
+              {isQuickAccessBarEnabled ? (
+                <View style={[
+                  styles.quickAccessBar, 
+                  { 
+                    backgroundColor: isEcoMode ? '#1C1C1E' : '#F2F2F7', 
+                    borderColor: isEcoMode ? '#2C2C2E' : '#E5E5EA' 
+                  }
+                ]}>
+                  {/* 1. 準備時間 */}
                 <TouchableOpacity 
                   style={[
                     styles.quickAccessButton, 
@@ -1638,6 +1640,9 @@ export default function HomeScreen({ navigation }) {
                   </Text>
                 </TouchableOpacity>
               </View>
+            ) : (
+              <View style={styles.quickAccessBarPlaceholder} />
+            )}
 
               {/* 計測ジャンル表示・選択バッジ */}
               <TouchableOpacity
@@ -3039,6 +3044,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   quickAccessBar: {
+    height: 47,
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 4,
@@ -3050,6 +3056,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 3,
     elevation: 2,
+  },
+  quickAccessBarPlaceholder: {
+    height: 47,
+    width: '100%',
   },
   quickAccessButton: {
     flexDirection: 'column',
