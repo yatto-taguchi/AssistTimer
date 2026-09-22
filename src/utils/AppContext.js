@@ -23,9 +23,13 @@ export const AppProvider = ({ children }) => {
   const [isEcoNavActiveDot, setIsEcoNavActiveDot] = useState(false); // アイコン表示時、選択中のみ点にする
   const [isEcoBorderEnabled, setIsEcoBorderEnabled] = useState(false); // trueで境界線あり、falseでなし
   const [isEcoIndicatorEnabled, setIsEcoIndicatorEnabled] = useState(true); // エコモードでのタイマーリング表示
+  const [isEcoTargetTimeEnabled, setIsEcoTargetTimeEnabled] = useState(true); // エコモードでの設定タイム表示
   const [isNormalStatusBarEnabled, setIsNormalStatusBarEnabled] = useState(true); // 通常モードでのステータスバー（時計・電池）表示
   const [isNormalStatusBarAutoHide, setIsNormalStatusBarAutoHide] = useState(true); // 通常モードでのタイマー作動中ステータスバー自動非表示
   const [isNormalIndicatorEnabled, setIsNormalIndicatorEnabled] = useState(true); // 通常モードでのタイマーリング表示
+  const [isNormalTargetTimeEnabled, setIsNormalTargetTimeEnabled] = useState(true); // 通常モードでの設定タイム表示
+  const [isHomeStatsEnabled, setIsHomeStatsEnabled] = useState(true); // ホーム画面での練習統計サマリー表示マスター
+  const [isHomeStatsCollapsed, setIsHomeStatsCollapsed] = useState(false); // ホーム画面上での折りたたみ状態
   const [isProMode, setIsProModeState] = useState(false); // 課金（Proプラン）状態
   const [isColorIndicator, setIsColorIndicator] = useState(true); // カラーインジケーター（10分以下タイマー用）
   const [isCountdownEnabled, setIsCountdownEnabled] = useState(false); // スタート前カウントダウン
@@ -127,6 +131,10 @@ export const AppProvider = ({ children }) => {
         const normalStatusBarVal = await AsyncStorage.getItem('isNormalStatusBarEnabled');
         const normalStatusBarAutoHideVal = await AsyncStorage.getItem('isNormalStatusBarAutoHide');
         const normalIndicatorVal = await AsyncStorage.getItem('isNormalIndicatorEnabled');
+        const normalTargetTimeVal = await AsyncStorage.getItem('isNormalTargetTimeEnabled');
+        const ecoTargetTimeVal = await AsyncStorage.getItem('isEcoTargetTimeEnabled');
+        const homeStatsEnabledVal = await AsyncStorage.getItem('isHomeStatsEnabled');
+        const homeStatsCollapsedVal = await AsyncStorage.getItem('isHomeStatsCollapsed');
         const proVal = await AsyncStorage.getItem('isProMode');
         const colorVal = await AsyncStorage.getItem('isColorIndicator');
         const countdownEnabledVal = await AsyncStorage.getItem('isCountdownEnabled');
@@ -180,6 +188,10 @@ export const AppProvider = ({ children }) => {
         if (normalStatusBarVal !== null) setIsNormalStatusBarEnabled(JSON.parse(normalStatusBarVal));
         if (normalStatusBarAutoHideVal !== null) setIsNormalStatusBarAutoHide(JSON.parse(normalStatusBarAutoHideVal));
         if (normalIndicatorVal !== null) setIsNormalIndicatorEnabled(JSON.parse(normalIndicatorVal));
+        if (normalTargetTimeVal !== null) setIsNormalTargetTimeEnabled(JSON.parse(normalTargetTimeVal));
+        if (ecoTargetTimeVal !== null) setIsEcoTargetTimeEnabled(JSON.parse(ecoTargetTimeVal));
+        if (homeStatsEnabledVal !== null) setIsHomeStatsEnabled(JSON.parse(homeStatsEnabledVal));
+        if (homeStatsCollapsedVal !== null) setIsHomeStatsCollapsed(JSON.parse(homeStatsCollapsedVal));
         if (proVal !== null) setIsProModeState(JSON.parse(proVal));
         if (colorVal !== null) setIsColorIndicator(JSON.parse(colorVal));
         if (countdownEnabledVal !== null) setIsCountdownEnabled(JSON.parse(countdownEnabledVal));
@@ -304,6 +316,28 @@ export const AppProvider = ({ children }) => {
   const toggleNormalIndicator = async (value) => {
     setIsNormalIndicatorEnabled(value);
     await AsyncStorage.setItem('isNormalIndicatorEnabled', JSON.stringify(value));
+  };
+
+  const toggleNormalTargetTime = async (value) => {
+    setIsNormalTargetTimeEnabled(value);
+    await AsyncStorage.setItem('isNormalTargetTimeEnabled', JSON.stringify(value));
+  };
+
+  const toggleEcoTargetTime = async (value) => {
+    setIsEcoTargetTimeEnabled(value);
+    await AsyncStorage.setItem('isEcoTargetTimeEnabled', JSON.stringify(value));
+  };
+
+  const toggleHomeStatsEnabled = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isHomeStatsEnabled;
+    setIsHomeStatsEnabled(nextVal);
+    await AsyncStorage.setItem('isHomeStatsEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleHomeStatsCollapsed = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isHomeStatsCollapsed;
+    setIsHomeStatsCollapsed(nextVal);
+    await AsyncStorage.setItem('isHomeStatsCollapsed', JSON.stringify(nextVal));
   };
 
   // Proモード明示的セット
@@ -579,6 +613,14 @@ export const AppProvider = ({ children }) => {
         toggleNormalStatusBarAutoHide,
         isNormalIndicatorEnabled,
         toggleNormalIndicator,
+        isNormalTargetTimeEnabled,
+        toggleNormalTargetTime,
+        isEcoTargetTimeEnabled,
+        toggleEcoTargetTime,
+        isHomeStatsEnabled,
+        toggleHomeStatsEnabled,
+        isHomeStatsCollapsed,
+        toggleHomeStatsCollapsed,
         isProMode,
         setIsProMode,
         toggleProMode,

@@ -72,6 +72,9 @@ export default function SettingsScreen({ route }) {
     isNormalStatusBarEnabled, toggleNormalStatusBar,
     isNormalStatusBarAutoHide, toggleNormalStatusBarAutoHide,
     isNormalIndicatorEnabled, toggleNormalIndicator,
+    isNormalTargetTimeEnabled, toggleNormalTargetTime,
+    isEcoTargetTimeEnabled, toggleEcoTargetTime,
+    isHomeStatsEnabled, toggleHomeStatsEnabled,
     isProMode, toggleProMode, 
     isColorIndicator, toggleColorIndicator,
     isCountdownEnabled, toggleCountdownEnabled,
@@ -340,10 +343,16 @@ export default function SettingsScreen({ route }) {
   const modeSubTextColor = isEcoMode ? '#7FA6C7' : '#557086';
 
   // 通常モード詳細設定サマリー
-  const normalSettingsActiveCount = (isNormalStatusBarEnabled ? 1 : 0) + (isNormalIndicatorEnabled ? 1 : 0);
-  const normalSettingsSummary = normalSettingsActiveCount === 2 
+  const normalSettingsList = [
+    isNormalStatusBarEnabled,
+    isNormalIndicatorEnabled,
+    isNormalTargetTimeEnabled,
+    isHomeStatsEnabled,
+  ];
+  const normalSettingsActiveCount = normalSettingsList.filter(Boolean).length;
+  const normalSettingsSummary = normalSettingsActiveCount === normalSettingsList.length 
     ? '全項目 ON' 
-    : (normalSettingsActiveCount === 0 ? 'すべて OFF' : (isNormalStatusBarEnabled ? 'ステータスバー ON' : 'タイマーリング ON'));
+    : (normalSettingsActiveCount === 0 ? 'すべて OFF' : `${normalSettingsActiveCount}/${normalSettingsList.length} 項目 ON`);
 
   // エコモード詳細設定サマリー
   const ecoSettingsList = [
@@ -351,7 +360,9 @@ export default function SettingsScreen({ route }) {
     isEcoBatteryEnabled,
     isEcoNavIconEnabled,
     isEcoBorderEnabled,
-    isEcoIndicatorEnabled
+    isEcoIndicatorEnabled,
+    isEcoTargetTimeEnabled,
+    isHomeStatsEnabled,
   ];
   const ecoSettingsActiveCount = ecoSettingsList.filter(Boolean).length;
   const ecoSettingsSummary = ecoSettingsActiveCount === ecoSettingsList.length
@@ -549,11 +560,31 @@ export default function SettingsScreen({ route }) {
                 </View>
               )}
 
-              <View style={[styles.subSettingRow, { borderBottomWidth: 0 }]}>
+              <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
                 <Text style={[styles.subSettingText, { color: textColor }]}>タイマーリングを表示</Text>
                 <Switch
                   value={isNormalIndicatorEnabled}
                   onValueChange={toggleNormalIndicator}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
+
+              <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>設定タイムを表示</Text>
+                <Switch
+                  value={isNormalTargetTimeEnabled}
+                  onValueChange={toggleNormalTargetTime}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
+
+              <View style={[styles.subSettingRow, { borderBottomWidth: 0 }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>練習統計サマリーを表示</Text>
+                <Switch
+                  value={isHomeStatsEnabled}
+                  onValueChange={toggleHomeStatsEnabled}
                   trackColor={{ false: '#333', true: '#34C759' }}
                   style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
                 />
@@ -652,11 +683,31 @@ export default function SettingsScreen({ route }) {
                 />
               </View>
 
-              <View style={[styles.subSettingRow, { borderBottomWidth: 0 }]}>
+              <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
                 <Text style={[styles.subSettingText, { color: textColor }]}>タイマーリングを表示</Text>
                 <Switch
                   value={isEcoIndicatorEnabled}
                   onValueChange={toggleEcoIndicator}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
+
+              <View style={[styles.subSettingRow, { borderBottomColor: innerBorderColor }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>設定タイムを表示</Text>
+                <Switch
+                  value={isEcoTargetTimeEnabled}
+                  onValueChange={toggleEcoTargetTime}
+                  trackColor={{ false: '#333', true: '#34C759' }}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
+
+              <View style={[styles.subSettingRow, { borderBottomWidth: 0 }]}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>練習統計サマリーを表示</Text>
+                <Switch
+                  value={isHomeStatsEnabled}
+                  onValueChange={toggleHomeStatsEnabled}
                   trackColor={{ false: '#333', true: '#34C759' }}
                   style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
                 />

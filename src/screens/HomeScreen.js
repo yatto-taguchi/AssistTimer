@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useContext } from 'react';
+import React, { useState, useEffect, useRef, useContext, useCallback } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback, Image, FlatList, Dimensions, AppState, Vibration, LayoutAnimation } from 'react-native';
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 import { useIsFocused } from '@react-navigation/native';
@@ -9,9 +9,10 @@ import { Audio } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import RingProgress from '../components/RingProgress';
+import HomeStatsSummary from '../components/HomeStatsSummary';
 import { AppContext } from '../utils/AppContext';
 import { saveRecord, getRecords } from '../utils/recordStorage';
-import { recordInterruption, getFullPracticeStats } from '../utils/practiceStats';
+import { recordInterruption, getFullPracticeStats, getQuickStatsSummary } from '../utils/practiceStats';
 import AdBannerComponent from '../components/AdBannerComponent';
 import ProSubscriptionModal from '../components/ProSubscriptionModal';
 
@@ -88,6 +89,7 @@ export default function HomeScreen({ navigation }) {
   const [isAddingGenreModal, setIsAddingGenreModal] = useState(false);
   const [newGenreNameInput, setNewGenreNameInput] = useState('');
   const [genreStatsMap, setGenreStatsMap] = useState({});
+  const [homeQuickStats, setHomeQuickStats] = useState(null);
 
   const DEFAULT_TAGS = ['お気に入り', 'タイム'];
 
@@ -154,6 +156,11 @@ export default function HomeScreen({ navigation }) {
     isEcoNavActiveDot,
     isEcoIndicatorEnabled,
     isNormalIndicatorEnabled,
+    isNormalTargetTimeEnabled,
+    isEcoTargetTimeEnabled,
+    isHomeStatsEnabled,
+    isHomeStatsCollapsed,
+    toggleHomeStatsCollapsed,
     controlsOpacity,
     controlsVisible,
     showControls,
@@ -688,6 +695,20 @@ export default function HomeScreen({ navigation }) {
     }
     
     return isNegative ? `-${formatted}` : formatted;
+  };
+
+  const formatTargetTime = (timeInSeconds) => {
+    const absTime = Math.abs(timeInSeconds);
+    const h = Math.floor(absTime / 3600);
+    const m = Math.floor((absTime % 3600) / 60);
+    const s = absTime % 60;
+    
+    if (h > 0) {
+      // 1時間以上の場合： h:mm:ss （時は0埋めなし、分と秒は2桁）
+      return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    }
+    // 1時間未満の場合： m:ss （分は0埋めなし、秒は2桁）
+    return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
   const toggleTimer = () => {
@@ -1253,6 +1274,7 @@ export default function HomeScreen({ navigation }) {
     setPhotoUris([]);
     resetTimer(true);
     loadGenreStats();
+    loadHomeQuickStats();
   };
 
   const handleAddCategory = async () => {
@@ -1283,11 +1305,22 @@ export default function HomeScreen({ navigation }) {
     }
   };
 
+  // ホーム画面クイック練習統計サマリーの取得
+  const loadHomeQuickStats = useCallback(async (cat = selectedCategory) => {
+    try {
+      const stats = await getQuickStatsSummary(cat || null);
+      setHomeQuickStats(stats);
+    } catch (e) {
+      console.error('Failed to load home quick stats', e);
+    }
+  }, [selectedCategory]);
+
   useEffect(() => {
     if (isFocused) {
       loadGenreStats();
+      loadHomeQuickStats();
     }
-  }, [isFocused]);
+  }, [isFocused, selectedCategory, loadHomeQuickStats]);
 
   // ---- ホーム画面ジャンル選択モーダル操作ハンドラー ----
   const handleOpenGenreModal = () => {
@@ -1302,6 +1335,7 @@ export default function HomeScreen({ navigation }) {
     Vibration.vibrate(30);
     setSelectedCategory(category);
     setGenreModalVisible(false);
+    loadHomeQuickStats(category);
     try {
       await AsyncStorage.setItem('lastUsedCategory', category);
       setLastUsedCategory(category);
@@ -1314,6 +1348,7 @@ export default function HomeScreen({ navigation }) {
     Vibration.vibrate(30);
     setSelectedCategory('');
     setGenreModalVisible(false);
+    loadHomeQuickStats('');
     try {
       await AsyncStorage.removeItem('lastUsedCategory');
       setLastUsedCategory('');
@@ -1333,6 +1368,7 @@ export default function HomeScreen({ navigation }) {
       setNewGenreNameInput('');
       setIsAddingGenreModal(false);
       setGenreModalVisible(false);
+      loadHomeQuickStats(trimmed);
       try {
         await AsyncStorage.setItem('savedCategories', JSON.stringify(uniqueCats));
         await AsyncStorage.setItem('lastUsedCategory', trimmed);
@@ -1435,6 +1471,17 @@ export default function HomeScreen({ navigation }) {
     }
   };
 
+  // インジケーター（タイマー円）の位置はサマリーON/OFFやアコーディオン開閉にかかわらず完全固定
+  const contentTopShift = 45;
+
+  // 上側コントロール群（クイックアクセスバー・ジャンルバッジ・サマリー）の垂直シフト
+  // 統計サマリーのON/OFFに関わらず基本位置（-10）を完全固定し、アコーディオン展開時のみ上へスライドして高さを吸収
+  const topControlsShift = (isHomeStatsEnabled && !isHomeStatsCollapsed) ? -36 : -10;
+
+  // ボタン群（スタート・リセット・記録保存）の垂直位置も完全固定
+  const timerMarginBottom = screenHeight < 700 ? 20 : 40;
+  const controlsTopShift = 27;
+
   return (
     <TouchableWithoutFeedback onPress={handleScreenPress}>
       <View style={[styles.container, { backgroundColor: bgColor }]}>
@@ -1444,7 +1491,10 @@ export default function HomeScreen({ navigation }) {
             <Animated.View 
               style={[
                 styles.quickAccessBarWrapper, 
-                { opacity: controlsOpacity }
+                { 
+                  top: topControlsShift,
+                  opacity: controlsOpacity 
+                }
               ]} 
               pointerEvents={controlsVisible ? 'auto' : 'none'}
             >
@@ -1634,9 +1684,23 @@ export default function HomeScreen({ navigation }) {
                   style={{ marginLeft: 6 }}
                 />
               </TouchableOpacity>
+
+              {/* 計測ジャンル直下の練習統計サマリー */}
+              {isHomeStatsEnabled && homeQuickStats && (
+                <HomeStatsSummary
+                  stats={homeQuickStats}
+                  isEcoMode={isEcoMode}
+                  isCollapsed={isHomeStatsCollapsed}
+                  onToggleCollapse={toggleHomeStatsCollapsed}
+                  disabled={!controlsVisible}
+                />
+              )}
             </Animated.View>
           </View>
-          <View style={styles.timerContainer}>
+          <View style={[
+            styles.timerContainer, 
+            { top: contentTopShift, marginBottom: timerMarginBottom }
+          ]}>
           {(isEcoMode ? isEcoIndicatorEnabled : isNormalIndicatorEnabled) && (
             <RingProgress 
               radius={140} 
@@ -1661,10 +1725,32 @@ export default function HomeScreen({ navigation }) {
                 </Text>
               </TouchableOpacity>
             )}
+            {(isEcoMode ? isEcoTargetTimeEnabled : isNormalTargetTimeEnabled) && !isPreCountingDown && (isRunning || remainingTime !== targetTime || isCountUp) && (
+              <View 
+                style={[
+                  styles.targetTimePill,
+                  isEcoMode ? styles.targetTimePillEco : styles.targetTimePillNormal
+                ]}
+                pointerEvents="none"
+              >
+                <Text style={[
+                  styles.targetTimePillText,
+                  { color: isEcoMode ? '#8E8E93' : '#3A3A3C' }
+                ]}>
+                  {formatTargetTime(targetTime)}
+                </Text>
+              </View>
+            )}
           </View>
         </View>
 
-        <Animated.View style={[styles.bottomControlsWrapper, { opacity: controlsOpacity }]} pointerEvents={controlsVisible ? 'auto' : 'none'}>
+        <Animated.View 
+          style={[
+            styles.bottomControlsWrapper, 
+            { top: controlsTopShift, opacity: controlsOpacity }
+          ]} 
+          pointerEvents={controlsVisible ? 'auto' : 'none'}
+        >
           <View style={styles.controlsContainer}>
             <TouchableOpacity style={styles.button} onPress={toggleTimer} disabled={!controlsVisible}>
               <Text style={styles.buttonText}>{isRunning || isPreCountingDown ? '一時停止' : 'スタート'}</Text>
@@ -2940,12 +3026,13 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    top: -20, // 画面全体の垂直位置を20px上へシフト
   },
   topBalanceContainer: {
     height: screenHeight < 700 ? 54 : 84, // bottomActionArea (height 64 + marginTop 20 = 84) と釣り合わせ、タイマー位置をスタート前の中央位置に完全一致させる
     width: '100%',
     alignItems: 'center',
-    justifyContent: 'center',
+    justifyContent: 'flex-start', // 上端基準にすることで、サマリーの有無（ON/OFF）による重心変動・位置ズレを完全排除
   },
   quickAccessBarWrapper: {
     alignItems: 'center',
@@ -3079,17 +3166,42 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontVariant: ['tabular-nums'], // こちらも揺れを防止
   },
+  targetTimePill: {
+    position: 'absolute',
+    bottom: -32,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 3,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+  },
+  targetTimePillNormal: {
+    backgroundColor: '#EBECEF',
+    borderWidth: 0.5,
+    borderColor: '#DFE0E5',
+  },
+  targetTimePillEco: {
+    backgroundColor: '#1C1C1E',
+    borderWidth: 0.5,
+    borderColor: '#2C2C2E',
+  },
+  targetTimePillText: {
+    fontSize: 13,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
   controlsContainer: {
     flexDirection: 'row',
     gap: 20,
-    marginBottom: 30, // saveボタンなどの余白
+    marginBottom: 16, // saveボタンなどとの余白を最適化して上に調整
   },
   bottomActionArea: {
     width: '100%',
     alignItems: 'center',
     justifyContent: 'center',
     height: 64, // 計測終了ボタンの高さに合わせて固定領域を確保し、スタート前後の位置ズレを防止
-    marginTop: 20,
+    marginTop: 10,
   },
   button: {
     backgroundColor: '#007AFF', // ブルー

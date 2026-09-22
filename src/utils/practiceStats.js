@@ -228,3 +228,91 @@ export const getFullPracticeStats = async () => {
     };
   }
 };
+
+/**
+ * 秒数を日本語表記（時間・分・秒）にフォーマット
+ * @param {number} totalSeconds 
+ * @param {boolean} includeSeconds - 秒を含めるか
+ * @returns {string} フォーマットされた文字列 (例: '1時間20分', '15分30秒', '0分')
+ */
+export const formatJapaneseDuration = (totalSeconds, includeSeconds = true) => {
+  const sec = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  if (sec === 0) return '0分';
+
+  const hours = Math.floor(sec / 3600);
+  const minutes = Math.floor((sec % 3600) / 60);
+  const remainingSec = sec % 60;
+
+  if (hours > 0) {
+    if (minutes > 0) {
+      return `${hours}時間${minutes}分`;
+    }
+    return `${hours}時間`;
+  }
+
+  if (includeSeconds && remainingSec > 0) {
+    if (minutes > 0) {
+      return `${minutes}分${remainingSec}秒`;
+    }
+    return `${remainingSec}秒`;
+  }
+
+  return `${minutes}分`;
+};
+
+/**
+ * ホーム画面のジャンル直下に表示するクイック練習統計サマリーを取得
+ * @param {string|null} category - ジャンル名（nullまたは未設定時は全ジャンル集計）
+ * @returns {Promise<Object>} 5大指標を含むサマリーオブジェクト
+ */
+export const getQuickStatsSummary = async (category = null) => {
+  try {
+    const records = await getRecords();
+    const isFiltered = Boolean(category && category !== 'ジャンル未設定');
+    const targetRecords = isFiltered
+      ? records.filter(r => (r.category || '未分類') === category)
+      : records;
+
+    const totalCompleted = targetRecords.length;
+    const totalDuration = targetRecords.reduce((sum, r) => sum + (Number(r.duration) || 0), 0);
+    const averageDuration = totalCompleted > 0 ? Math.round(totalDuration / totalCompleted) : 0;
+
+    const todayStr = toLocalDateString(new Date().toISOString());
+    const todayRecords = targetRecords.filter(r => toLocalDateString(r.date) === todayStr);
+    const todaySessions = todayRecords.length;
+    const todayDuration = todayRecords.reduce((sum, r) => sum + (Number(r.duration) || 0), 0);
+    const todayMinutes = Math.round(todayDuration / 60);
+
+    const streakDays = calculateStreakDays(records, isFiltered ? category : null);
+
+    return {
+      category: isFiltered ? category : null,
+      totalCompleted,
+      totalDuration,
+      totalDurationText: formatJapaneseDuration(totalDuration, false),
+      averageDuration,
+      averageDurationText: formatJapaneseDuration(averageDuration, true),
+      todaySessions,
+      todayDuration,
+      todayMinutes,
+      todayDurationText: todaySessions > 0 ? `${todayMinutes}分` : '0分',
+      streakDays,
+    };
+  } catch (e) {
+    console.error('Failed to get quick stats summary', e);
+    return {
+      category: null,
+      totalCompleted: 0,
+      totalDuration: 0,
+      totalDurationText: '0分',
+      averageDuration: 0,
+      averageDurationText: '0分',
+      todaySessions: 0,
+      todayDuration: 0,
+      todayMinutes: 0,
+      todayDurationText: '0分',
+      streakDays: 0,
+    };
+  }
+};
+
