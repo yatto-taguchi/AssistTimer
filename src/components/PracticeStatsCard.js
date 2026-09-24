@@ -1,4 +1,4 @@
-import React, { useState, useContext } from 'react';
+import React, { useState, useEffect, useContext } from 'react';
 import {
   StyleSheet,
   Text,
@@ -8,6 +8,7 @@ import {
   Platform,
   UIManager,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { AppContext } from '../utils/AppContext';
 
@@ -16,18 +17,45 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
+const STORAGE_KEY_STATS_ACCORDION = '@records_stats_accordion_open';
+
 export default function PracticeStatsCard({ stats }) {
   const { isEcoMode } = useContext(AppContext);
-  const [isAccordionExpanded, setIsAccordionExpanded] = useState(false);
+  const [isStatsExpanded, setIsStatsExpanded] = useState(false);
+  const [isGenreAccordionExpanded, setIsGenreAccordionExpanded] = useState(false);
+
+  // 前回の開閉状態を復元（デフォルトは折りたたみ）
+  useEffect(() => {
+    const loadAccordionState = async () => {
+      try {
+        const stored = await AsyncStorage.getItem(STORAGE_KEY_STATS_ACCORDION);
+        if (stored !== null) {
+          setIsStatsExpanded(JSON.parse(stored));
+        }
+      } catch (e) {
+        console.error('Failed to load stats accordion state', e);
+      }
+    };
+    loadAccordionState();
+  }, []);
 
   if (!stats) return null;
 
-  const toggleAccordion = () => {
+  // 親アコーディオン（練習時間を詳しく見る）の開閉トグル
+  const toggleStatsAccordion = () => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setIsAccordionExpanded(!isAccordionExpanded);
+    const nextState = !isStatsExpanded;
+    setIsStatsExpanded(nextState);
+    AsyncStorage.setItem(STORAGE_KEY_STATS_ACCORDION, JSON.stringify(nextState)).catch(console.error);
   };
 
-  // 秒数を「○時間○分」または「○分○秒」にフォーマット
+  // 子アコーディオン（ジャンル別内訳）の開閉トグル
+  const toggleGenreAccordion = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setIsGenreAccordionExpanded(!isGenreAccordionExpanded);
+  };
+
+  // 秒数を「○h ○m」または「○分」にフォーマット
   const formatTotalTime = (totalSeconds) => {
     if (!totalSeconds || totalSeconds <= 0) return '0分';
     const hours = Math.floor(totalSeconds / 3600);
@@ -46,6 +74,8 @@ export default function PracticeStatsCard({ stats }) {
   const mainTextColor = isEcoMode ? '#FFFFFF' : '#1C1C1E';
   const subCardBg = isEcoMode ? '#18181A' : '#F9F9FB';
   const subCardBorder = isEcoMode ? '#28282B' : '#ECECF0';
+  const timeBadgeBg = isEcoMode ? '#1E293B' : '#EFF6FF';
+  const timeBadgeText = isEcoMode ? '#64D2FF' : '#007AFF';
 
   const totalCompleted = stats.totalCompleted || 0;
   const inTimeRate = stats.overallInTimeRate || 0;
@@ -55,144 +85,181 @@ export default function PracticeStatsCard({ stats }) {
 
   return (
     <View style={[styles.card, { backgroundColor: cardBg, borderColor: cardBorder }]}>
-      {/* カードヘッダー */}
-      <View style={styles.headerRow}>
+      {/* カードヘッダー（タップで開閉） */}
+      <TouchableOpacity
+        style={styles.headerPressable}
+        onPress={toggleStatsAccordion}
+        activeOpacity={0.7}
+      >
         <View style={styles.headerLeft}>
           <Ionicons 
-            name="bar-chart" 
+            name="time-outline" 
             size={18} 
             color={isEcoMode ? '#64D2FF' : '#007AFF'} 
-            style={{ marginRight: 6 }} 
+            style={{ marginRight: 7 }} 
           />
-          <Text style={[styles.headerTitle, { color: mainTextColor }]}>練習サマリー＆統計</Text>
-        </View>
-        {stats.overallStreak > 0 && (
-          <View style={[styles.streakBadge, { backgroundColor: isEcoMode ? '#2C1E14' : '#FFF3E0' }]}>
-            <Text style={[styles.streakBadgeText, { color: '#FF9500' }]}>
-              🔥 {stats.overallStreak}日連続
-            </Text>
-          </View>
-        )}
-      </View>
-
-      {/* 主要4指標グリッド */}
-      <View style={styles.gridContainer}>
-        {/* ① 総練習回数 */}
-        <View style={[styles.gridItem, { backgroundColor: subCardBg, borderColor: subCardBorder }]}>
-          <Text style={[styles.gridLabel, { color: labelColor }]}>総練習回数</Text>
-          <View style={styles.gridValueRow}>
-            <Text style={[styles.gridValue, { color: isEcoMode ? '#38BDF8' : '#007AFF' }]}>
-              {totalCompleted}
-            </Text>
-            <Text style={[styles.gridUnit, { color: isEcoMode ? '#888' : '#666' }]}>回</Text>
-          </View>
+          <Text style={[styles.headerTitle, { color: mainTextColor }]}>
+            練習時間を詳しく見る
+          </Text>
         </View>
 
-        {/* ② タイム達成率 */}
-        <View style={[styles.gridItem, { backgroundColor: subCardBg, borderColor: subCardBorder }]}>
-          <Text style={[styles.gridLabel, { color: labelColor }]}>タイム達成率</Text>
-          <View style={styles.gridValueRow}>
-            <Text style={[styles.gridValue, { color: '#34C759' }]}>
-              {totalCompleted > 0 ? `${inTimeRate}` : '-'}
-            </Text>
-            {totalCompleted > 0 && (
-              <Text style={[styles.gridUnit, { color: isEcoMode ? '#888' : '#666' }]}>%</Text>
-            )}
-          </View>
-        </View>
-
-        {/* ③ 途中終了（中断） */}
-        <View style={[styles.gridItem, { backgroundColor: subCardBg, borderColor: subCardBorder }]}>
-          <Text style={[styles.gridLabel, { color: labelColor }]}>途中で終了</Text>
-          <View style={styles.gridValueRow}>
-            <Text style={[styles.gridValue, { color: '#FF9500' }]}>
-              {interruptedCount}
-            </Text>
-            <Text style={[styles.gridUnit, { color: isEcoMode ? '#888' : '#666' }]}>回</Text>
-          </View>
-        </View>
-
-        {/* ④ 総練習時間 */}
-        <View style={[styles.gridItem, { backgroundColor: subCardBg, borderColor: subCardBorder }]}>
-          <Text style={[styles.gridLabel, { color: labelColor }]}>総練習時間</Text>
-          <View style={styles.gridValueRow}>
-            <Text style={[styles.gridValueTime, { color: isEcoMode ? '#A78BFA' : '#5856D6' }]}>
-              {totalDurationStr}
-            </Text>
-          </View>
-        </View>
-      </View>
-
-      {/* ジャンル別内訳アコーディオンヘッダー */}
-      {genres.length > 0 && (
-        <TouchableOpacity
-          style={[styles.accordionHeader, { borderTopColor: cardBorder }]}
-          onPress={toggleAccordion}
-          activeOpacity={0.7}
-        >
-          <View style={styles.accordionHeaderLeft}>
-            <Ionicons 
-              name="pricetags-outline" 
-              size={15} 
-              color={isEcoMode ? '#64D2FF' : '#007AFF'} 
-              style={{ marginRight: 6 }} 
-            />
-            <Text style={[styles.accordionTitle, { color: isEcoMode ? '#AAA' : '#444' }]}>
-              ジャンル別内訳（{genres.length}種）
-            </Text>
-          </View>
-          <View style={styles.accordionHeaderRight}>
-            <Text style={[styles.accordionStatusText, { color: isEcoMode ? '#666' : '#8E8E93' }]}>
-              {isAccordionExpanded ? '閉じる' : '詳細を見る'}
-            </Text>
-            <Ionicons
-              name={isAccordionExpanded ? 'chevron-up' : 'chevron-down'}
-              size={16}
-              color={isEcoMode ? '#888' : '#8E8E93'}
-              style={{ marginLeft: 4 }}
-            />
-          </View>
-        </TouchableOpacity>
-      )}
-
-      {/* アコーディオン展開コンテンツ（ジャンル別リスト） */}
-      {isAccordionExpanded && genres.length > 0 && (
-        <View style={styles.accordionContent}>
-          {genres.map((item, idx) => (
-            <View
-              key={`stat-genre-${idx}-${item.category}`}
-              style={[
-                styles.genreRow,
-                { backgroundColor: subCardBg, borderColor: subCardBorder }
-              ]}
-            >
-              <View style={styles.genreRowTop}>
-                <Text style={[styles.genreName, { color: mainTextColor }]}>
-                  {item.category}
+        <View style={styles.headerRight}>
+          {/* 折りたたみ時: 総練習時間サマリーバッジ */}
+          {!isStatsExpanded ? (
+            <View style={[styles.timeSummaryBadge, { backgroundColor: timeBadgeBg }]}>
+              <Ionicons 
+                name="hourglass-outline" 
+                size={11} 
+                color={timeBadgeText} 
+                style={{ marginRight: 3 }} 
+              />
+              <Text style={[styles.timeSummaryBadgeText, { color: timeBadgeText }]}>
+                {totalDurationStr}
+              </Text>
+            </View>
+          ) : (
+            /* 展開時: 連続練習日数バッジ（継続中のみ表示） */
+            stats.overallStreak > 0 && (
+              <View style={[styles.streakBadge, { backgroundColor: isEcoMode ? '#2C1E14' : '#FFF3E0' }]}>
+                <Text style={[styles.streakBadgeText, { color: '#FF9500' }]}>
+                  🔥 {stats.overallStreak}日連続
                 </Text>
-                <View style={styles.genreCountBadge}>
-                  <Text style={[styles.genreCountNum, { color: isEcoMode ? '#64D2FF' : '#007AFF' }]}>
-                    {item.completed}
-                  </Text>
-                  <Text style={[styles.genreCountUnit, { color: labelColor }]}>回</Text>
-                </View>
               </View>
+            )
+          )}
 
-              <View style={styles.genreRowBottom}>
-                <Text style={[styles.genreSubText, { color: labelColor }]}>
-                  📅 最終: {item.lastPracticedRelative}
+          <Ionicons
+            name={isStatsExpanded ? "chevron-up" : "chevron-down"}
+            size={18}
+            color={isEcoMode ? '#888' : '#8E8E93'}
+            style={{ marginLeft: 6 }}
+          />
+        </View>
+      </TouchableOpacity>
+
+      {/* 展開時コンテンツ */}
+      {isStatsExpanded && (
+        <View style={styles.expandedContent}>
+          {/* 主要4指標グリッド */}
+          <View style={styles.gridContainer}>
+            {/* ① 総練習回数 */}
+            <View style={[styles.gridItem, { backgroundColor: subCardBg, borderColor: subCardBorder }]}>
+              <Text style={[styles.gridLabel, { color: labelColor }]}>総練習回数</Text>
+              <View style={styles.gridValueRow}>
+                <Text style={[styles.gridValue, { color: isEcoMode ? '#38BDF8' : '#007AFF' }]}>
+                  {totalCompleted}
                 </Text>
-                <Text style={[styles.genreSubText, { color: '#34C759' }]}>
-                  🎯 達成率: {item.inTimeRate}%
-                </Text>
-                {item.streakDays > 0 ? (
-                  <Text style={[styles.genreSubText, { color: '#FF9500' }]}>
-                    🔥 {item.streakDays}日連続
-                  </Text>
-                ) : null}
+                <Text style={[styles.gridUnit, { color: isEcoMode ? '#888' : '#666' }]}>回</Text>
               </View>
             </View>
-          ))}
+
+            {/* ② タイム達成率 */}
+            <View style={[styles.gridItem, { backgroundColor: subCardBg, borderColor: subCardBorder }]}>
+              <Text style={[styles.gridLabel, { color: labelColor }]}>タイム達成率</Text>
+              <View style={styles.gridValueRow}>
+                <Text style={[styles.gridValue, { color: '#34C759' }]}>
+                  {totalCompleted > 0 ? `${inTimeRate}` : '-'}
+                </Text>
+                {totalCompleted > 0 && (
+                  <Text style={[styles.gridUnit, { color: isEcoMode ? '#888' : '#666' }]}>%</Text>
+                )}
+              </View>
+            </View>
+
+            {/* ③ 途中終了（中断） */}
+            <View style={[styles.gridItem, { backgroundColor: subCardBg, borderColor: subCardBorder }]}>
+              <Text style={[styles.gridLabel, { color: labelColor }]}>途中で終了</Text>
+              <View style={styles.gridValueRow}>
+                <Text style={[styles.gridValue, { color: '#FF9500' }]}>
+                  {interruptedCount}
+                </Text>
+                <Text style={[styles.gridUnit, { color: isEcoMode ? '#888' : '#666' }]}>回</Text>
+              </View>
+            </View>
+
+            {/* ④ 総練習時間 */}
+            <View style={[styles.gridItem, { backgroundColor: subCardBg, borderColor: subCardBorder }]}>
+              <Text style={[styles.gridLabel, { color: labelColor }]}>総練習時間</Text>
+              <View style={styles.gridValueRow}>
+                <Text style={[styles.gridValueTime, { color: isEcoMode ? '#A78BFA' : '#5856D6' }]}>
+                  {totalDurationStr}
+                </Text>
+              </View>
+            </View>
+          </View>
+
+          {/* ジャンル別内訳アコーディオンヘッダー */}
+          {genres.length > 0 && (
+            <TouchableOpacity
+              style={[styles.accordionHeader, { borderTopColor: cardBorder }]}
+              onPress={toggleGenreAccordion}
+              activeOpacity={0.7}
+            >
+              <View style={styles.accordionHeaderLeft}>
+                <Ionicons 
+                  name="pricetags-outline" 
+                  size={15} 
+                  color={isEcoMode ? '#64D2FF' : '#007AFF'} 
+                  style={{ marginRight: 6 }} 
+                />
+                <Text style={[styles.accordionTitle, { color: isEcoMode ? '#AAA' : '#444' }]}>
+                  ジャンル別内訳（{genres.length}種）
+                </Text>
+              </View>
+              <View style={styles.accordionHeaderRight}>
+                <Text style={[styles.accordionStatusText, { color: isEcoMode ? '#666' : '#8E8E93' }]}>
+                  {isGenreAccordionExpanded ? '閉じる' : '詳細を見る'}
+                </Text>
+                <Ionicons
+                  name={isGenreAccordionExpanded ? 'chevron-up' : 'chevron-down'}
+                  size={16}
+                  color={isEcoMode ? '#888' : '#8E8E93'}
+                  style={{ marginLeft: 4 }}
+                />
+              </View>
+            </TouchableOpacity>
+          )}
+
+          {/* アコーディオン展開コンテンツ（ジャンル別リスト） */}
+          {isGenreAccordionExpanded && genres.length > 0 && (
+            <View style={styles.accordionContent}>
+              {genres.map((item, idx) => (
+                <View
+                  key={`stat-genre-${idx}-${item.category}`}
+                  style={[
+                    styles.genreRow,
+                    { backgroundColor: subCardBg, borderColor: subCardBorder }
+                  ]}
+                >
+                  <View style={styles.genreRowTop}>
+                    <Text style={[styles.genreName, { color: mainTextColor }]}>
+                      {item.category}
+                    </Text>
+                    <View style={styles.genreCountBadge}>
+                      <Text style={[styles.genreCountNum, { color: isEcoMode ? '#64D2FF' : '#007AFF' }]}>
+                        {item.completed}
+                      </Text>
+                      <Text style={[styles.genreCountUnit, { color: labelColor }]}>回</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.genreRowBottom}>
+                    <Text style={[styles.genreSubText, { color: labelColor }]}>
+                      📅 最終: {item.lastPracticedRelative}
+                    </Text>
+                    <Text style={[styles.genreSubText, { color: '#34C759' }]}>
+                      🎯 達成率: {item.inTimeRate}%
+                    </Text>
+                    {item.streakDays > 0 ? (
+                      <Text style={[styles.genreSubText, { color: '#FF9500' }]}>
+                        🔥 {item.streakDays}日連続
+                      </Text>
+                    ) : null}
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
         </View>
       )}
     </View>
@@ -201,41 +268,61 @@ export default function PracticeStatsCard({ stats }) {
 
 const styles = StyleSheet.create({
   card: {
-    marginHorizontal: 12,
+    marginHorizontal: 0,
     marginTop: 10,
     marginBottom: 6,
     borderRadius: 14,
     borderWidth: 1,
-    padding: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     shadowColor: '#000',
     shadowOpacity: 0.04,
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 2 },
     elevation: 1,
   },
-  headerRow: {
+  headerPressable: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 12,
+    minHeight: 24,
   },
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+    flex: 1,
   },
   headerTitle: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '700',
     letterSpacing: 0.2,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  timeSummaryBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+  timeSummaryBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
   },
   streakBadge: {
     paddingHorizontal: 8,
     paddingVertical: 3,
-    borderRadius: 12,
+    borderRadius: 10,
   },
   streakBadgeText: {
     fontSize: 12,
     fontWeight: '700',
+  },
+  expandedContent: {
+    marginTop: 12,
   },
   gridContainer: {
     flexDirection: 'row',
@@ -343,3 +430,4 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
 });
+

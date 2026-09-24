@@ -524,7 +524,12 @@ export default function SettingsScreen({ route }) {
           >
             <View style={styles.accordionTitleContainer}>
               <Ionicons name="sunny" size={18} color="#FF9500" style={{ marginRight: 8 }} />
-              <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>通常モードの設定をする</Text>
+              <Text 
+                style={[styles.settingText, styles.accordionTitleText, { color: textColor, fontWeight: '600' }]}
+                numberOfLines={1}
+              >
+                通常モードの設定をする
+              </Text>
             </View>
             <View style={styles.accordionRightContainer}>
               <View style={[styles.summaryBadge, { backgroundColor: '#FFF5E5' }]}>
@@ -627,7 +632,12 @@ export default function SettingsScreen({ route }) {
           >
             <View style={styles.accordionTitleContainer}>
               <Ionicons name="leaf" size={18} color="#34C759" style={{ marginRight: 8 }} />
-              <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>エコモードの設定をする</Text>
+              <Text 
+                style={[styles.settingText, styles.accordionTitleText, { color: textColor, fontWeight: '600' }]}
+                numberOfLines={1}
+              >
+                エコモードの設定をする
+              </Text>
             </View>
             <View style={styles.accordionRightContainer}>
               <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? '#152E1D' : '#E8F5E9' }]}>
@@ -749,12 +759,14 @@ export default function SettingsScreen({ route }) {
         >
           <View style={styles.accordionTitleContainer}>
             <Ionicons name="musical-notes" size={18} color={isEcoMode ? "#38BDF8" : "#007AFF"} style={{ marginRight: 8 }} />
-            <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>アラーム・サウンド設定をする</Text>
+            <Text 
+              style={[styles.settingText, styles.accordionTitleText, { color: textColor, fontWeight: '600' }]}
+              numberOfLines={1}
+            >
+              アラーム・サウンド設定
+            </Text>
           </View>
           <View style={styles.accordionRightContainer}>
-            <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? '#1C2E42' : '#EBF4FF' }]}>
-              <Text style={[styles.summaryBadgeText, { color: isEcoMode ? '#38BDF8' : '#007AFF' }]}>{currentAlarmLabel}</Text>
-            </View>
             <Ionicons 
               name={isAlarmSectionOpen ? "chevron-up" : "chevron-down"} 
               size={18} 
@@ -1038,7 +1050,12 @@ export default function SettingsScreen({ route }) {
           >
             <View style={styles.accordionTitleContainer}>
               <Ionicons name="musical-notes-outline" size={18} color={textColor} style={{ marginRight: 8 }} />
-              <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>アラーム音の選択</Text>
+              <Text 
+                style={[styles.settingText, styles.accordionTitleText, { color: textColor, fontWeight: '600' }]}
+                numberOfLines={1}
+              >
+                アラーム音の選択
+              </Text>
             </View>
             <View style={styles.accordionRightContainer}>
               <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? '#1C2E42' : '#EBF4FF' }]}>
@@ -1112,7 +1129,12 @@ export default function SettingsScreen({ route }) {
           >
             <View style={styles.accordionTitleContainer}>
               <Ionicons name="timer-outline" size={18} color={textColor} style={{ marginRight: 8 }} />
-              <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>タイマー計測中</Text>
+              <Text 
+                style={[styles.settingText, styles.accordionTitleText, { color: textColor, fontWeight: '600' }]}
+                numberOfLines={1}
+              >
+                タイマー計測中
+              </Text>
             </View>
             <View style={styles.accordionRightContainer}>
               <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? (mainVoiceActiveCount > 0 ? '#1C2E42' : '#222') : (mainVoiceActiveCount > 0 ? '#EBF4FF' : '#F2F2F7') }]}>
@@ -1148,7 +1170,12 @@ export default function SettingsScreen({ route }) {
           >
             <View style={styles.accordionTitleContainer}>
               <Ionicons name="hourglass-outline" size={18} color={textColor} style={{ marginRight: 8 }} />
-              <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>スタート事前準備時間</Text>
+              <Text 
+                style={[styles.settingText, styles.accordionTitleText, { color: textColor, fontWeight: '600' }]}
+                numberOfLines={1}
+              >
+                スタート事前準備時間
+              </Text>
             </View>
             <View style={styles.accordionRightContainer}>
               <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? (prepVoiceActiveCount > 0 ? '#1C2E42' : '#222') : (prepVoiceActiveCount > 0 ? '#EBF4FF' : '#F2F2F7') }]}>
@@ -1184,7 +1211,12 @@ export default function SettingsScreen({ route }) {
           >
             <View style={styles.accordionTitleContainer}>
               <Ionicons name="trending-up-outline" size={18} color={textColor} style={{ marginRight: 8 }} />
-              <Text style={[styles.settingText, { color: textColor, fontWeight: '600' }]}>カウントアップ・超過時間</Text>
+              <Text 
+                style={[styles.settingText, styles.accordionTitleText, { color: textColor, fontWeight: '600' }]}
+                numberOfLines={1}
+              >
+                カウントアップ・超過時間
+              </Text>
             </View>
             <View style={styles.accordionRightContainer}>
               <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? (overVoiceActiveCount > 0 ? '#1C2E42' : '#222') : (overVoiceActiveCount > 0 ? '#EBF4FF' : '#F2F2F7') }]}>
@@ -1651,10 +1683,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
+    marginRight: 8,
+  },
+  accordionTitleText: {
+    flex: 1,
   },
   accordionRightContainer: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 0,
   },
   summaryBadge: {
     paddingHorizontal: 9,

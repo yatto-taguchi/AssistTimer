@@ -19,6 +19,7 @@ export const DEMO_RECORDS = [
     photoUris: [cutUri],
     photoUri: cutUri,
     tags: ['お気に入り', 'タイム'],
+    isFavorite: true,
     memo: 'ワンレングスカットの練習。タイム内におさまりラインも綺麗に出せた。'
   },
   {
@@ -29,6 +30,7 @@ export const DEMO_RECORDS = [
     photoUris: [windingUri],
     photoUri: windingUri,
     tags: ['タイム'],
+    isFavorite: false,
     memo: 'センターロッド巻きスピード意識。ゴム掛けのテンション安定してきた。'
   },
   {
@@ -39,6 +41,7 @@ export const DEMO_RECORDS = [
     photoUris: [colorUri],
     photoUri: colorUri,
     tags: ['お気に入り'],
+    isFavorite: true,
     memo: 'リタッチ塗布練習。コーミングの手数を減らして時短できた。'
   },
   {
@@ -49,6 +52,7 @@ export const DEMO_RECORDS = [
     photoUris: [updoUri],
     photoUri: updoUri,
     tags: [],
+    isFavorite: false,
     memo: '夜会巻きのベース作りとピン打ちの練習。'
   }
 ];
@@ -57,11 +61,18 @@ export const DEMO_RECORDS = [
 export const saveRecord = async (record) => {
   try {
     const existingRecords = await getRecords();
+    const isFav = record.isFavorite === true || (Array.isArray(record.tags) && record.tags.includes('お気に入り'));
+    let tags = Array.isArray(record.tags) ? [...record.tags] : [];
+    if (isFav && !tags.includes('お気に入り')) {
+      tags.push('お気に入り');
+    }
     // record = { id, date, duration, category, photoUri, ... }
     const newRecord = {
       id: Date.now().toString(),
       date: new Date().toISOString(),
-      ...record
+      ...record,
+      isFavorite: isFav,
+      tags: tags,
     };
     const updatedRecords = [newRecord, ...existingRecords];
     await AsyncStorage.setItem(RECORDS_KEY, JSON.stringify(updatedRecords));
@@ -81,23 +92,29 @@ export const getRecords = async () => {
       // デモデータの写真が未設定の場合は写真付きにアップデート
       let hasUpdates = false;
       const enrichedRecords = records.map(r => {
+        let updated = { ...r };
+        // isFavoriteの補完
+        if (updated.isFavorite === undefined) {
+          updated.isFavorite = Array.isArray(updated.tags) && updated.tags.includes('お気に入り');
+          hasUpdates = true;
+        }
         if (r.id === 'demo-1' && (!r.photoUris || r.photoUris.length === 0)) {
           hasUpdates = true;
-          return { ...r, photoUris: [cutUri], photoUri: cutUri };
+          updated = { ...updated, photoUris: [cutUri], photoUri: cutUri };
         }
         if (r.id === 'demo-2' && (!r.photoUris || r.photoUris.length === 0)) {
           hasUpdates = true;
-          return { ...r, photoUris: [windingUri], photoUri: windingUri };
+          updated = { ...updated, photoUris: [windingUri], photoUri: windingUri };
         }
         if (r.id === 'demo-3' && (!r.photoUris || r.photoUris.length === 0)) {
           hasUpdates = true;
-          return { ...r, photoUris: [colorUri], photoUri: colorUri };
+          updated = { ...updated, photoUris: [colorUri], photoUri: colorUri };
         }
         if (r.id === 'demo-4' && (!r.photoUris || r.photoUris.length === 0)) {
           hasUpdates = true;
-          return { ...r, photoUris: [updoUri], photoUri: updoUri };
+          updated = { ...updated, photoUris: [updoUri], photoUri: updoUri };
         }
-        return r;
+        return updated;
       });
       if (hasUpdates) {
         await AsyncStorage.setItem(RECORDS_KEY, JSON.stringify(enrichedRecords));
@@ -128,6 +145,36 @@ export const updateRecordPhoto = async (recordId, newPhotoUri) => {
         return updatedRecords;
     } catch (e) {
         console.error("Failed to update record", e);
+        return [];
+    }
+};
+
+// 特定の記録のお気に入り状態をトグルする
+export const toggleRecordFavorite = async (recordId) => {
+    try {
+        const records = await getRecords();
+        const updatedRecords = records.map(record => {
+            if (record.id === recordId) {
+                const currentFav = record.isFavorite === true || (Array.isArray(record.tags) && record.tags.includes('お気に入り'));
+                const newFav = !currentFav;
+                let newTags = Array.isArray(record.tags) ? [...record.tags] : [];
+                if (newFav) {
+                    if (!newTags.includes('お気に入り')) newTags.push('お気に入り');
+                } else {
+                    newTags = newTags.filter(t => t !== 'お気に入り');
+                }
+                return {
+                    ...record,
+                    isFavorite: newFav,
+                    tags: newTags,
+                };
+            }
+            return record;
+        });
+        await AsyncStorage.setItem(RECORDS_KEY, JSON.stringify(updatedRecords));
+        return updatedRecords;
+    } catch (e) {
+        console.error("Failed to toggle favorite", e);
         return [];
     }
 };

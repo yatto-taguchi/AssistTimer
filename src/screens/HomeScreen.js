@@ -74,6 +74,7 @@ export default function HomeScreen({ navigation }) {
 
   // 記録・保存用State
   const [saveModalVisible, setSaveModalVisible] = useState(false);
+  const [saveIsFavorite, setSaveIsFavorite] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState('');
   const [savedCategories, setSavedCategories] = useState(['カット', 'カラー', 'ワインディング', 'アップスタイル']);
   const [lastUsedCategory, setLastUsedCategory] = useState('');
@@ -1163,6 +1164,7 @@ export default function HomeScreen({ navigation }) {
     if (!selectedCategory && lastUsedCategory) {
       setSelectedCategory(lastUsedCategory); // ホームで未設定の場合のみ前回のカテゴリをセット
     }
+    setSaveIsFavorite(false);
     setSelectedTags([]); // タグを初期化
     setSaveModalVisible(true);
   };
@@ -1178,6 +1180,7 @@ export default function HomeScreen({ navigation }) {
     if (!selectedCategory && lastUsedCategory) {
       setSelectedCategory(lastUsedCategory); // ホームで未設定の場合のみ前回のカテゴリをセット
     }
+    setSaveIsFavorite(false);
     setSelectedTags([]); // タグを初期化
     setSaveModalVisible(true);
   };
@@ -1255,11 +1258,19 @@ export default function HomeScreen({ navigation }) {
     // タイム内達成判定（タイム内ボタン押下またはカウントアップ前終了）
     const isCompletedInTime = forceTargetTime || !isCountUp;
 
+    let finalTags = [...selectedTags];
+    if (saveIsFavorite && !finalTags.includes('お気に入り')) {
+      finalTags.push('お気に入り');
+    } else if (!saveIsFavorite && finalTags.includes('お気に入り')) {
+      finalTags = finalTags.filter(t => t !== 'お気に入り');
+    }
+
     await saveRecord({
       duration: duration,
       category: selectedCategory || '未分類',
       photoUris: photoUris,
-      tags: selectedTags,
+      tags: finalTags,
+      isFavorite: saveIsFavorite,
       isCompletedInTime: isCompletedInTime,
     });
     
@@ -1273,6 +1284,7 @@ export default function HomeScreen({ navigation }) {
     // モーダルを閉じ、タイマーをリセットする（保存によるリセットのため中断カウントは行わない）
     setSaveModalVisible(false);
     setPhotoUris([]);
+    setSaveIsFavorite(false);
     resetTimer(true);
     loadGenreStats();
     loadHomeQuickStats();
@@ -1921,6 +1933,46 @@ export default function HomeScreen({ navigation }) {
             </View>
           )}
 
+          {/* お気に入り登録トグルカード */}
+          <TouchableOpacity
+            style={[
+              styles.favoriteToggleCard,
+              saveIsFavorite && styles.favoriteToggleCardActive,
+              isEcoMode && (saveIsFavorite ? styles.favoriteToggleCardActiveEco : styles.favoriteToggleCardEco)
+            ]}
+            onPress={() => {
+              const nextFav = !saveIsFavorite;
+              setSaveIsFavorite(nextFav);
+              if (nextFav) {
+                if (!selectedTags.includes('お気に入り')) {
+                  setSelectedTags([...selectedTags, 'お気に入り']);
+                }
+              } else {
+                setSelectedTags(selectedTags.filter(t => t !== 'お気に入り'));
+              }
+            }}
+            activeOpacity={0.7}
+          >
+            <Ionicons 
+              name={saveIsFavorite ? "star" : "star-outline"} 
+              size={24} 
+              color={saveIsFavorite ? "#FFB800" : (isEcoMode ? "#888" : "#8E8E93")} 
+              style={{ marginRight: 10 }}
+            />
+            <View style={{ flex: 1 }}>
+              <Text style={[
+                styles.favoriteToggleTitle, 
+                saveIsFavorite && styles.favoriteToggleTitleActive,
+                isEcoMode && { color: saveIsFavorite ? '#FFD60A' : '#FFF' }
+              ]}>
+                {saveIsFavorite ? '★ お気に入りに登録中' : '☆ お気に入りに登録する'}
+              </Text>
+              <Text style={[styles.favoriteToggleSubtitle, isEcoMode && { color: '#888' }]}>
+                {saveIsFavorite ? '記録一覧でお気に入りフィルターや優先並び替えができます' : 'タップしてこの練習をお気に入りに指定'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+
           <Text style={[styles.label, { marginTop: 20 }]}>タグをつける</Text>
           <View style={styles.categoryChipsContainer}>
             {DEFAULT_TAGS.map((tag, index) => {
@@ -1932,8 +1984,10 @@ export default function HomeScreen({ navigation }) {
                   onPress={() => {
                     if (isSelected) {
                       setSelectedTags(selectedTags.filter(t => t !== tag));
+                      if (tag === 'お気に入り') setSaveIsFavorite(false);
                     } else {
                       setSelectedTags([...selectedTags, tag]);
+                      if (tag === 'お気に入り') setSaveIsFavorite(true);
                     }
                   }}
                 >
@@ -1943,11 +1997,17 @@ export default function HomeScreen({ navigation }) {
             })}
           </View>
 
-          <TouchableOpacity style={[styles.saveActionButton, {marginTop: 40}]} onPress={handleSaveRecord}>
+          <TouchableOpacity style={[styles.saveActionButton, {marginTop: 35}]} onPress={handleSaveRecord}>
              <Text style={styles.saveActionText}>記録を保存してリセット</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={[styles.resetButton, {marginTop: 20, padding: 15, borderRadius: 10}]} onPress={() => setSaveModalVisible(false)}>
+          <TouchableOpacity 
+            style={[styles.resetButton, {marginTop: 15, padding: 15, borderRadius: 10}]} 
+            onPress={() => {
+              setSaveModalVisible(false);
+              setSaveIsFavorite(false);
+            }}
+          >
              <Text style={{textAlign: 'center', color: '#000', fontWeight: 'bold'}}>キャンセル</Text>
           </TouchableOpacity>
         </ScrollView>
@@ -3235,6 +3295,42 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 18,
     fontWeight: '600',
+  },
+  favoriteToggleCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F2F2F7',
+    borderWidth: 1.5,
+    borderColor: '#E5E5EA',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 15,
+    marginBottom: 5,
+  },
+  favoriteToggleCardActive: {
+    backgroundColor: '#FFF9E6',
+    borderColor: '#FFB800',
+  },
+  favoriteToggleCardEco: {
+    backgroundColor: '#1C1C1E',
+    borderColor: '#333333',
+  },
+  favoriteToggleCardActiveEco: {
+    backgroundColor: '#2A2410',
+    borderColor: '#FFB800',
+  },
+  favoriteToggleTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#333',
+  },
+  favoriteToggleTitleActive: {
+    color: '#B27B00',
+  },
+  favoriteToggleSubtitle: {
+    fontSize: 11,
+    color: '#8E8E93',
+    marginTop: 2,
   },
   saveActionButton: {
     backgroundColor: '#34C759', // グリーン
