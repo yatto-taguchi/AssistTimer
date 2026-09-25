@@ -15,6 +15,7 @@ import { saveRecord, getRecords } from '../utils/recordStorage';
 import { recordInterruption, getFullPracticeStats, getQuickStatsSummary } from '../utils/practiceStats';
 import AdBannerComponent from '../components/AdBannerComponent';
 import ProSubscriptionModal from '../components/ProSubscriptionModal';
+import CheerYamaimoOverlay from '../components/CheerYamaimoOverlay';
 
 const ALARM_SOUNDS = {
   kitchen: require('../../assets/alarm_kitchen.wav'),
@@ -166,9 +167,31 @@ export default function HomeScreen({ navigation }) {
     controlsOpacity,
     controlsVisible,
     showControls,
-    resetControlsVisible
+    resetControlsVisible,
+    isCheerModeEnabled,
+    isCheerInEcoEnabled
   } = useContext(AppContext);
   const isFocused = useIsFocused();
+
+  // 応援キャラクター【やまいも】Ref
+  const cheerOverlayRef = useRef(null);
+  const saveModalCheerRef = useRef(null);
+  const lastCheerTriggerTimeRef = useRef(0);
+
+  // 記録保存モーダル（SaveModal）オープン時のやまいも連動
+  useEffect(() => {
+    if (saveModalVisible) {
+      const timer = setTimeout(() => {
+        const isOver = isCountUp && !forceTargetTime;
+        if (isOver) {
+          saveModalCheerRef.current?.trigger('overtime_start', 0.65);
+        } else {
+          saveModalCheerRef.current?.trigger('finish_success', 0.65);
+        }
+      }, 350);
+      return () => clearTimeout(timer);
+    }
+  }, [saveModalVisible, isCountUp, forceTargetTime]);
 
   // スタート前カウントダウン用State
   const [isPreCountingDown, setIsPreCountingDown] = useState(false);
@@ -527,6 +550,13 @@ export default function HomeScreen({ navigation }) {
           triggerVibration('countdown');
         }
 
+        // 準備中盤でのやまいも応援（中間秒数到達時、1回のみ）
+        const halfPrep = Math.floor(countdownSeconds / 2);
+        if (halfPrep >= 3 && nextTime === halfPrep && !triggeredPrepVoicesRef.current.has('cheer_prep')) {
+          triggeredPrepVoicesRef.current.add('cheer_prep');
+          cheerOverlayRef.current?.trigger('prep', 0.7);
+        }
+
         if (diffMs <= 0) {
           clearInterval(interval);
           prepEndTimeRef.current = null;
@@ -601,6 +631,12 @@ export default function HomeScreen({ navigation }) {
             triggerVibration('countdown');
           }
 
+          // 計測中のランダムやまいも登場（最低45秒インターバル＋警告秒数を避ける）
+          if (now - lastCheerTriggerTimeRef.current >= 45000 && nextTime > 15 && targetTime - nextTime >= 10) {
+            lastCheerTriggerTimeRef.current = now;
+            cheerOverlayRef.current?.trigger('running', 0.65);
+          }
+
           // 0秒到達（タイムアップ）
           if (diffMs <= 0) {
             if (!triggeredVoicesRef.current.has('alarm')) {
@@ -614,6 +650,7 @@ export default function HomeScreen({ navigation }) {
               triggeredOverVoicesRef.current.clear();
               remainingTimeRef.current = 0;
               setRemainingTime(0);
+              cheerOverlayRef.current?.trigger('overtime_start', 0.85);
             } else {
               isCountUpRef.current = false;
               setIsCountUp(false);
@@ -624,6 +661,7 @@ export default function HomeScreen({ navigation }) {
               remainingTimeRef.current = 0;
               setRemainingTime(0);
               resetControlsVisible();
+              cheerOverlayRef.current?.trigger('finish_success', 0.85);
             }
           }
         } else {
@@ -660,6 +698,12 @@ export default function HomeScreen({ navigation }) {
             triggeredOverVoicesRef.current.add(900);
             playVoice('over_15min');
             triggerVibration('overtime');
+          }
+
+          // カウントアップ（超過時間中）のランダムやまいも登場（超過時演出：最低45秒インターバル＋超過開始直後を避ける）
+          if (now - lastCheerTriggerTimeRef.current >= 45000 && nextTime >= 20) {
+            lastCheerTriggerTimeRef.current = now;
+            cheerOverlayRef.current?.trigger('overtime_start', 0.65);
           }
         }
       }, 250);
@@ -1448,7 +1492,11 @@ export default function HomeScreen({ navigation }) {
   // クイックアクセスボタン用ハンドラー（触覚フィードバック＋トグル）
   const handleToggleCountdown = () => {
     Vibration.vibrate(30);
+    const nextVal = !isCountdownEnabled;
     toggleCountdownEnabled();
+    if (nextVal) {
+      cheerOverlayRef.current?.trigger('setting', 0.7);
+    }
   };
 
   const handleOpenCountdownDirectly = () => {
@@ -1459,7 +1507,11 @@ export default function HomeScreen({ navigation }) {
 
   const handleToggleCountUp = () => {
     Vibration.vibrate(30);
+    const nextVal = !isCountUpEnabled;
     toggleCountUpEnabled();
+    if (nextVal) {
+      cheerOverlayRef.current?.trigger('setting', 0.7);
+    }
   };
 
   const handleToggleVoice = () => {
@@ -2025,6 +2077,14 @@ export default function HomeScreen({ navigation }) {
             />
           </View>
         )}
+
+        {/* 記録保存モーダル用 応援キャラクター【やまいも】オーバーレイ */}
+        <CheerYamaimoOverlay
+          ref={saveModalCheerRef}
+          isCheerModeEnabled={isCheerModeEnabled}
+          isCheerInEcoEnabled={isCheerInEcoEnabled}
+          isEcoMode={isEcoMode}
+        />
       </Modal>
 
       {/* タイマー・カウントダウン設定モーダル（1つのモーダルで中身を切り替える） */}
@@ -3082,6 +3142,14 @@ export default function HomeScreen({ navigation }) {
 
       {/* Proプラン（月額100円）購入モーダル */}
       <ProSubscriptionModal visible={proModalVisible} onClose={() => setProModalVisible(false)} />
+
+      {/* 応援キャラクター【やまいも】オーバーレイ */}
+      <CheerYamaimoOverlay
+        ref={cheerOverlayRef}
+        isCheerModeEnabled={isCheerModeEnabled}
+        isCheerInEcoEnabled={isCheerInEcoEnabled}
+        isEcoMode={isEcoMode}
+      />
 
     </View>
     </TouchableWithoutFeedback>

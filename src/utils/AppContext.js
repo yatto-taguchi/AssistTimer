@@ -44,6 +44,8 @@ export const AppProvider = ({ children }) => {
   const [isCountdownEnabled, setIsCountdownEnabled] = useState(false); // スタート前カウントダウン
   const [countdownSeconds, setCountdownSeconds] = useState(10); // カウントダウン秒数
   const [hasSeenEcoExplanation, setHasSeenEcoExplanation] = useState(false); // エコモード説明モーダル閲覧済みフラグ
+  const [isCheerModeEnabled, setIsCheerModeEnabled] = useState(false); // 応援モード（キャラクター【やまいも】登場）マスター
+  const [isCheerInEcoEnabled, setIsCheerInEcoEnabled] = useState(false); // エコモード中も応援モードを稼働
 
   const [alarmSoundType, setAlarmSoundType] = useState('digital'); // 'digital' | 'bell' | 'buzzer' | 'kitchen' | 'fast' | 'gong' | 'none'
   const [isAlarmSoundEnabled, setIsAlarmSoundEnabled] = useState(true); // アラーム音のマスター有効/無効
@@ -150,6 +152,8 @@ export const AppProvider = ({ children }) => {
         const countdownEnabledVal = await AsyncStorage.getItem('isCountdownEnabled');
         const countdownSecVal = await AsyncStorage.getItem('countdownSeconds');
         const seenEcoVal = await AsyncStorage.getItem('hasSeenEcoExplanation');
+        const cheerModeVal = await AsyncStorage.getItem('isCheerModeEnabled');
+        const cheerInEcoVal = await AsyncStorage.getItem('isCheerInEcoEnabled');
         const soundTypeVal = await AsyncStorage.getItem('alarmSoundType');
         const alarmSoundEnabledVal = await AsyncStorage.getItem('isAlarmSoundEnabled');
         const voiceMasterVal = await AsyncStorage.getItem('isVoiceMasterEnabled');
@@ -208,6 +212,8 @@ export const AppProvider = ({ children }) => {
         if (countdownEnabledVal !== null) setIsCountdownEnabled(JSON.parse(countdownEnabledVal));
         if (countdownSecVal !== null) setCountdownSeconds(parseInt(countdownSecVal, 10));
         if (seenEcoVal !== null) setHasSeenEcoExplanation(JSON.parse(seenEcoVal));
+        if (cheerModeVal !== null) setIsCheerModeEnabled(JSON.parse(cheerModeVal));
+        if (cheerInEcoVal !== null) setIsCheerInEcoEnabled(JSON.parse(cheerInEcoVal));
         if (soundTypeVal !== null) setAlarmSoundType(soundTypeVal);
         if (alarmSoundEnabledVal !== null) setIsAlarmSoundEnabled(JSON.parse(alarmSoundEnabledVal));
         if (voiceMasterVal !== null) setIsVoiceMasterEnabled(JSON.parse(voiceMasterVal));
@@ -370,6 +376,18 @@ export const AppProvider = ({ children }) => {
     const nextVal = typeof value === 'boolean' ? value : !isQuickAccessBarEnabled;
     setIsQuickAccessBarEnabled(nextVal);
     await AsyncStorage.setItem('isQuickAccessBarEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleCheerMode = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isCheerModeEnabled;
+    setIsCheerModeEnabled(nextVal);
+    await AsyncStorage.setItem('isCheerModeEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleCheerInEco = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isCheerInEcoEnabled;
+    setIsCheerInEcoEnabled(nextVal);
+    await AsyncStorage.setItem('isCheerInEcoEnabled', JSON.stringify(nextVal));
   };
 
   // Proモード明示的セット
@@ -734,6 +752,10 @@ export const AppProvider = ({ children }) => {
         toggleOverVoice15Min,
         hasSeenEcoExplanation,
         markEcoExplanationSeen,
+        isCheerModeEnabled,
+        toggleCheerMode,
+        isCheerInEcoEnabled,
+        toggleCheerInEco,
         controlsOpacity,
         controlsVisible,
         showControls,

@@ -2,7 +2,8 @@ import React, { useContext, useState, useEffect, useRef } from 'react';
 import { 
   StyleSheet, Text, View, Switch, TouchableOpacity, Modal, 
   TextInput, KeyboardAvoidingView, Platform, ScrollView,
-  LayoutAnimation, UIManager, Vibration, Linking, Animated 
+  LayoutAnimation, UIManager, Vibration, Linking, Animated,
+  Image, Dimensions 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
@@ -12,6 +13,9 @@ import ProSubscriptionModal from '../components/ProSubscriptionModal';
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
+
+const { width: screenWidth } = Dimensions.get('window');
+const YAMAIMO_MAIN_IMAGE = require('../../assets/characters/yamaimo/main.png');
 
 const ALARM_SOUNDS = {
   kitchen: require('../../assets/alarm_kitchen.wav'),
@@ -111,8 +115,46 @@ export default function SettingsScreen({ route }) {
     isOverVoice5MinEnabled, toggleOverVoice5Min,
     isOverVoice10MinEnabled, toggleOverVoice10Min,
     isOverVoice15MinEnabled, toggleOverVoice15Min,
-    hasSeenEcoExplanation, markEcoExplanationSeen
+    hasSeenEcoExplanation, markEcoExplanationSeen,
+    isCheerModeEnabled, toggleCheerMode,
+    isCheerInEcoEnabled, toggleCheerInEco
   } = useContext(AppContext);
+
+  const [cheerModalVisible, setCheerModalVisible] = useState(false);
+  const cheerModalScale = useRef(new Animated.Value(0.5)).current;
+  const cheerModalOpacity = useRef(new Animated.Value(0)).current;
+
+  const handleToggleCheerMode = (value) => {
+    toggleCheerMode(value);
+    if (value) {
+      setCheerModalVisible(true);
+      cheerModalScale.setValue(0.5);
+      cheerModalOpacity.setValue(0);
+      Animated.parallel([
+        Animated.spring(cheerModalScale, {
+          toValue: 1,
+          friction: 5,
+          tension: 40,
+          useNativeDriver: true,
+        }),
+        Animated.timing(cheerModalOpacity, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+      ]).start();
+
+      setTimeout(() => {
+        Animated.timing(cheerModalOpacity, {
+          toValue: 0,
+          duration: 350,
+          useNativeDriver: true,
+        }).start(() => {
+          setCheerModalVisible(false);
+        });
+      }, 2600);
+    }
+  };
 
   const [ecoModalVisible, setEcoModalVisible] = useState(false);
   const [proModalVisible, setProModalVisible] = useState(false);
@@ -343,6 +385,13 @@ export default function SettingsScreen({ route }) {
   const modeInnerBorderColor = isEcoMode ? '#152E46' : '#D6EBFF';
   const modeSubTextColor = isEcoMode ? '#7FA6C7' : '#557086';
 
+  // 応援モードカード専用の温かい黄色・ゴールドカラートークン
+  const cheerCardBgColor = isEcoMode ? '#18150A' : '#FFFDF0';
+  const cheerCardBorderColor = isEcoMode ? '#3D3212' : '#FDE047';
+  const cheerInnerBorderColor = isEcoMode ? '#2B230C' : '#FEF3C7';
+  const cheerAccentColor = isEcoMode ? '#FBBF24' : '#D97706';
+  const cheerSubTextColor = isEcoMode ? '#D1A153' : '#92400E';
+
   // 通常モード詳細設定サマリー
   const normalSettingsList = [
     isNormalStatusBarEnabled,
@@ -460,6 +509,56 @@ export default function SettingsScreen({ route }) {
     >
       <Text style={[styles.title, { color: textColor }]}>設定</Text>
       
+      {/* 0. 応援モード設定親カード（温かい黄色の最上部カード） */}
+      <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>応援キャラクター</Text>
+      <View style={[styles.groupCard, { backgroundColor: cheerCardBgColor, borderColor: cheerCardBorderColor, marginBottom: 16 }]}>
+        {/* 応援モード 親トグル行 */}
+        <View style={[
+          styles.settingRowInCard,
+          isCheerModeEnabled && { borderBottomWidth: 1, borderBottomColor: cheerInnerBorderColor }
+        ]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 8 }}>
+            <View style={[styles.cheerThumbContainer, { borderColor: cheerCardBorderColor }]}>
+              <Image source={YAMAIMO_MAIN_IMAGE} style={styles.cheerThumbImage} resizeMode="contain" />
+            </View>
+            <View style={{ flex: 1, marginLeft: 10 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Text style={[styles.settingText, { color: textColor, fontWeight: '700' }]}>応援モード</Text>
+                <View style={[styles.cheerBadge, { backgroundColor: isEcoMode ? '#2B230C' : '#FEF3C7' }]}>
+                  <Text style={[styles.cheerBadgeText, { color: cheerAccentColor }]}>やまいも</Text>
+                </View>
+              </View>
+              <Text style={{ fontSize: 12, color: cheerSubTextColor, marginTop: 2 }}>
+                練習中やタイム後に画面に現れて応援・見守り
+              </Text>
+            </View>
+          </View>
+          <Switch
+            value={isCheerModeEnabled}
+            onValueChange={handleToggleCheerMode}
+            trackColor={{ false: '#333', true: '#F59E0B' }}
+          />
+        </View>
+
+        {/* エコモード中も登場させる サブトグル行（ON時のみ展開） */}
+        {isCheerModeEnabled && (
+          <View style={[styles.subSettingRow, { borderBottomWidth: 0, paddingLeft: 20 }]}>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <Text style={[styles.subSettingText, { color: textColor }]}>└ エコモード中も登場させる</Text>
+              <Text style={{ fontSize: 11, color: subTextColor, marginTop: 1 }}>
+                極限省電力時でもやまいもを表示します
+              </Text>
+            </View>
+            <Switch
+              value={isCheerInEcoEnabled}
+              onValueChange={toggleCheerInEco}
+              trackColor={{ false: '#333', true: '#34C759' }}
+              style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+            />
+          </View>
+        )}
+      </View>
+
       {/* 1. 動作モード設定グループカード（2項目のみの水色親カード） */}
       <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>動作モード設定</Text>
       <View style={[styles.groupCard, { backgroundColor: modeCardBgColor, borderColor: modeCardBorderColor, marginBottom: 12 }]}>
@@ -1257,7 +1356,7 @@ export default function SettingsScreen({ route }) {
         >
           <View style={styles.settingTextContainer}>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <Text style={{ fontSize: 16, marginRight: 6 }}>👑</Text>
+              <Text style={{ fontSize: 16, marginRight: 6 }}>⭐️</Text>
               <Text style={[styles.settingText, { color: textColor }]}>Proプラン（月額100円）</Text>
             </View>
             <Text style={[styles.settingDescription, { color: subTextColor }]}>
@@ -1363,7 +1462,7 @@ export default function SettingsScreen({ route }) {
             activeOpacity={0.8}
           >
             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
-              <Text style={{ fontSize: 18, marginRight: 6 }}>👑</Text>
+              <Text style={{ fontSize: 18, marginRight: 6 }}>⭐️</Text>
               <Text style={{ color: '#34C759', fontSize: 17, fontWeight: '700' }}>PROモード有効中</Text>
             </View>
             <Text style={{ color: '#88D49E', fontSize: 13, textAlign: 'center' }}>
@@ -1377,7 +1476,7 @@ export default function SettingsScreen({ route }) {
             activeOpacity={0.85}
           >
             <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
-              <Text style={{ fontSize: 20, marginRight: 8 }}>👑</Text>
+              <Text style={{ fontSize: 20, marginRight: 8 }}>⭐️</Text>
               <Text style={styles.proCtaTitle}>PROモードにする</Text>
             </View>
             <Text style={styles.proCtaDesc}>
@@ -1438,6 +1537,40 @@ export default function SettingsScreen({ route }) {
 
       {/* Proプラン（月額100円）購入・管理モーダル */}
       <ProSubscriptionModal visible={proModalVisible} onClose={() => setProModalVisible(false)} />
+
+      {/* 応援モードON確定全画面演出モーダル */}
+      <Modal
+        visible={cheerModalVisible}
+        transparent={true}
+        animationType="none"
+        onRequestClose={() => setCheerModalVisible(false)}
+      >
+        <TouchableOpacity 
+          style={styles.cheerModalBackdrop} 
+          activeOpacity={1} 
+          onPress={() => setCheerModalVisible(false)}
+        >
+          <Animated.View style={[
+            styles.cheerModalContent,
+            {
+              opacity: cheerModalOpacity,
+              transform: [{ scale: cheerModalScale }]
+            }
+          ]}>
+            {/* 吹き出し */}
+            <View style={styles.cheerModalBubble}>
+              <Text style={styles.cheerModalBubbleText}>応援するよー！頑張ろう！</Text>
+              <View style={styles.cheerModalBubbleTail} />
+            </View>
+            <Image 
+              source={YAMAIMO_MAIN_IMAGE} 
+              style={styles.cheerModalFullImage} 
+              resizeMode="contain" 
+            />
+            <Text style={styles.cheerModalSubText}>応援モードがONになりました ✨</Text>
+          </Animated.View>
+        </TouchableOpacity>
+      </Modal>
 
     </ScrollView>
   );
@@ -1779,6 +1912,87 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  cheerThumbContainer: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1.5,
+    overflow: 'hidden',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cheerThumbImage: {
+    width: 42,
+    height: 42,
+  },
+  cheerBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 10,
+    marginLeft: 6,
+  },
+  cheerBadgeText: {
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  cheerModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  cheerModalContent: {
+    alignItems: 'center',
+    padding: 24,
+  },
+  cheerModalBubble: {
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 24,
+    borderWidth: 2,
+    borderColor: '#FACC15',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 6,
+    marginBottom: 12,
+  },
+  cheerModalBubbleText: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  cheerModalBubbleTail: {
+    position: 'absolute',
+    bottom: -10,
+    alignSelf: 'center',
+    width: 0,
+    height: 0,
+    borderLeftWidth: 10,
+    borderRightWidth: 10,
+    borderTopWidth: 10,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderTopColor: '#FACC15',
+  },
+  cheerModalFullImage: {
+    width: screenWidth * 0.72,
+    height: screenWidth * 0.72,
+    maxWidth: 300,
+    maxHeight: 300,
+  },
+  cheerModalSubText: {
+    fontSize: 14,
+    color: '#FEF08A',
+    fontWeight: '600',
+    marginTop: 14,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
 });
 
