@@ -184,3 +184,37 @@ export const getTotalPracticeCount = async () => {
     const records = await getRecords();
     return records.length;
 };
+
+/**
+ * 記録日時を YYYY/MM/DD HH:mm 形式（ローカル時刻）にフォーマット
+ * @param {string|Date} dateValue - 日時文字列またはDateオブジェクト
+ * @returns {string} フォーマットされた日時文字列（例: "2026/09/26 13:46"）
+ */
+export const formatRecordDateTime = (dateValue) => {
+  if (!dateValue) return '';
+  const d = new Date(dateValue);
+  if (isNaN(d.getTime())) return '';
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  return `${year}/${month}/${day} ${hours}:${minutes}`;
+};
+
+/**
+ * 記録日時を M/D HH:mm 形式（写真アルバム用・コンパクト）にフォーマット
+ * @param {string|Date} dateValue - 日時文字列またはDateオブジェクト
+ * @returns {string} フォーマットされた日時文字列（例: "9/26 13:46"）
+ */
+export const formatCompactDateTime = (dateValue) => {
+  if (!dateValue) return '';
+  const d = new Date(dateValue);
+  if (isNaN(d.getTime())) return '';
+  const month = d.getMonth() + 1;
+  const day = d.getDate();
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  return `${month}/${day} ${hours}:${minutes}`;
+};
+

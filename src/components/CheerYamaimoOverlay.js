@@ -66,15 +66,15 @@ const CheerYamaimoOverlay = forwardRef(({
       let speechText = '';
       let duration = 3500;
 
-      // サイズ抽選: 超巨大 (15%), ラージ (20%), ミニ (15%), 標準 (50%)
+      // サイズ抽選: 超巨大 (20%), ラージ (25%), ミニ (25%), 標準 (30%)
       const sizeRand = Math.random();
       let sizeMode = 'normal';
-      if (sizeRand < 0.15) {
+      if (sizeRand < 0.20) {
         sizeMode = 'huge';
-        position = 'center'; // 超巨大時は画面中央をドーーーンと占拠！
-      } else if (sizeRand < 0.35) {
+        position = 'center'; // 超巨大時は画面中央または中央上下をドーーーンと占拠！
+      } else if (sizeRand < 0.45) {
         sizeMode = 'large';
-      } else if (sizeRand < 0.50) {
+      } else if (sizeRand < 0.70) {
         sizeMode = 'small';
       } else {
         sizeMode = 'normal';
@@ -170,7 +170,20 @@ const CheerYamaimoOverlay = forwardRef(({
             speechText = '水分補給しよう！';
           }
         }
-        if (sizeMode !== 'huge') position = 'bottom-right';
+
+        // 位置のランダム決定（右下固定を完全撤廃！画面中央や文字被りも含めた全画面ランダム配置）
+        if (sizeMode === 'huge') {
+          const hugePositions = ['center', 'center-upper', 'center-lower'];
+          position = hugePositions[Math.floor(Math.random() * hugePositions.length)];
+        } else {
+          const finishPositions = [
+            'center', 'center-upper', 'center-lower',
+            'bottom-right', 'bottom-left', 'bottom-center',
+            'top-center', 'top-left', 'top-right',
+            'side-right', 'side-left'
+          ];
+          position = finishPositions[Math.floor(Math.random() * finishPositions.length)];
+        }
         duration = 3800;
       } else if (type === 'overtime_start' || type === 'finish_overtime') {
         // タイム内に入らなかった時（超過時間突入時・超過保存時）: わかるよ、フッ、ピザ、へーーー、オレンジ
@@ -180,7 +193,20 @@ const CheerYamaimoOverlay = forwardRef(({
           hasSpeechBubble = true;
           speechText = 'あ、気にせず頑張って♡';
         }
-        if (sizeMode !== 'huge') position = 'bottom-right';
+
+        // 位置のランダム決定（右下固定を完全撤廃！画面中央や文字被りも含めた全画面ランダム配置）
+        if (sizeMode === 'huge') {
+          const hugePositions = ['center', 'center-upper', 'center-lower'];
+          position = hugePositions[Math.floor(Math.random() * hugePositions.length)];
+        } else {
+          const overtimePositions = [
+            'center', 'center-upper', 'center-lower',
+            'bottom-right', 'bottom-left', 'bottom-center',
+            'top-center', 'top-left', 'top-right',
+            'side-right', 'side-left'
+          ];
+          position = overtimePositions[Math.floor(Math.random() * overtimePositions.length)];
+        }
         duration = 3800;
       }
 
@@ -219,10 +245,10 @@ const CheerYamaimoOverlay = forwardRef(({
     } else if (position === 'side-left') {
       initX = -60;
       initY = 0;
-    } else if (position === 'top-center') {
+    } else if (position === 'top-center' || position === 'top-left' || position === 'top-right' || position === 'center-upper') {
       initX = 0;
       initY = -40;
-    } else if (position === 'center') {
+    } else if (position === 'center' || position === 'center-lower') {
       initX = 0;
       initY = 50;
     }
@@ -273,7 +299,7 @@ const CheerYamaimoOverlay = forwardRef(({
           useNativeDriver: true,
         }),
         Animated.timing(animTranslateY, {
-          toValue: position === 'top-center' ? -20 : (position === 'center' ? -30 : 20),
+          toValue: (position === 'top-center' || position === 'top-left' || position === 'top-right' || position === 'center-upper') ? -20 : (position === 'center' || position === 'center-lower' ? -30 : 20),
           duration: 350,
           useNativeDriver: true,
         }),
@@ -300,14 +326,24 @@ const CheerYamaimoOverlay = forwardRef(({
     switch (activeItem.position) {
       case 'center':
         return styles.posCenter;
+      case 'center-upper':
+        return styles.posCenterUpper;
+      case 'center-lower':
+        return styles.posCenterLower;
+      case 'top-left':
+        return styles.posTopLeft;
+      case 'top-right':
+        return styles.posTopRight;
+      case 'top-center':
+        return styles.posTopCenter;
       case 'side-right':
         return styles.posSideRight;
       case 'side-left':
         return styles.posSideLeft;
+      case 'bottom-left':
+        return styles.posBottomLeft;
       case 'bottom-center':
         return styles.posBottomCenter;
-      case 'top-center':
-        return styles.posTopCenter;
       case 'bottom-right':
       default:
         return styles.posBottomRight;
@@ -384,10 +420,30 @@ const styles = StyleSheet.create({
     position: 'absolute',
     alignItems: 'center',
   },
-  // 画面中央（超巨大画面占拠用）
+  // 画面中央（超巨大画面占拠用 / 中央ドカン）
   posCenter: {
     alignSelf: 'center',
     top: screenHeight * 0.28,
+  },
+  // 画面中央やや上（結果表示エリアの上・文字被り）
+  posCenterUpper: {
+    alignSelf: 'center',
+    top: screenHeight * 0.16,
+  },
+  // 画面中央やや下（ボタンやジャンルの上・文字被り）
+  posCenterLower: {
+    alignSelf: 'center',
+    top: screenHeight * 0.44,
+  },
+  // 画面右上
+  posTopRight: {
+    right: 16,
+    top: screenHeight > 750 ? 120 : 90,
+  },
+  // 画面左上
+  posTopLeft: {
+    left: 16,
+    top: screenHeight > 750 ? 120 : 90,
   },
   // 右下（操作ボタンの斜め上あたり：タイマー数字とボタンに被らないゴールデンエリア）
   posBottomRight: {
@@ -419,25 +475,25 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     top: 90,
   },
-  // 超巨大（画面いっぱい）
+  // 超巨大（画面いっぱい特大サイズ）
   characterImageHuge: {
-    width: Math.min(320, screenWidth * 0.82),
-    height: Math.min(320, screenWidth * 0.82),
+    width: Math.min(330, screenWidth * 0.86),
+    height: Math.min(330, screenWidth * 0.86),
   },
-  // ラージサイズ
+  // ラージサイズ（大迫力）
   characterImageLarge: {
-    width: 190,
-    height: 190,
+    width: 220,
+    height: 220,
   },
-  // 標準サイズ
+  // 標準サイズ（程よい中型）
   characterImageNormal: {
-    width: 140,
-    height: 140,
+    width: 150,
+    height: 150,
   },
-  // ミニサイズ
+  // ミニサイズ（ちょこんと小型）
   characterImageSmall: {
-    width: 105,
-    height: 105,
+    width: 95,
+    height: 95,
   },
 
   speechBubble: {

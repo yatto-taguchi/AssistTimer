@@ -11,7 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import RingProgress from '../components/RingProgress';
 import HomeStatsSummary from '../components/HomeStatsSummary';
 import { AppContext } from '../utils/AppContext';
-import { saveRecord, getRecords } from '../utils/recordStorage';
+import { saveRecord, getRecords, formatRecordDateTime } from '../utils/recordStorage';
 import { recordInterruption, getFullPracticeStats, getQuickStatsSummary } from '../utils/practiceStats';
 import AdBannerComponent from '../components/AdBannerComponent';
 import ProSubscriptionModal from '../components/ProSubscriptionModal';
@@ -85,6 +85,7 @@ export default function HomeScreen({ navigation }) {
   const [fullScreenIndex, setFullScreenIndex] = useState(null);
   const [forceTargetTime, setForceTargetTime] = useState(false);
   const [selectedTags, setSelectedTags] = useState([]);
+  const [recordDate, setRecordDate] = useState(null);
 
   // ホーム画面ジャンル選択モーダル用State
   const [genreModalVisible, setGenreModalVisible] = useState(false);
@@ -1210,6 +1211,7 @@ export default function HomeScreen({ navigation }) {
     }
     setSaveIsFavorite(false);
     setSelectedTags([]); // タグを初期化
+    setRecordDate(new Date().toISOString()); // 計測終了日時を記録
     setSaveModalVisible(true);
   };
 
@@ -1226,6 +1228,7 @@ export default function HomeScreen({ navigation }) {
     }
     setSaveIsFavorite(false);
     setSelectedTags([]); // タグを初期化
+    setRecordDate(new Date().toISOString()); // 計測終了日時を記録
     setSaveModalVisible(true);
   };
 
@@ -1310,6 +1313,7 @@ export default function HomeScreen({ navigation }) {
     }
 
     await saveRecord({
+      date: recordDate || new Date().toISOString(),
       duration: duration,
       category: selectedCategory || '未分類',
       photoUris: photoUris,
@@ -1436,17 +1440,18 @@ export default function HomeScreen({ navigation }) {
     }
   };
 
-  const progress = isCountUp ? 0 : Math.max(0, remainingTime / targetTime);
-
-  // カラーインジケーターのロジック
+  // インジケーター（プログレスリング）の進捗およびカラー計算
   let ringColor = '#007AFF'; // デフォルト: ブルー
-  let activeProgress = progress;
+  let activeProgress = 0;
 
   if (isPreCountingDown) {
     // 準備カウントダウン中はMAXブルー固定
     activeProgress = 1;
     ringColor = '#007AFF';
   } else if (!isCountUp) {
+    // 通常タイマー計測中（カウントダウン）
+    activeProgress = Math.max(0, targetTime > 0 ? remainingTime / targetTime : 0);
+
     if (isColorIndicator && targetTime <= 600) {
       // 残量パーセントに基づく色変更
       const remainingPercent = targetTime > 0 ? remainingTime / targetTime : 0;
@@ -1463,7 +1468,15 @@ export default function HomeScreen({ navigation }) {
       else if (remainingTime <= 300) ringColor = '#FFCC00';
     }
   } else {
+    // タイム終了後のカウントアップ中（超過時間計測）: 赤のインジケーター（3分で1周、以降ループ）
     ringColor = '#FF3B30';
+    const COUNT_UP_CYCLE_SECONDS = 180; // 3分（180秒）で1周
+    const safeRemaining = Math.max(0, remainingTime || 0);
+    if (safeRemaining === 0) {
+      activeProgress = 0;
+    } else {
+      activeProgress = (((safeRemaining - 1) % COUNT_UP_CYCLE_SECONDS) + 1) / COUNT_UP_CYCLE_SECONDS;
+    }
   }
 
   // エコモードによるテーマ設定
@@ -1910,6 +1923,9 @@ export default function HomeScreen({ navigation }) {
                 );
               }
             })()}
+            <Text style={{ fontSize: 13, color: isEcoMode ? '#aaa' : '#666', marginTop: 8 }}>
+              練習日時: {formatRecordDateTime(recordDate || new Date().toISOString())}
+            </Text>
           </View>
 
           <Text style={styles.label}>選択中のジャンル</Text>

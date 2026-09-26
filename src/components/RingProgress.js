@@ -123,20 +123,22 @@ export default function RingProgress({
           </Svg>
         </Animated.View>
       ) : (
-        /* 計測中・一時停止時: 通常の単色プログレスリング */
+        /* 計測中・一時停止時: 通常の単色プログレスリング（進捗0%時は不要な始点ドット残留を根本防止） */
         <Svg style={{ width: radius * 2, height: radius * 2 }}>
-          <Circle
-            r={innerRadius}
-            cx={radius}
-            cy={radius}
-            fill={fillColor}
-            stroke={color}
-            strokeWidth={strokeWidth}
-            strokeDasharray={`${circumference} ${circumference}`}
-            strokeDashoffset={progress * circumference - circumference}
-            strokeLinecap="round"
-            transform={`rotate(-90 ${radius} ${radius})`}
-          />
+          {progress > 0 && (
+            <Circle
+              r={innerRadius}
+              cx={radius}
+              cy={radius}
+              fill={fillColor}
+              stroke={color}
+              strokeWidth={strokeWidth}
+              strokeDasharray={`${circumference} ${circumference}`}
+              strokeDashoffset={progress * circumference - circumference}
+              strokeLinecap="round"
+              transform={`rotate(-90 ${radius} ${radius})`}
+            />
+          )}
         </Svg>
       )}
     </View>

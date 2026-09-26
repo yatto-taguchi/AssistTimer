@@ -20,7 +20,7 @@ import ImageViewer from 'react-native-image-zoom-viewer';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
-import { getRecords, updateRecordPhoto, toggleRecordFavorite } from '../utils/recordStorage';
+import { getRecords, updateRecordPhoto, toggleRecordFavorite, formatRecordDateTime, formatCompactDateTime } from '../utils/recordStorage';
 import { getFullPracticeStats } from '../utils/practiceStats';
 import { AppContext } from '../utils/AppContext';
 import AdBannerComponent from '../components/AdBannerComponent';
@@ -310,11 +310,8 @@ export default function RecordsScreen() {
     const catName = item.category || '未設定';
     const photosCount = (item.photoUris && item.photoUris.length > 0) ? item.photoUris.length : (item.photoUri ? 1 : 0);
 
-    // 日付フォーマット（M/D 形式）
-    const itemDate = new Date(item.date);
-    const dateFormatted = !isNaN(itemDate.getTime()) 
-      ? `${itemDate.getMonth() + 1}/${itemDate.getDate()}`
-      : '';
+    // 日時フォーマット（M/D HH:mm 形式）
+    const dateFormatted = formatCompactDateTime(item.date);
 
     // タイムフォーマット（m分s秒）
     const durationFormatted = formatDuration(item.duration);
@@ -392,7 +389,7 @@ export default function RecordsScreen() {
 
   // タイル（個別の記録行）の描画（詳細タップ領域と★ボタンを完全に分離して誤爆防止）
   const renderItem = ({ item }) => {
-    const dateStr = new Date(item.date).toLocaleDateString();
+    const dateStr = formatRecordDateTime(item.date);
     const isFav = isItemFavorite(item);
 
     return (
@@ -856,7 +853,7 @@ export default function RecordsScreen() {
               <View style={[styles.modalInfoBox, { backgroundColor: tileBgColor }]}>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                   <Text style={[styles.infoText, { color: textColor, marginBottom: 0 }]}>
-                    日付: {new Date(selectedRecord.date).toLocaleString()}
+                    練習日時: {formatRecordDateTime(selectedRecord.date)}
                   </Text>
                   {/* 詳細内お気に入りバッジ */}
                   {isItemFavorite(selectedRecord) && (
