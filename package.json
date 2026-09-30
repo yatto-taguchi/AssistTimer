@@ -1,6 +1,6 @@
 {
   "name": "appv3",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "main": "index.js",
   "scripts": {
     "start": "expo start",
@@ -17,6 +17,7 @@
     "expo-battery": "~10.0.8",
     "expo-camera": "~17.0.10",
     "expo-image-picker": "~17.0.10",
+    "expo-keep-awake": "~15.0.8",
     "expo-media-library": "~18.2.1",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",
