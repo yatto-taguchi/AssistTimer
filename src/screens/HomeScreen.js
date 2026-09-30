@@ -6,6 +6,7 @@ import ImageViewer from 'react-native-image-zoom-viewer';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 // 必要なモジュールのインポート
 import { Audio } from 'expo-av';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import RingProgress from '../components/RingProgress';
@@ -16,6 +17,8 @@ import { recordInterruption, getFullPracticeStats, getQuickStatsSummary } from '
 import AdBannerComponent from '../components/AdBannerComponent';
 import ProSubscriptionModal from '../components/ProSubscriptionModal';
 import CheerYamaimoOverlay from '../components/CheerYamaimoOverlay';
+
+const SILENT_LOOP_SOUND = require('../../assets/silent_loop.wav');
 
 const ALARM_SOUNDS = {
   kitchen: require('../../assets/alarm_kitchen.wav'),
@@ -178,6 +181,7 @@ export default function HomeScreen({ navigation }) {
   const cheerOverlayRef = useRef(null);
   const saveModalCheerRef = useRef(null);
   const lastCheerTriggerTimeRef = useRef(0);
+  const nextCheerIntervalMsRef = useRef((Math.floor(Math.random() * (300 - 60 + 1)) + 60) * 1000);
 
   // 記録保存モーダル（SaveModal）オープン時のやまいも連動
   useEffect(() => {
@@ -292,6 +296,68 @@ export default function HomeScreen({ navigation }) {
     } catch (e) {}
   };
 
+  const silentSoundRef = useRef(null);
+  const shouldPlaySilentAudioRef = useRef(false);
+  const isLoadingSilentAudioRef = useRef(false);
+
+  // バックグラウンドでのJSサスペンド防止用無音オーディオ再生（レースコンディション防止ガード付き）
+  const startSilentBackgroundAudio = async () => {
+    shouldPlaySilentAudioRef.current = true;
+    if (silentSoundRef.current || isLoadingSilentAudioRef.current) return;
+    isLoadingSilentAudioRef.current = true;
+    try {
+      await Audio.setAudioModeAsync({
+        playsInSilentModeIOS: playsInSilentMode,
+        staysActiveInBackground: true,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+      });
+      const { sound: s } = await Audio.Sound.createAsync(
+        SILENT_LOOP_SOUND,
+        { isLooping: true, volume: 0.001 }
+      );
+      // ロード中に一時停止やリセットが押されていた場合は即アンロード
+      if (!shouldPlaySilentAudioRef.current) {
+        await s.stopAsync().catch(() => {});
+        await s.unloadAsync().catch(() => {});
+        silentSoundRef.current = null;
+      } else {
+        silentSoundRef.current = s;
+        await s.playAsync();
+      }
+    } catch (err) {
+      console.log('startSilentBackgroundAudio error', err);
+    } finally {
+      isLoadingSilentAudioRef.current = false;
+    }
+  };
+
+  const stopSilentBackgroundAudio = async () => {
+    shouldPlaySilentAudioRef.current = false;
+    try {
+      if (silentSoundRef.current) {
+        const s = silentSoundRef.current;
+        silentSoundRef.current = null;
+        await s.stopAsync().catch(() => {});
+        await s.unloadAsync().catch(() => {});
+      }
+    } catch (err) {
+      console.log('stopSilentBackgroundAudio error', err);
+    }
+  };
+
+  // タイマー進行中のみ画面スリープ防止（常時点灯）およびバックグラウンド音声維持を完全連動（準備→本番の無瞬断化）
+  useEffect(() => {
+    const isTimerActive = isPreCountingDown || isRunning;
+    if (isTimerActive) {
+      activateKeepAwakeAsync();
+      startSilentBackgroundAudio();
+    } else {
+      deactivateKeepAwake();
+      stopSilentBackgroundAudio();
+    }
+  }, [isPreCountingDown, isRunning, playsInSilentMode]);
+
   // 初回起動時のサウンドロード等と再生用関数
   const playAlarm = async () => {
     triggerVibration('finish');
@@ -302,15 +368,22 @@ export default function HomeScreen({ navigation }) {
     try {
       console.log('Play Alarm trigger: 0 seconds reached');
       if (sound) {
-        await sound.unloadAsync();
+        await sound.unloadAsync().catch(() => {});
       }
       await Audio.setAudioModeAsync({
         playsInSilentModeIOS: playsInSilentMode,
+        staysActiveInBackground: true,
         shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
       });
       const soundFile = ALARM_SOUNDS[alarmSoundType] || ALARM_SOUNDS.digital;
       const { sound: newSound } = await Audio.Sound.createAsync(soundFile);
       setSound(newSound);
+      newSound.setOnPlaybackStatusUpdate((status) => {
+        if (status.didJustFinish) {
+          newSound.unloadAsync().catch(() => {});
+        }
+      });
       await newSound.playAsync();
     } catch (e) {
       console.log("Audio play error", e);
@@ -324,16 +397,23 @@ export default function HomeScreen({ navigation }) {
     }
     try {
       if (voiceSound) {
-        await voiceSound.unloadAsync();
+        await voiceSound.unloadAsync().catch(() => {});
       }
       await Audio.setAudioModeAsync({
         playsInSilentModeIOS: playsInSilentMode,
+        staysActiveInBackground: true,
         shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
       });
       const soundFile = VOICE_SOUNDS[key];
       if (!soundFile) return;
       const { sound: newVoice } = await Audio.Sound.createAsync(soundFile);
       setVoiceSound(newVoice);
+      newVoice.setOnPlaybackStatusUpdate((status) => {
+        if (status.didJustFinish) {
+          newVoice.unloadAsync().catch(() => {});
+        }
+      });
       await newVoice.playAsync();
     } catch (e) {
       console.log("Voice play error", e);
@@ -351,6 +431,8 @@ export default function HomeScreen({ navigation }) {
   useEffect(() => {
     return () => {
       cancelVibration();
+      deactivateKeepAwake();
+      stopSilentBackgroundAudio();
     };
   }, []);
 
@@ -516,36 +598,36 @@ export default function HomeScreen({ navigation }) {
           setPreCountdownTime(nextTime);
         }
 
-        // カウント進行中の経過コール
-        if (nextTime === 900 && countdownSeconds > 900 && isPrepVoice15MinEnabled && !triggeredPrepVoicesRef.current.has(900)) {
+        // カウント進行中の経過コール（スロットリングによるスキップ防止のレンジ判定）
+        if (countdownSeconds > 900 && nextTime <= 900 && nextTime > 600 && isPrepVoice15MinEnabled && !triggeredPrepVoicesRef.current.has(900)) {
           triggeredPrepVoicesRef.current.add(900);
           playVoice('prep_15min');
-        } else if (nextTime === 600 && countdownSeconds > 600 && isPrepVoice10MinEnabled && !triggeredPrepVoicesRef.current.has(600)) {
+        } else if (countdownSeconds > 600 && nextTime <= 600 && nextTime > 300 && isPrepVoice10MinEnabled && !triggeredPrepVoicesRef.current.has(600)) {
           triggeredPrepVoicesRef.current.add(600);
           playVoice('prep_10min');
-        } else if (nextTime === 300 && countdownSeconds > 300 && isPrepVoice5MinEnabled && !triggeredPrepVoicesRef.current.has(300)) {
+        } else if (countdownSeconds > 300 && nextTime <= 300 && nextTime > 240 && isPrepVoice5MinEnabled && !triggeredPrepVoicesRef.current.has(300)) {
           triggeredPrepVoicesRef.current.add(300);
           playVoice('prep_5min');
-        } else if (nextTime === 240 && countdownSeconds > 240 && isPrepVoice4MinEnabled && !triggeredPrepVoicesRef.current.has(240)) {
+        } else if (countdownSeconds > 240 && nextTime <= 240 && nextTime > 180 && isPrepVoice4MinEnabled && !triggeredPrepVoicesRef.current.has(240)) {
           triggeredPrepVoicesRef.current.add(240);
           playVoice('prep_4min');
-        } else if (nextTime === 180 && countdownSeconds > 180 && isPrepVoice3MinEnabled && !triggeredPrepVoicesRef.current.has(180)) {
+        } else if (countdownSeconds > 180 && nextTime <= 180 && nextTime > 120 && isPrepVoice3MinEnabled && !triggeredPrepVoicesRef.current.has(180)) {
           triggeredPrepVoicesRef.current.add(180);
           playVoice('prep_3min');
-        } else if (nextTime === 120 && countdownSeconds > 120 && isPrepVoice2MinEnabled && !triggeredPrepVoicesRef.current.has(120)) {
+        } else if (countdownSeconds > 120 && nextTime <= 120 && nextTime > 60 && isPrepVoice2MinEnabled && !triggeredPrepVoicesRef.current.has(120)) {
           triggeredPrepVoicesRef.current.add(120);
           playVoice('prep_2min');
-        } else if (nextTime === 60 && countdownSeconds > 60 && isPrepVoice1MinEnabled && !triggeredPrepVoicesRef.current.has(60)) {
+        } else if (countdownSeconds > 60 && nextTime <= 60 && nextTime > 30 && isPrepVoice1MinEnabled && !triggeredPrepVoicesRef.current.has(60)) {
           triggeredPrepVoicesRef.current.add(60);
           playVoice('prep_1min');
-        } else if (nextTime === 30 && countdownSeconds > 30 && isPrepVoice30SecEnabled && !triggeredPrepVoicesRef.current.has(30)) {
+        } else if (countdownSeconds > 30 && nextTime <= 30 && nextTime > 10 && isPrepVoice30SecEnabled && !triggeredPrepVoicesRef.current.has(30)) {
           triggeredPrepVoicesRef.current.add(30);
           playVoice('prep_30sec');
-        } else if (nextTime === 10 && countdownSeconds > 10 && isPrepVoice10SecEnabled && !triggeredPrepVoicesRef.current.has(10)) {
+        } else if (countdownSeconds > 10 && nextTime <= 10 && nextTime > 5 && isPrepVoice10SecEnabled && !triggeredPrepVoicesRef.current.has(10)) {
           triggeredPrepVoicesRef.current.add(10);
           playVoice('prep_10sec');
           triggerVibration('prep');
-        } else if (nextTime === 5 && countdownSeconds > 5 && isPrepVoiceCountdownEnabled && !triggeredPrepVoicesRef.current.has(5)) {
+        } else if (countdownSeconds > 5 && nextTime <= 5 && nextTime > 0 && isPrepVoiceCountdownEnabled && !triggeredPrepVoicesRef.current.has(5)) {
           triggeredPrepVoicesRef.current.add(5);
           playVoice('prep_countdown_5'); // 5秒前から「5,4,3,2,1 スタート！」
           triggerVibration('countdown');
@@ -562,11 +644,14 @@ export default function HomeScreen({ navigation }) {
           clearInterval(interval);
           prepEndTimeRef.current = null;
           setIsPreCountingDown(false);
+          cheerOverlayRef.current?.dismiss(); // 準備中のやまいもが残っていればスッと消去
           // カウントダウン終了後、メインタイマー開始
           targetEndTimeRef.current = now + targetTime * 1000;
           triggeredVoicesRef.current.clear();
           remainingTimeRef.current = targetTime;
           setRemainingTime(targetTime);
+          lastCheerTriggerTimeRef.current = now;
+          nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (300 - 60 + 1)) + 60) * 1000;
           setIsRunning(true);
         }
       }, 250);
@@ -607,35 +692,37 @@ export default function HomeScreen({ navigation }) {
             setRemainingTime(nextTime);
           }
 
-          // 音声アナウンス＆バイブレーションのトリガー（残り時間到達時）
-          if (nextTime === 300 && isVoice5MinEnabled && !triggeredVoicesRef.current.has(300)) {
+          // 音声アナウンス＆バイブレーションのトリガー（スロットリングによるスキップ防止のレンジ判定）
+          if (targetTime > 300 && nextTime <= 300 && nextTime > 180 && isVoice5MinEnabled && !triggeredVoicesRef.current.has(300)) {
             triggeredVoicesRef.current.add(300);
             playVoice('v_5min');
-          } else if (nextTime === 180 && isVoice3MinEnabled && !triggeredVoicesRef.current.has(180)) {
+          } else if (targetTime > 180 && nextTime <= 180 && nextTime > 60 && isVoice3MinEnabled && !triggeredVoicesRef.current.has(180)) {
             triggeredVoicesRef.current.add(180);
             playVoice('v_3min');
-          } else if (nextTime === 60 && isVoice1MinEnabled && !triggeredVoicesRef.current.has(60)) {
+          } else if (targetTime > 60 && nextTime <= 60 && nextTime > 30 && isVoice1MinEnabled && !triggeredVoicesRef.current.has(60)) {
             triggeredVoicesRef.current.add(60);
             playVoice('v_1min');
             triggerVibration('warning');
-          } else if (nextTime === 30 && isVoice30SecEnabled && !triggeredVoicesRef.current.has(30)) {
+          } else if (targetTime > 30 && nextTime <= 30 && nextTime > 10 && isVoice30SecEnabled && !triggeredVoicesRef.current.has(30)) {
             triggeredVoicesRef.current.add(30);
             playVoice('v_30sec');
             triggerVibration('warning');
-          } else if (nextTime === 10 && isVoice10SecEnabled && !triggeredVoicesRef.current.has(10)) {
+          } else if (targetTime > 10 && nextTime <= 10 && nextTime > 5 && isVoice10SecEnabled && !triggeredVoicesRef.current.has(10)) {
             triggeredVoicesRef.current.add(10);
             playVoice('v_10sec');
             triggerVibration('warning');
-          } else if (nextTime === 5 && isVoiceFinishEnabled && !triggeredVoicesRef.current.has(5)) {
+          } else if (targetTime > 5 && nextTime <= 5 && nextTime > 0 && isVoiceFinishEnabled && !triggeredVoicesRef.current.has(5)) {
             triggeredVoicesRef.current.add(5);
             playVoice('v_finish'); // 「5,4,3,2,1 終了」カウントダウン開始
             triggerVibration('countdown');
           }
 
-          // 計測中のランダムやまいも登場（最低45秒インターバル＋警告秒数を避ける）
-          if (now - lastCheerTriggerTimeRef.current >= 45000 && nextTime > 15 && targetTime - nextTime >= 10) {
+          // 計測中のランダムやまいも登場（60〜300秒のランダムインターバル・20分で3〜4回目安）
+          const cheerIntervalMs = nextCheerIntervalMsRef.current || 120000;
+          if (now - lastCheerTriggerTimeRef.current >= cheerIntervalMs && nextTime > 15 && targetTime - nextTime >= 10) {
             lastCheerTriggerTimeRef.current = now;
-            cheerOverlayRef.current?.trigger('running', 0.65);
+            nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (300 - 60 + 1)) + 60) * 1000;
+            cheerOverlayRef.current?.trigger('running', 0.70);
           }
 
           // 0秒到達（タイムアップ）
@@ -797,6 +884,7 @@ export default function HomeScreen({ navigation }) {
         setIsPreCountingDown(false);
         prepEndTimeRef.current = null;
         cancelVibration();
+        cheerOverlayRef.current?.dismiss();
         if (voiceSound) {
           voiceSound.stopAsync().catch(() => {});
         }
@@ -808,6 +896,8 @@ export default function HomeScreen({ navigation }) {
             targetEndTimeRef.current = Date.now() + remainingTimeRef.current * 1000;
             if (remainingTimeRef.current === targetTime) {
               triggeredVoicesRef.current.clear();
+              lastCheerTriggerTimeRef.current = Date.now();
+              nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (300 - 60 + 1)) + 60) * 1000;
             }
           } else {
             overStartTimeRef.current = Date.now() - remainingTimeRef.current * 1000;
@@ -835,6 +925,7 @@ export default function HomeScreen({ navigation }) {
       }
     }
 
+    cheerOverlayRef.current?.dismiss(); // やまいも表示をリセット時にスッとクリア
     setIsRunning(false);
     setIsPreCountingDown(false);
     setIsCountUp(false);

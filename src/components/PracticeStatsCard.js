@@ -67,15 +67,16 @@ export default function PracticeStatsCard({ stats }) {
     return `${minutes}分`;
   };
 
-  // カラーパレット
-  const cardBg = isEcoMode ? '#111111' : '#FFFFFF';
-  const cardBorder = isEcoMode ? '#222222' : '#E5E5EA';
-  const labelColor = isEcoMode ? '#888888' : '#8E8E93';
-  const mainTextColor = isEcoMode ? '#FFFFFF' : '#1C1C1E';
-  const subCardBg = isEcoMode ? '#18181A' : '#F9F9FB';
-  const subCardBorder = isEcoMode ? '#28282B' : '#ECECF0';
-  const timeBadgeBg = isEcoMode ? '#1E293B' : '#EFF6FF';
-  const timeBadgeText = isEcoMode ? '#64D2FF' : '#007AFF';
+  // カラーパレット（爽やかで優しい薄緑色テーマ）
+  const cardBg = isEcoMode ? '#0D1C14' : '#F0FDF4';
+  const cardBorder = isEcoMode ? '#1B4332' : '#BBF7D0';
+  const labelColor = isEcoMode ? '#88AA99' : '#52796F';
+  const mainTextColor = isEcoMode ? '#ECFDF5' : '#14532D';
+  const subCardBg = isEcoMode ? '#14291E' : '#FFFFFF';
+  const subCardBorder = isEcoMode ? '#1E3A2B' : '#DCFCE7';
+  const timeBadgeBg = isEcoMode ? '#1C382B' : '#DCFCE7';
+  const timeBadgeText = isEcoMode ? '#4ADE80' : '#15803D';
+  const iconColor = isEcoMode ? '#4ADE80' : '#16A34A';
 
   const totalCompleted = stats.totalCompleted || 0;
   const inTimeRate = stats.overallInTimeRate || 0;
@@ -95,7 +96,7 @@ export default function PracticeStatsCard({ stats }) {
           <Ionicons 
             name="time-outline" 
             size={18} 
-            color={isEcoMode ? '#64D2FF' : '#007AFF'} 
+            color={iconColor} 
             style={{ marginRight: 7 }} 
           />
           <Text style={[styles.headerTitle, { color: mainTextColor }]}>
@@ -131,7 +132,7 @@ export default function PracticeStatsCard({ stats }) {
           <Ionicons
             name={isStatsExpanded ? "chevron-up" : "chevron-down"}
             size={18}
-            color={isEcoMode ? '#888' : '#8E8E93'}
+            color={iconColor}
             style={{ marginLeft: 6 }}
           />
         </View>

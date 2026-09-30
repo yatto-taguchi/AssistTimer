@@ -53,6 +53,8 @@ export default function RecordsScreen() {
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
   const [sortBy, setSortBy] = useState('newest'); // 'newest' | 'favoriteFirst' | 'oldest'
   const [genreOrder, setGenreOrder] = useState([]); // 最近押したジャンル順（MRU）
+  // ジャンル絞り込みアコーディオン開閉State（初期値: false でコンパクトに表示）
+  const [isGenreAccordionOpen, setIsGenreAccordionOpen] = useState(false);
   const genreScrollRef = useRef(null);
 
   const { isEcoMode, isProMode } = useContext(AppContext);
@@ -62,10 +64,11 @@ export default function RecordsScreen() {
   useEffect(() => {
     const loadSettings = async () => {
       try {
-        const [storedGenreOrder, storedViewMode, storedOverlay] = await Promise.all([
+        const [storedGenreOrder, storedViewMode, storedOverlay, storedGenreAccordionOpen] = await Promise.all([
           AsyncStorage.getItem('@records_genre_order'),
           AsyncStorage.getItem('@records_view_mode'),
           AsyncStorage.getItem('@records_gallery_overlay_enabled'),
+          AsyncStorage.getItem('@records_genre_accordion_open'),
         ]);
 
         if (storedGenreOrder) {
@@ -79,6 +82,9 @@ export default function RecordsScreen() {
         }
         if (storedOverlay !== null) {
           setShowGalleryOverlay(JSON.parse(storedOverlay));
+        }
+        if (storedGenreAccordionOpen !== null) {
+          setIsGenreAccordionOpen(JSON.parse(storedGenreAccordionOpen));
         }
       } catch (e) {
         console.error('Failed to load records settings', e);
@@ -173,6 +179,14 @@ export default function RecordsScreen() {
         genreScrollRef.current.scrollTo({ x: 0, animated: true });
       }
     }, 60);
+  };
+
+  // ジャンル絞り込みアコーディオン開閉トグル
+  const toggleGenreAccordion = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    const nextState = !isGenreAccordionOpen;
+    setIsGenreAccordionOpen(nextState);
+    AsyncStorage.setItem('@records_genre_accordion_open', JSON.stringify(nextState)).catch(console.error);
   };
 
   // ジャンル候補（記録に存在するジャンル＋主要デフォルトジャンル）
@@ -471,7 +485,7 @@ export default function RecordsScreen() {
       {stats ? <PracticeStatsCard stats={stats} /> : null}
 
       {/* 表示モード切替セグメントタブ (リスト ⇔ 写真アルバム) */}
-      <View style={[styles.viewModeContainer, { backgroundColor: isEcoMode ? '#1C1C1E' : '#E5E5EA', borderColor: cardBorder }]}>
+      <View style={[styles.viewModeContainer, { backgroundColor: isEcoMode ? '#1C1C1E' : '#E2E8F0', borderColor: cardBorder }]}>
         <TouchableOpacity
           style={[
             styles.viewModeBtn,
@@ -482,25 +496,29 @@ export default function RecordsScreen() {
         >
           <Ionicons
             name="list"
-            size={16}
-            color={viewMode === 'list' ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#888' : '#666')}
+            size={17}
+            color={viewMode === 'list' ? '#FFFFFF' : (isEcoMode ? '#888' : '#64748B')}
             style={{ marginRight: 6 }}
           />
           <Text style={[
             styles.viewModeBtnText,
-            viewMode === 'list' && (isEcoMode ? styles.viewModeBtnTextActiveEco : styles.viewModeBtnTextActiveNormal),
-            viewMode !== 'list' && { color: isEcoMode ? '#888' : '#666' }
+            viewMode === 'list' 
+              ? (isEcoMode ? styles.viewModeBtnTextActiveEco : styles.viewModeBtnTextActiveNormal)
+              : { color: isEcoMode ? '#888' : '#475569' }
           ]}>
             リスト一覧
           </Text>
           <View style={[
             styles.viewModeCountBadge,
-            viewMode === 'list' && (isEcoMode ? styles.viewModeCountBadgeActiveEco : styles.viewModeCountBadgeActiveNormal)
+            viewMode === 'list' 
+              ? (isEcoMode ? styles.viewModeCountBadgeActiveEco : styles.viewModeCountBadgeActiveNormal)
+              : { backgroundColor: isEcoMode ? '#2C2C2E' : 'rgba(0,0,0,0.06)' }
           ]}>
             <Text style={[
               styles.viewModeCountBadgeText,
-              viewMode === 'list' && (isEcoMode ? styles.viewModeCountBadgeTextActiveEco : styles.viewModeCountBadgeTextActiveNormal),
-              viewMode !== 'list' && { color: isEcoMode ? '#888' : '#666' }
+              viewMode === 'list' 
+                ? (isEcoMode ? styles.viewModeCountBadgeTextActiveEco : styles.viewModeCountBadgeTextActiveNormal)
+                : { color: isEcoMode ? '#888' : '#64748B' }
             ]}>
               {records.length}
             </Text>
@@ -517,25 +535,29 @@ export default function RecordsScreen() {
         >
           <Ionicons
             name="images"
-            size={16}
-            color={viewMode === 'gallery' ? (isEcoMode ? '#64D2FF' : '#007AFF') : (isEcoMode ? '#888' : '#666')}
+            size={17}
+            color={viewMode === 'gallery' ? '#FFFFFF' : (isEcoMode ? '#888' : '#64748B')}
             style={{ marginRight: 6 }}
           />
           <Text style={[
             styles.viewModeBtnText,
-            viewMode === 'gallery' && (isEcoMode ? styles.viewModeBtnTextActiveEco : styles.viewModeBtnTextActiveNormal),
-            viewMode !== 'gallery' && { color: isEcoMode ? '#888' : '#666' }
+            viewMode === 'gallery' 
+              ? (isEcoMode ? styles.viewModeBtnTextActiveEco : styles.viewModeBtnTextActiveNormal)
+              : { color: isEcoMode ? '#888' : '#475569' }
           ]}>
             写真アルバム
           </Text>
           <View style={[
             styles.viewModeCountBadge,
-            viewMode === 'gallery' && (isEcoMode ? styles.viewModeCountBadgeActiveEco : styles.viewModeCountBadgeActiveNormal)
+            viewMode === 'gallery' 
+              ? (isEcoMode ? styles.viewModeCountBadgeActiveEco : styles.viewModeCountBadgeActiveNormal)
+              : { backgroundColor: isEcoMode ? '#2C2C2E' : 'rgba(0,0,0,0.06)' }
           ]}>
             <Text style={[
               styles.viewModeCountBadgeText,
-              viewMode === 'gallery' && (isEcoMode ? styles.viewModeCountBadgeTextActiveEco : styles.viewModeCountBadgeTextActiveNormal),
-              viewMode !== 'gallery' && { color: isEcoMode ? '#888' : '#666' }
+              viewMode === 'gallery' 
+                ? (isEcoMode ? styles.viewModeCountBadgeTextActiveEco : styles.viewModeCountBadgeTextActiveNormal)
+                : { color: isEcoMode ? '#888' : '#64748B' }
             ]}>
               {totalPhotosCount}
             </Text>
@@ -543,192 +565,251 @@ export default function RecordsScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* ジャンルタグ ＆ お気に入りフィルター コントロールボックス */}
-      <View style={[styles.filterCard, { backgroundColor: tileBgColor, borderColor: cardBorder }]}>
-        
-        {/* ① ジャンルタグ選択バー */}
-        <View style={styles.filterSectionHeader}>
-          <Ionicons 
-            name="pricetags" 
-            size={16} 
-            color={isEcoMode ? '#64D2FF' : '#007AFF'} 
-            style={{ marginRight: 6 }} 
-          />
-          <Text style={[styles.filterSectionTitle, { color: textColor }]}>ジャンルで絞り込み</Text>
-        </View>
+      {/* ジャンルタグ ＆ お気に入りフィルター コントロールボックス（開閉式アコーディオン） */}
+      {(() => {
+        const isFilterActive = selectedGenre !== 'すべて' || showFavoritesOnly;
+        return (
+          <View style={[styles.filterCard, { backgroundColor: tileBgColor, borderColor: cardBorder }]}>
+            
+            {/* アコーディオンヘッダー（タップで開閉） */}
+            <TouchableOpacity 
+              style={styles.filterAccordionHeader}
+              onPress={toggleGenreAccordion}
+              activeOpacity={0.7}
+            >
+              <View style={styles.filterSectionHeaderLeft}>
+                <Ionicons 
+                  name="pricetags" 
+                  size={16} 
+                  color={isEcoMode ? '#64D2FF' : '#007AFF'} 
+                  style={{ marginRight: 6 }} 
+                />
+                <Text style={[styles.filterSectionTitle, { color: textColor }]}>ジャンルで絞り込み</Text>
+              </View>
 
-        <ScrollView 
-          ref={genreScrollRef}
-          horizontal 
-          showsHorizontalScrollIndicator={false} 
-          contentContainerStyle={styles.genreChipsScroll}
-        >
-          {allGenresList.map((genre) => {
-            const isSelected = selectedGenre === genre;
-            // ギャラリーモード時は写真付き件数、通常時は全件数を表示
-            const count = viewMode === 'gallery'
-              ? (genre === 'すべて' 
-                  ? totalPhotosCount 
-                  : records.filter(r => r.category === genre && Boolean(getItemPhotoUri(r))).length)
-              : (genre === 'すべて' 
-                  ? records.length 
-                  : (genreCountMap[genre] || 0));
-
-            return (
-              <TouchableOpacity
-                key={genre}
-                style={[
-                  styles.genreChip,
-                  isSelected && (isEcoMode ? styles.genreChipSelectedEco : styles.genreChipSelected),
-                  isEcoMode && !isSelected && styles.genreChipEco
-                ]}
-                onPress={() => handleSelectGenre(genre)}
-                activeOpacity={0.7}
-              >
-                <Text style={[
-                  styles.genreChipText,
-                  isSelected && (isEcoMode ? styles.genreChipTextSelectedEco : styles.genreChipTextSelected),
-                  isEcoMode && !isSelected && { color: '#888' }
-                ]}>
-                  {genre}
-                </Text>
+              <View style={styles.filterSectionHeaderRight}>
+                {/* 絞り込み状態サマリーバッジ */}
                 <View style={[
-                  styles.genreCountBadge,
-                  isSelected && (isEcoMode ? styles.genreCountBadgeSelectedEco : styles.genreCountBadgeSelected)
+                  styles.filterSummaryBadge,
+                  isFilterActive 
+                    ? (showFavoritesOnly
+                        ? (isEcoMode ? styles.filterSummaryBadgeFavEco : styles.filterSummaryBadgeFav)
+                        : (isEcoMode ? styles.filterSummaryBadgeActiveEco : styles.filterSummaryBadgeActive))
+                    : (isEcoMode ? styles.filterSummaryBadgeEco : styles.filterSummaryBadgeNormal)
                 ]}>
-                  <Text style={[
-                    styles.genreCountBadgeText,
-                    isSelected && (isEcoMode ? styles.genreCountBadgeTextSelectedEco : styles.genreCountBadgeTextSelected),
-                    isEcoMode && !isSelected && { color: '#888' }
-                  ]}>
-                    {count}
+                  {showFavoritesOnly && (
+                    <Ionicons 
+                      name="star" 
+                      size={11} 
+                      color={isEcoMode ? '#FFD60A' : '#B27B00'} 
+                      style={{ marginRight: 3 }} 
+                    />
+                  )}
+                  <Text 
+                    style={[
+                      styles.filterSummaryBadgeText,
+                      isFilterActive 
+                        ? (showFavoritesOnly
+                            ? (isEcoMode ? styles.filterSummaryBadgeTextFavEco : styles.filterSummaryBadgeTextFav)
+                            : (isEcoMode ? styles.filterSummaryBadgeTextActiveEco : styles.filterSummaryBadgeTextActive))
+                        : { color: isEcoMode ? '#888' : '#666' }
+                    ]}
+                    numberOfLines={1}
+                    ellipsizeMode="tail"
+                  >
+                    {selectedGenre !== 'すべて' ? selectedGenre : '全ジャンル'} {displayRecords.length}件
                   </Text>
                 </View>
-              </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
 
-        {/* ② お気に入りトグル ＆ 並び順（ソート） */}
-        <View style={styles.subControlsRow}>
-          {/* 「★ お気に入りのみ」トグルボタン */}
-          <TouchableOpacity
-            style={[
-              styles.favFilterBtn,
-              showFavoritesOnly && styles.favFilterBtnActive,
-              isEcoMode && (showFavoritesOnly ? styles.favFilterBtnActiveEco : styles.favFilterBtnEco)
-            ]}
-            onPress={() => setShowFavoritesOnly(!showFavoritesOnly)}
-            activeOpacity={0.7}
-          >
-            <Ionicons 
-              name={showFavoritesOnly ? "star" : "star-outline"} 
-              size={16} 
-              color={showFavoritesOnly ? "#FFB800" : (isEcoMode ? "#888" : "#8E8E93")} 
-              style={{ marginRight: 5 }} 
-            />
-            <Text style={[
-              styles.favFilterBtnText,
-              showFavoritesOnly && styles.favFilterBtnTextActive,
-              isEcoMode && !showFavoritesOnly && { color: '#aaa' }
-            ]}>
-              ★ お気に入りのみ
-            </Text>
-          </TouchableOpacity>
-
-          {/* 並び順（ソート）ボタン群 */}
-          <View style={[styles.sortGroup, isEcoMode && { backgroundColor: '#1C1C1E', borderColor: '#2C2C2E' }]}>
-            <TouchableOpacity
-              style={[
-                styles.sortBtn,
-                sortBy === 'newest' && (isEcoMode ? styles.sortBtnActiveEco : styles.sortBtnActive),
-              ]}
-              onPress={() => setSortBy('newest')}
-            >
-              <Text style={[
-                styles.sortBtnText,
-                sortBy === 'newest' && styles.sortBtnTextActive,
-                isEcoMode && sortBy !== 'newest' && { color: '#777' }
-              ]}>新しい順</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.sortBtn,
-                sortBy === 'favoriteFirst' && (isEcoMode ? styles.sortBtnActiveEco : styles.sortBtnActive),
-              ]}
-              onPress={() => setSortBy('favoriteFirst')}
-            >
-              <Text style={[
-                styles.sortBtnText,
-                sortBy === 'favoriteFirst' && styles.sortBtnTextActive,
-                isEcoMode && sortBy !== 'favoriteFirst' && { color: '#777' }
-              ]}>★優先</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.sortBtn,
-                sortBy === 'oldest' && (isEcoMode ? styles.sortBtnActiveEco : styles.sortBtnActive),
-              ]}
-              onPress={() => setSortBy('oldest')}
-            >
-              <Text style={[
-                styles.sortBtnText,
-                sortBy === 'oldest' && styles.sortBtnTextActive,
-                isEcoMode && sortBy !== 'oldest' && { color: '#777' }
-              ]}>古い順</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* ③ 現在の絞り込み状態 ＆ 件数 ＆ 成長データ表示切替 */}
-        <View style={styles.statusRow}>
-          <Text style={[styles.statusText, { color: subTextColor }]}>
-            表示: {selectedGenre !== 'すべて' ? `【${selectedGenre}】` : '全ジャンル'}
-            {showFavoritesOnly ? '（★お気に入り）' : ''} {displayRecords.length}件
-          </Text>
-
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            {/* ギャラリー表示時限定: 成長データ（タイム・日時・回数）表示トグル */}
-            {viewMode === 'gallery' && (
-              <TouchableOpacity 
-                style={[
-                  styles.overlayToggleBtn, 
-                  showGalleryOverlay && (isEcoMode ? styles.overlayToggleBtnActiveEco : styles.overlayToggleBtnActive),
-                  isEcoMode && !showGalleryOverlay && styles.overlayToggleBtnEco
-                ]}
-                onPress={handleToggleGalleryOverlay}
-                activeOpacity={0.7}
-              >
-                <Ionicons 
-                  name={showGalleryOverlay ? "stats-chart" : "image-outline"} 
-                  size={12} 
-                  color={showGalleryOverlay ? (isEcoMode ? "#64D2FF" : "#007AFF") : (isEcoMode ? "#888" : "#8E8E93")} 
-                  style={{ marginRight: 4 }} 
+                <Ionicons
+                  name={isGenreAccordionOpen ? "chevron-up" : "chevron-down"}
+                  size={18}
+                  color={isEcoMode ? '#888' : '#8E8E93'}
+                  style={{ marginLeft: 6 }}
                 />
-                <Text style={[
-                  styles.overlayToggleBtnText,
-                  showGalleryOverlay && (isEcoMode ? styles.overlayToggleBtnTextActiveEco : styles.overlayToggleBtnTextActive),
-                  isEcoMode && !showGalleryOverlay && { color: '#888' }
-                ]}>
-                  {showGalleryOverlay ? '成長データON' : '写真のみ'}
-                </Text>
-              </TouchableOpacity>
+              </View>
+            </TouchableOpacity>
+
+            {/* アコーディオン展開コンテンツ */}
+            {isGenreAccordionOpen && (
+              <View style={styles.filterAccordionBody}>
+                {/* ① ジャンルタグ選択バー */}
+                <ScrollView 
+                  ref={genreScrollRef}
+                  horizontal 
+                  showsHorizontalScrollIndicator={false} 
+                  contentContainerStyle={styles.genreChipsScroll}
+                >
+                  {allGenresList.map((genre) => {
+                    const isSelected = selectedGenre === genre;
+                    // ギャラリーモード時は写真付き件数、通常時は全件数を表示
+                    const count = viewMode === 'gallery'
+                      ? (genre === 'すべて' 
+                          ? totalPhotosCount 
+                          : records.filter(r => r.category === genre && Boolean(getItemPhotoUri(r))).length)
+                      : (genre === 'すべて' 
+                          ? records.length 
+                          : (genreCountMap[genre] || 0));
+
+                    return (
+                      <TouchableOpacity
+                        key={genre}
+                        style={[
+                          styles.genreChip,
+                          isSelected && (isEcoMode ? styles.genreChipSelectedEco : styles.genreChipSelected),
+                          isEcoMode && !isSelected && styles.genreChipEco
+                        ]}
+                        onPress={() => handleSelectGenre(genre)}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={[
+                          styles.genreChipText,
+                          isSelected && (isEcoMode ? styles.genreChipTextSelectedEco : styles.genreChipTextSelected),
+                          isEcoMode && !isSelected && { color: '#888' }
+                        ]}>
+                          {genre}
+                        </Text>
+                        <View style={[
+                          styles.genreCountBadge,
+                          isSelected && (isEcoMode ? styles.genreCountBadgeSelectedEco : styles.genreCountBadgeSelected)
+                        ]}>
+                          <Text style={[
+                            styles.genreCountBadgeText,
+                            isSelected && (isEcoMode ? styles.genreCountBadgeTextSelectedEco : styles.genreCountBadgeTextSelected),
+                            isEcoMode && !isSelected && { color: '#888' }
+                          ]}>
+                            {count}
+                          </Text>
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+
+                {/* ② お気に入りトグル ＆ 並び順（ソート） */}
+                <View style={styles.subControlsRow}>
+                  {/* 「★ お気に入りのみ」トグルボタン */}
+                  <TouchableOpacity
+                    style={[
+                      styles.favFilterBtn,
+                      showFavoritesOnly && styles.favFilterBtnActive,
+                      isEcoMode && (showFavoritesOnly ? styles.favFilterBtnActiveEco : styles.favFilterBtnEco)
+                    ]}
+                    onPress={() => setShowFavoritesOnly(!showFavoritesOnly)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons 
+                      name={showFavoritesOnly ? "star" : "star-outline"} 
+                      size={16} 
+                      color={showFavoritesOnly ? "#FFB800" : (isEcoMode ? "#888" : "#8E8E93")} 
+                      style={{ marginRight: 5 }} 
+                    />
+                    <Text style={[
+                      styles.favFilterBtnText,
+                      showFavoritesOnly && styles.favFilterBtnTextActive,
+                      isEcoMode && !showFavoritesOnly && { color: '#aaa' }
+                    ]}>
+                      ★ お気に入りのみ
+                    </Text>
+                  </TouchableOpacity>
+
+                  {/* 並び順（ソート）ボタン群 */}
+                  <View style={[styles.sortGroup, isEcoMode && { backgroundColor: '#1C1C1E', borderColor: '#2C2C2E' }]}>
+                    <TouchableOpacity
+                      style={[
+                        styles.sortBtn,
+                        sortBy === 'newest' && (isEcoMode ? styles.sortBtnActiveEco : styles.sortBtnActive),
+                      ]}
+                      onPress={() => setSortBy('newest')}
+                    >
+                      <Text style={[
+                        styles.sortBtnText,
+                        sortBy === 'newest' && styles.sortBtnTextActive,
+                        isEcoMode && sortBy !== 'newest' && { color: '#777' }
+                      ]}>新しい順</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.sortBtn,
+                        sortBy === 'favoriteFirst' && (isEcoMode ? styles.sortBtnActiveEco : styles.sortBtnActive),
+                      ]}
+                      onPress={() => setSortBy('favoriteFirst')}
+                    >
+                      <Text style={[
+                        styles.sortBtnText,
+                        sortBy === 'favoriteFirst' && styles.sortBtnTextActive,
+                        isEcoMode && sortBy !== 'favoriteFirst' && { color: '#777' }
+                      ]}>★優先</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.sortBtn,
+                        sortBy === 'oldest' && (isEcoMode ? styles.sortBtnActiveEco : styles.sortBtnActive),
+                      ]}
+                      onPress={() => setSortBy('oldest')}
+                    >
+                      <Text style={[
+                        styles.sortBtnText,
+                        sortBy === 'oldest' && styles.sortBtnTextActive,
+                        isEcoMode && sortBy !== 'oldest' && { color: '#777' }
+                      ]}>古い順</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {/* ③ 現在の絞り込み状態 ＆ 件数 ＆ 成長データ表示切替 */}
+                <View style={styles.statusRow}>
+                  <Text style={[styles.statusText, { color: subTextColor }]}>
+                    表示: {selectedGenre !== 'すべて' ? `【${selectedGenre}】` : '全ジャンル'}
+                    {showFavoritesOnly ? '（★お気に入り）' : ''} {displayRecords.length}件
+                  </Text>
+
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    {/* ギャラリー表示時限定: 成長データ（タイム・日時・回数）表示トグル */}
+                    {viewMode === 'gallery' && (
+                      <TouchableOpacity 
+                        style={[
+                          styles.overlayToggleBtn, 
+                          showGalleryOverlay && (isEcoMode ? styles.overlayToggleBtnActiveEco : styles.overlayToggleBtnActive),
+                          isEcoMode && !showGalleryOverlay && styles.overlayToggleBtnEco
+                        ]}
+                        onPress={handleToggleGalleryOverlay}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons 
+                          name={showGalleryOverlay ? "stats-chart" : "image-outline"} 
+                          size={12} 
+                          color={showGalleryOverlay ? (isEcoMode ? "#64D2FF" : "#007AFF") : (isEcoMode ? "#888" : "#8E8E93")} 
+                          style={{ marginRight: 4 }} 
+                        />
+                        <Text style={[
+                          styles.overlayToggleBtnText,
+                          showGalleryOverlay && (isEcoMode ? styles.overlayToggleBtnTextActiveEco : styles.overlayToggleBtnTextActive),
+                          isEcoMode && !showGalleryOverlay && { color: '#888' }
+                        ]}>
+                          {showGalleryOverlay ? '成長データON' : '写真のみ'}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+
+                    {(selectedGenre !== 'すべて' || showFavoritesOnly) && (
+                      <TouchableOpacity 
+                        onPress={handleResetFilter}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      >
+                        <Text style={[styles.clearBtnText, isEcoMode && { color: '#64D2FF' }]}>条件リセット</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+              </View>
             )}
 
-            {(selectedGenre !== 'すべて' || showFavoritesOnly) && (
-              <TouchableOpacity 
-                onPress={handleResetFilter}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Text style={[styles.clearBtnText, isEcoMode && { color: '#64D2FF' }]}>条件リセット</Text>
-              </TouchableOpacity>
-            )}
           </View>
-        </View>
-
-      </View>
+        );
+      })()}
     </View>
   );
 
@@ -983,11 +1064,73 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 2,
   },
-  filterSectionHeader: {
+  filterAccordionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    minHeight: 24,
+  },
+  filterSectionHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 8,
-    paddingHorizontal: 2,
+    flexShrink: 1,
+    marginRight: 8,
+  },
+  filterSectionHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  filterSummaryBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  filterSummaryBadgeNormal: {
+    backgroundColor: '#F2F2F7',
+    borderColor: '#E5E5EA',
+  },
+  filterSummaryBadgeEco: {
+    backgroundColor: '#1C1C1E',
+    borderColor: '#2C2C2E',
+  },
+  filterSummaryBadgeActive: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#BFDBFE',
+  },
+  filterSummaryBadgeActiveEco: {
+    backgroundColor: '#1E293B',
+    borderColor: '#0284C7',
+  },
+  filterSummaryBadgeFav: {
+    backgroundColor: '#FFF8E6',
+    borderColor: '#FFE082',
+  },
+  filterSummaryBadgeFavEco: {
+    backgroundColor: '#2E2610',
+    borderColor: '#B45309',
+  },
+  filterSummaryBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    maxWidth: 160,
+  },
+  filterSummaryBadgeTextActive: {
+    color: '#007AFF',
+  },
+  filterSummaryBadgeTextActiveEco: {
+    color: '#64D2FF',
+  },
+  filterSummaryBadgeTextFav: {
+    color: '#B27B00',
+  },
+  filterSummaryBadgeTextFavEco: {
+    color: '#FFD60A',
+  },
+  filterAccordionBody: {
+    marginTop: 10,
   },
   filterSectionTitle: {
     fontSize: 13,
@@ -1321,13 +1464,13 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
 
-  // 表示モード切替セグメントコントロール
+  // 表示モード切替セグメントコントロール（鮮やかなソリッドブルー仕様）
   viewModeContainer: {
     flexDirection: 'row',
     marginHorizontal: 0,
     marginBottom: 8,
-    padding: 3,
-    borderRadius: 10,
+    padding: 4,
+    borderRadius: 11,
     borderWidth: 1,
   },
   viewModeBtn: {
@@ -1335,54 +1478,55 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 7,
-    borderRadius: 7,
+    paddingVertical: 9,
+    borderRadius: 8,
   },
   viewModeBtnActiveNormal: {
-    backgroundColor: '#FFFFFF',
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 3,
-    shadowOffset: { width: 0, height: 1 },
-    elevation: 2,
+    backgroundColor: '#007AFF',
+    shadowColor: '#007AFF',
+    shadowOpacity: 0.35,
+    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
   },
   viewModeBtnActiveEco: {
-    backgroundColor: '#2C2C2E',
+    backgroundColor: '#0055B3',
+    borderWidth: 1,
+    borderColor: '#64D2FF',
   },
   viewModeBtnText: {
-    fontSize: 13,
+    fontSize: 13.5,
     fontWeight: '600',
   },
   viewModeBtnTextActiveNormal: {
-    color: '#007AFF',
+    color: '#FFFFFF',
     fontWeight: '700',
   },
   viewModeBtnTextActiveEco: {
-    color: '#64D2FF',
+    color: '#FFFFFF',
     fontWeight: '700',
   },
   viewModeCountBadge: {
     marginLeft: 6,
-    paddingHorizontal: 6,
-    paddingVertical: 1,
+    paddingHorizontal: 7,
+    paddingVertical: 1.5,
     borderRadius: 10,
-    backgroundColor: 'rgba(0,0,0,0.06)',
   },
   viewModeCountBadgeActiveNormal: {
-    backgroundColor: '#EBF5FF',
+    backgroundColor: 'rgba(255, 255, 255, 0.28)',
   },
   viewModeCountBadgeActiveEco: {
-    backgroundColor: '#1E293B',
+    backgroundColor: 'rgba(255, 255, 255, 0.22)',
   },
   viewModeCountBadgeText: {
     fontSize: 11,
     fontWeight: '700',
   },
   viewModeCountBadgeTextActiveNormal: {
-    color: '#007AFF',
+    color: '#FFFFFF',
   },
   viewModeCountBadgeTextActiveEco: {
-    color: '#64D2FF',
+    color: '#FFFFFF',
   },
 
   // ギャラリー用オーバーレイトグル

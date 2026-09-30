@@ -52,7 +52,7 @@ export const AppProvider = ({ children }) => {
   const [isVoiceMasterEnabled, setIsVoiceMasterEnabled] = useState(true); // 音声アナウンス全体のマスター有効/無効
   const [isCountUpEnabled, setIsCountUpEnabled] = useState(true); // カウントアップ（超過時間計測）有効/無効
   const [playsInSilentMode, setPlaysInSilentMode] = useState(true); // マナーモード時でも鳴らす
-  const [isVibrationEnabled, setIsVibrationEnabled] = useState(true); // バイブレーション（振動）全体有効/無効
+  const [isVibrationEnabled, setIsVibrationEnabled] = useState(false); // バイブレーション（振動）全体有効/無効（初期値: OFF）
   const [isVibration3SecOnly, setIsVibration3SecOnly] = useState(true); // タイムアップ時3秒で自動停止
   const [vibrationIntensity, setVibrationIntensity] = useState('strong'); // 'strong' | 'normal' | 'gentle'
   const [isVibPrepEnabled, setIsVibPrepEnabled] = useState(true); // 事前準備時間
@@ -219,7 +219,15 @@ export const AppProvider = ({ children }) => {
         if (voiceMasterVal !== null) setIsVoiceMasterEnabled(JSON.parse(voiceMasterVal));
         if (countUpVal !== null) setIsCountUpEnabled(JSON.parse(countUpVal));
         if (silentModeVal !== null) setPlaysInSilentMode(JSON.parse(silentModeVal));
-        if (vibrationVal !== null) setIsVibrationEnabled(JSON.parse(vibrationVal));
+        // バイブレーション初期値のマイグレーション（v1.0.3: 既存端末含め初回初期値を確実にOFFにセット）
+        const vibInitKey = await AsyncStorage.getItem('@is_vibration_initialized_v1_0_3');
+        if (vibInitKey === null) {
+          setIsVibrationEnabled(false);
+          await AsyncStorage.setItem('isVibrationEnabled', JSON.stringify(false));
+          await AsyncStorage.setItem('@is_vibration_initialized_v1_0_3', 'true');
+        } else if (vibrationVal !== null) {
+          setIsVibrationEnabled(JSON.parse(vibrationVal));
+        }
         if (vibration3SecVal !== null) setIsVibration3SecOnly(JSON.parse(vibration3SecVal));
         if (vibIntensityVal !== null) setVibrationIntensity(vibIntensityVal);
         if (vibPrepVal !== null) setIsVibPrepEnabled(JSON.parse(vibPrepVal));

@@ -320,7 +320,9 @@ export default function SettingsScreen({ route }) {
       }
       await Audio.setAudioModeAsync({
         playsInSilentModeIOS: playsInSilentMode,
+        staysActiveInBackground: true,
         shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
       });
       const { sound: newSound } = await Audio.Sound.createAsync(ALARM_SOUNDS[type]);
       setPreviewSound(newSound);
@@ -338,7 +340,9 @@ export default function SettingsScreen({ route }) {
       setPlayingVoiceKey(key);
       await Audio.setAudioModeAsync({
         playsInSilentModeIOS: playsInSilentMode,
+        staysActiveInBackground: true,
         shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
       });
       const { sound: newSound } = await Audio.Sound.createAsync(VOICE_SAMPLES[key]);
       setPreviewSound(newSound);
