@@ -17,6 +17,9 @@ import { recordInterruption, getFullPracticeStats, getQuickStatsSummary } from '
 import AdBannerComponent from '../components/AdBannerComponent';
 import ProSubscriptionModal from '../components/ProSubscriptionModal';
 import CheerYamaimoOverlay from '../components/CheerYamaimoOverlay';
+import NewsBadge from '../components/NewsBadge';
+import NewsModal from '../components/NewsModal';
+import { getUnreadNewsCount } from '../data/newsData';
 
 const SILENT_LOOP_SOUND = require('../../assets/silent_loop.wav');
 
@@ -173,9 +176,19 @@ export default function HomeScreen({ navigation }) {
     showControls,
     resetControlsVisible,
     isCheerModeEnabled,
-    isCheerInEcoEnabled
+    isCheerInEcoEnabled,
+    readNewsIds,
+    isNewsHiddenUntilNext,
+    markNewsAsRead,
+    markAllNewsAsRead,
+    hideNewsUntilNextUpdate,
+    restoreNewsIcon
   } = useContext(AppContext);
   const isFocused = useIsFocused();
+
+  // NEWS（お知らせ）用State
+  const [newsModalVisible, setNewsModalVisible] = useState(false);
+  const unreadNewsCount = getUnreadNewsCount(readNewsIds);
 
   // 応援キャラクター【やまいも】Ref
   const cheerOverlayRef = useRef(null);
@@ -1654,6 +1667,21 @@ export default function HomeScreen({ navigation }) {
   return (
     <TouchableWithoutFeedback onPress={handleScreenPress}>
       <View style={[styles.container, { backgroundColor: bgColor }]}>
+        {/* 画面左上 NEWS バッジ */}
+        <Animated.View 
+          style={[
+            styles.newsBadgeContainer, 
+            { opacity: controlsOpacity }
+          ]} 
+          pointerEvents={controlsVisible ? 'auto' : 'none'}
+        >
+          <NewsBadge
+            unreadCount={unreadNewsCount}
+            isHiddenUntilNext={isNewsHiddenUntilNext}
+            onPress={() => setNewsModalVisible(true)}
+          />
+        </Animated.View>
+
         <View style={styles.content}>
           {/* タイマー上部クイックアクセスバー ＆ バランサー領域 */}
           <View style={styles.topBalanceContainer}>
@@ -3258,6 +3286,22 @@ export default function HomeScreen({ navigation }) {
         isEcoMode={isEcoMode}
       />
 
+      {/* NEWS（お知らせ）モーダル */}
+      <NewsModal
+        visible={newsModalVisible}
+        onClose={() => setNewsModalVisible(false)}
+        readNewsIds={readNewsIds}
+        onMarkAsRead={markNewsAsRead}
+        onMarkAllAsRead={markAllNewsAsRead}
+        onHideUntilNextUpdate={() => {
+          hideNewsUntilNextUpdate();
+          setNewsModalVisible(false);
+        }}
+        onRestoreNewsIcon={restoreNewsIcon}
+        isNewsHiddenUntilNext={isNewsHiddenUntilNext}
+        isEcoMode={isEcoMode}
+      />
+
     </View>
     </TouchableWithoutFeedback>
   );
@@ -3265,6 +3309,12 @@ export default function HomeScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  newsBadgeContainer: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    zIndex: 100,
+  },
   content: {
     flex: 1,
     alignItems: 'center',

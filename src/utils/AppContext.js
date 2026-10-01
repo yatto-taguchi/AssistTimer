@@ -21,6 +21,8 @@ try {
 // RevenueCat APIキー設定
 export const REVENUECAT_PUBLIC_APPLE_KEY = 'appl_jEzBjFMGADnabxXSYPQqMxFYKXJ';
 
+import { NEWS_ITEMS } from '../data/newsData';
+
 export const AppContext = createContext();
 
 export const AppProvider = ({ children }) => {
@@ -46,6 +48,11 @@ export const AppProvider = ({ children }) => {
   const [hasSeenEcoExplanation, setHasSeenEcoExplanation] = useState(false); // エコモード説明モーダル閲覧済みフラグ
   const [isCheerModeEnabled, setIsCheerModeEnabled] = useState(false); // 応援モード（キャラクター【やまいも】登場）マスター
   const [isCheerInEcoEnabled, setIsCheerInEcoEnabled] = useState(false); // エコモード中も応援モードを稼働
+
+  // NEWS（お知らせ）関連State
+  const [readNewsIds, setReadNewsIds] = useState([]);
+  const [isNewsHiddenUntilNext, setIsNewsHiddenUntilNext] = useState(false);
+  const [lastHiddenNewsId, setLastHiddenNewsId] = useState(null);
 
   const [alarmSoundType, setAlarmSoundType] = useState('digital'); // 'digital' | 'bell' | 'buzzer' | 'kitchen' | 'fast' | 'gong' | 'none'
   const [isAlarmSoundEnabled, setIsAlarmSoundEnabled] = useState(true); // アラーム音のマスター有効/無効
@@ -259,6 +266,29 @@ export const AppProvider = ({ children }) => {
         if (over5MinVal !== null) setIsOverVoice5MinEnabled(JSON.parse(over5MinVal));
         if (over10MinVal !== null) setIsOverVoice10MinEnabled(JSON.parse(over10MinVal));
         if (over15MinVal !== null) setIsOverVoice15MinEnabled(JSON.parse(over15MinVal));
+
+        // NEWS関連のロード＆自動復活チェック
+        const readNewsIdsVal = await AsyncStorage.getItem('@assist_timer_read_news_ids');
+        const newsHiddenVal = await AsyncStorage.getItem('@assist_timer_news_hidden_until_next');
+        const lastHiddenIdVal = await AsyncStorage.getItem('@assist_timer_last_hidden_news_id');
+
+        if (readNewsIdsVal !== null) {
+          try {
+            setReadNewsIds(JSON.parse(readNewsIdsVal));
+          } catch (e) {}
+        }
+
+        const latestNewsId = NEWS_ITEMS.length > 0 ? NEWS_ITEMS[0].id : null;
+        if (newsHiddenVal !== null && JSON.parse(newsHiddenVal) === true) {
+          // 隠した時点の最新IDと現在の最新IDが異なる場合（新着がある場合）は自動復活
+          if (lastHiddenIdVal && latestNewsId && lastHiddenIdVal !== latestNewsId) {
+            setIsNewsHiddenUntilNext(false);
+            await AsyncStorage.setItem('@assist_timer_news_hidden_until_next', JSON.stringify(false));
+          } else {
+            setIsNewsHiddenUntilNext(true);
+            setLastHiddenNewsId(lastHiddenIdVal);
+          }
+        }
       } catch (e) {
         console.error("Failed to load settings.", e);
       }
@@ -397,6 +427,61 @@ export const AppProvider = ({ children }) => {
     setIsCheerInEcoEnabled(nextVal);
     await AsyncStorage.setItem('isCheerInEcoEnabled', JSON.stringify(nextVal));
   };
+
+  // NEWS（お知らせ）操作ハンドラー
+  const markNewsAsRead = async (newsId) => {
+    try {
+      const nextReadIds = Array.from(new Set([...readNewsIds, newsId]));
+      setReadNewsIds(nextReadIds);
+      await AsyncStorage.setItem('@assist_timer_read_news_ids', JSON.stringify(nextReadIds));
+    } catch (e) {
+      console.warn('Failed to mark news as read', e);
+    }
+  };
+
+  const markAllNewsAsRead = async () => {
+    try {
+      const allIds = NEWS_ITEMS.map(item => item.id);
+      const nextReadIds = Array.from(new Set([...readNewsIds, ...allIds]));
+      setReadNewsIds(nextReadIds);
+      await AsyncStorage.setItem('@assist_timer_read_news_ids', JSON.stringify(nextReadIds));
+    } catch (e) {
+      console.warn('Failed to mark all news as read', e);
+    }
+  };
+
+  const hideNewsUntilNextUpdate = async () => {
+    try {
+      const allIds = NEWS_ITEMS.map(item => item.id);
+      const nextReadIds = Array.from(new Set([...readNewsIds, ...allIds]));
+      setReadNewsIds(nextReadIds);
+
+      const latestNewsId = NEWS_ITEMS.length > 0 ? NEWS_ITEMS[0].id : null;
+      setIsNewsHiddenUntilNext(true);
+      setLastHiddenNewsId(latestNewsId);
+
+      const storageTasks = [
+        AsyncStorage.setItem('@assist_timer_read_news_ids', JSON.stringify(nextReadIds)),
+        AsyncStorage.setItem('@assist_timer_news_hidden_until_next', JSON.stringify(true)),
+      ];
+      if (latestNewsId) {
+        storageTasks.push(AsyncStorage.setItem('@assist_timer_last_hidden_news_id', latestNewsId));
+      }
+      await Promise.all(storageTasks);
+    } catch (e) {
+      console.warn('Failed to hide news until next update', e);
+    }
+  };
+
+  const restoreNewsIcon = async () => {
+    try {
+      setIsNewsHiddenUntilNext(false);
+      await AsyncStorage.setItem('@assist_timer_news_hidden_until_next', JSON.stringify(false));
+    } catch (e) {
+      console.warn('Failed to restore news icon', e);
+    }
+  };
+
 
   // Proモード明示的セット
   const setIsProMode = async (value) => {
@@ -764,6 +849,13 @@ export const AppProvider = ({ children }) => {
         toggleCheerMode,
         isCheerInEcoEnabled,
         toggleCheerInEco,
+        // NEWS機能
+        readNewsIds,
+        isNewsHiddenUntilNext,
+        markNewsAsRead,
+        markAllNewsAsRead,
+        hideNewsUntilNextUpdate,
+        restoreNewsIcon,
         controlsOpacity,
         controlsVisible,
         showControls,

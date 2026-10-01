@@ -9,6 +9,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import { AppContext } from '../utils/AppContext';
 import ProSubscriptionModal from '../components/ProSubscriptionModal';
+import NewsModal from '../components/NewsModal';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -117,9 +118,16 @@ export default function SettingsScreen({ route }) {
     isOverVoice15MinEnabled, toggleOverVoice15Min,
     hasSeenEcoExplanation, markEcoExplanationSeen,
     isCheerModeEnabled, toggleCheerMode,
-    isCheerInEcoEnabled, toggleCheerInEco
+    isCheerInEcoEnabled, toggleCheerInEco,
+    readNewsIds,
+    isNewsHiddenUntilNext,
+    markNewsAsRead,
+    markAllNewsAsRead,
+    hideNewsUntilNextUpdate,
+    restoreNewsIcon
   } = useContext(AppContext);
 
+  const [newsModalVisible, setNewsModalVisible] = useState(false);
   const [cheerModalVisible, setCheerModalVisible] = useState(false);
   const cheerModalScale = useRef(new Animated.Value(0.5)).current;
   const cheerModalOpacity = useRef(new Animated.Value(0)).current;
@@ -1420,6 +1428,31 @@ export default function SettingsScreen({ route }) {
       {/* 5. 情報・利用規約セクション（Apple審査必須要件） */}
       <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>情報・規約</Text>
       <View style={[styles.groupCard, { backgroundColor: cardBgColor, borderColor: cardBorderColor }]}>
+        {/* お知らせ & アップデート（NEWS） */}
+        <TouchableOpacity 
+          style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}
+          onPress={() => setNewsModalVisible(true)}
+          activeOpacity={0.7}
+        >
+          <View style={styles.settingTextContainer}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Ionicons name="megaphone-outline" size={17} color="#FF9500" style={{ marginRight: 6 }} />
+              <Text style={[styles.settingText, { color: textColor }]}>お知らせ & アップデート</Text>
+            </View>
+            <Text style={[styles.settingDescription, { color: subTextColor }]}>
+              新機能や配置変更、バグ修正の更新履歴を確認できます
+            </Text>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {isNewsHiddenUntilNext && (
+              <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? '#222' : '#E5E5EA', marginRight: 4 }]}>
+                <Text style={[styles.summaryBadgeText, { color: subTextColor, fontSize: 11 }]}>アイコン非表示中</Text>
+              </View>
+            )}
+            <Ionicons name="chevron-forward" size={18} color={subTextColor} />
+          </View>
+        </TouchableOpacity>
+
         <TouchableOpacity 
           style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}
           onPress={() => {
@@ -1541,6 +1574,22 @@ export default function SettingsScreen({ route }) {
 
       {/* Proプラン（月額100円）購入・管理モーダル */}
       <ProSubscriptionModal visible={proModalVisible} onClose={() => setProModalVisible(false)} />
+
+      {/* NEWS（お知らせ）モーダル */}
+      <NewsModal
+        visible={newsModalVisible}
+        onClose={() => setNewsModalVisible(false)}
+        readNewsIds={readNewsIds}
+        onMarkAsRead={markNewsAsRead}
+        onMarkAllAsRead={markAllNewsAsRead}
+        onHideUntilNextUpdate={() => {
+          hideNewsUntilNextUpdate();
+          setNewsModalVisible(false);
+        }}
+        onRestoreNewsIcon={restoreNewsIcon}
+        isNewsHiddenUntilNext={isNewsHiddenUntilNext}
+        isEcoMode={isEcoMode}
+      />
 
       {/* 応援モードON確定全画面演出モーダル */}
       <Modal
