@@ -1,6 +1,6 @@
 {
   "name": "appv3",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "main": "index.js",
   "scripts": {
     "start": "expo start",
@@ -20,6 +20,7 @@
     "expo-keep-awake": "~15.0.8",
     "expo-media-library": "~18.2.1",
     "expo-status-bar": "~3.0.9",
+    "expo-updates": "~29.0.20",
     "react": "19.1.0",
     "react-native": "0.81.5",
     "react-native-google-mobile-ads": "^16.5.0",
