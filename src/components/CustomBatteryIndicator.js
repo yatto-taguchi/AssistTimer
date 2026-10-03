@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useContext } from 'react';
 import { View, Text, StyleSheet, Platform, StatusBar as RNStatusBar, Animated } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Battery from 'expo-battery';
 import { Ionicons } from '@expo/vector-icons';
 import { AppContext } from '../utils/AppContext';
@@ -12,6 +13,13 @@ export default function CustomBatteryIndicator() {
   } = useContext(AppContext);
   const [batteryLevel, setBatteryLevel] = useState(1.0);
   const [timeStr, setTimeStr] = useState('');
+
+  let insets = { top: 0 };
+  try {
+    insets = useSafeAreaInsets();
+  } catch (e) {
+    // Provider外等の安全フォールバック
+  }
 
   // 電池残量の取得
   useEffect(() => {
@@ -87,7 +95,8 @@ export default function CustomBatteryIndicator() {
   }
 
   const percentage = batteryLevel !== null ? Math.round(batteryLevel * 100) : null;
-  const statusBarHeight = Platform.OS === 'ios' ? 44 : RNStatusBar.currentHeight || 24;
+  const topSafe = insets.top > 0 ? insets.top : (Platform.OS === 'ios' ? 44 : (RNStatusBar.currentHeight || 24));
+  const indicatorTop = Math.max(8, topSafe - 24);
 
   let iconName = "battery-full";
   if (percentage !== null) {
@@ -102,7 +111,7 @@ export default function CustomBatteryIndicator() {
       style={[
         styles.container, 
         { 
-          top: Math.max(10, statusBarHeight - 10),
+          top: indicatorTop,
           opacity: controlsOpacity
         }
       ]} 

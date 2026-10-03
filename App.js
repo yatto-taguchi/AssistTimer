@@ -1,6 +1,6 @@
 import React, { useContext } from 'react';
-import { Animated, View } from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { Animated, View, Platform, StatusBar as RNStatusBar, StyleSheet } from 'react-native';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NavigationContainer, DefaultTheme, DarkTheme } from '@react-navigation/native';
 import { createBottomTabNavigator, BottomTabBar } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
@@ -26,6 +26,7 @@ function MainTabs() {
     controlsOpacity,
     controlsVisible
   } = useContext(AppContext);
+  const insets = useSafeAreaInsets();
 
   // ステータスバーの非表示判定:
   // エコモード時は常に非表示
@@ -35,6 +36,13 @@ function MainTabs() {
     : (!isNormalStatusBarEnabled || (isNormalStatusBarAutoHide && !controlsVisible));
 
   const appBgColor = isEcoMode ? '#000000' : '#F5F5F5';
+
+  // OS標準ステータスバー・ノッチ・Dynamic Islandを安全に回避する上部パディング
+  // ノッチ/Dynamic Island端末でも文字やアイコンが見切れない安全余白を確保
+  const safeTopPadding = Math.max(
+    insets.top,
+    Platform.OS === 'ios' ? 20 : (RNStatusBar.currentHeight || 0)
+  );
 
   return (
     <View style={{ flex: 1, backgroundColor: appBgColor }}>
@@ -51,6 +59,7 @@ function MainTabs() {
         tabBar={(props) => (
           <Animated.View
             style={{ 
+              paddingTop: safeTopPadding,
               opacity: controlsOpacity,
               backgroundColor: isEcoMode ? '#000000' : '#FFFFFF'
             }}
@@ -64,12 +73,22 @@ function MainTabs() {
           tabBarActiveTintColor: isEcoMode ? '#888' : '#007AFF', // 選択中を明るいグレーに
           tabBarInactiveTintColor: isEcoMode ? '#333' : '#8E8E93', // 非選択中もうっすら見えるように
           tabBarShowLabel: !isEcoMode,
+          tabBarAllowFontScaling: false, // OSの文字サイズ拡大による枠外はみ出し・切断を防止
+          tabBarLabelStyle: {
+            fontSize: 10,
+            fontWeight: '600',
+            marginTop: -2,
+            marginBottom: 2,
+          },
           tabBarStyle: {
             backgroundColor: isEcoMode ? '#000' : '#fff',
-            borderTopWidth: isEcoMode && !isEcoBorderEnabled ? 0 : undefined,
-            borderBottomWidth: isEcoMode && !isEcoBorderEnabled ? 0 : undefined,
+            borderTopWidth: 0,
+            borderBottomWidth: isEcoMode && !isEcoBorderEnabled ? 0 : StyleSheet.hairlineWidth,
+            borderBottomColor: isEcoMode ? '#2C2C2E' : '#E5E5EA',
             elevation: isEcoMode && !isEcoBorderEnabled ? 0 : undefined, // Androidの影を消す
             shadowOpacity: isEcoMode && !isEcoBorderEnabled ? 0 : undefined, // iOSの影を消す
+            height: isEcoMode ? 38 : 46, // 不要なボトムパディングを排除して高さを最適化
+            paddingBottom: isEcoMode ? 0 : 2,
           },
           tabBarPosition: 'top',
           tabBarIcon: ({ focused, color, size }) => {

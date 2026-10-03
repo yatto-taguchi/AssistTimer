@@ -10,6 +10,7 @@ import { Audio } from 'expo-av';
 import { AppContext } from '../utils/AppContext';
 import ProSubscriptionModal from '../components/ProSubscriptionModal';
 import NewsModal from '../components/NewsModal';
+import { YAMAIMO_SOUNDS } from '../components/CheerYamaimoOverlay';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -119,6 +120,7 @@ export default function SettingsScreen({ route }) {
     hasSeenEcoExplanation, markEcoExplanationSeen,
     isCheerModeEnabled, toggleCheerMode,
     isCheerInEcoEnabled, toggleCheerInEco,
+    isCheerSoundEnabled, toggleCheerSound,
     readNewsIds,
     isNewsHiddenUntilNext,
     markNewsAsRead,
@@ -131,8 +133,24 @@ export default function SettingsScreen({ route }) {
   const [cheerModalVisible, setCheerModalVisible] = useState(false);
   const cheerModalScale = useRef(new Animated.Value(0.5)).current;
   const cheerModalOpacity = useRef(new Animated.Value(0)).current;
+  const cheerSoundRef = useRef(null);
+  const cheerModalTimerRef = useRef(null);
 
-  const handleToggleCheerMode = (value) => {
+  // アンマウント時に応援音声とタイマーを確実に解放
+  useEffect(() => {
+    return () => {
+      if (cheerSoundRef.current) {
+        cheerSoundRef.current.unloadAsync().catch(() => {});
+        cheerSoundRef.current = null;
+      }
+      if (cheerModalTimerRef.current) {
+        clearTimeout(cheerModalTimerRef.current);
+        cheerModalTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleToggleCheerMode = async (value) => {
     toggleCheerMode(value);
     if (value) {
       setCheerModalVisible(true);
@@ -152,15 +170,65 @@ export default function SettingsScreen({ route }) {
         }),
       ]).start();
 
-      setTimeout(() => {
+      // 登場サウンドが有効ならランダム再生（効果音8割・レアボイス2割）
+      if (isCheerSoundEnabled) {
+        try {
+          const isVoice = Math.random() < 0.20;
+          let soundKey = null;
+          if (isVoice) {
+            const voicePool = ['voice_yahho', 'voice_n', 'voice_doumo'];
+            soundKey = voicePool[Math.floor(Math.random() * voicePool.length)];
+          } else {
+            const sePool = ['se_pop', 'se_supon', 'se_kalimba', 'se_koron', 'se_drop', 'se_muni', 'se_deepdrop'];
+            soundKey = sePool[Math.floor(Math.random() * sePool.length)];
+          }
+
+          if (soundKey && YAMAIMO_SOUNDS[soundKey]) {
+            if (cheerSoundRef.current) {
+              await cheerSoundRef.current.unloadAsync().catch(() => {});
+              cheerSoundRef.current = null;
+            }
+
+            await Audio.setAudioModeAsync({
+              playsInSilentModeIOS: true,
+              staysActiveInBackground: true,
+              shouldDuckAndroid: true,
+              playThroughEarpieceAndroid: false,
+            });
+
+            const { sound: newSound } = await Audio.Sound.createAsync(
+              YAMAIMO_SOUNDS[soundKey],
+              { shouldPlay: true, volume: 0.85 }
+            );
+            cheerSoundRef.current = newSound;
+
+            newSound.setOnPlaybackStatusUpdate((status) => {
+              if (status.didJustFinish) {
+                newSound.unloadAsync().catch(() => {});
+                if (cheerSoundRef.current === newSound) {
+                  cheerSoundRef.current = null;
+                }
+              }
+            });
+
+            await newSound.playAsync();
+          }
+        } catch (e) {
+          console.log('[SettingsScreen] Cheer mode ON sound play error:', e);
+        }
+      }
+
+      if (cheerModalTimerRef.current) clearTimeout(cheerModalTimerRef.current);
+      cheerModalTimerRef.current = setTimeout(() => {
         Animated.timing(cheerModalOpacity, {
           toValue: 0,
           duration: 350,
           useNativeDriver: true,
         }).start(() => {
           setCheerModalVisible(false);
+          cheerModalTimerRef.current = null;
         });
-      }, 2600);
+      }, 3500);
     }
   };
 
@@ -513,12 +581,13 @@ export default function SettingsScreen({ route }) {
   );
 
   return (
-    <ScrollView 
-      ref={scrollViewRef}
-      style={[styles.container, { backgroundColor: bgColor }]}
-      contentContainerStyle={styles.scrollContent}
-      showsVerticalScrollIndicator={false}
-    >
+    <View style={[styles.container, { backgroundColor: bgColor }]}>
+      <ScrollView 
+        ref={scrollViewRef}
+        style={{ flex: 1 }}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
       <Text style={[styles.title, { color: textColor }]}>設定</Text>
       
       {/* 0. 応援モード設定親カード（温かい黄色の最上部カード） */}
@@ -552,22 +621,40 @@ export default function SettingsScreen({ route }) {
           />
         </View>
 
-        {/* エコモード中も登場させる サブトグル行（ON時のみ展開） */}
+        {/* 応援モード展開時サブトグル群 */}
         {isCheerModeEnabled && (
-          <View style={[styles.subSettingRow, { borderBottomWidth: 0, paddingLeft: 20 }]}>
-            <View style={{ flex: 1, marginRight: 8 }}>
-              <Text style={[styles.subSettingText, { color: textColor }]}>└ エコモード中も登場させる</Text>
-              <Text style={{ fontSize: 11, color: subTextColor, marginTop: 1 }}>
-                極限省電力時でもやまいもを表示します
-              </Text>
+          <>
+            <View style={[styles.subSettingRow, { borderBottomWidth: 1, borderBottomColor: cheerInnerBorderColor, paddingLeft: 20 }]}>
+              <View style={{ flex: 1, marginRight: 8 }}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>└ エコモード中も登場させる</Text>
+                <Text style={{ fontSize: 11, color: cheerSubTextColor, marginTop: 1 }}>
+                  極限省電力時でもやまいもを表示します
+                </Text>
+              </View>
+              <Switch
+                value={isCheerInEcoEnabled}
+                onValueChange={toggleCheerInEco}
+                trackColor={{ false: '#333', true: '#34C759' }}
+                style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+              />
             </View>
-            <Switch
-              value={isCheerInEcoEnabled}
-              onValueChange={toggleCheerInEco}
-              trackColor={{ false: '#333', true: '#34C759' }}
-              style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
-            />
-          </View>
+
+            {/* 登場サウンド（効果音・レアボイス） */}
+            <View style={[styles.subSettingRow, { borderBottomWidth: 0, paddingLeft: 20 }]}>
+              <View style={{ flex: 1, marginRight: 8 }}>
+                <Text style={[styles.subSettingText, { color: textColor }]}>└ 登場サウンド（効果音・レアボイス）</Text>
+                <Text style={{ fontSize: 11, color: cheerSubTextColor, marginTop: 1 }}>
+                  登場時に控えめな効果音やレアボイスを再生（効果音8割・ボイス2割）
+                </Text>
+              </View>
+              <Switch
+                value={isCheerSoundEnabled}
+                onValueChange={toggleCheerSound}
+                trackColor={{ false: '#333', true: '#F59E0B' }}
+                style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+              />
+            </View>
+          </>
         )}
       </View>
 
@@ -1522,6 +1609,7 @@ export default function SettingsScreen({ route }) {
           </TouchableOpacity>
         )}
       </View>
+      </ScrollView>
 
       {/* エコモード説明モーダル */}
       <Modal
@@ -1539,27 +1627,29 @@ export default function SettingsScreen({ route }) {
               <Text style={styles.ecoModalTitle}>エコモード（極限省電力）</Text>
             </View>
 
-            <View style={styles.ecoModalBody}>
-              <View style={styles.ecoSection}>
-                <View style={styles.ecoSectionHeader}>
-                  <Ionicons name="contrast" size={18} color="#34C759" style={styles.ecoSectionIcon} />
-                  <Text style={styles.ecoSectionTitle}>漆黒画面でバッテリーを最大節約</Text>
+            <ScrollView style={{ maxHeight: 320 }} showsVerticalScrollIndicator={false}>
+              <View style={styles.ecoModalBody}>
+                <View style={styles.ecoSection}>
+                  <View style={styles.ecoSectionHeader}>
+                    <Ionicons name="contrast" size={18} color="#34C759" style={styles.ecoSectionIcon} />
+                    <Text style={styles.ecoSectionTitle}>漆黒画面でバッテリーを最大節約</Text>
+                  </View>
+                  <Text style={styles.ecoSectionText}>
+                    有機EL（OLED）ディスプレイは、黒い部分の発光が完全に停止します。画面全体を真っ黒にすることで、バッテリー消費を最大限まで抑えられます。
+                  </Text>
                 </View>
-                <Text style={styles.ecoSectionText}>
-                  有機EL（OLED）ディスプレイは、黒い部分の発光が完全に停止します。画面全体を真っ黒にすることで、バッテリー消費を最大限まで抑えられます。
-                </Text>
-              </View>
 
-              <View style={styles.ecoSection}>
-                <View style={styles.ecoSectionHeader}>
-                  <Ionicons name="options" size={18} color="#34C759" style={styles.ecoSectionIcon} />
-                  <Text style={styles.ecoSectionTitle}>カスタムして極限まで省電力化</Text>
+                <View style={styles.ecoSection}>
+                  <View style={styles.ecoSectionHeader}>
+                    <Ionicons name="options" size={18} color="#34C759" style={styles.ecoSectionIcon} />
+                    <Text style={styles.ecoSectionTitle}>カスタムして極限まで省電力化</Text>
+                  </View>
+                  <Text style={styles.ecoSectionText}>
+                    エコモード中は、時計・電池残量・タイマーリング・タブ表示などを個別にOFFにできます。不要な表示を削るほど、極限まで省電力を高めることができます。
+                  </Text>
                 </View>
-                <Text style={styles.ecoSectionText}>
-                  エコモード中は、時計・電池残量・タイマーリング・タブ表示などを個別にOFFにできます。不要な表示を削るほど、極限まで省電力を高めることができます。
-                </Text>
               </View>
-            </View>
+            </ScrollView>
 
             <TouchableOpacity
               style={styles.ecoCloseButton}
@@ -1596,12 +1686,18 @@ export default function SettingsScreen({ route }) {
         visible={cheerModalVisible}
         transparent={true}
         animationType="none"
-        onRequestClose={() => setCheerModalVisible(false)}
+        onRequestClose={() => {
+          if (cheerModalTimerRef.current) clearTimeout(cheerModalTimerRef.current);
+          setCheerModalVisible(false);
+        }}
       >
         <TouchableOpacity 
           style={styles.cheerModalBackdrop} 
           activeOpacity={1} 
-          onPress={() => setCheerModalVisible(false)}
+          onPress={() => {
+            if (cheerModalTimerRef.current) clearTimeout(cheerModalTimerRef.current);
+            setCheerModalVisible(false);
+          }}
         >
           <Animated.View style={[
             styles.cheerModalContent,
@@ -1625,7 +1721,7 @@ export default function SettingsScreen({ route }) {
         </TouchableOpacity>
       </Modal>
 
-    </ScrollView>
+    </View>
   );
 }
 
@@ -1636,7 +1732,7 @@ const styles = StyleSheet.create({
   scrollContent: {
     padding: 20,
     paddingTop: 10,
-    paddingBottom: 50,
+    paddingBottom: 70,
   },
   title: {
     fontSize: 24,
@@ -1708,6 +1804,7 @@ const styles = StyleSheet.create({
   ecoModalCard: {
     width: '100%',
     maxWidth: 360,
+    maxHeight: '88%',
     backgroundColor: '#1C1C1E',
     borderRadius: 20,
     padding: 24,

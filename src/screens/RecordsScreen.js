@@ -828,7 +828,7 @@ export default function RecordsScreen() {
           onPress={() => setProModalVisible(true)}
           activeOpacity={0.8}
         >
-          <Text style={[styles.tierBarText, { color: records.length >= 50 ? '#FF3B30' : textColor }]}>
+          <Text style={[styles.tierBarText, { color: records.length >= 50 ? '#FF3B30' : textColor }]} allowFontScaling={false}>
             {records.length >= 50 
               ? '⚠️ 記録枠（50件）に達しました。Proプランで無制限に保存' 
               : `📊 練習記録: ${records.length}/50件（無料枠） ★ Proで無制限`}
@@ -908,7 +908,11 @@ export default function RecordsScreen() {
         animationType="slide"
         transparent={false}
       >
-        <ScrollView style={[styles.modalContainer, { backgroundColor: bgColor }]}>
+        <ScrollView 
+          style={[styles.modalContainer, { backgroundColor: bgColor }]}
+          contentContainerStyle={{ paddingBottom: 60 }}
+          showsVerticalScrollIndicator={true}
+        >
           <Text style={[styles.modalTitle, { color: textColor }]}>練習の記録詳細</Text>
           
           {selectedRecord && (
@@ -1046,7 +1050,8 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   listContainer: {
-    paddingVertical: 10,
+    paddingTop: 8,
+    paddingBottom: 28,
     paddingHorizontal: 12,
   },
 

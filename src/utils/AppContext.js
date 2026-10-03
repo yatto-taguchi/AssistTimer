@@ -47,7 +47,8 @@ export const AppProvider = ({ children }) => {
   const [countdownSeconds, setCountdownSeconds] = useState(10); // カウントダウン秒数
   const [hasSeenEcoExplanation, setHasSeenEcoExplanation] = useState(false); // エコモード説明モーダル閲覧済みフラグ
   const [isCheerModeEnabled, setIsCheerModeEnabled] = useState(false); // 応援モード（キャラクター【やまいも】登場）マスター
-  const [isCheerInEcoEnabled, setIsCheerInEcoEnabled] = useState(false); // エコモード中も応援モードを稼働
+  const [isCheerInEcoEnabled, setIsCheerInEcoEnabled] = useState(true); // エコモード中も応援モードを稼働（初期値: ON）
+  const [isCheerSoundEnabled, setIsCheerSoundEnabled] = useState(true); // 応援モード登場サウンド（効果音・レアボイス）有効/無効
 
   // NEWS（お知らせ）関連State
   const [readNewsIds, setReadNewsIds] = useState([]);
@@ -161,6 +162,7 @@ export const AppProvider = ({ children }) => {
         const seenEcoVal = await AsyncStorage.getItem('hasSeenEcoExplanation');
         const cheerModeVal = await AsyncStorage.getItem('isCheerModeEnabled');
         const cheerInEcoVal = await AsyncStorage.getItem('isCheerInEcoEnabled');
+        const cheerSoundVal = await AsyncStorage.getItem('isCheerSoundEnabled');
         const soundTypeVal = await AsyncStorage.getItem('alarmSoundType');
         const alarmSoundEnabledVal = await AsyncStorage.getItem('isAlarmSoundEnabled');
         const voiceMasterVal = await AsyncStorage.getItem('isVoiceMasterEnabled');
@@ -219,8 +221,23 @@ export const AppProvider = ({ children }) => {
         if (countdownEnabledVal !== null) setIsCountdownEnabled(JSON.parse(countdownEnabledVal));
         if (countdownSecVal !== null) setCountdownSeconds(parseInt(countdownSecVal, 10));
         if (seenEcoVal !== null) setHasSeenEcoExplanation(JSON.parse(seenEcoVal));
-        if (cheerModeVal !== null) setIsCheerModeEnabled(JSON.parse(cheerModeVal));
-        if (cheerInEcoVal !== null) setIsCheerInEcoEnabled(JSON.parse(cheerInEcoVal));
+        const cheerMode = cheerModeVal !== null ? JSON.parse(cheerModeVal) : false;
+        let cheerInEco = cheerInEcoVal !== null ? JSON.parse(cheerInEcoVal) : true;
+        const cheerSound = cheerSoundVal !== null ? JSON.parse(cheerSoundVal) : true;
+
+        // 応援モードONユーザーのエコモード自動連動マイグレーション（v1.0.4: 過去のfalseキャッシュによる遮断救済）
+        const cheerEcoMigrated = await AsyncStorage.getItem('@is_cheer_in_eco_migrated_v1_0_4');
+        if (cheerEcoMigrated === null) {
+          if (cheerMode && !cheerInEco) {
+            cheerInEco = true;
+            await AsyncStorage.setItem('isCheerInEcoEnabled', JSON.stringify(true));
+          }
+          await AsyncStorage.setItem('@is_cheer_in_eco_migrated_v1_0_4', 'true');
+        }
+
+        setIsCheerModeEnabled(cheerMode);
+        setIsCheerInEcoEnabled(cheerInEco);
+        setIsCheerSoundEnabled(cheerSound);
         if (soundTypeVal !== null) setAlarmSoundType(soundTypeVal);
         if (alarmSoundEnabledVal !== null) setIsAlarmSoundEnabled(JSON.parse(alarmSoundEnabledVal));
         if (voiceMasterVal !== null) setIsVoiceMasterEnabled(JSON.parse(voiceMasterVal));
@@ -420,12 +437,23 @@ export const AppProvider = ({ children }) => {
     const nextVal = typeof value === 'boolean' ? value : !isCheerModeEnabled;
     setIsCheerModeEnabled(nextVal);
     await AsyncStorage.setItem('isCheerModeEnabled', JSON.stringify(nextVal));
+    if (nextVal) {
+      // 応援モードON時は、エコモード中登場も確実にONにして黒画面でも確定演出・見守りを体験可能にする
+      setIsCheerInEcoEnabled(true);
+      await AsyncStorage.setItem('isCheerInEcoEnabled', JSON.stringify(true));
+    }
   };
 
   const toggleCheerInEco = async (value) => {
     const nextVal = typeof value === 'boolean' ? value : !isCheerInEcoEnabled;
     setIsCheerInEcoEnabled(nextVal);
     await AsyncStorage.setItem('isCheerInEcoEnabled', JSON.stringify(nextVal));
+  };
+
+  const toggleCheerSound = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isCheerSoundEnabled;
+    setIsCheerSoundEnabled(nextVal);
+    await AsyncStorage.setItem('isCheerSoundEnabled', JSON.stringify(nextVal));
   };
 
   // NEWS（お知らせ）操作ハンドラー
@@ -849,6 +877,8 @@ export const AppProvider = ({ children }) => {
         toggleCheerMode,
         isCheerInEcoEnabled,
         toggleCheerInEco,
+        isCheerSoundEnabled,
+        toggleCheerSound,
         // NEWS機能
         readNewsIds,
         isNewsHiddenUntilNext,

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useContext, useCallback } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback, Image, FlatList, Dimensions, AppState, Vibration, LayoutAnimation } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, Modal, TextInput, Alert, ScrollView, Switch, Animated, TouchableWithoutFeedback, Image, FlatList, Dimensions, AppState, Vibration, LayoutAnimation, KeyboardAvoidingView, Platform } from 'react-native';
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 import { useIsFocused } from '@react-navigation/native';
 import ImageViewer from 'react-native-image-zoom-viewer';
@@ -177,6 +177,7 @@ export default function HomeScreen({ navigation }) {
     resetControlsVisible,
     isCheerModeEnabled,
     isCheerInEcoEnabled,
+    isCheerSoundEnabled,
     readNewsIds,
     isNewsHiddenUntilNext,
     markNewsAsRead,
@@ -194,7 +195,8 @@ export default function HomeScreen({ navigation }) {
   const cheerOverlayRef = useRef(null);
   const saveModalCheerRef = useRef(null);
   const lastCheerTriggerTimeRef = useRef(0);
-  const nextCheerIntervalMsRef = useRef((Math.floor(Math.random() * (300 - 60 + 1)) + 60) * 1000);
+  const nextCheerIntervalMsRef = useRef(0);
+  const isFirstCheerTriggeredRef = useRef(false);
 
   // 記録保存モーダル（SaveModal）オープン時のやまいも連動
   useEffect(() => {
@@ -228,6 +230,24 @@ export default function HomeScreen({ navigation }) {
   const triggeredPrepVoicesRef = useRef(new Set());
   const triggeredOverVoicesRef = useRef(new Set());
   const vibrationTimeoutRef = useRef(null);
+  const lastIdleCheerTimeRef = useRef(0);
+  const idleCheerTimeoutRef = useRef(null);
+
+  // 待機中（Idle）やまいもウォーキング演出のトリガーヘルパー
+  const triggerIdleCheer = useCallback((chance = 0.85, delayMs = 1500) => {
+    if (idleCheerTimeoutRef.current) {
+      clearTimeout(idleCheerTimeoutRef.current);
+    }
+    idleCheerTimeoutRef.current = setTimeout(() => {
+      // タイマーが動いていない（待機中）ことを確認
+      if (!isRunningRef.current && !isPreCountingDownRef.current) {
+        const todayCount = (homeQuickStats?.todaySessions || 0) + 1;
+        lastIdleCheerTimeRef.current = Date.now();
+        console.log('[HomeScreen] Idle cheer walker triggered! todayCount:', todayCount);
+        cheerOverlayRef.current?.trigger('idle', chance, { todayCount });
+      }
+    }, delayMs);
+  }, [homeQuickStats?.todaySessions]);
 
   // バイブレーション制御ヘルパー（強度およびタイミング個別設定対応）
   const triggerVibration = (type) => {
@@ -646,11 +666,16 @@ export default function HomeScreen({ navigation }) {
           triggerVibration('countdown');
         }
 
-        // 準備中盤でのやまいも応援（中間秒数到達時、1回のみ）
-        const halfPrep = Math.floor(countdownSeconds / 2);
-        if (halfPrep >= 3 && nextTime === halfPrep && !triggeredPrepVoicesRef.current.has('cheer_prep')) {
-          triggeredPrepVoicesRef.current.add('cheer_prep');
-          cheerOverlayRef.current?.trigger('prep', 0.7);
+        // 準備時間中のやまいもウォーキング応援
+        // 開始1秒後（最初の秒数カウントダウン時）に100%確定で即座に歩き出す！
+        const prepElapsedSec = countdownSeconds - nextTime;
+        if (prepElapsedSec >= 1 && !triggeredPrepVoicesRef.current.has('cheer_prep_first')) {
+          triggeredPrepVoicesRef.current.add('cheer_prep_first');
+          console.log('[HomeScreen] Prep cheer walker triggered! elapsed:', prepElapsedSec);
+          cheerOverlayRef.current?.trigger('prep', 1.0, { prepSeconds: countdownSeconds });
+        } else if (countdownSeconds >= 30 && nextTime === Math.floor(countdownSeconds / 2) && !triggeredPrepVoicesRef.current.has('cheer_prep_mid')) {
+          triggeredPrepVoicesRef.current.add('cheer_prep_mid');
+          cheerOverlayRef.current?.trigger('prep', 0.65, { prepSeconds: countdownSeconds });
         }
 
         if (diffMs <= 0) {
@@ -664,7 +689,8 @@ export default function HomeScreen({ navigation }) {
           remainingTimeRef.current = targetTime;
           setRemainingTime(targetTime);
           lastCheerTriggerTimeRef.current = now;
-          nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (300 - 60 + 1)) + 60) * 1000;
+          isFirstCheerTriggeredRef.current = false;
+          nextCheerIntervalMsRef.current = 0;
           setIsRunning(true);
         }
       }, 250);
@@ -730,12 +756,49 @@ export default function HomeScreen({ navigation }) {
             triggerVibration('countdown');
           }
 
-          // 計測中のランダムやまいも登場（60〜300秒のランダムインターバル・20分で3〜4回目安）
-          const cheerIntervalMs = nextCheerIntervalMsRef.current || 120000;
-          if (now - lastCheerTriggerTimeRef.current >= cheerIntervalMs && nextTime > 15 && targetTime - nextTime >= 10) {
-            lastCheerTriggerTimeRef.current = now;
-            nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (300 - 60 + 1)) + 60) * 1000;
-            cheerOverlayRef.current?.trigger('running', 0.70);
+          // 計測中のランダムやまいも登場
+          // ① 初回確定演出: スタート後わずか3〜5秒で即座に「走るやつ」が100%確定駆け抜け！
+          //    （5秒や3秒などの極短タイマーでも開始1秒後・0秒直前まで確実に駆け抜ける）
+          // ② 2回目以降: タイマー長さに応じたインテリジェント・インターバル
+          const elapsedSec = targetTime - nextTime;
+          const minElapsedBeforeFirst = 1; // スタート後わずか1秒で即時確定発動！
+          const minRemainingSec = targetTime <= 3 ? 0 : 1;
+
+          if (!isFirstCheerTriggeredRef.current) {
+            if (elapsedSec >= minElapsedBeforeFirst && nextTime >= minRemainingSec) {
+              isFirstCheerTriggeredRef.current = true;
+              lastCheerTriggerTimeRef.current = now;
+              // 次回インターバルをタイマー長さに応じて設定
+              if (targetTime <= 180) {
+                // 3分以下: 30〜50秒
+                nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (50 - 30 + 1)) + 30) * 1000;
+              } else if (targetTime <= 600) {
+                // 3〜10分: 60〜100秒
+                nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (100 - 60 + 1)) + 60) * 1000;
+              } else {
+                // 10分以上: 120〜240秒（2〜4分）
+                nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (240 - 120 + 1)) + 120) * 1000;
+              }
+              // 初回は100%確実に出現し、走るやつ（広告バナー上ランナー）を優先確定発動！（序盤フェーズ: スタート・ファイト等）
+              console.log('[HomeScreen] First cheer runner triggered! elapsedSec:', elapsedSec);
+              cheerOverlayRef.current?.trigger('running', 1.0, { forceBannerRunner: true, phase: 'early' });
+            }
+          } else {
+            const cheerIntervalMs = nextCheerIntervalMsRef.current || 60000;
+            if (now - lastCheerTriggerTimeRef.current >= cheerIntervalMs && nextTime >= minRemainingSec) {
+              lastCheerTriggerTimeRef.current = now;
+              if (targetTime <= 180) {
+                nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (50 - 30 + 1)) + 30) * 1000;
+              } else if (targetTime <= 600) {
+                nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (100 - 60 + 1)) + 60) * 1000;
+              } else {
+                nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (240 - 120 + 1)) + 120) * 1000;
+              }
+              // タイマー進行フェーズを判定（残り60秒以内または70%以上はlate、30%未満はearly、それ以外はmid）
+              const progress = targetTime > 0 ? (targetTime - nextTime) / targetTime : 0;
+              const phase = nextTime <= 60 || progress >= 0.70 ? 'late' : (progress < 0.30 ? 'early' : 'mid');
+              cheerOverlayRef.current?.trigger('running', 0.85, { phase });
+            }
           }
 
           // 0秒到達（タイムアップ）
@@ -819,7 +882,7 @@ export default function HomeScreen({ navigation }) {
     isVoice5MinEnabled, isVoice3MinEnabled, isVoice1MinEnabled, isVoice30SecEnabled, isVoice10SecEnabled, isVoiceFinishEnabled,
     isOverVoiceStartEnabled, isOverVoice1MinEnabled, isOverVoice3MinEnabled, isOverVoice5MinEnabled, isOverVoice10MinEnabled, isOverVoice15MinEnabled,
     alarmSoundType, playsInSilentMode, isVibrationEnabled, isVibration3SecOnly,
-    vibrationIntensity, isVibWarningEnabled, isVibFinishEnabled, isVibOvertimeEnabled
+    vibrationIntensity, isVibWarningEnabled, isVibFinishEnabled, isVibOvertimeEnabled, targetTime
   ]);
 
   const formatTime = (timeInSeconds) => {
@@ -910,7 +973,8 @@ export default function HomeScreen({ navigation }) {
             if (remainingTimeRef.current === targetTime) {
               triggeredVoicesRef.current.clear();
               lastCheerTriggerTimeRef.current = Date.now();
-              nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (300 - 60 + 1)) + 60) * 1000;
+              isFirstCheerTriggeredRef.current = false;
+              nextCheerIntervalMsRef.current = 0;
             }
           } else {
             overStartTimeRef.current = Date.now() - remainingTimeRef.current * 1000;
@@ -939,6 +1003,9 @@ export default function HomeScreen({ navigation }) {
     }
 
     cheerOverlayRef.current?.dismiss(); // やまいも表示をリセット時にスッとクリア
+    isFirstCheerTriggeredRef.current = false;
+    lastCheerTriggerTimeRef.current = 0;
+    nextCheerIntervalMsRef.current = 0;
     setIsRunning(false);
     setIsPreCountingDown(false);
     setIsCountUp(false);
@@ -957,7 +1024,33 @@ export default function HomeScreen({ navigation }) {
     if (voiceSound) {
       voiceSound.stopAsync().catch(() => {});
     }
+
+    // リセットボタン押下後の待機中やまいもウォーキング演出（クールダウン30秒、出現率50%）
+    if (!isFromSave) {
+      const now = Date.now();
+      if (now - lastIdleCheerTimeRef.current >= 30000) {
+        triggerIdleCheer(0.50, 1800);
+      }
+    }
   };
+
+  // ---- 待機放置中（待合室モード）のやまいも気まぐれお散歩演出 ----
+  useEffect(() => {
+    let idleTimer = null;
+    if (!isRunning && !isPreCountingDown && !saveModalVisible && !isCountUp) {
+      // 待機放置中: 60〜90秒おきにふらっとお散歩（出現率40%）
+      const intervalMs = (Math.floor(Math.random() * (90 - 60 + 1)) + 60) * 1000;
+      idleTimer = setTimeout(() => {
+        const now = Date.now();
+        if (now - lastIdleCheerTimeRef.current >= 45000) {
+          triggerIdleCheer(0.40, 0);
+        }
+      }, intervalMs);
+    }
+    return () => {
+      if (idleTimer) clearTimeout(idleTimer);
+    };
+  }, [isRunning, isPreCountingDown, saveModalVisible, isCountUp, triggerIdleCheer]);
 
   // ---- 操作ボタン・ナビゲーションの自動非表示ロジック ----
   const handleScreenPress = () => {
@@ -1164,6 +1257,9 @@ export default function HomeScreen({ navigation }) {
     overStartTimeRef.current = null;
     triggeredVoicesRef.current.clear();
     triggeredOverVoicesRef.current.clear();
+    isFirstCheerTriggeredRef.current = false;
+    lastCheerTriggerTimeRef.current = 0;
+    nextCheerIntervalMsRef.current = 0;
     setTimeModalKeypadActive(null);
     setIsEditingFavorites(false);
     setTimeModalVisible(false);
@@ -1187,6 +1283,9 @@ export default function HomeScreen({ navigation }) {
       overStartTimeRef.current = null;
       triggeredVoicesRef.current.clear();
       triggeredOverVoicesRef.current.clear();
+      isFirstCheerTriggeredRef.current = false;
+      lastCheerTriggerTimeRef.current = 0;
+      nextCheerIntervalMsRef.current = 0;
       setTimeModalKeypadActive(null);
       setTimeModalVisible(false);
     } else {
@@ -1440,6 +1539,9 @@ export default function HomeScreen({ navigation }) {
     resetTimer(true);
     loadGenreStats();
     loadHomeQuickStats();
+
+    // 記録保存完了後、ホームに戻ってきた直後にトコトコ歩いて労い・次の気合を声掛け（出現率85%）
+    triggerIdleCheer(0.85, 1500);
   };
 
   const handleAddCategory = async () => {
@@ -1653,16 +1755,28 @@ export default function HomeScreen({ navigation }) {
     }
   };
 
-  // インジケーター（タイマー円）の位置はサマリーON/OFFやアコーディオン開閉にかかわらず完全固定
-  const contentTopShift = 45;
+  // 小型端末（iPhone SE等の screenHeight < 720 / 680）でも下部操作ボタンが広告バナーと重ならず
+  // 完全に見切れない安全な余白・スケーリングを自動算出
+  const isSmallDevice = screenHeight < 720;
+  const isTinyDevice = screenHeight < 680;
+
+  // インジケーター（タイマー円）の位置：
+  // 小型端末では上方に引き上げて下部の操作ボタン領域・広告クリアランスを完全確保
+  const contentTopShift = isTinyDevice ? 8 : (isSmallDevice ? 18 : 45);
 
   // 上側コントロール群（クイックアクセスバー・ジャンルバッジ・サマリー）の垂直シフト
-  // 統計サマリーのON/OFFに関わらず基本位置（-10）を完全固定し、アコーディオン展開時のみ上へスライドして高さを吸収
-  const topControlsShift = (isHomeStatsEnabled && !isHomeStatsCollapsed) ? -36 : -10;
+  // 統計サマリーのON/OFFに関わらず基本位置を完全固定し、アコーディオン展開時のみ上へスライドして高さを吸収
+  const topControlsShift = (isHomeStatsEnabled && !isHomeStatsCollapsed) 
+    ? (isSmallDevice ? -44 : -36) 
+    : (isSmallDevice ? -16 : -10);
 
   // ボタン群（スタート・リセット・記録保存）の垂直位置も完全固定
-  const timerMarginBottom = screenHeight < 700 ? 20 : 40;
-  const controlsTopShift = 27;
+  const timerMarginBottom = isTinyDevice ? 12 : (isSmallDevice ? 20 : 40);
+  const controlsTopShift = isTinyDevice ? 6 : (isSmallDevice ? 14 : 27);
+
+  // 小型端末でのタイマー円半径（超小型端末では250px、通常は280px）
+  const timerRadius = isTinyDevice ? 125 : 140;
+  const timerContainerSize = timerRadius * 2;
 
   return (
     <TouchableWithoutFeedback onPress={handleScreenPress}>
@@ -1900,12 +2014,17 @@ export default function HomeScreen({ navigation }) {
           </View>
           <View style={[
             styles.timerContainer, 
-            { top: contentTopShift, marginBottom: timerMarginBottom }
+            { 
+              width: timerContainerSize,
+              height: timerContainerSize,
+              top: contentTopShift, 
+              marginBottom: timerMarginBottom 
+            }
           ]}>
           {(isEcoMode ? isEcoIndicatorEnabled : isNormalIndicatorEnabled) && (
             <RingProgress 
-              radius={140} 
-              strokeWidth={15} 
+              radius={timerRadius} 
+              strokeWidth={isTinyDevice ? 13 : 15} 
               progress={activeProgress} 
               color={ringColor}
               backgroundColor={ringBgColor}
@@ -1916,12 +2035,18 @@ export default function HomeScreen({ navigation }) {
           )}
           <View style={styles.timeTextContainer}>
             {isPreCountingDown ? (
-              <Text style={[preCountdownTime <= 10 ? styles.preCountdownText : styles.timeText, { color: mainTextColor }]}>
+              <Text 
+                style={[preCountdownTime <= 10 ? styles.preCountdownText : styles.timeText, { color: mainTextColor }]}
+                allowFontScaling={false}
+              >
                 {preCountdownTime <= 10 ? preCountdownTime : formatTime(preCountdownTime)}
               </Text>
             ) : (
               <TouchableOpacity onPress={handleOpenTimeModal} disabled={isRunning}>
-                <Text style={[styles.timeText, { color: isCountUp ? '#FF3B30' : mainTextColor }]}>
+                <Text 
+                  style={[styles.timeText, { color: isCountUp ? '#FF3B30' : mainTextColor, fontSize: isTinyDevice ? 42 : 48 }]}
+                  allowFontScaling={false}
+                >
                   {isCountUp ? '+' : ''}{formatTime(remainingTime)}
                 </Text>
               </TouchableOpacity>
@@ -1940,6 +2065,7 @@ export default function HomeScreen({ navigation }) {
                     { color: isEcoMode ? '#8E8E93' : '#3A3A3C' }
                   ]}
                   numberOfLines={1}
+                  allowFontScaling={false}
                 >
                   {formatTargetTime(targetTime)}
                 </Text>
@@ -1957,10 +2083,10 @@ export default function HomeScreen({ navigation }) {
         >
           <View style={styles.controlsContainer}>
             <TouchableOpacity style={styles.button} onPress={toggleTimer} disabled={!controlsVisible}>
-              <Text style={styles.buttonText}>{isRunning || isPreCountingDown ? '一時停止' : 'スタート'}</Text>
+              <Text style={styles.buttonText} allowFontScaling={false}>{isRunning || isPreCountingDown ? '一時停止' : 'スタート'}</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.button, styles.resetButton]} onPress={resetTimer} disabled={!controlsVisible}>
-              <Text style={[styles.buttonText, { color: '#000' }]}>リセット</Text>
+              <Text style={[styles.buttonText, { color: '#000' }]} allowFontScaling={false}>リセット</Text>
             </TouchableOpacity>
           </View>
           
@@ -2007,8 +2133,12 @@ export default function HomeScreen({ navigation }) {
 
       {/* 記録保存用モーダル */}
       <Modal visible={saveModalVisible} animationType="slide">
-        <ScrollView contentContainerStyle={styles.modalContainer}>
-          <Text style={styles.modalTitle}>練習結果の記録</Text>
+        <KeyboardAvoidingView 
+          style={{ flex: 1 }} 
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          <ScrollView contentContainerStyle={[styles.modalContainer, { paddingBottom: 60 }]}>
+            <Text style={styles.modalTitle}>練習結果の記録</Text>
 
           {/* 計測時間の詳細表示 */}
           <View style={{ backgroundColor: isEcoMode ? '#333' : '#F2F2F7', padding: 15, borderRadius: 10, width: '100%', marginBottom: 20, alignItems: 'center' }}>
@@ -2198,6 +2328,7 @@ export default function HomeScreen({ navigation }) {
              <Text style={{textAlign: 'center', color: '#000', fontWeight: 'bold'}}>キャンセル</Text>
           </TouchableOpacity>
         </ScrollView>
+        </KeyboardAvoidingView>
         
         {/* 写真の全画面プレビュー用オーバーレイ（二重Modalを避けるためViewの絶対配置を使用） */}
         {fullScreenIndex !== null && (
@@ -2218,6 +2349,8 @@ export default function HomeScreen({ navigation }) {
           ref={saveModalCheerRef}
           isCheerModeEnabled={isCheerModeEnabled}
           isCheerInEcoEnabled={isCheerInEcoEnabled}
+          isCheerSoundEnabled={isCheerSoundEnabled}
+          playsInSilentMode={playsInSilentMode}
           isEcoMode={isEcoMode}
         />
       </Modal>
@@ -2226,6 +2359,12 @@ export default function HomeScreen({ navigation }) {
       <Modal visible={timeModalVisible} animationType="fade" transparent={true}>
         <View style={styles.timeModalOverlay}>
           <View style={[styles.timeModalContent, { backgroundColor: isEcoMode ? '#222' : '#fff' }]}>
+            <ScrollView 
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={{ alignItems: 'center', width: '100%', paddingBottom: 10 }}
+              style={{ width: '100%' }}
+              nestedScrollEnabled={true}
+            >
             {timeModalMode === 'time' ? (
               <>
                 <Text style={[styles.timeModalTitle, { color: isEcoMode ? '#fff' : '#000' }]}>タイマー時間の設定</Text>
@@ -2940,6 +3079,7 @@ export default function HomeScreen({ navigation }) {
                 )}
               </>
             )}
+            </ScrollView>
           </View>
 
           {/* お気に入り時間追加ポップアップ（二重Modalを回避するインモーダル・オーバーレイ ＆ テンキー入力） */}
@@ -3089,8 +3229,12 @@ export default function HomeScreen({ navigation }) {
       >
         <TouchableWithoutFeedback onPress={() => setGenreModalVisible(false)}>
           <View style={styles.genreModalOverlay}>
-            <TouchableWithoutFeedback onPress={() => {}}>
-              <View style={[
+            <KeyboardAvoidingView 
+              behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+              style={{ width: '100%', alignItems: 'center' }}
+            >
+              <TouchableWithoutFeedback onPress={() => {}}>
+                <View style={[
                 styles.genreModalContent,
                 { 
                   backgroundColor: isEcoMode ? '#1C1C1E' : '#FFFFFF', 
@@ -3271,6 +3415,7 @@ export default function HomeScreen({ navigation }) {
                 )}
               </View>
             </TouchableWithoutFeedback>
+            </KeyboardAvoidingView>
           </View>
         </TouchableWithoutFeedback>
       </Modal>
@@ -3283,6 +3428,8 @@ export default function HomeScreen({ navigation }) {
         ref={cheerOverlayRef}
         isCheerModeEnabled={isCheerModeEnabled}
         isCheerInEcoEnabled={isCheerInEcoEnabled}
+        isCheerSoundEnabled={isCheerSoundEnabled}
+        playsInSilentMode={playsInSilentMode}
         isEcoMode={isEcoMode}
       />
 
@@ -3733,8 +3880,9 @@ const styles = StyleSheet.create({
   },
   timeModalContent: {
     width: '90%',
+    maxHeight: '88%',
     borderRadius: 15,
-    padding: 20,
+    padding: 16,
     alignItems: 'center',
     maxWidth: 400,
   },
@@ -4215,6 +4363,7 @@ const styles = StyleSheet.create({
   genreModalContent: {
     width: '100%',
     maxWidth: 340,
+    maxHeight: '90%',
     borderRadius: 20,
     padding: 20,
     borderWidth: 1,

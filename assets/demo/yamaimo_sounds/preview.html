@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>キャラクター【やまいも】音声・SE 試聴（声色＆セリフ拡充）</title>
+  <style>
+    :root {
+      --bg: #0b0e14;
+      --card-bg: #141923;
+      --card-border: #232b3b;
+      --accent: #f59e0b;
+      --accent-light: #fef3c7;
+      --text-main: #f1f5f9;
+      --text-sub: #94a3b8;
+      --active-card: #1f2737;
+      --adopted-green: #10b981;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+      background-color: var(--bg);
+      color: var(--text-main);
+      padding: 30px 20px 80px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container {
+      max-width: 920px;
+      width: 100%;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .badge-bar {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+    .badge-green {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+    .badge-gold {
+      background: rgba(245, 158, 11, 0.15);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.35);
+    }
+    .badge-purple {
+      background: rgba(168, 85, 247, 0.15);
+      color: #c084fc;
+      border: 1px solid rgba(168, 85, 247, 0.35);
+    }
+    h1 {
+      font-size: 26px;
+      font-weight: 800;
+      margin-bottom: 8px;
+      letter-spacing: -0.5px;
+    }
+    p.lead {
+      color: var(--text-sub);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    /* Stage preview */
+    .stage {
+      background: radial-gradient(circle at center, #242c3d 0%, #0e121a 100%);
+      border: 1px solid var(--card-border);
+      border-radius: 20px;
+      height: 175px;
+      margin-bottom: 30px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    .stage-label {
+      position: absolute;
+      top: 12px;
+      left: 16px;
+      font-size: 12px;
+      color: var(--text-sub);
+      font-weight: 500;
+    }
+    .stage-timer {
+      font-size: 42px;
+      font-weight: 200;
+      letter-spacing: 2px;
+      color: #64748b;
+      font-variant-numeric: tabular-nums;
+      user-select: none;
+    }
+    .yamaimo-mascot {
+      position: absolute;
+      bottom: 15px;
+      right: 25px;
+      width: 100px;
+      height: 100px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      transform: scale(0.4) translateY(40px);
+      transition: all 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      pointer-events: none;
+    }
+    .yamaimo-mascot.show {
+      opacity: 1;
+      transform: scale(1) translateY(0);
+    }
+    .yamaimo-mascot img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      filter: drop-shadow(0 6px 14px rgba(0,0,0,0.6));
+    }
+    .speech-bubble {
+      position: absolute;
+      top: -18px;
+      left: -40px;
+      background: white;
+      color: #1e293b;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 4px 9px;
+      border-radius: 10px;
+      white-space: nowrap;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+      opacity: 0;
+      transform: scale(0.7);
+      transition: all 0.2s ease 0.1s;
+    }
+    .yamaimo-mascot.show .speech-bubble {
+      opacity: 1;
+      transform: scale(1);
+    }
+
+    /* Section Headers */
+    .section-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin: 28px 0 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .title-adopted {
+      color: #34d399;
+    }
+    .title-adopted::before {
+      content: "";
+      display: inline-block;
+      width: 4px;
+      height: 16px;
+      background: #10b981;
+      border-radius: 2px;
+    }
+    .title-tone {
+      color: #c084fc;
+    }
+    .title-tone::before {
+      content: "";
+      display: inline-block;
+      width: 4px;
+      height: 16px;
+      background: #a855f7;
+      border-radius: 2px;
+    }
+    .title-words {
+      color: #fcd34d;
+    }
+    .title-words::before {
+      content: "";
+      display: inline-block;
+      width: 4px;
+      height: 16px;
+      background: var(--accent);
+      border-radius: 2px;
+    }
+
+    /* Grid */
+    .sound-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+      gap: 12px;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      padding: 14px 16px;
+      transition: all 0.2s ease;
+      cursor: pointer;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .card:hover {
+      background: var(--active-card);
+      border-color: #475569;
+      transform: translateY(-2px);
+    }
+    .card.adopted {
+      border-color: rgba(16, 185, 129, 0.4);
+      background: linear-gradient(180deg, rgba(6, 78, 59, 0.2) 0%, var(--card-bg) 100%);
+    }
+    .card.playing {
+      border-color: var(--accent) !important;
+      box-shadow: 0 0 15px rgba(245, 158, 11, 0.3);
+    }
+    .card-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .card-name {
+      font-size: 14.5px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .tag {
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 6px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .tag-adopted {
+      background: rgba(16, 185, 129, 0.25);
+      color: #34d399;
+      border: 1px solid #059669;
+    }
+    .tag-tone {
+      background: rgba(168, 85, 247, 0.25);
+      color: #c084fc;
+      border: 1px solid #9333ea;
+    }
+    .tag-word {
+      background: rgba(245, 158, 11, 0.25);
+      color: #fcd34d;
+      border: 1px solid #b45309;
+    }
+    .card-desc {
+      font-size: 12px;
+      color: var(--text-sub);
+      line-height: 1.5;
+      margin-bottom: 10px;
+    }
+    .card-action {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      padding-top: 8px;
+      margin-top: auto;
+    }
+    .duration {
+      font-size: 11px;
+      color: #64748b;
+      font-family: monospace;
+    }
+    .play-btn {
+      background: var(--accent);
+      color: #000;
+      border: none;
+      border-radius: 50%;
+      width: 30px;
+      height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 900;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      box-shadow: 0 4px 8px rgba(245, 158, 11, 0.25);
+    }
+    .play-btn:hover {
+      transform: scale(1.1);
+      background: #fbbf24;
+    }
+    .play-btn:active {
+      transform: scale(0.95);
+    }
+
+    footer {
+      margin-top: 40px;
+      text-align: center;
+      color: #64748b;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div class="badge-bar">
+        <span class="badge badge-green">★ 採用SE・ボイス全11種 確定</span>
+        <span class="badge badge-purple">声色（トーン）5種比較</span>
+        <span class="badge badge-gold">セリフ（言葉）7種追加</span>
+      </div>
+      <h1>キャラクター【やまいも】登場音声・声色サンプル</h1>
+      <p class="lead">
+        カードをクリックすると、上のステージにやまいもが現れながら音声が鳴ります。<br>
+        お好みの「声色」や、レア枠に入れたい「セリフ」をお選びいただけます。
+      </p>
+    </header>
+
+    <!-- Stage preview where yamaimo pops up -->
+    <div class="stage">
+      <div class="stage-label">リアルプレビュー（クリックした音に合わせて登場します）</div>
+      <div class="stage-timer">14:52</div>
+      <div class="yamaimo-mascot" id="mascot">
+        <div class="speech-bubble" id="bubble">チラッ</div>
+        <img id="mascot-img" src="../../characters/yamaimo/chiratto.png" alt="やまいも">
+      </div>
+    </div>
+
+    <!-- Group 1: Tone Comparison (Same word "Yahho!") -->
+    <div class="section-title title-tone">【声色（トーン）の聴き比べ】同じセリフ「やっほ！」で声質を比較</div>
+    <div class="sound-grid">
+      <!-- Tone 1 -->
+      <div class="card" onclick="playSound('voice_tone1', 'やっほ！', '../../characters/yamaimo/iijan.png', event)">
+        <div class="card-top">
+          <div class="card-name">A. 元気マスコット（アニメ調・高め）</div>
+          <span class="tag tag-tone">現在採用中</span>
+        </div>
+        <div class="card-desc">
+          ピッチを上げて早口にしたキュートな小動物・妖精風ボイス。明るく愛嬌たっぷり。
+        </div>
+        <div class="card-action">
+          <span class="duration">0.16秒 (High Pitch Mascot)</span>
+          <button class="play-btn" aria-label="再生">▶</button>
+        </div>
+      </div>
+
+      <!-- Tone 2 -->
+      <div class="card" onclick="playSound('voice_tone2', 'やっほ〜', '../../characters/yamaimo/coffee_time.png', event)">
+        <div class="card-top">
+          <div class="card-name">B. おっとり脱力系（ゆるキャラ・芋感）</div>
+          <span class="tag tag-tone">マイペース</span>
+        </div>
+        <div class="card-desc">
+          ぽわ〜んとした低めのトーンで、お芋のような丸みと脱力感。マイペースな相棒感。
+        </div>
+        <div class="card-action">
+          <span class="duration">0.35秒 (Soft Yuru-chara)</span>
+          <button class="play-btn" aria-label="再生">▶</button>
+        </div>
+      </div>
+
+      <!-- Tone 3 -->
+      <div class="card" onclick="playSound('voice_tone3', 'やっほ', '../../characters/yamaimo/chiratto.png', event)">
+        <div class="card-top">
+          <div class="card-name">C. ひそひそウィスパー（ささやき声）</div>
+          <span class="tag tag-tone">集中邪魔ゼロ</span>
+        </div>
+        <div class="card-desc">
+          息混じりで耳元でそっと囁くような極小ボイス。集中している部屋でも絶対に耳障りになりません。
+        </div>
+        <div class="card-action">
+          <span class="duration">0.19秒 (Whisper Breath)</span>
+          <button class="play-btn" aria-label="再生">▶</button>
+        </div>
+      </div>
+
+      <!-- Tone 4 -->
+      <div class="card" onclick="playSound('voice_tone4', 'やっほ！', '../../characters/yamaimo/run_tokotoko.png', event)">
+        <div class="card-top">
+          <div class="card-name">D. ちびメカ・ピコピコ（電子マスコット）</div>
+          <span class="tag tag-tone">ゲーム調</span>
+        </div>
+        <div class="card-desc">
+          リングモジュレーションとビットクラッシュを施したピコピコ電子声。レトロで可愛い。
+        </div>
+        <div class="card-action">
+          <span class="duration">0.16秒 (8-bit Chibi Robot)</span>
+          <button class="play-btn" aria-label="再生">▶</button>
+        </div>
+      </div>
+
+      <!-- Tone 5 -->
+      <div class="card" onclick="playSound('voice_tone5', 'やっほ！', '../../characters/yamaimo/ganbare.png', event)">
+        <div class="card-top">
+          <div class="card-name">E. あどけない子ども系（甘えん坊）</div>
+          <span class="tag tag-tone">超キュート</span>
+        </div>
+        <div class="card-desc">
+          さらに高めのピッチで舌足らずな幼さを出した甘えん坊ボイス。
+        </div>
+        <div class="card-action">
+          <span class="duration">0.14秒 (Baby Mascot)</span>
+          <button class="play-btn" aria-label="再生">▶</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Group 2: Word Variations -->
+    <div class="section-title title-words">【セリフ（言葉）の追加バリエーション】レア枠の追加候補</div>
+    <div class="sound-grid">
+      <!-- Word 1 -->
+      <div class="card" onclick="playSound('voice_word1', 'みてるよ〜', '../../characters/yamaimo/ji.png', event)">
+        <div class="card-top">
+          <div class="card-name">① 「みてるよ〜」</div>
+          <span class="tag tag-word">見守り</span>
+        </div>
+        <div class="card-desc">
+          じーっと見つめる絵柄にぴったり。「見守られてる」安心感を与える癒やしセリフ。
+        </div>
+        <div class="card-action">
+          <span class="duration">0.39秒</span>
+          <button class="play-btn" aria-label="再生">▶</button>
+        </div>
+      </div>
+
+      <!-- Word 2 -->
+      <div class="card" onclick="playSound('voice_word2', 'ふぁいとっ！', '../../characters/yamaimo/ganbare.png', event)">
+        <div class="card-top">
+          <div class="card-name">② 「ふぁいとっ！」</div>
+          <span class="tag tag-word">応援・励まし</span>
+        </div>
+        <div class="card-desc">
+          短く元気に「ふぁいとっ！」。タイマー練習中の背中をそっと押してくれる応援。
+        </div>
+        <div class="card-action">
+          <span class="duration">0.26秒</span>
+          <button class="play-btn" aria-label="再生">▶</button>
+        </div>
+      </div>
+
+      <!-- Word 3 -->
+      <div class="card" onclick="playSound('voice_word3', '休憩しよ？', '../../characters/yamaimo/coffee_dou.png', event)">
+        <div class="card-top">
+          <div class="card-name">③ 「休憩しよ？」</div>
+          <span class="tag tag-word">差し入れ</span>
+        </div>
+        <div class="card-desc">
+          コーヒーやケーキの絵柄で登場した時の脱力セリフ。「無理しないでね」のニュアンス。
+        </div>
+        <div class="card-action">
+          <span class="duration">0.80秒</span>
+          <button class="play-btn" aria-label="再生">▶</button>
+        </div>
+      </div>
+
+      <!-- Word 4 -->
+      <div class="card" onclick="playSound('voice_word4', 'いい調子！', '../../characters/yamaimo/iijan.png', event)">
+        <div class="card-top">
+          <div class="card-name">④ 「いい調子！」</div>
+          <span class="tag tag-word">肯定・褒め</span>
+        </div>
+        <div class="card-desc">
+          「いいじゃん」の親指立てポーズに連動。練習が順調に進んでいる時に励まされます。
+        </div>
+        <div class="card-action">
+          <span class="duration">0.41秒</span>
+          <button class="play-btn" aria-label="再生">▶</button>
+        </div>
+      </div>
+
+      <!-- Word 5 -->
+      <div class="card" onclick="playSound('voice_word5', 'チラッ', '../../characters/yamaimo/chiratto.png', event)">
+        <div class="card-top">
+          <div class="card-name">⑤ 「チラッ」（ウィスパー）</div>
+          <span class="tag tag-word">擬音ボイス</span>
+        </div>
+        <div class="card-desc">
+          「チラッ」と覗きながら、その擬音を囁くシュールで愛嬌のある声。
+        </div>
+        <div class="card-action">
+          <span class="duration">0.22秒</span>
+          <button class="play-btn" aria-label="再生">▶</button>
+        </div>
+      </div>
+
+      <!-- Word 6 -->
+      <div class="card" onclick="playSound('voice_word6', 'ほいっ！', '../../characters/yamaimo/yamaimo_peek.png', event)">
+        <div class="card-top">
+          <div class="card-name">⑥ 「ほいっ！」</div>
+          <span class="tag tag-word">ひょっこり</span>
+        </div>
+        <div class="card-desc">
+          わずか0.13秒。ひょっこり顔を出す軽快な掛け声。
+        </div>
+        <div class="card-action">
+          <span class="duration">0.13秒</span>
+          <button class="play-btn" aria-label="再生">▶</button>
+        </div>
+      </div>
+
+      <!-- Word 7 -->
+      <div class="card" onclick="playSound('voice_word7', 'もぐもぐ…', '../../characters/yamaimo/cake_tabetemasu.png', event)">
+        <div class="card-top">
+          <div class="card-name">⑦ 「もぐもぐ…」</div>
+          <span class="tag tag-word">食事絵柄連動</span>
+        </div>
+        <div class="card-desc">
+          ケーキやピザ、からあげを勝手に食べてる絵柄専用のボケセリフ。思わずツッコミたくなります。
+        </div>
+        <div class="card-action">
+          <span class="duration">0.50秒</span>
+          <button class="play-btn" aria-label="再生">▶</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Group 3: Adopted Sounds Review -->
+    <div class="section-title title-adopted">【採用確定リスト】今回決定いただいた全11種類のサウンド</div>
+    <div class="sound-grid">
+      <div class="card adopted" onclick="playSound('sample1', 'ぽこっ♪', '../../characters/yamaimo/chiratto.png', event)">
+        <div class="card-top"><div class="card-name">① ぽこっ（ウッドポップ）</div><span class="tag tag-adopted">SE</span></div>
+        <div class="card-desc">木の打音・コルク音。最も控えめで耳馴染み抜群。</div>
+        <div class="card-action"><span class="duration">0.20秒</span><button class="play-btn">▶</button></div>
+      </div>
+      <div class="card adopted" onclick="playSound('sample3', 'ぴちょん', '../../characters/yamaimo/ji.png', event)">
+        <div class="card-top"><div class="card-name">② ぴちょん（澄んだ水滴）</div><span class="tag tag-adopted">SE</span></div>
+        <div class="card-desc">静寂の中に一滴落ちる透明感。上品な水音。</div>
+        <div class="card-action"><span class="duration">0.25秒</span><button class="play-btn">▶</button></div>
+      </div>
+      <div class="card adopted" onclick="playSound('sample6', 'てちてち', '../../characters/yamaimo/run_tokotoko.png', event)">
+        <div class="card-top"><div class="card-name">④ ててっ（走る足音）</div><span class="tag tag-adopted">アニメ連動</span></div>
+        <div class="card-desc">バナー上を走るやまいもの出現演出にシンクロ。</div>
+        <div class="card-action"><span class="duration">0.34秒</span><button class="play-btn">▶</button></div>
+      </div>
+      <div class="card adopted" onclick="playSound('sample11', 'すぽんっ！', '../../characters/yamaimo/biroon.png', event)">
+        <div class="card-top"><div class="card-name">⑪ すぽんっ（コルク抜け）</div><span class="tag tag-adopted">SE</span></div>
+        <div class="card-desc">すき間からスポンッと顔を出したコミカル音。</div>
+        <div class="card-action"><span class="duration">0.22秒</span><button class="play-btn">▶</button></div>
+      </div>
+      <div class="card adopted" onclick="playSound('sample13', 'とぷん…', '../../characters/yamaimo/suibun.png', event)">
+        <div class="card-top"><div class="card-name">⑬ とぷん（まろやかな湧き水）</div><span class="tag tag-adopted">SE</span></div>
+        <div class="card-desc">低めで落ち着いた優しい湧き水音。</div>
+        <div class="card-action"><span class="duration">0.30秒</span><button class="play-btn">▶</button></div>
+      </div>
+      <div class="card adopted" onclick="playSound('sample14', 'ぽろ〜ん♪', '../../characters/yamaimo/coffee_dou.png', event)">
+        <div class="card-top"><div class="card-name">⑭ ぽろん（カリンバ）</div><span class="tag tag-adopted">SE</span></div>
+        <div class="card-desc">親指ピアノの素朴でオーガニックな癒やし音。</div>
+        <div class="card-action"><span class="duration">0.45秒</span><button class="play-btn">▶</button></div>
+      </div>
+      <div class="card adopted" onclick="playSound('sample15', 'ころん', '../../characters/yamaimo/orange.png', event)">
+        <div class="card-top"><div class="card-name">⑮ ころん（木の実転がり）</div><span class="tag tag-adopted">SE</span></div>
+        <div class="card-desc">木の実がコロンと転がる乾いた可愛い2打音。</div>
+        <div class="card-action"><span class="duration">0.36秒</span><button class="play-btn">▶</button></div>
+      </div>
+      <div class="card adopted" onclick="playSound('sample16', 'むにっ', '../../characters/yamaimo/cake_tabetemasu.png', event)">
+        <div class="card-top"><div class="card-name">⑯ むにっ（低反発モチ）</div><span class="tag tag-adopted">SE</span></div>
+        <div class="card-desc">縮んで伸びるようなコミカル変形音。</div>
+        <div class="card-action"><span class="duration">0.28秒</span><button class="play-btn">▶</button></div>
+      </div>
+      <div class="card adopted" onclick="playSound('sample7', 'やっほ！', '../../characters/yamaimo/iijan.png', event)">
+        <div class="card-top"><div class="card-name">⑦ 「やっほ！」</div><span class="tag tag-adopted">レアボイス</span></div>
+        <div class="card-desc">低確率レアで顔を出すキュートな挨拶。</div>
+        <div class="card-action"><span class="duration">0.17秒</span><button class="play-btn">▶</button></div>
+      </div>
+      <div class="card adopted" onclick="playSound('sample8', 'ん？', '../../characters/yamaimo/chiratto.png', event)">
+        <div class="card-top"><div class="card-name">⑧ 「ん？」</div><span class="tag tag-adopted">レアボイス</span></div>
+        <div class="card-desc">0.06秒の超短ボイス。小首をかしげる様子見。</div>
+        <div class="card-action"><span class="duration">0.06秒</span><button class="play-btn">▶</button></div>
+      </div>
+      <div class="card adopted" onclick="playSound('sample17', 'あ、どうも', '../../characters/yamaimo/cake_taberu.png', event)">
+        <div class="card-top"><div class="card-name">⑰ 「あ、どうも」</div><span class="tag tag-adopted">レアボイス</span></div>
+        <div class="card-desc">差し入れや登場時の脱力した丁寧なお辞儀。</div>
+        <div class="card-action"><span class="duration">0.42秒</span><button class="play-btn">▶</button></div>
+      </div>
+    </div>
+
+    <footer>
+      Assist Timer for yamaimo • Sound & Voice Proposal
+    </footer>
+  </div>
+
+  <!-- Audio Elements -->
+  <!-- Adopted SEs -->
+  <audio id="audio-sample1" src="./sample1_pop_wood.wav" preload="auto"></audio>
+  <audio id="audio-sample3" src="./sample3_water_drop.wav" preload="auto"></audio>
+  <audio id="audio-sample6" src="./sample6_step_tokotoko.wav" preload="auto"></audio>
+  <audio id="audio-sample11" src="./sample11_supon_cork.wav" preload="auto"></audio>
+  <audio id="audio-sample13" src="./sample13_deep_drop.wav" preload="auto"></audio>
+  <audio id="audio-sample14" src="./sample14_kalimba.wav" preload="auto"></audio>
+  <audio id="audio-sample15" src="./sample15_koron.wav" preload="auto"></audio>
+  <audio id="audio-sample16" src="./sample16_muni.wav" preload="auto"></audio>
+  <audio id="audio-sample7" src="./sample7_voice_yahho.wav" preload="auto"></audio>
+  <audio id="audio-sample8" src="./sample8_voice_n.wav" preload="auto"></audio>
+  <audio id="audio-sample17" src="./sample17_voice_doumo.wav" preload="auto"></audio>
+
+  <!-- Tone comparison -->
+  <audio id="audio-voice_tone1" src="./voice_tone1_cute_yahho.wav" preload="auto"></audio>
+  <audio id="audio-voice_tone2" src="./voice_tone2_yuru_yahho.wav" preload="auto"></audio>
+  <audio id="audio-voice_tone3" src="./voice_tone3_whisper_yahho.wav" preload="auto"></audio>
+  <audio id="audio-voice_tone4" src="./voice_tone4_robot_yahho.wav" preload="auto"></audio>
+  <audio id="audio-voice_tone5" src="./voice_tone5_child_yahho.wav" preload="auto"></audio>
+
+  <!-- Words -->
+  <audio id="audio-voice_word1" src="./voice_word1_miteruyo.wav" preload="auto"></audio>
+  <audio id="audio-voice_word2" src="./voice_word2_fight.wav" preload="auto"></audio>
+  <audio id="audio-voice_word3" src="./voice_word3_kyuukei.wav" preload="auto"></audio>
+  <audio id="audio-voice_word4" src="./voice_word4_iichoushi.wav" preload="auto"></audio>
+  <audio id="audio-voice_word5" src="./voice_word5_chiratto.wav" preload="auto"></audio>
+  <audio id="audio-voice_word6" src="./voice_word6_hoi.wav" preload="auto"></audio>
+  <audio id="audio-voice_word7" src="./voice_word7_mogumogu.wav" preload="auto"></audio>
+
+  <script>
+    let hideTimeout = null;
+
+    function playSound(sampleId, bubbleText, imgSrc, ev) {
+      document.querySelectorAll('audio').forEach(a => {
+        a.pause();
+        a.currentTime = 0;
+      });
+
+      const audio = document.getElementById('audio-' + sampleId);
+      if (audio) {
+        audio.play().catch(e => console.log('Audio play error:', e));
+      }
+
+      const mascot = document.getElementById('mascot');
+      const bubble = document.getElementById('bubble');
+      const img = document.getElementById('mascot-img');
+
+      if (imgSrc) img.src = imgSrc;
+      if (bubbleText) bubble.textContent = bubbleText;
+
+      mascot.classList.remove('show');
+      void mascot.offsetWidth;
+      mascot.classList.add('show');
+
+      if (hideTimeout) clearTimeout(hideTimeout);
+      hideTimeout = setTimeout(() => {
+        mascot.classList.remove('show');
+      }, 2400);
+
+      document.querySelectorAll('.card').forEach(c => c.classList.remove('playing'));
+      const activeCard = ev ? ev.currentTarget : (window.event ? window.event.currentTarget : null);
+      if (activeCard) {
+        activeCard.classList.add('playing');
+        setTimeout(() => activeCard.classList.remove('playing'), 600);
+      }
+    }
+  </script>
+</body>
+</html>
