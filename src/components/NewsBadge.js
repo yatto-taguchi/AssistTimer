@@ -90,8 +90,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#FF5E62', // 鮮やかで温かいコーラルピンク
-    paddingHorizontal: 6,
-    paddingVertical: 3,
+    paddingHorizontal: 5.5,
+    paddingVertical: 2.5,
     borderRadius: 11,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.5)',
