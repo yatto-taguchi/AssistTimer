@@ -915,7 +915,7 @@ export default function SalonWorkScreen() {
             ...s,
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
-            colorStaffName: modalColorStaff.trim() || userName || 'スタイリスト',
+            colorStaffName: userName || 'スタイリスト',
             assistantStaffName: s.assistantStaffName || null,
             isShampooing: false,
             targetSeconds: targetSec,
@@ -943,7 +943,7 @@ export default function SalonWorkScreen() {
             ...s,
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
-            colorStaffName: modalColorStaff.trim() || s.colorStaffName || userName || 'スタイリスト',
+            colorStaffName: userName || s.colorStaffName || 'スタイリスト',
             assistantStaffName: s.assistantStaffName || null,
             isShampooing: s.isShampooing,
             targetSeconds: targetSec,
@@ -971,7 +971,7 @@ export default function SalonWorkScreen() {
             ...s,
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
-            colorStaffName: modalColorStaff.trim() || s.colorStaffName || userName || 'スタイリスト',
+            colorStaffName: userName || s.colorStaffName || 'スタイリスト',
             assistantStaffName: s.assistantStaffName || null,
             isShampooing: s.isShampooing,
             targetSeconds: targetSec,
@@ -994,7 +994,7 @@ export default function SalonWorkScreen() {
           ...s,
           seatLabel: modalSeatLabel.trim() || s.seatLabel,
           status: 'running',
-          colorStaffName: modalColorStaff.trim() || userName || 'スタイリスト',
+          colorStaffName: userName || 'スタイリスト',
           assistantStaffName: s.assistantStaffName || null,
           isShampooing: false,
           targetSeconds: targetSec,
@@ -2200,10 +2200,10 @@ export default function SalonWorkScreen() {
               <View style={styles.staffRow}>
                 <View style={styles.staffItem}>
                   <Text style={[styles.staffRoleLabel, { color: theme.textTertiary }]}>
-                    カラー担当
+                    タイマー作成
                   </Text>
                   <Text style={[styles.staffNameText, { color: theme.textPrimary }]}>
-                    🎨 {item.colorStaffName}
+                    ⏱️ {item.colorStaffName || '未設定'}
                   </Text>
                 </View>
 
@@ -2850,18 +2850,8 @@ export default function SalonWorkScreen() {
                 </ScrollView>
               </View>
 
-              {/* カラー担当 */}
-              <Text style={[styles.inputLabel, { color: theme.textSecondary }]}>カラー担当</Text>
-              <TextInput
-                style={[styles.textInput, { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.cardBorder }]}
-                placeholder="担当スタイリスト名"
-                placeholderTextColor={theme.textTertiary}
-                value={modalColorStaff}
-                onChangeText={setModalColorStaff}
-              />
-
               <TouchableOpacity
-                style={[styles.submitButton, { backgroundColor: theme.accent }]}
+                style={[styles.submitButton, { backgroundColor: theme.accent, marginTop: 18 }]}
                 onPress={handleStartSeatTimer}
               >
                 <Text style={styles.submitButtonText}>
@@ -3331,7 +3321,7 @@ export default function SalonWorkScreen() {
                   🤝 ヘルプ担当の指定・変更
                 </Text>
                 <Text style={[styles.helpAssignSubtitle, { color: theme.textSecondary }]}>
-                  {helpAssignTargetSeat?.seatLabel} （カラー担当: 🎨 {helpAssignTargetSeat?.colorStaffName || '未設定'}）
+                  {helpAssignTargetSeat?.seatLabel} （作成者: ⏱️ {helpAssignTargetSeat?.colorStaffName || '未設定'}）
                 </Text>
               </View>
               <TouchableOpacity onPress={() => setIsHelpAssignModalVisible(false)}>
