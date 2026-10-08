@@ -10,6 +10,7 @@ import { AppProvider, AppContext } from './src/utils/AppContext';
 
 import HomeScreen from './src/screens/HomeScreen';
 import RecordsScreen from './src/screens/RecordsScreen';
+import SalonWorkScreen from './src/screens/SalonWorkScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import CustomBatteryIndicator from './src/components/CustomBatteryIndicator';
 
@@ -99,6 +100,8 @@ function MainTabs() {
               iconName = focused ? 'book' : 'book-outline';
             } else if (route.name === 'Home') {
               iconName = focused ? 'time' : 'time-outline';
+            } else if (route.name === 'Salon') {
+              iconName = focused ? 'people' : 'people-outline';
             } else if (route.name === 'Settings') {
               iconName = focused ? 'settings' : 'settings-outline';
             }
@@ -116,6 +119,11 @@ function MainTabs() {
         name="Home" 
         component={HomeScreen} 
         options={{ title: 'タイマー' }}
+      />
+      <Tab.Screen 
+        name="Salon" 
+        component={SalonWorkScreen} 
+        options={{ title: 'サロン' }}
       />
       <Tab.Screen 
         name="Settings" 

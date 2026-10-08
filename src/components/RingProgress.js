@@ -84,7 +84,7 @@ export default function RingProgress({
   });
 
   return (
-    <View style={styles.container}>
+    <View style={styles.container} pointerEvents="none">
       {isIdle ? (
         /* 待機時: 1本の完全な美しい円環 ＋ オフセット放射グラデーション（一箇所だけが水のように光って巡る） */
         <Animated.View

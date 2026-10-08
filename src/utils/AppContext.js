@@ -761,9 +761,31 @@ export const AppProvider = ({ children }) => {
     await AsyncStorage.setItem('hasSeenEcoExplanation', JSON.stringify(true));
   };
 
+  // メインタイマー（HomeScreen）連動共有State
+  const [mainTimerState, setMainTimerState] = useState({
+    remainingTime: 180,
+    targetTime: 180,
+    isRunning: false,
+    isPaused: false,
+    isCountUp: false,
+    genre: '',
+  });
+
+  // サロン画面等からのメインタイマー操作リクエスト（タイムスタンプ＋アクション名）
+  const [mainTimerActionRequest, setMainTimerActionRequest] = useState(null);
+
+  const requestMainTimerAction = (action, payload = null) => {
+    // action: 'start' | 'pause' | 'reset' | 'set_time'
+    setMainTimerActionRequest({ action, payload, timestamp: Date.now() });
+  };
+
   return (
     <AppContext.Provider
       value={{
+        mainTimerState,
+        setMainTimerState,
+        mainTimerActionRequest,
+        requestMainTimerAction,
         isEcoMode,
         toggleEcoMode,
         isEcoClockEnabled,

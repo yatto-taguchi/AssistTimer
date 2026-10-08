@@ -183,7 +183,9 @@ export default function HomeScreen({ navigation }) {
     markNewsAsRead,
     markAllNewsAsRead,
     hideNewsUntilNextUpdate,
-    restoreNewsIcon
+    restoreNewsIcon,
+    setMainTimerState,
+    mainTimerActionRequest
   } = useContext(AppContext);
   const isFocused = useIsFocused();
 
@@ -1033,6 +1035,34 @@ export default function HomeScreen({ navigation }) {
       }
     }
   };
+
+  // サロン画面等へのメインタイマー状態のリアルタイム同期
+  useEffect(() => {
+    if (setMainTimerState) {
+      setMainTimerState({
+        remainingTime,
+        targetTime,
+        isRunning,
+        isPaused: !isRunning && remainingTime !== targetTime && !isCountUp,
+        isCountUp,
+        genre: selectedCategory || '',
+      });
+    }
+  }, [remainingTime, targetTime, isRunning, isCountUp, selectedCategory]);
+
+  // サロン画面等からの操作リクエスト（一時停止/再開/リセット）の実行
+  const lastMainActionTimestampRef = useRef(0);
+  useEffect(() => {
+    if (mainTimerActionRequest && mainTimerActionRequest.timestamp > lastMainActionTimestampRef.current) {
+      lastMainActionTimestampRef.current = mainTimerActionRequest.timestamp;
+      const { action } = mainTimerActionRequest;
+      if (action === 'start' || action === 'pause' || action === 'toggle') {
+        toggleTimer();
+      } else if (action === 'reset') {
+        resetTimer();
+      }
+    }
+  }, [mainTimerActionRequest]);
 
   // ---- 待機放置中（待合室モード）のやまいも気まぐれお散歩演出 ----
   useEffect(() => {
@@ -2033,45 +2063,58 @@ export default function HomeScreen({ navigation }) {
               isEcoMode={isEcoMode}
             />
           )}
-          <View style={styles.timeTextContainer}>
-            {isPreCountingDown ? (
-              <Text 
-                style={[preCountdownTime <= 10 ? styles.preCountdownText : styles.timeText, { color: mainTextColor }]}
-                allowFontScaling={false}
-              >
-                {preCountdownTime <= 10 ? preCountdownTime : formatTime(preCountdownTime)}
-              </Text>
-            ) : (
-              <TouchableOpacity onPress={handleOpenTimeModal} disabled={isRunning}>
+          {/* インジケーター内部全体の円形タップ領域（時間設定モーダル呼出） */}
+          <TouchableOpacity
+            style={[
+              styles.timerTouchArea,
+              {
+                width: timerContainerSize,
+                height: timerContainerSize,
+                borderRadius: timerRadius,
+              }
+            ]}
+            onPress={handleOpenTimeModal}
+            disabled={isRunning || isPreCountingDown}
+            activeOpacity={0.7}
+          >
+            <View style={styles.timeTextContainer} pointerEvents="none">
+              {isPreCountingDown ? (
+                <Text 
+                  style={[preCountdownTime <= 10 ? styles.preCountdownText : styles.timeText, { color: mainTextColor }]}
+                  allowFontScaling={false}
+                >
+                  {preCountdownTime <= 10 ? preCountdownTime : formatTime(preCountdownTime)}
+                </Text>
+              ) : (
                 <Text 
                   style={[styles.timeText, { color: isCountUp ? '#FF3B30' : mainTextColor, fontSize: isTinyDevice ? 42 : 48 }]}
                   allowFontScaling={false}
                 >
                   {isCountUp ? '+' : ''}{formatTime(remainingTime)}
                 </Text>
-              </TouchableOpacity>
-            )}
-            {(isEcoMode ? isEcoTargetTimeEnabled : isNormalTargetTimeEnabled) && !isPreCountingDown && (isRunning || remainingTime !== targetTime || isCountUp) && (
-              <View 
-                style={[
-                  styles.targetTimePill,
-                  isEcoMode ? styles.targetTimePillEco : styles.targetTimePillNormal
-                ]}
-                pointerEvents="none"
-              >
-                <Text 
+              )}
+              {(isEcoMode ? isEcoTargetTimeEnabled : isNormalTargetTimeEnabled) && !isPreCountingDown && (isRunning || remainingTime !== targetTime || isCountUp) && (
+                <View 
                   style={[
-                    styles.targetTimePillText,
-                    { color: isEcoMode ? '#8E8E93' : '#3A3A3C' }
+                    styles.targetTimePill,
+                    isEcoMode ? styles.targetTimePillEco : styles.targetTimePillNormal
                   ]}
-                  numberOfLines={1}
-                  allowFontScaling={false}
+                  pointerEvents="none"
                 >
-                  {formatTargetTime(targetTime)}
-                </Text>
-              </View>
-            )}
-          </View>
+                  <Text 
+                    style={[
+                      styles.targetTimePillText,
+                      { color: isEcoMode ? '#8E8E93' : '#3A3A3C' }
+                    ]}
+                    numberOfLines={1}
+                    allowFontScaling={false}
+                  >
+                    {formatTargetTime(targetTime)}
+                  </Text>
+                </View>
+              )}
+            </View>
+          </TouchableOpacity>
         </View>
 
         <Animated.View 
@@ -3590,6 +3633,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: screenHeight < 700 ? 30 : 60,
+  },
+  timerTouchArea: {
+    position: 'absolute',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   bottomControlsWrapper: {
     top: 20,
