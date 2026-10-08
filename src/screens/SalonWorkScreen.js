@@ -636,9 +636,10 @@ export default function SalonWorkScreen() {
 
     const actionInfo = getActionStatusInfo(determinedActionId, determinedActionId === 'shampoo');
 
-    // アコーディオンを自動で折りたたみ（スリムバー化）
+    // ★ ユーザー指定: シャンプーの場合はアコーディオンをしまう。シャンプー以外（コーミング、チェック等）の場合は開けたままにしておく
+    const isShampoo = determinedActionId === 'shampoo';
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setExpandedPausedSeatIds((prev) => ({ ...prev, [seat.id]: false }));
+    setExpandedPausedSeatIds((prev) => ({ ...prev, [seat.id]: !isShampoo }));
 
     const nowStr = getCurrentTimeFormatted();
     // 担当スタッフ名（アシスタント担当がいればその名前、いなければ操作者）
@@ -1253,6 +1254,12 @@ export default function SalonWorkScreen() {
     setIsActionStatusModalVisible(false);
 
     const isShampoo = statusId === 'shampoo';
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    if (seat.status === 'paused') {
+      // ★ ユーザー指定: 停止中席の場合、シャンプーならしまう、シャンプー以外なら開けたままにする
+      setExpandedPausedSeatIds((prev) => ({ ...prev, [seat.id]: !isShampoo }));
+    }
+
     setSeats((prev) =>
       prev.map((s) => {
         if (s.id !== seat.id) return s;
@@ -1275,12 +1282,13 @@ export default function SalonWorkScreen() {
     if (!seat) return;
     const isStopping = seat.status === 'running';
     const currentUser = (userName || 'スタッフ').trim();
+    const isShampoo = seat.actionStatus === 'shampoo' || seat.isShampooing;
 
     // アコーディオン開閉アニメーション
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     if (isStopping) {
-      // 停止したら自動でアコーディオンを閉じる
-      setExpandedPausedSeatIds((prev) => ({ ...prev, [seatId]: false }));
+      // ★ ユーザー指定: 停止時、シャンプーならアコーディオンをしまい、シャンプー以外なら開けたままにする
+      setExpandedPausedSeatIds((prev) => ({ ...prev, [seatId]: !isShampoo }));
     }
 
     setSeats((prev) =>
@@ -1776,7 +1784,12 @@ export default function SalonWorkScreen() {
           // 【パターンB: 停止中 ＆ アコーディオン閉じ状態（スリムバー）】
           // ==============================
           const isPaused = item.status === 'paused';
-          const isExpanded = !!expandedPausedSeatIds[item.id];
+          const isShampoo = item.isShampooing || item.actionStatus === 'shampoo';
+          // ★ ユーザー指定: シャンプー以外の場合は開けたままにしておく。シャンプーの場合はアコーディオンをしまう。
+          const isExpanded =
+            expandedPausedSeatIds[item.id] !== undefined
+              ? !!expandedPausedSeatIds[item.id]
+              : !isShampoo;
 
           let remainingSec = 0;
           let isOver = false;
