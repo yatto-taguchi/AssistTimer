@@ -216,11 +216,12 @@ export default function SalonWorkScreen() {
           const elapsedOverSec = Math.floor((currentNow - timeUpTs) / 1000);
           let escLevel = s.escalationLevel || 0;
 
-          // 両者確認（またはメイン確認による黄色）に達していない場合の段階的エスカレーション
-          const isYellowOrGreen = s.mainStaffConfirmed;
+          // ヘルプ確認（またはヘルプなし確認）に達していない場合の段階的エスカレーション
+          const isNoHelp = s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none';
+          const isConfirmed = isNoHelp || !s.assistantStaffName || s.assistantStaffConfirmed;
 
           // ① 30秒リマインド（強い振動）
-          if (elapsedOverSec >= 30 && escLevel < 1 && !isYellowOrGreen) {
+          if (elapsedOverSec >= 30 && escLevel < 1 && !isConfirmed) {
             escLevel = 1;
             hasChanges = true;
             if (Platform.OS !== 'web') {
@@ -228,15 +229,15 @@ export default function SalonWorkScreen() {
             }
           }
           // ② 1分リマインド（強い振動）
-          else if (elapsedOverSec >= 60 && escLevel < 2 && !isYellowOrGreen) {
+          else if (elapsedOverSec >= 60 && escLevel < 2 && !isConfirmed) {
             escLevel = 2;
             hasChanges = true;
             if (Platform.OS !== 'web') {
               Vibration.vibrate([0, 400, 150, 400, 150, 400]);
             }
           }
-          // ③ 3分経過: 黄色以上に変わらない場合、サロン全員にチェックアラート発動！
-          else if (elapsedOverSec >= 180 && escLevel < 3 && !isYellowOrGreen) {
+          // ③ 3分経過: 確認されない場合、サロン全員にチェックアラート発動！
+          else if (elapsedOverSec >= 180 && escLevel < 3 && !isConfirmed) {
             escLevel = 3;
             hasChanges = true;
             if (Platform.OS !== 'web') {
@@ -356,7 +357,7 @@ export default function SalonWorkScreen() {
           targetEndTimestamp: Date.now() + 14 * 60 * 1000 + 20 * 1000, // 残り14分20秒
           comment: '根元チェック後乳化',
           timeUpTimestamp: null,
-          mainStaffConfirmed: false,
+          mainStaffConfirmed: true,
           assistantStaffConfirmed: false,
           sosTriggered: false,
           escalationLevel: 0,
@@ -377,7 +378,7 @@ export default function SalonWorkScreen() {
           targetEndTimestamp: 0,
           comment: '',
           timeUpTimestamp: null,
-          mainStaffConfirmed: false,
+          mainStaffConfirmed: true,
           assistantStaffConfirmed: false,
           sosTriggered: false,
           escalationLevel: 0,
@@ -395,7 +396,7 @@ export default function SalonWorkScreen() {
           targetEndTimestamp: Date.now() - 45 * 1000, // 超過45秒
           comment: 'トリートメント浸透中',
           timeUpTimestamp: Date.now() - 45 * 1000,
-          mainStaffConfirmed: false,
+          mainStaffConfirmed: true,
           assistantStaffConfirmed: false,
           sosTriggered: false,
           escalationLevel: 1, // 30秒リマインド通過
@@ -418,7 +419,7 @@ export default function SalonWorkScreen() {
           targetEndTimestamp: 0,
           comment: '',
           timeUpTimestamp: null,
-          mainStaffConfirmed: false,
+          mainStaffConfirmed: true,
           assistantStaffConfirmed: false,
           sosTriggered: false,
           escalationLevel: 0,
@@ -436,7 +437,7 @@ export default function SalonWorkScreen() {
           targetEndTimestamp: 0,
           comment: '',
           timeUpTimestamp: null,
-          mainStaffConfirmed: false,
+          mainStaffConfirmed: true,
           assistantStaffConfirmed: false,
           sosTriggered: false,
           escalationLevel: 0,
@@ -696,26 +697,25 @@ export default function SalonWorkScreen() {
     }
   };
 
-  // スタッフによるタイム確認（メイン担当本人・ヘルプ担当本人の直接確認、または第三者確認モーダル起動）
+  // スタッフによるタイム確認（ヘルプ担当本人の直接確認、または代理確認モーダル起動）
   const handlePressConfirmButton = (seat) => {
     const myName = (userName || '').trim().toLowerCase();
     const isNoHelp = seat.assistantStaffName === 'ヘルプなし' || seat.assistantStaffName === 'none';
-    const isColorMain = myName.length > 0 && (seat.colorStaffName || '').toLowerCase().includes(myName);
     const isAssistant = myName.length > 0 && (seat.assistantStaffName || '').toLowerCase().includes(myName);
 
-    // ① メイン担当本人が未確認の場合 ➔ ワンタップで直接メイン確認完了
-    if (isColorMain && !seat.mainStaffConfirmed) {
-      performDirectConfirm(seat.id, 'main');
-      return;
-    }
-
-    // ② ヘルプ担当本人が未確認の場合 ➔ ワンタップで直接ヘルプ確認完了
+    // ① ヘルプ担当本人の場合 ➔ ワンタップで直接ヘルプ確認完了
     if (isAssistant && !seat.assistantStaffConfirmed && !isNoHelp) {
       performDirectConfirm(seat.id, 'assistant');
       return;
     }
 
-    // ③ 自分以外の確認、または第三者（メインでもヘルプでもない）の場合 ➔ 確認モーダルを表示！
+    // ② ヘルプなし（ワンマン）の場合 ➔ ワンタップで直接完了
+    if (isNoHelp) {
+      performDirectConfirm(seat.id, 'main');
+      return;
+    }
+
+    // ③ それ以外のスタッフ（指定したタイマー作成者または第三者）➔ 代理確認モーダルを表示
     setConfirmProxyTargetSeat(seat);
     setIsConfirmProxyModalVisible(true);
   };
@@ -923,7 +923,7 @@ export default function SalonWorkScreen() {
             targetEndTimestamp: endTs,
             pausedRemainingSeconds: null,
             stoppedBy: null,
-            mainStaffConfirmed: false,
+            mainStaffConfirmed: true,
             assistantStaffConfirmed: false,
             comment: s.comment || '',
             history: newHistory,
@@ -951,7 +951,7 @@ export default function SalonWorkScreen() {
             targetEndTimestamp: endTs,
             pausedRemainingSeconds: null,
             stoppedBy: null,
-            mainStaffConfirmed: false,
+            mainStaffConfirmed: true,
             assistantStaffConfirmed: false,
             comment: s.comment || '',
             history: [...prevHistory, additionalHistoryItem],
@@ -1002,7 +1002,7 @@ export default function SalonWorkScreen() {
           targetEndTimestamp: endTs,
           pausedRemainingSeconds: null,
           stoppedBy: null,
-          mainStaffConfirmed: false,
+          mainStaffConfirmed: true,
           assistantStaffConfirmed: false,
           comment: s.comment || '',
           history: [...prevHistory, historyItem],
@@ -1864,11 +1864,10 @@ export default function SalonWorkScreen() {
           const isHelpUndecided = !item.assistantStaffName || item.assistantStaffName.trim() === '';
           const isOneMinBeforeHelpAlert = !isPaused && !isOver && remainingSec <= 60 && remainingSec > 0 && isHelpUndecided && !isNoHelp;
 
-          // 確認状態の判定（ヘルプなしの場合はメイン確認のみで緑色安全に）
-          const isBothConfirmed = item.mainStaffConfirmed && (item.assistantStaffConfirmed || !item.assistantStaffName || isNoHelp);
-          const isMainOnly = item.mainStaffConfirmed && !item.assistantStaffConfirmed && !isNoHelp;
+          // 確認状態の判定（指定した人＝タイマー作成者は自分で入れているので確認不要。ヘルプ担当がいる場合はヘルプの確認で安全完了）
+          const isSafetyConfirmed = isNoHelp || !item.assistantStaffName || item.assistantStaffConfirmed;
 
-          // カードの動的境界線＆背景色（緑/黄/赤/SOS/1分前未定警告/施術ステータスカラー）
+          // カードの動的境界線＆背景色（緑/赤/SOS/1分前未定警告/施術ステータスカラー）
           let cardBgColor = theme.cardBg;
           let cardBorderColor = currentStatusInfo ? currentStatusInfo.color : theme.cardBorder;
           let cardBorderWidth = currentStatusInfo ? 1.5 : 1;
@@ -1878,14 +1877,10 @@ export default function SalonWorkScreen() {
             cardBorderWidth = 2.5;
             cardBgColor = isEcoMode ? '#281136' : '#FAF0FF';
           } else if (isOver) {
-            if (isBothConfirmed) {
+            if (isSafetyConfirmed) {
               cardBorderColor = theme.success;
               cardBorderWidth = 2.5;
               cardBgColor = isEcoMode ? '#0B2413' : '#F0FDF4';
-            } else if (isMainOnly) {
-              cardBorderColor = theme.warning;
-              cardBorderWidth = 2.5;
-              cardBgColor = isEcoMode ? '#2B1C05' : '#FFFBEB';
             } else {
               cardBorderColor = theme.danger;
               cardBorderWidth = 2.5;
@@ -2049,24 +2044,23 @@ export default function SalonWorkScreen() {
                     <Text style={[styles.safetyStatusTitle, { color: cardBorderColor }]}>
                       {item.sosTriggered
                         ? '🚨 SOSヘルプ要請中'
-                        : isBothConfirmed
-                        ? '🟢 両者確認完了 (安全)'
-                        : isMainOnly
-                        ? '🟡 メイン確認済 (ヘルプ未確認)'
-                        : '🔴 未確認 (危険・両者/ヘルプ未確認)'}
+                        : isSafetyConfirmed
+                        ? (isNoHelp ? '🟢 確認完了 (安全)' : '🟢 ヘルプ確認完了 (安全)')
+                        : (!item.assistantStaffName ? '⚠️ ヘルプ未定 (確認待ち)' : '🔴 ヘルプ確認待ち')}
                     </Text>
 
                     <View style={styles.safetyStatusRoles}>
-                      <Text style={[styles.safetyRoleText, { color: item.mainStaffConfirmed ? theme.success : theme.danger }]}>
-                        メイン: {item.mainStaffConfirmed ? '✓済' : '✕未'}
-                      </Text>
                       {isNoHelp ? (
                         <Text style={[styles.safetyRoleText, { color: theme.textSecondary }]}>
-                          ヘルプ: なし
+                          👤 ワンマン施術
+                        </Text>
+                      ) : item.assistantStaffName ? (
+                        <Text style={[styles.safetyRoleText, { color: item.assistantStaffConfirmed ? theme.success : theme.danger }]}>
+                          ヘルプ（{item.assistantStaffName}）: {item.assistantStaffConfirmed ? '✓済' : '✕未'}
                         </Text>
                       ) : (
-                        <Text style={[styles.safetyRoleText, { color: item.assistantStaffConfirmed ? theme.success : theme.danger }]}>
-                          ヘルプ: {item.assistantStaffConfirmed ? '✓済' : '✕未'}
+                        <Text style={[styles.safetyRoleText, { color: theme.warning }]}>
+                          ヘルプ: 未定
                         </Text>
                       )}
                     </View>
@@ -2074,44 +2068,32 @@ export default function SalonWorkScreen() {
 
                   {/* アクションボタン（確認する ＆ SOS） */}
                   <View style={styles.safetyActionRow}>
-                    {!isBothConfirmed ? (() => {
+                    {!isSafetyConfirmed ? (() => {
                       const myName = (userName || '').trim().toLowerCase();
-                      const isColorMain = myName.length > 0 && (item.colorStaffName || '').toLowerCase().includes(myName);
                       const isAssistant = myName.length > 0 && (item.assistantStaffName || '').toLowerCase().includes(myName);
-                      const isMyMainPending = isColorMain && !item.mainStaffConfirmed;
                       const isMyAssistPending = isAssistant && !item.assistantStaffConfirmed && !isNoHelp;
 
-                      let btnLabel = '確認する';
-                      let isProxyAction = false;
-
-                      if (isMyMainPending) {
-                        btnLabel = 'メイン確認する';
-                      } else if (isMyAssistPending) {
-                        btnLabel = 'ヘルプ確認する';
-                      } else {
-                        isProxyAction = true;
-                        if (item.mainStaffConfirmed && !item.assistantStaffConfirmed) {
-                          btnLabel = 'ヘルプを代理確認 ▾';
-                        } else if (!item.mainStaffConfirmed && item.assistantStaffConfirmed) {
-                          btnLabel = 'メインを代理確認 ▾';
-                        } else {
-                          btnLabel = '代理確認する ▾';
-                        }
-                      }
+                      // ヘルプ担当本人なら緑色の直接確認、それ以外（指定したメイン担当または第三者）は代理確認
+                      const isDirectAction = isMyAssistPending || isNoHelp;
+                      const btnLabel = isMyAssistPending
+                        ? '✓ ヘルプ確認する'
+                        : isNoHelp
+                        ? '✓ 確認する'
+                        : 'ヘルプを代理確認 ▾';
 
                       return (
                         <TouchableOpacity
                           style={[
                             styles.safetyConfirmBtn,
                             {
-                              backgroundColor: isProxyAction ? '#FF9500' : theme.success,
+                              backgroundColor: isDirectAction ? theme.success : '#FF9500',
                             },
                           ]}
                           onPress={() => handlePressConfirmButton(item)}
                           activeOpacity={0.7}
                         >
                           <Ionicons
-                            name={isProxyAction ? 'shield-checkmark' : 'checkmark-circle'}
+                            name={isDirectAction ? 'checkmark-circle' : 'shield-checkmark'}
                             size={15}
                             color="#FFFFFF"
                             style={{ marginRight: 4 }}
@@ -3809,25 +3791,25 @@ export default function SalonWorkScreen() {
                 現在の担当者と確認状況
               </Text>
 
-              {/* メイン担当行 */}
+              {/* タイマー作成者（メイン）行 */}
               <View style={styles.proxyStatusRow}>
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                  <Text style={{ fontSize: 13, marginRight: 6 }}>🎨</Text>
+                  <Text style={{ fontSize: 13, marginRight: 6 }}>⏱️</Text>
                   <Text style={[styles.proxyStaffName, { color: theme.textPrimary }]}>
                     {confirmProxyTargetSeat?.colorStaffName || '未設定'}
-                    <Text style={{ fontSize: 11, color: theme.textTertiary }}>（メイン）</Text>
+                    <Text style={{ fontSize: 11, color: theme.textTertiary }}>（タイマー作成）</Text>
                   </Text>
                 </View>
                 <View style={[
                   styles.proxyStatusBadge,
-                  { backgroundColor: confirmProxyTargetSeat?.mainStaffConfirmed ? 'rgba(52, 199, 89, 0.15)' : 'rgba(255, 59, 48, 0.15)' }
+                  { backgroundColor: 'rgba(52, 199, 89, 0.15)' }
                 ]}>
                   <Text style={{
                     fontSize: 12,
                     fontWeight: '700',
-                    color: confirmProxyTargetSeat?.mainStaffConfirmed ? theme.success : theme.danger
+                    color: theme.success
                   }}>
-                    {confirmProxyTargetSeat?.mainStaffConfirmed ? '✓ 確認済み' : '✕ 未確認'}
+                    ✓ 設定済 (確認不要)
                   </Text>
                 </View>
               </View>
@@ -3871,71 +3853,29 @@ export default function SalonWorkScreen() {
             </View>
 
             <Text style={[styles.proxyExplanationText, { color: theme.textSecondary }]}>
-              担当者本人の代わりに確認を行いますか？{'\n'}
-              代理確認を行うと関係者全員に通知が記録されます。
+              タイマー作成者は自分でタイムを入れているため確認不要です。{'\n'}
+              ヘルプ担当者（{confirmProxyTargetSeat?.assistantStaffName || 'ヘルプ担当'}）の代わりに代理確認を行いますか？
             </Text>
 
             {/* 選択肢ボタン群 */}
             <View style={styles.proxyActionButtonsContainer}>
-              {/* ① メインの代わりに確認（メイン未確認の場合） */}
-              {!confirmProxyTargetSeat?.mainStaffConfirmed && (
-                <TouchableOpacity
-                  style={[styles.proxyConfirmOptionBtn, { backgroundColor: isEcoMode ? '#2C2C2E' : '#FFFFFF', borderColor: theme.cardBorder }]}
-                  onPress={() => handleExecuteProxyConfirm(confirmProxyTargetSeat?.id, 'main')}
-                  activeOpacity={0.7}
-                >
-                  <Text style={{ fontSize: 18, marginRight: 10 }}>🎨</Text>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.proxyConfirmOptionTitle, { color: theme.textPrimary }]}>
-                      メイン（{confirmProxyTargetSeat?.colorStaffName || 'メイン担当'}）の代わりに確認
-                    </Text>
-                    <Text style={[styles.proxyConfirmOptionSub, { color: theme.textTertiary }]}>
-                      メイン担当者の確認を代行します
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={16} color={theme.textTertiary} />
-                </TouchableOpacity>
-              )}
-
-              {/* ② ヘルプの代わりに確認（ヘルプ未確認かつヘルプなしでない場合） */}
-              {confirmProxyTargetSeat?.assistantStaffName !== 'ヘルプなし' && !confirmProxyTargetSeat?.assistantStaffConfirmed && (
-                <TouchableOpacity
-                  style={[styles.proxyConfirmOptionBtn, { backgroundColor: isEcoMode ? '#2C2C2E' : '#FFFFFF', borderColor: theme.cardBorder }]}
-                  onPress={() => handleExecuteProxyConfirm(confirmProxyTargetSeat?.id, 'assistant')}
-                  activeOpacity={0.7}
-                >
-                  <Text style={{ fontSize: 18, marginRight: 10 }}>🤝</Text>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.proxyConfirmOptionTitle, { color: theme.textPrimary }]}>
-                      ヘルプ（{confirmProxyTargetSeat?.assistantStaffName || 'ヘルプ担当'}）の代わりに確認
-                    </Text>
-                    <Text style={[styles.proxyConfirmOptionSub, { color: theme.textTertiary }]}>
-                      ヘルプ担当者の確認を代行します
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={16} color={theme.textTertiary} />
-                </TouchableOpacity>
-              )}
-
-              {/* ③ 両者ともまとめて確認（両方未確認の場合） */}
-              {!confirmProxyTargetSeat?.mainStaffConfirmed && !confirmProxyTargetSeat?.assistantStaffConfirmed && confirmProxyTargetSeat?.assistantStaffName !== 'ヘルプなし' && (
-                <TouchableOpacity
-                  style={[styles.proxyConfirmOptionBtn, { backgroundColor: isEcoMode ? 'rgba(52, 199, 89, 0.15)' : 'rgba(52, 199, 89, 0.1)', borderColor: theme.success }]}
-                  onPress={() => handleExecuteProxyConfirm(confirmProxyTargetSeat?.id, 'both')}
-                  activeOpacity={0.7}
-                >
-                  <Ionicons name="checkmark-done-circle" size={20} color={theme.success} style={{ marginRight: 10 }} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.proxyConfirmOptionTitle, { color: theme.success }]}>
-                      両者ともまとめて代理確認する
-                    </Text>
-                    <Text style={[styles.proxyConfirmOptionSub, { color: theme.textSecondary }]}>
-                      メイン・ヘルプの両方を確認済みにします
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={16} color={theme.success} />
-                </TouchableOpacity>
-              )}
+              {/* ヘルプの代わりに確認 */}
+              <TouchableOpacity
+                style={[styles.proxyConfirmOptionBtn, { backgroundColor: isEcoMode ? '#2C2C2E' : '#FFFFFF', borderColor: theme.cardBorder }]}
+                onPress={() => handleExecuteProxyConfirm(confirmProxyTargetSeat?.id, 'assistant')}
+                activeOpacity={0.7}
+              >
+                <Text style={{ fontSize: 18, marginRight: 10 }}>🤝</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.proxyConfirmOptionTitle, { color: theme.textPrimary }]}>
+                    ヘルプ（{confirmProxyTargetSeat?.assistantStaffName || 'ヘルプ担当'}）の代わりに確認
+                  </Text>
+                  <Text style={[styles.proxyConfirmOptionSub, { color: theme.textTertiary }]}>
+                    ヘルプ担当者の確認を代行します（関係者に通知記録）
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={16} color={theme.textTertiary} />
+              </TouchableOpacity>
             </View>
 
             {/* キャンセルボタン */}
