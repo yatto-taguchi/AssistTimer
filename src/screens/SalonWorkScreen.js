@@ -95,6 +95,19 @@ export default function SalonWorkScreen() {
   const [isConfirmProxyModalVisible, setIsConfirmProxyModalVisible] = useState(false);
   const [confirmProxyTargetSeat, setConfirmProxyTargetSeat] = useState(null);
 
+  // 施術履歴（タイムライン）手動追加モーダル用ステート
+  const [isAddHistoryModalVisible, setIsAddHistoryModalVisible] = useState(false);
+  const [addHistoryTargetSeat, setAddHistoryTargetSeat] = useState(null);
+  const [inputHistoryText, setInputHistoryText] = useState('');
+
+  // 現在時刻HH:MMフォーマットヘルパー
+  const getCurrentTimeFormatted = () => {
+    const d = new Date();
+    const h = String(d.getHours()).padStart(2, '0');
+    const m = String(d.getMinutes()).padStart(2, '0');
+    return `${h}:${m}`;
+  };
+
   // 表示名（ニックネーム）編集用ステート
   const [isEditingUserName, setIsEditingUserName] = useState(false);
   const [inputUserName, setInputUserName] = useState('');
@@ -313,6 +326,7 @@ export default function SalonWorkScreen() {
           assistantStaffName: 'ヤマモト',
           isShampooing: false,
           targetSeconds: 1200,
+          initialMinutes: 20,
           targetEndTimestamp: Date.now() + 14 * 60 * 1000 + 20 * 1000, // 残り14分20秒
           comment: '根元チェック後乳化',
           timeUpTimestamp: null,
@@ -320,6 +334,10 @@ export default function SalonWorkScreen() {
           assistantStaffConfirmed: false,
           sosTriggered: false,
           escalationLevel: 0,
+          history: [
+            { id: 'h-1-1', time: '14:15', text: '10分放置', type: 'timer' },
+            { id: 'h-1-2', time: '14:25', text: '田口チェック', type: 'check' },
+          ],
         },
         {
           id: 'seat-2',
@@ -329,6 +347,7 @@ export default function SalonWorkScreen() {
           assistantStaffName: null,
           isShampooing: false,
           targetSeconds: 0,
+          initialMinutes: 0,
           targetEndTimestamp: 0,
           comment: '',
           timeUpTimestamp: null,
@@ -336,6 +355,7 @@ export default function SalonWorkScreen() {
           assistantStaffConfirmed: false,
           sosTriggered: false,
           escalationLevel: 0,
+          history: [],
         },
         {
           id: 'seat-3',
@@ -345,6 +365,7 @@ export default function SalonWorkScreen() {
           assistantStaffName: '田中',
           isShampooing: true, // シャンプー中
           targetSeconds: 1500,
+          initialMinutes: 22,
           targetEndTimestamp: Date.now() - 45 * 1000, // 超過45秒
           comment: 'トリートメント浸透中',
           timeUpTimestamp: Date.now() - 45 * 1000,
@@ -352,6 +373,12 @@ export default function SalonWorkScreen() {
           assistantStaffConfirmed: false,
           sosTriggered: false,
           escalationLevel: 1, // 30秒リマインド通過
+          history: [
+            { id: 'h-3-1', time: '13:55', text: '10分放置', type: 'timer' },
+            { id: 'h-3-2', time: '14:05', text: '田口チェック', type: 'check' },
+            { id: 'h-3-3', time: '14:10', text: '7分追加放置', type: 'extend' },
+            { id: 'h-3-4', time: '14:17', text: '伊藤シャンプー', type: 'action' },
+          ],
         },
         {
           id: 'seat-4',
@@ -361,6 +388,7 @@ export default function SalonWorkScreen() {
           assistantStaffName: null,
           isShampooing: false,
           targetSeconds: 0,
+          initialMinutes: 0,
           targetEndTimestamp: 0,
           comment: '',
           timeUpTimestamp: null,
@@ -368,6 +396,7 @@ export default function SalonWorkScreen() {
           assistantStaffConfirmed: false,
           sosTriggered: false,
           escalationLevel: 0,
+          history: [],
         },
         {
           id: 'seat-5',
@@ -377,6 +406,7 @@ export default function SalonWorkScreen() {
           assistantStaffName: null,
           isShampooing: false,
           targetSeconds: 0,
+          initialMinutes: 0,
           targetEndTimestamp: 0,
           comment: '',
           timeUpTimestamp: null,
@@ -384,6 +414,7 @@ export default function SalonWorkScreen() {
           assistantStaffConfirmed: false,
           sosTriggered: false,
           escalationLevel: 0,
+          history: [],
         },
       ];
       setSeats(initialSeats);
@@ -706,12 +737,21 @@ export default function SalonWorkScreen() {
 
   // タイム開始・時間変更の確定適用（新規開始または稼働中席の時間変更）
   const handleStartSeatTimer = () => {
-    const targetSec = (modalTargetMinutes || 20) * 60;
+    const mins = modalTargetMinutes || 20;
+    const targetSec = mins * 60;
     const endTs = Date.now() + targetSec * 1000;
+    const nowStr = getCurrentTimeFormatted();
 
     setSeats((prev) =>
       prev.map((s) => {
         if (s.id !== targetSeatId) return s;
+        const historyItem = {
+          id: `h-${Date.now()}`,
+          time: nowStr,
+          text: isEditingExistingTimer ? `${mins}分に変更` : `${mins}分放置`,
+          type: 'timer',
+        };
+        const prevHistory = s.history || [];
         return {
           ...s,
           seatLabel: modalSeatLabel.trim() || s.seatLabel,
@@ -720,8 +760,10 @@ export default function SalonWorkScreen() {
           assistantStaffName: modalAssistantStaff.trim() || null,
           isShampooing: isEditingExistingTimer ? s.isShampooing : false, // 時間変更時は既存のシャンプー中フラグを維持
           targetSeconds: targetSec,
+          initialMinutes: isEditingExistingTimer ? (s.initialMinutes || mins) : mins,
           targetEndTimestamp: endTs,
           comment: modalComment.trim(),
+          history: [...prevHistory, historyItem],
         };
       })
     );
@@ -979,15 +1021,65 @@ export default function SalonWorkScreen() {
 
   // ＋5分延長
   const handleExtend5Min = (seatId) => {
+    const nowStr = getCurrentTimeFormatted();
     setSeats((prev) =>
       prev.map((s) => {
         if (s.id !== seatId) return s;
+        const historyItem = {
+          id: `h-${Date.now()}`,
+          time: nowStr,
+          text: '5分追加放置',
+          type: 'extend',
+        };
+        const prevHist = s.history || [];
         return {
           ...s,
           targetEndTimestamp: s.targetEndTimestamp + 5 * 60 * 1000,
+          history: [...prevHist, historyItem],
         };
       })
     );
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 60]);
+    }
+  };
+
+  // 施術履歴手動追加モーダルを開く
+  const handleOpenAddHistoryModal = (seat) => {
+    setAddHistoryTargetSeat(seat);
+    setInputHistoryText('');
+    setIsAddHistoryModalVisible(true);
+  };
+
+  // 施術履歴の手動確定追加
+  const handleConfirmAddHistory = (customText) => {
+    const targetText = (customText || inputHistoryText || '').trim();
+    if (!targetText || !addHistoryTargetSeat) return;
+
+    const nowStr = getCurrentTimeFormatted();
+    const historyItem = {
+      id: `h-${Date.now()}`,
+      time: nowStr,
+      text: targetText,
+      type: 'action',
+    };
+
+    setSeats((prev) =>
+      prev.map((s) => {
+        if (s.id !== addHistoryTargetSeat.id) return s;
+        const prevHist = s.history || [];
+        return {
+          ...s,
+          history: [...prevHist, historyItem],
+        };
+      })
+    );
+
+    setIsAddHistoryModalVisible(false);
+    setInputHistoryText('');
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 50]);
+    }
   };
 
   // 施術終了（固定席なら待機中スリムバーに戻し、フリータイマーならボードから削除）
@@ -1660,6 +1752,13 @@ export default function SalonWorkScreen() {
                   >
                     {timeString}
                   </Text>
+                  {/* ★ ユーザー指定: カウントタイマーに最初の時間も下に小さく表示（何分で測ったのか一目でわかる） */}
+                  <View style={[styles.initialTimePill, { backgroundColor: isEcoMode ? '#252528' : '#F2F2F7', borderColor: theme.cardBorder }]}>
+                    <Ionicons name="timer-outline" size={11} color={theme.textTertiary} style={{ marginRight: 3 }} />
+                    <Text style={[styles.initialTimePillText, { color: theme.textSecondary }]}>
+                      初期設定: {item.initialMinutes || Math.round((item.targetSeconds || 1200) / 60)}分
+                    </Text>
+                  </View>
                 </TouchableOpacity>
                 <Text style={[styles.timerStatusBadge, { color: isPaused ? theme.warning : isOneMinBeforeHelpAlert ? theme.danger : theme.textSecondary }]}>
                   {isPaused
@@ -1771,6 +1870,59 @@ export default function SalonWorkScreen() {
                         <Text style={styles.safetySosPillText}>SOS発信済</Text>
                       </View>
                     )}
+                  </View>
+                </View>
+              ) : null}
+
+              {/* ★ ユーザー指定: タイマーの下に履歴が出るようにする（例: 10分放置 / 田口チェック / 7追加放置 / 伊藤シャンプー） */}
+              {item.history && item.history.length > 0 ? (
+                <View style={[styles.historyContainer, { backgroundColor: isEcoMode ? '#1C1C1E' : '#F8F9FA', borderColor: theme.cardBorder }]}>
+                  <View style={styles.historyHeaderRow}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Ionicons name="git-commit-outline" size={13} color={theme.accent} style={{ marginRight: 4 }} />
+                      <Text style={[styles.historyHeaderTitle, { color: theme.textSecondary }]}>
+                        施術履歴
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      onPress={() => handleOpenAddHistoryModal(item)}
+                      style={styles.addHistoryBtn}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="add-circle-outline" size={13} color={theme.accent} style={{ marginRight: 2 }} />
+                      <Text style={[styles.addHistoryBtnText, { color: theme.accent }]}>履歴追加</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <View style={styles.historyTimelineList}>
+                    {item.history.map((h, idx) => {
+                      const isLast = idx === item.history.length - 1;
+                      return (
+                        <View key={h.id || idx} style={styles.historyItemRow}>
+                          <View style={styles.timelineIndicatorColumn}>
+                            <View style={[
+                              styles.timelineDot,
+                              { backgroundColor: isLast ? theme.accent : (isEcoMode ? '#5E5E62' : '#C7C7CC') }
+                            ]} />
+                            {!isLast && <View style={[styles.timelineLine, { backgroundColor: isEcoMode ? '#38383A' : '#E5E5EA' }]} />}
+                          </View>
+                          <View style={styles.historyItemContent}>
+                            <Text style={[styles.historyItemTime, { color: theme.textTertiary }]}>
+                              {h.time}
+                            </Text>
+                            <Text style={[
+                              styles.historyItemText,
+                              {
+                                color: isLast ? theme.textPrimary : theme.textSecondary,
+                                fontWeight: isLast ? '700' : '500',
+                              }
+                            ]}>
+                              {h.text}
+                            </Text>
+                          </View>
+                        </View>
+                      );
+                    })}
                   </View>
                 </View>
               ) : null}
@@ -3106,6 +3258,110 @@ export default function SalonWorkScreen() {
             >
               <Text style={[styles.proxyCancelBtnText, { color: theme.textPrimary }]}>
                 キャンセル
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ⑪ 施術履歴手動追加モーダル */}
+      <Modal
+        visible={isAddHistoryModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setIsAddHistoryModalVisible(false)}
+      >
+        <TouchableOpacity
+          style={styles.actionModalOverlay}
+          activeOpacity={1}
+          onPress={() => setIsAddHistoryModalVisible(false)}
+        >
+          <View
+            style={[styles.addHistoryModalCard, { backgroundColor: theme.cardBg }]}
+            onStartShouldSetResponder={() => true}
+          >
+            {/* ヘッダー */}
+            <View style={styles.proxyConfirmHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <View style={[styles.proxyIconCircle, { backgroundColor: theme.accentLight }]}>
+                  <Ionicons name="list-outline" size={22} color={theme.accent} />
+                </View>
+                <View style={{ marginLeft: 10 }}>
+                  <Text style={[styles.proxyConfirmTitle, { color: theme.textPrimary }]}>
+                    施術履歴の追加
+                  </Text>
+                  <Text style={[styles.proxyConfirmSubtitle, { color: theme.textSecondary }]}>
+                    {addHistoryTargetSeat?.seatLabel} （{getCurrentTimeFormatted()} 記録）
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity onPress={() => setIsAddHistoryModalVisible(false)}>
+                <Ionicons name="close" size={24} color={theme.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            {/* クイックサジェストチップ群 */}
+            <Text style={[styles.proxyStatusCardLabel, { color: theme.textTertiary, marginBottom: 6 }]}>
+              よく使う工程（ワンタップで追加）
+            </Text>
+            <View style={styles.quickHistoryChipsContainer}>
+              {[
+                '10分放置',
+                `${userName || '担当'}チェック`,
+                '7分追加放置',
+                '伊藤シャンプー',
+                'コーミング完了',
+                '乳化チェック',
+                'トリートメント塗布',
+              ].map((itemText) => (
+                <TouchableOpacity
+                  key={itemText}
+                  style={[styles.quickHistoryChip, { backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7', borderColor: theme.cardBorder }]}
+                  onPress={() => handleConfirmAddHistory(itemText)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[styles.quickHistoryChipText, { color: theme.textPrimary }]}>
+                    ＋ {itemText}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* 自由入力フォーム */}
+            <Text style={[styles.proxyStatusCardLabel, { color: theme.textTertiary, marginTop: 10, marginBottom: 6 }]}>
+              直接入力して追加
+            </Text>
+            <View style={styles.helpInputRow}>
+              <TextInput
+                style={[
+                  styles.helpTextInput,
+                  { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.cardBorder },
+                ]}
+                placeholder="例: カラー塗布完了、5分延長など..."
+                placeholderTextColor={theme.textTertiary}
+                value={inputHistoryText}
+                onChangeText={setInputHistoryText}
+              />
+              <TouchableOpacity
+                style={[
+                  styles.helpSubmitBtn,
+                  { backgroundColor: inputHistoryText.trim() ? theme.accent : (isEcoMode ? '#3A3A3C' : '#D1D1D6') },
+                ]}
+                disabled={!inputHistoryText.trim()}
+                onPress={() => handleConfirmAddHistory(inputHistoryText)}
+              >
+                <Text style={styles.helpSubmitBtnText}>追加</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* 閉じるボタン */}
+            <TouchableOpacity
+              style={[styles.proxyCancelBtn, { backgroundColor: isEcoMode ? '#2C2C2E' : '#E5E5EA', marginTop: 10 }]}
+              onPress={() => setIsAddHistoryModalVisible(false)}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.proxyCancelBtnText, { color: theme.textPrimary }]}>
+                閉じる
               </Text>
             </TouchableOpacity>
           </View>
@@ -4452,6 +4708,123 @@ const styles = StyleSheet.create({
   },
   proxyCancelBtnText: {
     fontSize: 14,
+    fontWeight: '600',
+  },
+  // 初期設定時間ピル（何分で測ったのか一目でわかる表示）
+  initialTimePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    paddingHorizontal: 8,
+    paddingVertical: 2.5,
+    borderRadius: 8,
+    borderWidth: 1,
+    marginTop: 4,
+  },
+  initialTimePillText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  // 施術履歴（タイムライン）スタイル
+  historyContainer: {
+    borderRadius: 14,
+    borderWidth: 1,
+    padding: 12,
+    marginBottom: 12,
+  },
+  historyHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+    paddingBottom: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'rgba(128, 128, 128, 0.2)',
+  },
+  historyHeaderTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  addHistoryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  addHistoryBtnText: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  historyTimelineList: {
+    paddingLeft: 4,
+  },
+  historyItemRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    minHeight: 24,
+  },
+  timelineIndicatorColumn: {
+    width: 16,
+    alignItems: 'center',
+    paddingTop: 3,
+  },
+  timelineDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+    zIndex: 2,
+  },
+  timelineLine: {
+    width: 1.5,
+    flex: 1,
+    minHeight: 16,
+    marginTop: -1,
+  },
+  historyItemContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    paddingLeft: 6,
+    paddingBottom: 6,
+  },
+  historyItemTime: {
+    fontSize: 11,
+    fontVariant: ['tabular-nums'],
+    marginRight: 8,
+    width: 36,
+  },
+  historyItemText: {
+    fontSize: 12,
+    flex: 1,
+  },
+  // 施術履歴追加モーダル
+  addHistoryModalCard: {
+    width: '100%',
+    maxWidth: 360,
+    borderRadius: 24,
+    padding: 20,
+    alignItems: 'stretch',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  quickHistoryChipsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginBottom: 8,
+  },
+  quickHistoryChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  quickHistoryChipText: {
+    fontSize: 12,
     fontWeight: '600',
   },
 });
