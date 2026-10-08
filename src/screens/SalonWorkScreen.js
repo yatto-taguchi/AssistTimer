@@ -2298,12 +2298,31 @@ export default function SalonWorkScreen() {
                 },
               ]}
             >
-              {/* カード上段: 席名 ＆ 状態ステータスバッジ（放置中 / 停止中 / タイム超過 / ヘルプ未定 等） ＆ 折りたたみボタン */}
+              {/* カード上段: 席名 ＆ タイマー作成者 ＆ 状態ステータスバッジ（放置中 / 停止中 / タイム超過 / ヘルプ未定 等） ＆ 折りたたみボタン */}
               <View style={styles.cardHeader}>
-                <View style={[styles.seatLabelContainer, item.isFreeTimer && { backgroundColor: theme.accentLight }]}>
-                  <Text style={[styles.seatLabelText, { color: item.isFreeTimer ? theme.accent : theme.textPrimary }]}>
-                    {item.isFreeTimer ? `⏱️ ${item.seatLabel}` : item.seatLabel}
-                  </Text>
+                <View style={styles.cardHeaderLeft}>
+                  <View style={[styles.seatLabelContainer, item.isFreeTimer && { backgroundColor: theme.accentLight }]}>
+                    <Text style={[styles.seatLabelText, { color: item.isFreeTimer ? theme.accent : theme.textPrimary }]}>
+                      {item.isFreeTimer ? `⏱️ ${item.seatLabel}` : item.seatLabel}
+                    </Text>
+                  </View>
+
+                  {/* ★ ユーザー指定: 1番席の右の所にタイマー作成者の名前を表示 */}
+                  {item.colorStaffName ? (
+                    <View
+                      style={[
+                        styles.headerCreatorBadge,
+                        {
+                          backgroundColor: isEcoMode ? '#252528' : '#F2F2F7',
+                          borderColor: theme.cardBorder,
+                        },
+                      ]}
+                    >
+                      <Text style={[styles.headerCreatorText, { color: theme.textSecondary }]}>
+                        ⏱️ {item.colorStaffName}
+                      </Text>
+                    </View>
+                  ) : null}
                 </View>
 
                 <View style={styles.cardHeaderRight}>
@@ -2750,88 +2769,6 @@ export default function SalonWorkScreen() {
                 </View>
               ) : null}
 
-              {/* カード下段: 担当者情報 */}
-              <View style={styles.staffRow}>
-                <View style={styles.staffItem}>
-                  <Text style={[styles.staffRoleLabel, { color: theme.textTertiary }]}>
-                    タイマー作成
-                  </Text>
-                  <Text style={[styles.staffNameText, { color: theme.textPrimary }]}>
-                    ⏱️ {item.colorStaffName || '未設定'}
-                  </Text>
-                </View>
-
-                <View style={styles.staffItem}>
-                  <View style={styles.staffRoleHeader}>
-                    <Text style={[styles.staffRoleLabel, { color: theme.textTertiary }]}>
-                      ヘルプ担当
-                    </Text>
-                    {item.assistantStaffName ? (
-                      <TouchableOpacity
-                        onPress={() => handleOpenHelpAssignModal(item)}
-                        style={styles.changeHelpChip}
-                      >
-                        <Text style={[styles.changeHelpChipText, { color: theme.accent }]}>
-                          変更 ▾
-                        </Text>
-                      </TouchableOpacity>
-                    ) : null}
-                  </View>
-                  {isNoHelp ? (
-                    <TouchableOpacity
-                      activeOpacity={0.7}
-                      style={[
-                        styles.assistantAssignedBox,
-                        { backgroundColor: isEcoMode ? '#252528' : '#F3F4F6', borderColor: theme.cardBorder },
-                      ]}
-                      onPress={() => handleOpenHelpAssignModal(item)}
-                    >
-                      <Text style={[styles.staffNameText, { color: theme.textSecondary }]}>
-                        ヘルプなし（1人で施術）
-                      </Text>
-                      <Ionicons name="swap-horizontal" size={13} color={theme.textTertiary} style={{ marginLeft: 4 }} />
-                    </TouchableOpacity>
-                  ) : item.assistantStaffName ? (
-                    <TouchableOpacity
-                      activeOpacity={0.7}
-                      style={[
-                        styles.assistantAssignedBox,
-                        { backgroundColor: isEcoMode ? '#252528' : '#F6F8FA', borderColor: theme.cardBorder },
-                      ]}
-                      onPress={() => handleOpenHelpAssignModal(item)}
-                    >
-                      <Text style={[styles.staffNameText, { color: theme.textPrimary }]}>
-                        {getActionStatusInfo(item.actionStatus, item.isShampooing) ? `${getActionStatusInfo(item.actionStatus, item.isShampooing).label}: ` : ''}{item.assistantStaffName}
-                      </Text>
-                      <Ionicons name="swap-horizontal" size={13} color={theme.accent} style={{ marginLeft: 4 }} />
-                    </TouchableOpacity>
-                  ) : (
-                    <TouchableOpacity
-                      style={[
-                        styles.takeAssistantButton,
-                        isOneMinBeforeHelpAlert
-                          ? { backgroundColor: '#FEE2E2', borderColor: theme.danger, borderWidth: 1.5 }
-                          : { backgroundColor: theme.accentLight, borderColor: theme.accentBorder },
-                      ]}
-                      onPress={() => handleOpenHelpAssignModal(item)}
-                    >
-                      <Text
-                        style={[
-                          styles.takeAssistantText,
-                          {
-                            color: isOneMinBeforeHelpAlert ? theme.danger : theme.accent,
-                            fontWeight: isOneMinBeforeHelpAlert ? '700' : '600',
-                          },
-                        ]}
-                      >
-                        {isOneMinBeforeHelpAlert
-                          ? (getActionStatusInfo(item.actionStatus, item.isShampooing) ? `${getActionStatusInfo(item.actionStatus, item.isShampooing).label}未定 (あと1分) ▾` : '未定 (あと1分) ▾')
-                          : (getActionStatusInfo(item.actionStatus, item.isShampooing) ? `${getActionStatusInfo(item.actionStatus, item.isShampooing).label}未定 ▾` : '未定 (タップで指定) ▾')}
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-              </View>
 
               {/* コメント行（カード画面から直接タップで編集可能） */}
               <TouchableOpacity
@@ -5298,6 +5235,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 6,
   },
+  cardHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexShrink: 1,
+  },
   seatLabelContainer: {
     backgroundColor: 'rgba(128, 128, 128, 0.12)',
     paddingHorizontal: 10,
@@ -5307,6 +5250,19 @@ const styles = StyleSheet.create({
   seatLabelText: {
     fontSize: 14,
     fontWeight: '700',
+  },
+  // ★ ユーザー指定: 1番席の右にタイマー作成者を表示するバッジ
+  headerCreatorBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  headerCreatorText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
   shampooButton: {
     flexDirection: 'row',
