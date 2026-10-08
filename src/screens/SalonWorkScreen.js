@@ -141,6 +141,11 @@ export default function SalonWorkScreen() {
   const [isAddingFavorite, setIsAddingFavorite] = useState(false);
   const [newFavoriteLabel, setNewFavoriteLabel] = useState('');
 
+  // カード画面からの直接メモ編集モーダル用ステート
+  const [isEditCommentModalVisible, setIsEditCommentModalVisible] = useState(false);
+  const [commentTargetSeat, setCommentTargetSeat] = useState(null);
+  const [editCommentText, setEditCommentText] = useState('');
+
   // 招待コード参加・新規作成フォーム用
   const [inputInviteCode, setInputInviteCode] = useState('');
   const [inputSalonName, setInputSalonName] = useState('');
@@ -911,7 +916,7 @@ export default function SalonWorkScreen() {
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
             colorStaffName: modalColorStaff.trim() || userName || 'スタイリスト',
-            assistantStaffName: modalAssistantStaff.trim() || null,
+            assistantStaffName: s.assistantStaffName || null,
             isShampooing: false,
             targetSeconds: targetSec,
             initialMinutes: mins,
@@ -920,7 +925,7 @@ export default function SalonWorkScreen() {
             stoppedBy: null,
             mainStaffConfirmed: false,
             assistantStaffConfirmed: false,
-            comment: modalComment.trim(),
+            comment: s.comment || '',
             history: newHistory,
           };
         }
@@ -939,7 +944,7 @@ export default function SalonWorkScreen() {
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
             colorStaffName: modalColorStaff.trim() || s.colorStaffName || userName || 'スタイリスト',
-            assistantStaffName: modalAssistantStaff.trim() || s.assistantStaffName || null,
+            assistantStaffName: s.assistantStaffName || null,
             isShampooing: s.isShampooing,
             targetSeconds: targetSec,
             initialMinutes: mins,
@@ -948,7 +953,7 @@ export default function SalonWorkScreen() {
             stoppedBy: null,
             mainStaffConfirmed: false,
             assistantStaffConfirmed: false,
-            comment: modalComment.trim(),
+            comment: s.comment || '',
             history: [...prevHistory, additionalHistoryItem],
           };
         }
@@ -967,12 +972,12 @@ export default function SalonWorkScreen() {
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
             colorStaffName: modalColorStaff.trim() || s.colorStaffName || userName || 'スタイリスト',
-            assistantStaffName: modalAssistantStaff.trim() || s.assistantStaffName || null,
+            assistantStaffName: s.assistantStaffName || null,
             isShampooing: s.isShampooing,
             targetSeconds: targetSec,
             initialMinutes: s.initialMinutes || mins,
             targetEndTimestamp: endTs,
-            comment: modalComment.trim(),
+            comment: s.comment || '',
             history: [...prevHistory, historyItem],
           };
         }
@@ -990,7 +995,7 @@ export default function SalonWorkScreen() {
           seatLabel: modalSeatLabel.trim() || s.seatLabel,
           status: 'running',
           colorStaffName: modalColorStaff.trim() || userName || 'スタイリスト',
-          assistantStaffName: modalAssistantStaff.trim() || null,
+          assistantStaffName: s.assistantStaffName || null,
           isShampooing: false,
           targetSeconds: targetSec,
           initialMinutes: mins,
@@ -999,7 +1004,7 @@ export default function SalonWorkScreen() {
           stoppedBy: null,
           mainStaffConfirmed: false,
           assistantStaffConfirmed: false,
-          comment: modalComment.trim(),
+          comment: s.comment || '',
           history: [...prevHistory, historyItem],
         };
       })
@@ -1007,6 +1012,32 @@ export default function SalonWorkScreen() {
     setIsSetTimerModalVisible(false);
     setIsEditingExistingTimer(false);
     setTimerSetupMode('default');
+  };
+
+  // カード画面から直接メモを編集するモーダルを開く
+  const handleOpenEditCommentModal = (seat) => {
+    setCommentTargetSeat(seat);
+    setEditCommentText(seat.comment || '');
+    setIsEditCommentModalVisible(true);
+  };
+
+  // メモを確定保存
+  const handleSaveComment = () => {
+    if (!commentTargetSeat) return;
+    const newComment = editCommentText.trim();
+    setSeats((prev) =>
+      prev.map((s) => {
+        if (s.id !== commentTargetSeat.id) return s;
+        return {
+          ...s,
+          comment: newComment,
+        };
+      })
+    );
+    setIsEditCommentModalVisible(false);
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 40]);
+    }
   };
 
   // ヘルプ（アシスタント）柔軟指定・変更モーダルを開く
@@ -2252,15 +2283,45 @@ export default function SalonWorkScreen() {
                 </View>
               </View>
 
-              {/* コメント行 */}
-              {item.comment ? (
-                <View style={[styles.commentContainer, { backgroundColor: theme.inputBg }]}>
-                  <Ionicons name="chatbubble-ellipses-outline" size={13} color={theme.textTertiary} style={{ marginRight: 5 }} />
-                  <Text style={[styles.commentText, { color: theme.textSecondary }]} numberOfLines={2}>
-                    {item.comment}
-                  </Text>
-                </View>
-              ) : null}
+              {/* コメント行（カード画面から直接タップで編集可能） */}
+              <TouchableOpacity
+                style={[
+                  styles.commentContainer,
+                  {
+                    backgroundColor: item.comment ? theme.inputBg : (isEcoMode ? '#222225' : '#F9F9FB'),
+                    borderColor: item.comment ? 'transparent' : theme.cardBorder,
+                    borderWidth: item.comment ? 0 : 1,
+                    borderStyle: item.comment ? 'solid' : 'dashed',
+                  },
+                ]}
+                onPress={() => handleOpenEditCommentModal(item)}
+                activeOpacity={0.7}
+              >
+                <Ionicons
+                  name={item.comment ? "chatbubble-ellipses-outline" : "add-circle-outline"}
+                  size={13}
+                  color={item.comment ? theme.textTertiary : theme.accent}
+                  style={{ marginRight: 5 }}
+                />
+                <Text
+                  style={[
+                    styles.commentText,
+                    {
+                      color: item.comment ? theme.textSecondary : theme.accent,
+                      fontStyle: item.comment ? 'normal' : 'italic',
+                    },
+                  ]}
+                  numberOfLines={2}
+                >
+                  {item.comment ? item.comment : '＋ 施術メモを追加'}
+                </Text>
+                <Ionicons
+                  name="pencil"
+                  size={12}
+                  color={theme.textTertiary}
+                  style={{ marginLeft: 'auto' }}
+                />
+              </TouchableOpacity>
 
               {/* 操作ボタングループ */}
               <View style={[styles.cardActionRow, { borderColor: theme.cardBorder }]}>
@@ -2797,54 +2858,6 @@ export default function SalonWorkScreen() {
                 placeholderTextColor={theme.textTertiary}
                 value={modalColorStaff}
                 onChangeText={setModalColorStaff}
-              />
-
-              {/* ヘルプ担当 */}
-              <Text style={[styles.inputLabel, { color: theme.textSecondary }]}>ヘルプ担当 (未定なら空欄)</Text>
-              <TextInput
-                style={[styles.textInput, { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.cardBorder }]}
-                placeholder="空欄で『立候補待ち』になります"
-                placeholderTextColor={theme.textTertiary}
-                value={modalAssistantStaff}
-                onChangeText={setModalAssistantStaff}
-              />
-              <View style={{ flexDirection: 'row', gap: 8, marginTop: 4, marginBottom: 12 }}>
-                <TouchableOpacity
-                  style={[styles.quickStaffChip, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
-                  onPress={() => setModalAssistantStaff(userName || '自分')}
-                >
-                  <Text style={[styles.quickStaffChipText, { color: theme.accent }]}>+ 自分がヘルプ</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.quickStaffChip,
-                    {
-                      backgroundColor: modalAssistantStaff === 'ヘルプなし' ? theme.accentLight : theme.inputBg,
-                      borderColor: modalAssistantStaff === 'ヘルプなし' ? theme.accent : theme.cardBorder,
-                    },
-                  ]}
-                  onPress={() => setModalAssistantStaff(modalAssistantStaff === 'ヘルプなし' ? '' : 'ヘルプなし')}
-                >
-                  <Text
-                    style={[
-                      styles.quickStaffChipText,
-                      { color: modalAssistantStaff === 'ヘルプなし' ? theme.accent : theme.textSecondary },
-                    ]}
-                  >
-                    👤 ヘルプなし
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {/* コメント */}
-              <Text style={[styles.inputLabel, { color: theme.textSecondary }]}>コメント・施術メモ</Text>
-              <TextInput
-                style={[styles.textInput, { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.cardBorder, height: 60 }]}
-                placeholder="例: 根元チェック後乳化、耳カバー注意"
-                placeholderTextColor={theme.textTertiary}
-                value={modalComment}
-                onChangeText={setModalComment}
-                multiline={true}
               />
 
               <TouchableOpacity
@@ -3681,6 +3694,85 @@ export default function SalonWorkScreen() {
                 ) : null}
               </View>
             </ScrollView>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ⑨-B 施術メモ編集モーダル（カード画面から直接タップで編集） */}
+      <Modal
+        visible={isEditCommentModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setIsEditCommentModalVisible(false)}
+      >
+        <TouchableOpacity
+          style={styles.actionModalOverlay}
+          activeOpacity={1}
+          onPress={() => setIsEditCommentModalVisible(false)}
+        >
+          <View
+            style={[styles.actionModalCard, { backgroundColor: theme.cardBg }]}
+            onStartShouldSetResponder={() => true}
+          >
+            <View style={styles.actionModalHeaderRow}>
+              <Text style={[styles.actionModalTitle, { color: theme.textPrimary, marginBottom: 0 }]}>
+                💬 施術メモの編集
+              </Text>
+              <TouchableOpacity
+                onPress={() => setIsEditCommentModalVisible(false)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Ionicons name="close" size={22} color={theme.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={[styles.actionModalMessage, { color: theme.textSecondary, marginBottom: 14 }]}>
+              「{commentTargetSeat?.seatLabel || '対象席'}」の施術メモを入力
+            </Text>
+
+            <TextInput
+              style={[
+                styles.textInput,
+                {
+                  backgroundColor: theme.inputBg,
+                  color: theme.textPrimary,
+                  borderColor: theme.cardBorder,
+                  height: 70,
+                  textAlignVertical: 'top',
+                  width: '100%',
+                  marginBottom: 14,
+                },
+              ]}
+              placeholder="例: 根元チェック後乳化、耳カバー注意など"
+              placeholderTextColor={theme.textTertiary}
+              value={editCommentText}
+              onChangeText={setEditCommentText}
+              multiline={true}
+              autoFocus={true}
+            />
+
+            <View style={{ flexDirection: 'row', width: '100%', gap: 10 }}>
+              <TouchableOpacity
+                style={[
+                  styles.actionModalCancelBtn,
+                  { backgroundColor: isEcoMode ? '#2C2C2E' : '#E5E5EA' },
+                ]}
+                onPress={() => setIsEditCommentModalVisible(false)}
+              >
+                <Text style={[styles.actionModalCancelBtnText, { color: theme.textPrimary }]}>
+                  キャンセル
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.actionModalChangeBtn, { backgroundColor: theme.accent }]}
+                onPress={handleSaveComment}
+              >
+                <Text style={[styles.actionModalChangeBtnText, { color: '#FFFFFF' }]}>
+                  保存する
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </TouchableOpacity>
       </Modal>
