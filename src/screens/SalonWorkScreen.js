@@ -576,30 +576,58 @@ export default function SalonWorkScreen() {
     setIsSetTimerModalVisible(true);
   };
 
-  // モーダルから「タイマーを止める。」を押した時（第3者が止めた場合は3名に通知）
-  const handleStopTimerWithNotification = () => {
+  // モーダルから「タイマーを止める / 施術状態（コーミング/シャンプー等）に変更」を押した時
+  const handleStopTimerWithNotification = (newActionStatusOverride) => {
     if (!actionTargetSeat) return;
     const seat = actionTargetSeat;
     setIsTimeActionModalVisible(false);
 
     const currentUser = (userName || 'スタッフ').trim();
+    // ヘルプ指定された項目（引数で上書き指定があればそれ、なければ席のヘルプ指定値、なければnull）
+    const determinedActionId =
+      newActionStatusOverride !== undefined
+        ? newActionStatusOverride
+        : seat.actionStatus || (seat.isShampooing ? 'shampoo' : null);
+
+    const actionInfo = getActionStatusInfo(determinedActionId, determinedActionId === 'shampoo');
 
     // アコーディオンを自動で折りたたみ（スリムバー化）
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setExpandedPausedSeatIds((prev) => ({ ...prev, [seat.id]: false }));
 
-    // タイマーを一時停止状態にし、確認フラグをON（緑色シグナルへ移行）、停止者を記録
+    const nowStr = getCurrentTimeFormatted();
+    // 担当スタッフ名（アシスタント担当がいればその名前、いなければ操作者）
+    const staffName =
+      determinedActionId === 'shampoo' || determinedActionId === 'combing'
+        ? seat.assistantStaffName || currentUser
+        : currentUser;
+
+    const actionLabel = actionInfo ? actionInfo.label : null;
+    const historyText = actionLabel ? `${staffName} ${actionLabel}` : `${currentUser} 停止`;
+
+    const historyItem = {
+      id: `h-${Date.now()}`,
+      time: nowStr,
+      text: historyText,
+      type: 'status',
+    };
+
+    // タイマーを一時停止状態にし、指定されたステータスに変更、確認フラグをON（緑色シグナルへ移行）、停止者を記録、履歴追記
     setSeats((prev) =>
       prev.map((s) => {
         if (s.id !== seat.id) return s;
         const remaining = Math.max(0, Math.floor((s.targetEndTimestamp - Date.now()) / 1000));
+        const prevHistory = s.history || [];
         return {
           ...s,
           status: 'paused',
           pausedRemainingSeconds: remaining,
+          actionStatus: determinedActionId || null,
+          isShampooing: determinedActionId === 'shampoo',
           mainStaffConfirmed: true,
           assistantStaffConfirmed: true,
           stoppedBy: currentUser,
+          history: [...prevHistory, historyItem],
         };
       })
     );
@@ -615,18 +643,20 @@ export default function SalonWorkScreen() {
     const isAssist = assistStaff && assistStaff.toLowerCase() === currentUser.toLowerCase();
     const isThirdParty = !isMain && !isAssist;
 
+    const statusBadgeText = actionInfo ? `【${actionInfo.badge}】` : 'タイマー停止';
+
     if (isThirdParty) {
       // 第3者が止めた場合 -> メイン担当・ヘルプ担当・停止した第3者の3名に通知！
       Alert.alert(
-        '🔔 第3者によるタイマー停止通知 (3名共有)',
-        `「${seat.seatLabel}」のタイマーを【${currentUser}】（第3者）さんが停止しました。\n\n【関係者3名へリアルタイム通知完了】\n・🎨 ${mainStaff || 'メイン担当'}\n・🤝 ${assistStaff || 'ヘルプ担当'}\n・👤 ${currentUser}（停止操作者）\n\n関係者3名全員の端末およびApple Watchに「タイマー停止・確認完了」が届きました。`,
+        `🔔 第3者による停止・${actionLabel ? `${actionLabel}移行` : '停止'}通知 (3名共有)`,
+        `「${seat.seatLabel}」のタイマーを【${currentUser}】（第3者）さんが停止し、${statusBadgeText}に変更しました。\n\n【関係者3名へリアルタイム通知完了】\n・🎨 ${mainStaff || 'メイン担当'}\n・🤝 ${assistStaff || 'ヘルプ担当'}\n・👤 ${currentUser}（操作者）\n\n関係者3名全員の端末およびApple Watchに通知が届きました。`,
         [{ text: 'OK' }]
       );
     } else {
       // メイン担当またはヘルプ担当が止めた場合 -> 2名お互いに通知
       Alert.alert(
-        '🔔 タイマー停止・確認通知',
-        `「${seat.seatLabel}」のタイマーを停止しました。\n\n【お互いへの確認通知】\n・🎨 ${mainStaff || 'メイン担当'} に通知\n・🤝 ${assistStaff || 'ヘルプ担当'} に通知\n\n両者の端末およびApple Watchに「タイマー停止・確認完了」がリアルタイム通知されました。`,
+        `🔔 タイマー停止 ＆ ${actionLabel ? `${actionLabel}移行` : '確認'}通知`,
+        `「${seat.seatLabel}」のタイマーを停止し、${statusBadgeText}に変更しました。\n\n【お互いへの確認通知】\n・🎨 ${mainStaff || 'メイン担当'} に通知\n・🤝 ${assistStaff || 'ヘルプ担当'} に通知\n\n両者の端末およびApple Watchにリアルタイム通知されました。`,
         [{ text: 'OK' }]
       );
     }
@@ -3108,23 +3138,154 @@ export default function SalonWorkScreen() {
                   </TouchableOpacity>
                 </View>
 
-                {/* 下段: タイマーを止める。（お互いに通知確認が届く） */}
-                <TouchableOpacity
-                  style={[
-                    styles.actionModalStopBtn,
-                    {
-                      backgroundColor: isEcoMode ? 'rgba(239, 68, 68, 0.18)' : '#FEE2E2',
-                      borderColor: theme.danger,
-                    },
-                  ]}
-                  onPress={handleStopTimerWithNotification}
-                  activeOpacity={0.7}
-                >
-                  <Ionicons name="stop-circle" size={20} color={theme.danger} style={{ marginRight: 6 }} />
-                  <Text style={[styles.actionModalStopBtnText, { color: theme.danger }]}>
-                    タイマーを止める。
-                  </Text>
-                </TouchableOpacity>
+                {/* 下段: タイマー停止 ＆ 施術ステータス変更（ヘルプ指定項目に自動連動） */}
+                {(() => {
+                  const targetHelpActionId =
+                    actionTargetSeat?.actionStatus ||
+                    (actionTargetSeat?.isShampooing ? 'shampoo' : null);
+                  const targetHelpActionInfo = getActionStatusInfo(
+                    targetHelpActionId,
+                    actionTargetSeat?.isShampooing
+                  );
+
+                  return (
+                    <>
+                      <TouchableOpacity
+                        style={[
+                          styles.actionModalStopBtn,
+                          targetHelpActionInfo
+                            ? {
+                                backgroundColor: isEcoMode
+                                  ? 'rgba(0,0,0,0.3)'
+                                  : targetHelpActionInfo.bg,
+                                borderColor: targetHelpActionInfo.color,
+                              }
+                            : {
+                                backgroundColor: isEcoMode
+                                  ? 'rgba(239, 68, 68, 0.18)'
+                                  : '#FEE2E2',
+                                borderColor: theme.danger,
+                              },
+                        ]}
+                        onPress={() => handleStopTimerWithNotification(targetHelpActionId)}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons
+                          name={
+                            targetHelpActionInfo
+                              ? targetHelpActionInfo.icon
+                              : 'stop-circle'
+                          }
+                          size={20}
+                          color={
+                            targetHelpActionInfo
+                              ? targetHelpActionInfo.color
+                              : theme.danger
+                          }
+                          style={{ marginRight: 6 }}
+                        />
+                        <Text
+                          style={[
+                            styles.actionModalStopBtnText,
+                            {
+                              color: targetHelpActionInfo
+                                ? targetHelpActionInfo.color
+                                : theme.danger,
+                            },
+                          ]}
+                        >
+                          {targetHelpActionInfo
+                            ? `タイマーを止めて${targetHelpActionInfo.label}する`
+                            : 'タイマーを止める。'}
+                        </Text>
+                      </TouchableOpacity>
+
+                      {/* 他の施術状態に変更して停止できるクイックピル */}
+                      <View style={styles.actionModalStatusPillsSection}>
+                        <Text
+                          style={[
+                            styles.actionModalStatusPillsTitle,
+                            { color: theme.textSecondary },
+                          ]}
+                        >
+                          状態を変更して停止:
+                        </Text>
+                        <View style={styles.actionModalStatusPillsRow}>
+                          {SALON_ACTION_STATUS_OPTIONS.map((opt) => {
+                            const isSelected = targetHelpActionId === opt.id;
+                            return (
+                              <TouchableOpacity
+                                key={opt.id}
+                                style={[
+                                  styles.actionModalStatusPill,
+                                  {
+                                    backgroundColor: isSelected
+                                      ? opt.color
+                                      : isEcoMode
+                                      ? '#2C2C2E'
+                                      : '#F2F2F7',
+                                    borderColor: opt.color,
+                                  },
+                                ]}
+                                onPress={() => handleStopTimerWithNotification(opt.id)}
+                                activeOpacity={0.7}
+                              >
+                                <Ionicons
+                                  name={opt.icon}
+                                  size={12}
+                                  color={isSelected ? '#FFFFFF' : opt.color}
+                                  style={{ marginRight: 3 }}
+                                />
+                                <Text
+                                  style={[
+                                    styles.actionModalStatusPillText,
+                                    {
+                                      color: isSelected
+                                        ? '#FFFFFF'
+                                        : theme.textPrimary,
+                                    },
+                                  ]}
+                                >
+                                  {opt.label}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                          {targetHelpActionInfo && (
+                            <TouchableOpacity
+                              style={[
+                                styles.actionModalStatusPill,
+                                {
+                                  backgroundColor: isEcoMode
+                                    ? '#2C2C2E'
+                                    : '#F2F2F7',
+                                  borderColor: theme.danger,
+                                },
+                              ]}
+                              onPress={() => handleStopTimerWithNotification(null)}
+                              activeOpacity={0.7}
+                            >
+                              <Ionicons
+                                name="stop"
+                                size={11}
+                                color={theme.danger}
+                                style={{ marginRight: 2 }}
+                              />
+                              <Text
+                                style={[
+                                  styles.actionModalStatusPillText,
+                                  { color: theme.danger },
+                                ]}
+                              >
+                                通常停止
+                              </Text>
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                      </View>
+                    </>
+                  );
+                })()}
 
                 <Text style={[styles.actionModalNote, { color: theme.textTertiary }]}>
                   ※停止するとメイン担当・ヘルプ担当の両者に停止・確認通知が届きます
@@ -4669,6 +4830,35 @@ const styles = StyleSheet.create({
   },
   actionModalStopBtnText: {
     fontSize: 15,
+    fontWeight: '700',
+  },
+  actionModalStatusPillsSection: {
+    width: '100%',
+    marginTop: 10,
+    marginBottom: 4,
+  },
+  actionModalStatusPillsTitle: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  actionModalStatusPillsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  actionModalStatusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  actionModalStatusPillText: {
+    fontSize: 11,
     fontWeight: '700',
   },
   actionModalNote: {
