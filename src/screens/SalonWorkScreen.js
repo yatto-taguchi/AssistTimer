@@ -158,6 +158,7 @@ export default function SalonWorkScreen() {
   const [targetSeatId, setTargetSeatId] = useState(null);
   const [modalSeatLabel, setModalSeatLabel] = useState('');
   const [modalTargetMinutes, setModalTargetMinutes] = useState(20);
+  const [modalTargetSeconds, setModalTargetSeconds] = useState(0);
   const [modalColorStaff, setModalColorStaff] = useState('');
   const [modalAssistantStaff, setModalAssistantStaff] = useState('');
   const [modalComment, setModalComment] = useState('');
@@ -558,6 +559,7 @@ export default function SalonWorkScreen() {
     setTargetSeatId(seat.id);
     setModalSeatLabel(seat.seatLabel);
     setModalTargetMinutes(20);
+    setModalTargetSeconds(0);
     setModalColorStaff(userName || 'スタイリスト');
     setModalAssistantStaff('');
     setModalComment('');
@@ -579,8 +581,9 @@ export default function SalonWorkScreen() {
     const seat = actionTargetSeat;
     setTargetSeatId(seat.id);
     setModalSeatLabel(seat.seatLabel);
-    const initialMinutes = seat.targetSeconds ? Math.round(seat.targetSeconds / 60) : 20;
-    setModalTargetMinutes(initialMinutes);
+    const initialSec = seat.targetSeconds || (20 * 60);
+    setModalTargetMinutes(Math.floor(initialSec / 60));
+    setModalTargetSeconds(initialSec % 60);
     setModalColorStaff(seat.colorStaffName || userName || 'スタイリスト');
     setModalAssistantStaff(seat.assistantStaffName || '');
     setModalComment(seat.comment || '');
@@ -597,6 +600,7 @@ export default function SalonWorkScreen() {
     setTargetSeatId(seat.id);
     setModalSeatLabel(seat.seatLabel);
     setModalTargetMinutes(20);
+    setModalTargetSeconds(0);
     setModalColorStaff(seat.colorStaffName || userName || 'スタイリスト');
     setModalAssistantStaff('');
     setModalComment('');
@@ -613,6 +617,7 @@ export default function SalonWorkScreen() {
     setTargetSeatId(seat.id);
     setModalSeatLabel(seat.seatLabel);
     setModalTargetMinutes(7);
+    setModalTargetSeconds(0);
     setModalColorStaff(seat.colorStaffName || userName || 'スタイリスト');
     setModalAssistantStaff(seat.assistantStaffName || '');
     setModalComment(seat.comment || '');
@@ -875,26 +880,71 @@ export default function SalonWorkScreen() {
     }
   };
 
+  // 放置タイムの文字列表現ヘルパー（例: "7分", "7分30秒", "30秒"）
+  const formatModalTargetTime = (mins, secs) => {
+    const m = Number(mins) || 0;
+    const s = Number(secs) || 0;
+    if (m === 0 && s === 0) return '0秒';
+    if (m === 0) return `${s}秒`;
+    if (s === 0) return `${m}分`;
+    return `${m}分${s}秒`;
+  };
+
+  // 秒単位の微調整（-30秒, -10秒, +10秒, +30秒）
+  const handleAdjustTargetSeconds = (deltaSec) => {
+    const currentTotal = (Number(modalTargetMinutes) || 0) * 60 + (Number(modalTargetSeconds) || 0);
+    const newTotal = Math.max(10, Math.min(999 * 60, currentTotal + deltaSec));
+    setModalTargetMinutes(Math.floor(newTotal / 60));
+    setModalTargetSeconds(newTotal % 60);
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 30]);
+    }
+  };
+
+  // 分単位の微調整（-5分, -1分, +1分, +5分）
+  const handleAdjustTargetMinutes = (deltaMin) => {
+    const currentTotal = (Number(modalTargetMinutes) || 0) * 60 + (Number(modalTargetSeconds) || 0);
+    const newTotal = Math.max(10, Math.min(999 * 60, currentTotal + deltaMin * 60));
+    setModalTargetMinutes(Math.floor(newTotal / 60));
+    setModalTargetSeconds(newTotal % 60);
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 30]);
+    }
+  };
+
+  // クイック分選択ピル
+  const handleSelectQuickMinute = (min) => {
+    setModalTargetMinutes(min);
+    setModalTargetSeconds(0);
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 30]);
+    }
+  };
+
   // 現在の放置タイムをお気に入りに追加
   const handleAddCurrentAsFavorite = (customLabel = '') => {
-    const mins = parseInt(modalTargetMinutes, 10);
-    if (isNaN(mins) || mins <= 0) {
-      Alert.alert('登録エラー', '1分以上の有効な時間を設定してください。');
+    const mins = Number(modalTargetMinutes) || 0;
+    const secs = Number(modalTargetSeconds) || 0;
+    const totalSec = mins * 60 + secs;
+    if (totalSec < 10) {
+      Alert.alert('登録エラー', '10秒以上の有効な時間を設定してください。');
       return;
     }
     const label = (customLabel || newFavoriteLabel || '').trim();
-    // 既存に同じ分数かつ同じラベルがあれば重複登録しない
+    const timeLabel = formatModalTargetTime(mins, secs);
+    // 既存に同じ分数・秒数かつ同じラベルがあれば重複登録しない
     const isDuplicate = favoritePresets.some(
-      (f) => f.minutes === mins && (label ? f.label === label : !f.label)
+      (f) => f.minutes === mins && (f.seconds || 0) === secs && (label ? f.label === label : !f.label)
     );
     if (isDuplicate) {
-      Alert.alert('登録済み', `${mins}分のお気に入りは既に登録されています。`);
+      Alert.alert('登録済み', `${timeLabel}のお気に入りは既に登録されています。`);
       return;
     }
 
     const newFav = {
       id: `fav-${Date.now()}`,
       minutes: mins,
+      seconds: secs,
       label: label,
     };
     const updated = [...favoritePresets, newFav];
@@ -918,6 +968,7 @@ export default function SalonWorkScreen() {
   // お気に入りを選択
   const handleSelectFavoritePreset = (fav) => {
     setModalTargetMinutes(fav.minutes);
+    setModalTargetSeconds(fav.seconds || 0);
     if (fav.label && !modalComment.trim()) {
       setModalComment(fav.label);
     }
@@ -928,14 +979,16 @@ export default function SalonWorkScreen() {
 
   // タイム開始・時間変更の確定適用（新規開始、追加タイム、または稼働中席の時間変更）
   const handleStartSeatTimer = () => {
-    const mins = parseInt(modalTargetMinutes, 10);
-    if (isNaN(mins) || mins <= 0) {
-      Alert.alert('タイム指定エラー', '1分以上の数値を入力してください。');
+    const mins = Number(modalTargetMinutes) || 0;
+    const secs = Number(modalTargetSeconds) || 0;
+    const targetSec = mins * 60 + secs;
+    if (targetSec < 10) {
+      Alert.alert('タイム指定エラー', '10秒以上の数値を入力してください。');
       return;
     }
-    const targetSec = mins * 60;
     const endTs = Date.now() + targetSec * 1000;
     const nowStr = getCurrentTimeFormatted();
+    const timeDisplay = formatModalTargetTime(mins, secs);
 
     setSeats((prev) =>
       prev.map((s) => {
@@ -947,7 +1000,7 @@ export default function SalonWorkScreen() {
             {
               id: `h-${Date.now()}`,
               time: nowStr,
-              text: `${mins}分放置 (新規)`,
+              text: `${timeDisplay}放置 (新規)`,
               type: 'timer',
             },
           ];
@@ -959,7 +1012,7 @@ export default function SalonWorkScreen() {
             assistantStaffName: s.assistantStaffName || null,
             isShampooing: false,
             targetSeconds: targetSec,
-            initialMinutes: mins,
+            initialMinutes: mins > 0 ? mins : Math.round(targetSec / 60),
             targetEndTimestamp: endTs,
             pausedRemainingSeconds: null,
             stoppedBy: null,
@@ -976,7 +1029,7 @@ export default function SalonWorkScreen() {
           const additionalHistoryItem = {
             id: `h-${Date.now()}`,
             time: nowStr,
-            text: `${mins}分追加放置`,
+            text: `${timeDisplay}追加放置`,
             type: 'timer',
           };
           return {
@@ -987,7 +1040,7 @@ export default function SalonWorkScreen() {
             assistantStaffName: s.assistantStaffName || null,
             isShampooing: s.isShampooing,
             targetSeconds: targetSec,
-            initialMinutes: mins,
+            initialMinutes: mins > 0 ? mins : Math.round(targetSec / 60),
             targetEndTimestamp: endTs,
             pausedRemainingSeconds: null,
             stoppedBy: null,
@@ -1004,7 +1057,7 @@ export default function SalonWorkScreen() {
           const historyItem = {
             id: `h-${Date.now()}`,
             time: nowStr,
-            text: `${mins}分に変更`,
+            text: `${timeDisplay}に変更`,
             type: 'timer',
           };
           return {
@@ -1015,7 +1068,7 @@ export default function SalonWorkScreen() {
             assistantStaffName: s.assistantStaffName || null,
             isShampooing: s.isShampooing,
             targetSeconds: targetSec,
-            initialMinutes: s.initialMinutes || mins,
+            initialMinutes: s.initialMinutes || (mins > 0 ? mins : Math.round(targetSec / 60)),
             targetEndTimestamp: endTs,
             comment: s.comment || '',
             history: [...prevHistory, historyItem],
@@ -1027,7 +1080,7 @@ export default function SalonWorkScreen() {
         const historyItem = {
           id: `h-${Date.now()}`,
           time: nowStr,
-          text: `${mins}分放置`,
+          text: `${timeDisplay}放置`,
           type: 'timer',
         };
         return {
@@ -1038,7 +1091,7 @@ export default function SalonWorkScreen() {
           assistantStaffName: s.assistantStaffName || null,
           isShampooing: false,
           targetSeconds: targetSec,
-          initialMinutes: mins,
+          initialMinutes: mins > 0 ? mins : Math.round(targetSec / 60),
           targetEndTimestamp: endTs,
           pausedRemainingSeconds: null,
           stoppedBy: null,
@@ -2665,6 +2718,7 @@ export default function SalonWorkScreen() {
                     onChangeText={(val) => {
                       const clean = val.replace(/[^0-9]/g, '');
                       setModalTargetMinutes(clean === '' ? '' : parseInt(clean, 10));
+                      setModalTargetSeconds(0);
                     }}
                     placeholder="0"
                     placeholderTextColor={theme.textTertiary}
@@ -2673,7 +2727,7 @@ export default function SalonWorkScreen() {
                   <Text style={[styles.customTimeUnitText, { color: theme.textPrimary }]}>分</Text>
                   <View style={[styles.timeCurrentBadge, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder, marginLeft: 6 }]}>
                     <Text style={[styles.timeCurrentBadgeText, { color: theme.accent }]}>
-                      現在: {modalTargetMinutes || 0}分
+                      現在: {formatModalTargetTime(modalTargetMinutes, modalTargetSeconds)}
                     </Text>
                   </View>
                 </View>
@@ -2681,58 +2735,92 @@ export default function SalonWorkScreen() {
 
               {/* クイック選択ピル（1分、3分、5分、7分、10分、15分、20分、30分） */}
               <View style={styles.timePillRow}>
-                {[1, 3, 5, 7, 10, 15, 20, 30].map((min) => (
-                  <TouchableOpacity
-                    key={min}
-                    style={[
-                      styles.timePill,
-                      {
-                        backgroundColor: Number(modalTargetMinutes) === min ? theme.accent : theme.inputBg,
-                        borderColor: Number(modalTargetMinutes) === min ? theme.accent : theme.cardBorder,
-                      },
-                    ]}
-                    onPress={() => setModalTargetMinutes(min)}
-                  >
-                    <Text
+                {[1, 3, 5, 7, 10, 15, 20, 30].map((min) => {
+                  const isPillSelected = Number(modalTargetMinutes) === min && (Number(modalTargetSeconds) || 0) === 0;
+                  return (
+                    <TouchableOpacity
+                      key={min}
                       style={[
-                        styles.timePillText,
-                        { color: Number(modalTargetMinutes) === min ? '#FFFFFF' : theme.textPrimary },
+                        styles.timePill,
+                        {
+                          backgroundColor: isPillSelected ? theme.accent : theme.inputBg,
+                          borderColor: isPillSelected ? theme.accent : theme.cardBorder,
+                        },
                       ]}
+                      onPress={() => handleSelectQuickMinute(min)}
                     >
-                      {min}分
-                    </Text>
-                  </TouchableOpacity>
-                ))}
+                      <Text
+                        style={[
+                          styles.timePillText,
+                          { color: isPillSelected ? '#FFFFFF' : theme.textPrimary },
+                        ]}
+                      >
+                        {min}分
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
               </View>
 
               {/* 1分・5分単位の微調整ボタンバー */}
               <View style={styles.timeAdjustBar}>
                 <TouchableOpacity
                   style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
-                  onPress={() => setModalTargetMinutes((prev) => Math.max(1, (Number(prev) || 0) - 5))}
+                  onPress={() => handleAdjustTargetMinutes(-5)}
                 >
                   <Text style={[styles.timeAdjustBtnText, { color: theme.textPrimary }]}>-5分</Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
                   style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
-                  onPress={() => setModalTargetMinutes((prev) => Math.max(1, (Number(prev) || 0) - 1))}
+                  onPress={() => handleAdjustTargetMinutes(-1)}
                 >
                   <Text style={[styles.timeAdjustBtnText, { color: theme.textPrimary }]}>-1分</Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
                   style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
-                  onPress={() => setModalTargetMinutes((prev) => (Number(prev) || 0) + 1)}
+                  onPress={() => handleAdjustTargetMinutes(1)}
                 >
                   <Text style={[styles.timeAdjustBtnText, { color: theme.textPrimary }]}>+1分</Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
                   style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
-                  onPress={() => setModalTargetMinutes((prev) => (Number(prev) || 0) + 5)}
+                  onPress={() => handleAdjustTargetMinutes(5)}
                 >
                   <Text style={[styles.timeAdjustBtnText, { color: theme.textPrimary }]}>+5分</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* ★ ユーザー指定: 10秒・30秒単位の微調整ボタンバー（1段追加: -30秒, -10秒, +10秒, +30秒） */}
+              <View style={[styles.timeAdjustBar, { marginTop: 4, marginBottom: 8 }]}>
+                <TouchableOpacity
+                  style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                  onPress={() => handleAdjustTargetSeconds(-30)}
+                >
+                  <Text style={[styles.timeAdjustBtnText, { color: theme.textSecondary }]}>-30秒</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                  onPress={() => handleAdjustTargetSeconds(-10)}
+                >
+                  <Text style={[styles.timeAdjustBtnText, { color: theme.textSecondary }]}>-10秒</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                  onPress={() => handleAdjustTargetSeconds(10)}
+                >
+                  <Text style={[styles.timeAdjustBtnText, { color: theme.accent }]}>+10秒</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                  onPress={() => handleAdjustTargetSeconds(30)}
+                >
+                  <Text style={[styles.timeAdjustBtnText, { color: theme.accent }]}>+30秒</Text>
                 </TouchableOpacity>
               </View>
 
@@ -2753,7 +2841,7 @@ export default function SalonWorkScreen() {
                     >
                       <Ionicons name="add" size={13} color={theme.accent} />
                       <Text style={[styles.favAddQuickBtnText, { color: theme.accent }]}>
-                        ★ {modalTargetMinutes || 0}分を登録
+                        ★ {formatModalTargetTime(modalTargetMinutes, modalTargetSeconds)}を登録
                       </Text>
                     </TouchableOpacity>
                   ) : null}
@@ -2763,7 +2851,7 @@ export default function SalonWorkScreen() {
                 {isAddingFavorite && (
                   <View style={[styles.favInlineAddForm, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
                     <Text style={[styles.favInlineAddTitle, { color: theme.textSecondary }]}>
-                      【{modalTargetMinutes || 0}分】のお気に入り名 (省略可)
+                      【{formatModalTargetTime(modalTargetMinutes, modalTargetSeconds)}】のお気に入り名 (省略可)
                     </Text>
                     <View style={{ flexDirection: 'row', gap: 6, marginTop: 4 }}>
                       <TextInput
@@ -2797,7 +2885,9 @@ export default function SalonWorkScreen() {
                   contentContainerStyle={styles.favChipsScroll}
                 >
                   {favoritePresets.map((fav) => {
-                    const isSelected = Number(modalTargetMinutes) === fav.minutes;
+                    const isSelected =
+                      Number(modalTargetMinutes) === fav.minutes &&
+                      (Number(modalTargetSeconds) || 0) === (fav.seconds || 0);
                     return (
                       <View
                         key={fav.id}
@@ -2825,7 +2915,7 @@ export default function SalonWorkScreen() {
                               { color: isSelected ? '#FFFFFF' : theme.textPrimary },
                             ]}
                           >
-                            {fav.minutes}分
+                            {formatModalTargetTime(fav.minutes, fav.seconds || 0)}
                           </Text>
                           {fav.label ? (
                             <Text
