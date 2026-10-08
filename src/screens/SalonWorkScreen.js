@@ -128,6 +128,18 @@ export default function SalonWorkScreen() {
   const [modalComment, setModalComment] = useState('');
   const [isEditingExistingTimer, setIsEditingExistingTimer] = useState(false); // 時間変更モードか否か
 
+  // ★ 放置タイムのお気に入りパネル用ステート
+  const [favoritePresets, setFavoritePresets] = useState([
+    { id: 'fav-1', minutes: 3, label: '乳化' },
+    { id: 'fav-2', minutes: 7, label: 'チェック' },
+    { id: 'fav-3', minutes: 10, label: 'リタッチ' },
+    { id: 'fav-4', minutes: 15, label: '全体' },
+    { id: 'fav-5', minutes: 20, label: '白髪染め' },
+    { id: 'fav-6', minutes: 30, label: 'マニキュア' },
+  ]);
+  const [isAddingFavorite, setIsAddingFavorite] = useState(false);
+  const [newFavoriteLabel, setNewFavoriteLabel] = useState('');
+
   // 招待コード参加・新規作成フォーム用
   const [inputInviteCode, setInputInviteCode] = useState('');
   const [inputSalonName, setInputSalonName] = useState('');
@@ -272,6 +284,14 @@ export default function SalonWorkScreen() {
     try {
       const savedName = await AsyncStorage.getItem('@assist_timer_user_name');
       if (savedName) setUserName(savedName);
+
+      const savedFavs = await AsyncStorage.getItem('@salon_favorite_timer_presets');
+      if (savedFavs) {
+        const parsed = JSON.parse(savedFavs);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setFavoritePresets(parsed);
+        }
+      }
 
       // デモ用登録サロン一覧（本番サロン、別店舗、グループ、個人無料枠）
       const initialSalons = [
@@ -735,9 +755,74 @@ export default function SalonWorkScreen() {
     );
   };
 
+  // お気に入りタイマーの保存
+  const saveFavoritePresets = async (newList) => {
+    setFavoritePresets(newList);
+    try {
+      await AsyncStorage.setItem('@salon_favorite_timer_presets', JSON.stringify(newList));
+    } catch (e) {
+      console.warn('Failed to save favorite presets', e);
+    }
+  };
+
+  // 現在の放置タイムをお気に入りに追加
+  const handleAddCurrentAsFavorite = (customLabel = '') => {
+    const mins = parseInt(modalTargetMinutes, 10);
+    if (isNaN(mins) || mins <= 0) {
+      Alert.alert('登録エラー', '1分以上の有効な時間を設定してください。');
+      return;
+    }
+    const label = (customLabel || newFavoriteLabel || '').trim();
+    // 既存に同じ分数かつ同じラベルがあれば重複登録しない
+    const isDuplicate = favoritePresets.some(
+      (f) => f.minutes === mins && (label ? f.label === label : !f.label)
+    );
+    if (isDuplicate) {
+      Alert.alert('登録済み', `${mins}分のお気に入りは既に登録されています。`);
+      return;
+    }
+
+    const newFav = {
+      id: `fav-${Date.now()}`,
+      minutes: mins,
+      label: label,
+    };
+    const updated = [...favoritePresets, newFav];
+    saveFavoritePresets(updated);
+    setIsAddingFavorite(false);
+    setNewFavoriteLabel('');
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 50]);
+    }
+  };
+
+  // お気に入りを削除
+  const handleDeleteFavoritePreset = (favId) => {
+    const updated = favoritePresets.filter((f) => f.id !== favId);
+    saveFavoritePresets(updated);
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 30]);
+    }
+  };
+
+  // お気に入りを選択
+  const handleSelectFavoritePreset = (fav) => {
+    setModalTargetMinutes(fav.minutes);
+    if (fav.label && !modalComment.trim()) {
+      setModalComment(fav.label);
+    }
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 40]);
+    }
+  };
+
   // タイム開始・時間変更の確定適用（新規開始または稼働中席の時間変更）
   const handleStartSeatTimer = () => {
-    const mins = modalTargetMinutes || 20;
+    const mins = parseInt(modalTargetMinutes, 10);
+    if (isNaN(mins) || mins <= 0) {
+      Alert.alert('タイム指定エラー', '1分以上の数値を入力してください。');
+      return;
+    }
     const targetSec = mins * 60;
     const endTs = Date.now() + targetSec * 1000;
     const nowStr = getCurrentTimeFormatted();
@@ -2332,25 +2417,52 @@ export default function SalonWorkScreen() {
             </View>
 
             <ScrollView showsVerticalScrollIndicator={false}>
-              {/* 放置タイム設定（クイックピル ＆ 微調整） */}
+              {/* 放置タイム設定（直接入力 ＆ クイックピル ＆ 微調整 ＆ お気に入りパネル） */}
               <View style={styles.timeSettingHeaderRow}>
-                <Text style={[styles.inputLabel, { color: theme.textSecondary, marginBottom: 0 }]}>放置タイム</Text>
-                <View style={[styles.timeCurrentBadge, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder }]}>
-                  <Text style={[styles.timeCurrentBadgeText, { color: theme.accent }]}>
-                    現在: {modalTargetMinutes}分
-                  </Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={[styles.inputLabel, { color: theme.textSecondary, marginBottom: 0 }]}>放置タイム</Text>
+                  <Text style={{ fontSize: 11, color: theme.textTertiary }}>(直接入力可)</Text>
+                </View>
+                <View style={styles.customTimeInputContainer}>
+                  <TextInput
+                    style={[
+                      styles.customTimeNumberInput,
+                      {
+                        backgroundColor: theme.inputBg,
+                        color: theme.accent,
+                        borderColor: theme.accent,
+                      },
+                    ]}
+                    keyboardType="number-pad"
+                    maxLength={3}
+                    value={modalTargetMinutes !== '' && modalTargetMinutes !== undefined && modalTargetMinutes !== null ? String(modalTargetMinutes) : ''}
+                    onChangeText={(val) => {
+                      const clean = val.replace(/[^0-9]/g, '');
+                      setModalTargetMinutes(clean === '' ? '' : parseInt(clean, 10));
+                    }}
+                    placeholder="0"
+                    placeholderTextColor={theme.textTertiary}
+                    selectTextOnFocus={true}
+                  />
+                  <Text style={[styles.customTimeUnitText, { color: theme.textPrimary }]}>分</Text>
+                  <View style={[styles.timeCurrentBadge, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder, marginLeft: 6 }]}>
+                    <Text style={[styles.timeCurrentBadgeText, { color: theme.accent }]}>
+                      現在: {modalTargetMinutes || 0}分
+                    </Text>
+                  </View>
                 </View>
               </View>
 
+              {/* クイック選択ピル（1分、3分、5分、7分、10分、15分、20分、30分） */}
               <View style={styles.timePillRow}>
-                {[5, 10, 15, 20, 25, 30, 35, 40].map((min) => (
+                {[1, 3, 5, 7, 10, 15, 20, 30].map((min) => (
                   <TouchableOpacity
                     key={min}
                     style={[
                       styles.timePill,
                       {
-                        backgroundColor: modalTargetMinutes === min ? theme.accent : theme.inputBg,
-                        borderColor: modalTargetMinutes === min ? theme.accent : theme.cardBorder,
+                        backgroundColor: Number(modalTargetMinutes) === min ? theme.accent : theme.inputBg,
+                        borderColor: Number(modalTargetMinutes) === min ? theme.accent : theme.cardBorder,
                       },
                     ]}
                     onPress={() => setModalTargetMinutes(min)}
@@ -2358,7 +2470,7 @@ export default function SalonWorkScreen() {
                     <Text
                       style={[
                         styles.timePillText,
-                        { color: modalTargetMinutes === min ? '#FFFFFF' : theme.textPrimary },
+                        { color: Number(modalTargetMinutes) === min ? '#FFFFFF' : theme.textPrimary },
                       ]}
                     >
                       {min}分
@@ -2371,31 +2483,151 @@ export default function SalonWorkScreen() {
               <View style={styles.timeAdjustBar}>
                 <TouchableOpacity
                   style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
-                  onPress={() => setModalTargetMinutes((prev) => Math.max(1, prev - 5))}
+                  onPress={() => setModalTargetMinutes((prev) => Math.max(1, (Number(prev) || 0) - 5))}
                 >
                   <Text style={[styles.timeAdjustBtnText, { color: theme.textPrimary }]}>-5分</Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
                   style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
-                  onPress={() => setModalTargetMinutes((prev) => Math.max(1, prev - 1))}
+                  onPress={() => setModalTargetMinutes((prev) => Math.max(1, (Number(prev) || 0) - 1))}
                 >
                   <Text style={[styles.timeAdjustBtnText, { color: theme.textPrimary }]}>-1分</Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
                   style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
-                  onPress={() => setModalTargetMinutes((prev) => prev + 1)}
+                  onPress={() => setModalTargetMinutes((prev) => (Number(prev) || 0) + 1)}
                 >
                   <Text style={[styles.timeAdjustBtnText, { color: theme.textPrimary }]}>+1分</Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
                   style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
-                  onPress={() => setModalTargetMinutes((prev) => prev + 5)}
+                  onPress={() => setModalTargetMinutes((prev) => (Number(prev) || 0) + 5)}
                 >
                   <Text style={[styles.timeAdjustBtnText, { color: theme.textPrimary }]}>+5分</Text>
                 </TouchableOpacity>
+              </View>
+
+              {/* ★ お気に入りパネル */}
+              <View style={[styles.favPanelContainer, { backgroundColor: isEcoMode ? '#1C1C1E' : '#F7F8FC', borderColor: theme.cardBorder }]}>
+                <View style={styles.favPanelHeaderRow}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                    <Ionicons name="star" size={14} color="#FFB800" />
+                    <Text style={[styles.favPanelTitle, { color: theme.textPrimary }]}>お気に入りパネル</Text>
+                  </View>
+                  {!isAddingFavorite ? (
+                    <TouchableOpacity
+                      style={[styles.favAddQuickBtn, { borderColor: theme.accent, backgroundColor: theme.accentLight }]}
+                      onPress={() => {
+                        setIsAddingFavorite(true);
+                        setNewFavoriteLabel('');
+                      }}
+                    >
+                      <Ionicons name="add" size={13} color={theme.accent} />
+                      <Text style={[styles.favAddQuickBtnText, { color: theme.accent }]}>
+                        ★ {modalTargetMinutes || 0}分を登録
+                      </Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </View>
+
+                {/* お気に入り新規登録のインラインフォーム */}
+                {isAddingFavorite && (
+                  <View style={[styles.favInlineAddForm, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
+                    <Text style={[styles.favInlineAddTitle, { color: theme.textSecondary }]}>
+                      【{modalTargetMinutes || 0}分】のお気に入り名 (省略可)
+                    </Text>
+                    <View style={{ flexDirection: 'row', gap: 6, marginTop: 4 }}>
+                      <TextInput
+                        style={[styles.favInlineInput, { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.cardBorder }]}
+                        placeholder="例: 乳化、酸熱、ブリーチなど"
+                        placeholderTextColor={theme.textTertiary}
+                        value={newFavoriteLabel}
+                        onChangeText={setNewFavoriteLabel}
+                        autoFocus={true}
+                      />
+                      <TouchableOpacity
+                        style={[styles.favInlineSubmitBtn, { backgroundColor: theme.accent }]}
+                        onPress={() => handleAddCurrentAsFavorite()}
+                      >
+                        <Text style={styles.favInlineSubmitBtnText}>登録</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.favInlineCancelBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                        onPress={() => setIsAddingFavorite(false)}
+                      >
+                        <Text style={[styles.favInlineCancelBtnText, { color: theme.textSecondary }]}>取消</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
+
+                {/* お気に入りチップ一覧 */}
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.favChipsScroll}
+                >
+                  {favoritePresets.map((fav) => {
+                    const isSelected = Number(modalTargetMinutes) === fav.minutes;
+                    return (
+                      <View
+                        key={fav.id}
+                        style={[
+                          styles.favChipWrapper,
+                          {
+                            backgroundColor: isSelected ? theme.accent : (isEcoMode ? '#28282B' : '#FFFFFF'),
+                            borderColor: isSelected ? theme.accent : theme.cardBorder,
+                          },
+                        ]}
+                      >
+                        <TouchableOpacity
+                          style={styles.favChipPressable}
+                          onPress={() => handleSelectFavoritePreset(fav)}
+                        >
+                          <Ionicons
+                            name={isSelected ? 'star' : 'star'}
+                            size={12}
+                            color={isSelected ? '#FFFFFF' : '#FFB800'}
+                            style={{ marginRight: 3 }}
+                          />
+                          <Text
+                            style={[
+                              styles.favChipMinutes,
+                              { color: isSelected ? '#FFFFFF' : theme.textPrimary },
+                            ]}
+                          >
+                            {fav.minutes}分
+                          </Text>
+                          {fav.label ? (
+                            <Text
+                              style={[
+                                styles.favChipLabel,
+                                { color: isSelected ? '#FFFFFF' : theme.textSecondary },
+                              ]}
+                              numberOfLines={1}
+                            >
+                              {fav.label}
+                            </Text>
+                          ) : null}
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
+                          style={styles.favChipDeleteBtn}
+                          onPress={() => handleDeleteFavoritePreset(fav.id)}
+                        >
+                          <Ionicons
+                            name="close-circle"
+                            size={14}
+                            color={isSelected ? 'rgba(255,255,255,0.7)' : theme.textTertiary}
+                          />
+                        </TouchableOpacity>
+                      </View>
+                    );
+                  })}
+                </ScrollView>
               </View>
 
               {/* カラー担当 */}
@@ -3827,6 +4059,132 @@ const styles = StyleSheet.create({
   timeCurrentBadgeText: {
     fontSize: 12,
     fontWeight: '700',
+  },
+  customTimeInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  customTimeNumberInput: {
+    width: 48,
+    height: 32,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    textAlign: 'center',
+    fontSize: 15,
+    fontWeight: '800',
+    paddingVertical: 2,
+    paddingHorizontal: 2,
+  },
+  customTimeUnitText: {
+    fontSize: 13,
+    fontWeight: '700',
+    marginLeft: 4,
+  },
+  favPanelContainer: {
+    marginTop: 10,
+    marginBottom: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    padding: 10,
+  },
+  favPanelHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  favPanelTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  favAddQuickBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    borderWidth: 1,
+  },
+  favAddQuickBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    marginLeft: 2,
+  },
+  favInlineAddForm: {
+    padding: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: 8,
+  },
+  favInlineAddTitle: {
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  favInlineInput: {
+    flex: 1,
+    height: 32,
+    borderRadius: 6,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+    fontSize: 12,
+  },
+  favInlineSubmitBtn: {
+    paddingHorizontal: 12,
+    height: 32,
+    borderRadius: 6,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  favInlineSubmitBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  favInlineCancelBtn: {
+    paddingHorizontal: 10,
+    height: 32,
+    borderRadius: 6,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+  },
+  favInlineCancelBtnText: {
+    fontSize: 12,
+  },
+  favChipsScroll: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 2,
+  },
+  favChipWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 8,
+    borderWidth: 1,
+    paddingLeft: 8,
+    paddingRight: 4,
+    paddingVertical: 5,
+  },
+  favChipPressable: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: 2,
+  },
+  favChipMinutes: {
+    fontSize: 12,
+    fontWeight: '800',
+    marginRight: 4,
+  },
+  favChipLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginRight: 4,
+    maxWidth: 80,
+  },
+  favChipDeleteBtn: {
+    padding: 2,
+    marginLeft: 2,
   },
   timePillRow: {
     flexDirection: 'row',
