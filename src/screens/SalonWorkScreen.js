@@ -108,6 +108,41 @@ export default function SalonWorkScreen() {
     return `${h}:${m}`;
   };
 
+  // ★ ユーザー指定: 右上ヘルプアサインボタンの表示ラベル（絵文字なし、文字のみ、何も選択していない時は「未定」）
+  const getHelpHeaderButtonLabel = (seat, isAlert) => {
+    const staff = (seat?.assistantStaffName || '').trim();
+    const isNoHelp = staff === 'ヘルプなし' || staff === 'none';
+    const actionInfo = getActionStatusInfo(seat?.actionStatus, seat?.isShampooing);
+    const actionLabel = actionInfo ? actionInfo.label : null; // "コーミング", "シャンプー", "チェック", "呼び出し", "その他"
+
+    if (isNoHelp) {
+      return 'ヘルプなし ▾';
+    }
+
+    if (isAlert) {
+      if (actionLabel) {
+        return `${actionLabel}未定 (あと1分) ▾`;
+      }
+      return '未定 (あと1分) ▾';
+    }
+
+    // スタッフが決まっている場合
+    if (staff && staff !== '') {
+      if (actionLabel) {
+        return `${actionLabel} ${staff} ▾`;
+      }
+      return `${staff} ▾`;
+    }
+
+    // スタッフが未定で、工程だけ指定されている場合
+    if (actionLabel) {
+      return `${actionLabel}未定 ▾`;
+    }
+
+    // 何も選択していない時
+    return '未定 ▾';
+  };
+
   // 表示名（ニックネーム）編集用ステート
   const [isEditingUserName, setIsEditingUserName] = useState(false);
   const [inputUserName, setInputUserName] = useState('');
@@ -183,9 +218,14 @@ export default function SalonWorkScreen() {
               if (Platform.OS !== 'web') {
                 Vibration.vibrate([0, 500, 150, 500, 150, 500]);
               }
+              const sActionInfo = getActionStatusInfo(s.actionStatus, s.isShampooing);
+              const helpActionMsg = sActionInfo
+                ? `「${s.seatLabel}」の放置タイム終了まであと1分ですが、【${sActionInfo.label}】のヘルプ担当が未定です！\n至急ヘルプに入ってください！`
+                : `「${s.seatLabel}」の放置タイム終了まであと1分ですが、ヘルプ担当が決まっていません（未定）！\n至急ヘルプに入ってください！`;
+
               Alert.alert(
                 '⚠️【サロン全員ヘルプ募集】',
-                `「${s.seatLabel}」の放置タイム終了まであと1分ですが、ヘルプ担当が決まっていません！\n至急ヘルプに入ってください！`,
+                helpActionMsg,
                 [
                   {
                     text: '私がヘルプに入る',
@@ -1009,6 +1049,9 @@ export default function SalonWorkScreen() {
         };
       })
     );
+    if (targetSeatId) {
+      oneMinuteHelpAlertRef.current[targetSeatId] = false;
+    }
     setIsSetTimerModalVisible(false);
     setIsEditingExistingTimer(false);
     setTimerSetupMode('default');
@@ -1432,6 +1475,7 @@ export default function SalonWorkScreen() {
         };
       })
     );
+    oneMinuteHelpAlertRef.current[seatId] = false;
     setIsAssignMainTimerModalVisible(false);
     Alert.alert('割り当て完了', `メインタイマーを「${seats.find((s) => s.id === seatId)?.seatLabel}」にセットしました！`);
   };
@@ -1840,15 +1884,15 @@ export default function SalonWorkScreen() {
                       ]}
                     >
                       {item.assistantStaffName === 'ヘルプなし'
-                        ? '👤 なし'
+                        ? 'ヘルプなし'
                         : item.assistantStaffName
-                        ? `🤝 ${item.assistantStaffName}`
-                        : '🤝 未定'}
+                        ? item.assistantStaffName
+                        : '未定'}
                     </Text>
                   </TouchableOpacity>
 
                   <Text style={[styles.pausedStaffText, { color: theme.textSecondary }]} numberOfLines={1}>
-                    🎨{item.colorStaffName || '未'}
+                    ⏱️{item.colorStaffName || '未'}
                   </Text>
 
                   <Ionicons name="chevron-down" size={18} color={theme.textTertiary} style={{ marginLeft: 4 }} />
@@ -1929,28 +1973,6 @@ export default function SalonWorkScreen() {
                     onPress={() => handleOpenHelpAssignModal(item)}
                     activeOpacity={0.7}
                   >
-                    <Ionicons
-                      name={
-                        isOneMinBeforeHelpAlert
-                          ? "alert-circle"
-                          : isNoHelp
-                          ? "person"
-                          : item.assistantStaffName
-                          ? "hand-right"
-                          : "hand-right-outline"
-                      }
-                      size={14}
-                      color={
-                        isOneMinBeforeHelpAlert
-                          ? theme.danger
-                          : isNoHelp
-                          ? theme.textSecondary
-                          : item.assistantStaffName
-                          ? theme.accent
-                          : '#EA580C'
-                      }
-                      style={{ marginRight: 4 }}
-                    />
                     <Text
                       style={[
                         styles.helpHeaderButtonText,
@@ -1966,13 +1988,7 @@ export default function SalonWorkScreen() {
                         },
                       ]}
                     >
-                      {isOneMinBeforeHelpAlert
-                        ? '⚠️ ヘルプ未定(1分前) ▾'
-                        : isNoHelp
-                        ? '👤 ヘルプなし ▾'
-                        : item.assistantStaffName
-                        ? `🤝 ${item.assistantStaffName} ▾`
-                        : '🤝 ヘルプ担当 ▾'}
+                      {getHelpHeaderButtonLabel(item, isOneMinBeforeHelpAlert)}
                     </Text>
                   </TouchableOpacity>
 
@@ -2215,7 +2231,7 @@ export default function SalonWorkScreen() {
                       onPress={() => handleOpenHelpAssignModal(item)}
                     >
                       <Text style={[styles.staffNameText, { color: theme.textSecondary }]}>
-                        👤 ヘルプなし（1人で施術）
+                        ヘルプなし（1人で施術）
                       </Text>
                       <Ionicons name="swap-horizontal" size={13} color={theme.textTertiary} style={{ marginLeft: 4 }} />
                     </TouchableOpacity>
@@ -2229,7 +2245,7 @@ export default function SalonWorkScreen() {
                       onPress={() => handleOpenHelpAssignModal(item)}
                     >
                       <Text style={[styles.staffNameText, { color: theme.textPrimary }]}>
-                        🤝 {item.assistantStaffName}
+                        {getActionStatusInfo(item.actionStatus, item.isShampooing) ? `${getActionStatusInfo(item.actionStatus, item.isShampooing).label}: ` : ''}{item.assistantStaffName}
                       </Text>
                       <Ionicons name="swap-horizontal" size={13} color={theme.accent} style={{ marginLeft: 4 }} />
                     </TouchableOpacity>
@@ -2243,12 +2259,6 @@ export default function SalonWorkScreen() {
                       ]}
                       onPress={() => handleOpenHelpAssignModal(item)}
                     >
-                      <Ionicons
-                        name={isOneMinBeforeHelpAlert ? "alert-circle" : "hand-right"}
-                        size={13}
-                        color={isOneMinBeforeHelpAlert ? theme.danger : theme.accent}
-                        style={{ marginRight: 3 }}
-                      />
                       <Text
                         style={[
                           styles.takeAssistantText,
@@ -2258,7 +2268,9 @@ export default function SalonWorkScreen() {
                           },
                         ]}
                       >
-                        {isOneMinBeforeHelpAlert ? '⚠️ ヘルプ未定(1分前) ▾' : 'ヘルプ指定 / 参戦 ▾'}
+                        {isOneMinBeforeHelpAlert
+                          ? (getActionStatusInfo(item.actionStatus, item.isShampooing) ? `${getActionStatusInfo(item.actionStatus, item.isShampooing).label}未定 (あと1分) ▾` : '未定 (あと1分) ▾')
+                          : (getActionStatusInfo(item.actionStatus, item.isShampooing) ? `${getActionStatusInfo(item.actionStatus, item.isShampooing).label}未定 ▾` : '未定 (タップで指定) ▾')}
                       </Text>
                     </TouchableOpacity>
                   )}
@@ -3475,6 +3487,24 @@ export default function SalonWorkScreen() {
                       </Text>
                     </View>
                     <Ionicons name="chevron-forward" size={16} color={theme.accent} />
+                  </TouchableOpacity>
+
+                  {/* ★ 担当者未定のまま【選択中ヘルプ】を依頼・登録する */}
+                  <TouchableOpacity
+                    style={[styles.selfTakeBtn, { backgroundColor: isEcoMode ? '#2C2C2E' : '#FFF7ED', borderColor: '#FED7AA', marginTop: 0, marginBottom: 8 }]}
+                    onPress={() => handleAssignAssistant('', selectedHelpAction)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="help-circle-outline" size={20} color="#EA580C" style={{ marginRight: 10 }} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.selfTakeBtnTitle, { color: '#EA580C' }]}>
+                        担当者未定のまま【{getActionStatusInfo(selectedHelpAction)?.label}】を依頼する
+                      </Text>
+                      <Text style={[styles.selfTakeBtnSub, { color: theme.textSecondary }]}>
+                        カード右上に「{getActionStatusInfo(selectedHelpAction)?.label}未定」と表示・1分前アラート対象
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={16} color="#EA580C" />
                   </TouchableOpacity>
 
                   {/* ② スタッフ一覧から指名 */}
