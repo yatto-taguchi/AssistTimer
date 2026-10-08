@@ -127,6 +127,7 @@ export default function SalonWorkScreen() {
   const [modalAssistantStaff, setModalAssistantStaff] = useState('');
   const [modalComment, setModalComment] = useState('');
   const [isEditingExistingTimer, setIsEditingExistingTimer] = useState(false); // 時間変更モードか否か
+  const [timerSetupMode, setTimerSetupMode] = useState('default'); // 'default' | 'new' (新しく測る) | 'additional' (追加タイム)
 
   // ★ 放置タイムのお気に入りパネル用ステート
   const [favoritePresets, setFavoritePresets] = useState([
@@ -516,6 +517,7 @@ export default function SalonWorkScreen() {
     setModalAssistantStaff('');
     setModalComment('');
     setIsEditingExistingTimer(false);
+    setTimerSetupMode('default');
     setIsSetTimerModalVisible(true);
   };
 
@@ -525,7 +527,7 @@ export default function SalonWorkScreen() {
     setIsTimeActionModalVisible(true);
   };
 
-  // モーダルから「変更する」を選択した時
+  // モーダルから「変更する」を選択した時（稼働中のタイマー変更）
   const handleProceedToEditTimer = () => {
     if (!actionTargetSeat) return;
     setIsTimeActionModalVisible(false);
@@ -538,6 +540,39 @@ export default function SalonWorkScreen() {
     setModalAssistantStaff(seat.assistantStaffName || '');
     setModalComment(seat.comment || '');
     setIsEditingExistingTimer(true);
+    setTimerSetupMode('edit');
+    setIsSetTimerModalVisible(true);
+  };
+
+  // 停止中席から「新しく測る」を選択した時（新しく測る時は新しく）
+  const handleProceedToNewTimer = () => {
+    if (!actionTargetSeat) return;
+    setIsTimeActionModalVisible(false);
+    const seat = actionTargetSeat;
+    setTargetSeatId(seat.id);
+    setModalSeatLabel(seat.seatLabel);
+    setModalTargetMinutes(20);
+    setModalColorStaff(seat.colorStaffName || userName || 'スタイリスト');
+    setModalAssistantStaff('');
+    setModalComment('');
+    setIsEditingExistingTimer(false);
+    setTimerSetupMode('new');
+    setIsSetTimerModalVisible(true);
+  };
+
+  // 停止中席から「追加タイム」を選択した時（追加の時は履歴に続きを入れる）
+  const handleProceedToAddTimer = () => {
+    if (!actionTargetSeat) return;
+    setIsTimeActionModalVisible(false);
+    const seat = actionTargetSeat;
+    setTargetSeatId(seat.id);
+    setModalSeatLabel(seat.seatLabel);
+    setModalTargetMinutes(7);
+    setModalColorStaff(seat.colorStaffName || userName || 'スタイリスト');
+    setModalAssistantStaff(seat.assistantStaffName || '');
+    setModalComment(seat.comment || '');
+    setIsEditingExistingTimer(false);
+    setTimerSetupMode('additional');
     setIsSetTimerModalVisible(true);
   };
 
@@ -816,7 +851,7 @@ export default function SalonWorkScreen() {
     }
   };
 
-  // タイム開始・時間変更の確定適用（新規開始または稼働中席の時間変更）
+  // タイム開始・時間変更の確定適用（新規開始、追加タイム、または稼働中席の時間変更）
   const handleStartSeatTimer = () => {
     const mins = parseInt(modalTargetMinutes, 10);
     if (isNaN(mins) || mins <= 0) {
@@ -830,23 +865,110 @@ export default function SalonWorkScreen() {
     setSeats((prev) =>
       prev.map((s) => {
         if (s.id !== targetSeatId) return s;
+
+        // ① 新しく測る時（新しく測る時は新しく・履歴リセット）
+        if (timerSetupMode === 'new') {
+          const newHistory = [
+            {
+              id: `h-${Date.now()}`,
+              time: nowStr,
+              text: `${mins}分放置 (新規)`,
+              type: 'timer',
+            },
+          ];
+          return {
+            ...s,
+            seatLabel: modalSeatLabel.trim() || s.seatLabel,
+            status: 'running',
+            colorStaffName: modalColorStaff.trim() || userName || 'スタイリスト',
+            assistantStaffName: modalAssistantStaff.trim() || null,
+            isShampooing: false,
+            targetSeconds: targetSec,
+            initialMinutes: mins,
+            targetEndTimestamp: endTs,
+            pausedRemainingSeconds: null,
+            stoppedBy: null,
+            mainStaffConfirmed: false,
+            assistantStaffConfirmed: false,
+            comment: modalComment.trim(),
+            history: newHistory,
+          };
+        }
+
+        // ② 追加タイムの時（追加の時は履歴に続きを入れる）
+        if (timerSetupMode === 'additional') {
+          const prevHistory = s.history || [];
+          const additionalHistoryItem = {
+            id: `h-${Date.now()}`,
+            time: nowStr,
+            text: `${mins}分追加放置`,
+            type: 'timer',
+          };
+          return {
+            ...s,
+            seatLabel: modalSeatLabel.trim() || s.seatLabel,
+            status: 'running',
+            colorStaffName: modalColorStaff.trim() || s.colorStaffName || userName || 'スタイリスト',
+            assistantStaffName: modalAssistantStaff.trim() || s.assistantStaffName || null,
+            isShampooing: s.isShampooing,
+            targetSeconds: targetSec,
+            initialMinutes: mins,
+            targetEndTimestamp: endTs,
+            pausedRemainingSeconds: null,
+            stoppedBy: null,
+            mainStaffConfirmed: false,
+            assistantStaffConfirmed: false,
+            comment: modalComment.trim(),
+            history: [...prevHistory, additionalHistoryItem],
+          };
+        }
+
+        // ③ 稼働中の時間変更時
+        if (isEditingExistingTimer || timerSetupMode === 'edit') {
+          const prevHistory = s.history || [];
+          const historyItem = {
+            id: `h-${Date.now()}`,
+            time: nowStr,
+            text: `${mins}分に変更`,
+            type: 'timer',
+          };
+          return {
+            ...s,
+            seatLabel: modalSeatLabel.trim() || s.seatLabel,
+            status: 'running',
+            colorStaffName: modalColorStaff.trim() || s.colorStaffName || userName || 'スタイリスト',
+            assistantStaffName: modalAssistantStaff.trim() || s.assistantStaffName || null,
+            isShampooing: s.isShampooing,
+            targetSeconds: targetSec,
+            initialMinutes: s.initialMinutes || mins,
+            targetEndTimestamp: endTs,
+            comment: modalComment.trim(),
+            history: [...prevHistory, historyItem],
+          };
+        }
+
+        // ④ 通常の新規開始（待機中空席からスタート）
+        const prevHistory = s.history || [];
         const historyItem = {
           id: `h-${Date.now()}`,
           time: nowStr,
-          text: isEditingExistingTimer ? `${mins}分に変更` : `${mins}分放置`,
+          text: `${mins}分放置`,
           type: 'timer',
         };
-        const prevHistory = s.history || [];
         return {
           ...s,
           seatLabel: modalSeatLabel.trim() || s.seatLabel,
           status: 'running',
           colorStaffName: modalColorStaff.trim() || userName || 'スタイリスト',
           assistantStaffName: modalAssistantStaff.trim() || null,
-          isShampooing: isEditingExistingTimer ? s.isShampooing : false, // 時間変更時は既存のシャンプー中フラグを維持
+          isShampooing: false,
           targetSeconds: targetSec,
-          initialMinutes: isEditingExistingTimer ? (s.initialMinutes || mins) : mins,
+          initialMinutes: mins,
           targetEndTimestamp: endTs,
+          pausedRemainingSeconds: null,
+          stoppedBy: null,
+          mainStaffConfirmed: false,
+          assistantStaffConfirmed: false,
           comment: modalComment.trim(),
           history: [...prevHistory, historyItem],
         };
@@ -854,6 +976,7 @@ export default function SalonWorkScreen() {
     );
     setIsSetTimerModalVisible(false);
     setIsEditingExistingTimer(false);
+    setTimerSetupMode('default');
   };
 
   // ヘルプ（アシスタント）柔軟指定・変更モーダルを開く
@@ -2409,7 +2532,13 @@ export default function SalonWorkScreen() {
           <View style={[styles.modalCard, { backgroundColor: theme.cardBg }]}>
             <View style={styles.modalHeader}>
               <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>
-                {isEditingExistingTimer ? `${modalSeatLabel} のタイマー変更` : `${modalSeatLabel} のタイム設定`}
+                {timerSetupMode === 'additional'
+                  ? `${modalSeatLabel} の追加タイム設定`
+                  : timerSetupMode === 'new'
+                  ? `${modalSeatLabel} の新規タイマー設定`
+                  : isEditingExistingTimer
+                  ? `${modalSeatLabel} のタイマー変更`
+                  : `${modalSeatLabel} のタイム設定`}
               </Text>
               <TouchableOpacity onPress={() => setIsSetTimerModalVisible(false)}>
                 <Ionicons name="close" size={24} color={theme.textSecondary} />
@@ -2693,7 +2822,13 @@ export default function SalonWorkScreen() {
                 onPress={handleStartSeatTimer}
               >
                 <Text style={styles.submitButtonText}>
-                  {isEditingExistingTimer ? '変更を適用する' : 'タイマーを開始する'}
+                  {timerSetupMode === 'additional'
+                    ? '追加タイムを開始する'
+                    : timerSetupMode === 'new'
+                    ? '新しくタイマーを開始する'
+                    : isEditingExistingTimer
+                    ? '変更を適用する'
+                    : 'タイマーを開始する'}
                 </Text>
               </TouchableOpacity>
             </ScrollView>
@@ -2861,63 +2996,141 @@ export default function SalonWorkScreen() {
             style={[styles.actionModalCard, { backgroundColor: theme.cardBg }]}
             onStartShouldSetResponder={() => true}
           >
-            <Text style={[styles.actionModalTitle, { color: theme.textPrimary }]}>
-              時間変更しますか？
-            </Text>
-            <Text style={[styles.actionModalMessage, { color: theme.textSecondary }]}>
-              「{actionTargetSeat?.seatLabel || '対象席'}」のタイマー時間を変更しますか？
-            </Text>
+            {actionTargetSeat?.status === 'paused' ? (
+              // ★ タイマーを止めた状態: 「新しく測る」「追加タイム」の2つのみ表示（キャンセルと変更は不要）
+              <>
+                <View style={styles.actionModalHeaderRow}>
+                  <Text style={[styles.actionModalTitle, { color: theme.textPrimary, marginBottom: 0 }]}>
+                    タイマー操作を選択
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => setIsTimeActionModalVisible(false)}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <Ionicons name="close" size={22} color={theme.textSecondary} />
+                  </TouchableOpacity>
+                </View>
 
-            {/* 上段: キャンセル / 変更する */}
-            <View style={styles.actionModalTopButtonsRow}>
-              <TouchableOpacity
-                style={[
-                  styles.actionModalCancelBtn,
-                  { backgroundColor: isEcoMode ? '#2C2C2E' : '#E5E5EA' },
-                ]}
-                onPress={() => setIsTimeActionModalVisible(false)}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.actionModalCancelBtnText, { color: theme.textPrimary }]}>
-                  キャンセル
+                <Text style={[styles.actionModalMessage, { color: theme.textSecondary }]}>
+                  「{actionTargetSeat?.seatLabel || '対象席'}」は現在停止中です。
                 </Text>
-              </TouchableOpacity>
 
-              <TouchableOpacity
-                style={[
-                  styles.actionModalChangeBtn,
-                  { backgroundColor: isEcoMode ? '#3A3A3C' : '#E5E5EA' },
-                ]}
-                onPress={handleProceedToEditTimer}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.actionModalChangeBtnText, { color: theme.textPrimary }]}>
-                  変更する
+                <View style={styles.pausedActionButtonsCol}>
+                  {/* ① 新しく測る */}
+                  <TouchableOpacity
+                    style={[
+                      styles.pausedActionCardBtn,
+                      {
+                        backgroundColor: isEcoMode ? '#1E293B' : '#EFF6FF',
+                        borderColor: theme.accent,
+                      },
+                    ]}
+                    onPress={handleProceedToNewTimer}
+                    activeOpacity={0.75}
+                  >
+                    <View style={[styles.pausedActionIconCircle, { backgroundColor: theme.accent }]}>
+                      <Ionicons name="refresh" size={20} color="#FFFFFF" />
+                    </View>
+                    <View style={styles.pausedActionTextCol}>
+                      <Text style={[styles.pausedActionBtnTitle, { color: theme.accent }]}>
+                        新しく測る
+                      </Text>
+                      <Text style={[styles.pausedActionBtnSub, { color: theme.textSecondary }]}>
+                        履歴を新しくして最初から計測
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color={theme.accent} />
+                  </TouchableOpacity>
+
+                  {/* ② 追加タイム */}
+                  <TouchableOpacity
+                    style={[
+                      styles.pausedActionCardBtn,
+                      {
+                        backgroundColor: isEcoMode ? '#281B3C' : '#FAF5FF',
+                        borderColor: '#A855F7',
+                      },
+                    ]}
+                    onPress={handleProceedToAddTimer}
+                    activeOpacity={0.75}
+                  >
+                    <View style={[styles.pausedActionIconCircle, { backgroundColor: '#A855F7' }]}>
+                      <Ionicons name="add-circle" size={20} color="#FFFFFF" />
+                    </View>
+                    <View style={styles.pausedActionTextCol}>
+                      <Text style={[styles.pausedActionBtnTitle, { color: '#A855F7' }]}>
+                        追加タイム
+                      </Text>
+                      <Text style={[styles.pausedActionBtnSub, { color: theme.textSecondary }]}>
+                        履歴に続きを入れて追加放置
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color="#A855F7" />
+                  </TouchableOpacity>
+                </View>
+              </>
+            ) : (
+              // ★ タイマー稼働中（通常時）: キャンセル / 変更する / タイマーを止める
+              <>
+                <Text style={[styles.actionModalTitle, { color: theme.textPrimary }]}>
+                  時間変更しますか？
                 </Text>
-              </TouchableOpacity>
-            </View>
+                <Text style={[styles.actionModalMessage, { color: theme.textSecondary }]}>
+                  「{actionTargetSeat?.seatLabel || '対象席'}」のタイマー時間を変更しますか？
+                </Text>
 
-            {/* 下段: タイマーを止める。（お互いに通知確認が届く） */}
-            <TouchableOpacity
-              style={[
-                styles.actionModalStopBtn,
-                {
-                  backgroundColor: isEcoMode ? 'rgba(239, 68, 68, 0.18)' : '#FEE2E2',
-                  borderColor: theme.danger,
-                },
-              ]}
-              onPress={handleStopTimerWithNotification}
-              activeOpacity={0.7}
-            >
-              <Ionicons name="stop-circle" size={20} color={theme.danger} style={{ marginRight: 6 }} />
-              <Text style={[styles.actionModalStopBtnText, { color: theme.danger }]}>
-                タイマーを止める。
-              </Text>
-            </TouchableOpacity>
+                {/* 上段: キャンセル / 変更する */}
+                <View style={styles.actionModalTopButtonsRow}>
+                  <TouchableOpacity
+                    style={[
+                      styles.actionModalCancelBtn,
+                      { backgroundColor: isEcoMode ? '#2C2C2E' : '#E5E5EA' },
+                    ]}
+                    onPress={() => setIsTimeActionModalVisible(false)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.actionModalCancelBtnText, { color: theme.textPrimary }]}>
+                      キャンセル
+                    </Text>
+                  </TouchableOpacity>
 
-            <Text style={[styles.actionModalNote, { color: theme.textTertiary }]}>
-              ※停止するとメイン担当・ヘルプ担当の両者に停止・確認通知が届きます
-            </Text>
+                  <TouchableOpacity
+                    style={[
+                      styles.actionModalChangeBtn,
+                      { backgroundColor: isEcoMode ? '#3A3A3C' : '#E5E5EA' },
+                    ]}
+                    onPress={handleProceedToEditTimer}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.actionModalChangeBtnText, { color: theme.textPrimary }]}>
+                      変更する
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* 下段: タイマーを止める。（お互いに通知確認が届く） */}
+                <TouchableOpacity
+                  style={[
+                    styles.actionModalStopBtn,
+                    {
+                      backgroundColor: isEcoMode ? 'rgba(239, 68, 68, 0.18)' : '#FEE2E2',
+                      borderColor: theme.danger,
+                    },
+                  ]}
+                  onPress={handleStopTimerWithNotification}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="stop-circle" size={20} color={theme.danger} style={{ marginRight: 6 }} />
+                  <Text style={[styles.actionModalStopBtnText, { color: theme.danger }]}>
+                    タイマーを止める。
+                  </Text>
+                </TouchableOpacity>
+
+                <Text style={[styles.actionModalNote, { color: theme.textTertiary }]}>
+                  ※停止するとメイン担当・ヘルプ担当の両者に停止・確認通知が届きます
+                </Text>
+              </>
+            )}
           </View>
         </TouchableOpacity>
       </Modal>
@@ -4463,6 +4676,45 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 10,
     lineHeight: 15,
+  },
+  actionModalHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+    marginBottom: 8,
+  },
+  pausedActionButtonsCol: {
+    width: '100%',
+    gap: 12,
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  pausedActionCardBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 14,
+    borderRadius: 16,
+    borderWidth: 1.5,
+  },
+  pausedActionIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  pausedActionTextCol: {
+    flex: 1,
+  },
+  pausedActionBtnTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    marginBottom: 2,
+  },
+  pausedActionBtnSub: {
+    fontSize: 12,
   },
   // ヘルプ担当指定・変更スタイル
   staffRoleHeader: {
