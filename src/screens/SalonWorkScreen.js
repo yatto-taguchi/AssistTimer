@@ -195,6 +195,11 @@ export default function SalonWorkScreen() {
   const [isCheckStopModalVisible, setIsCheckStopModalVisible] = useState(false);
   const [checkStopTargetSeat, setCheckStopTargetSeat] = useState(null);
 
+  // ★ ユーザー指定: クイックタイム変更モーダル用ステート（+30秒, +1分, +3分, +5分 & ±30秒）
+  const [isQuickAdjustModalVisible, setIsQuickAdjustModalVisible] = useState(false);
+  const [quickAdjustTargetSeat, setQuickAdjustTargetSeat] = useState(null);
+  const [quickAdjustDeltaSeconds, setQuickAdjustDeltaSeconds] = useState(0);
+
   // 招待コード参加・新規作成フォーム用
   const [inputInviteCode, setInputInviteCode] = useState('');
   const [inputSalonName, setInputSalonName] = useState('');
@@ -1669,7 +1674,7 @@ export default function SalonWorkScreen() {
     }
   };
 
-  // ＋5分延長
+  // ＋5分延長（互換性保持）
   const handleExtend5Min = (seatId) => {
     const nowStr = getCurrentTimeFormatted();
     setSeats((prev) =>
@@ -1691,6 +1696,145 @@ export default function SalonWorkScreen() {
     );
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 60]);
+    }
+  };
+
+  // ★ ユーザー指定: クイックタイム変更モーダルを開く
+  const handleOpenQuickTimeAdjustModal = (seat) => {
+    setQuickAdjustTargetSeat(seat);
+    setQuickAdjustDeltaSeconds(0);
+    setIsQuickAdjustModalVisible(true);
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate(20);
+    }
+  };
+
+  // クイック加算・微調整ハンドラー (+30秒, +1分, +3分, +5分, ±30秒)
+  const handleAddQuickAdjustDelta = (seconds) => {
+    setQuickAdjustDeltaSeconds((prev) => prev + seconds);
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate(25);
+    }
+  };
+
+  // クイックタイム変更プレビュー計算
+  const getQuickAdjustPreview = () => {
+    if (!quickAdjustTargetSeat) {
+      return { currentStr: '0:00', nextStr: '0:00', deltaStr: '±0秒', isOver: false };
+    }
+    const now = Date.now();
+    let currentRemainingSec = 0;
+    let isCurrentOver = false;
+
+    if (quickAdjustTargetSeat.isPaused) {
+      currentRemainingSec = quickAdjustTargetSeat.pausedRemainingSeconds || 0;
+    } else if (quickAdjustTargetSeat.targetEndTimestamp) {
+      const diffSec = Math.floor((quickAdjustTargetSeat.targetEndTimestamp - now) / 1000);
+      if (diffSec < 0) {
+        isCurrentOver = true;
+        currentRemainingSec = Math.abs(diffSec);
+      } else {
+        currentRemainingSec = diffSec;
+      }
+    }
+
+    const cM = Math.floor(currentRemainingSec / 60);
+    const cS = currentRemainingSec % 60;
+    const currentStr = `${isCurrentOver ? '+' : ''}${cM}:${cS < 10 ? '0' : ''}${cS}`;
+
+    let nextSec = 0;
+    if (isCurrentOver) {
+      nextSec = Math.max(0, quickAdjustDeltaSeconds);
+    } else {
+      nextSec = Math.max(0, currentRemainingSec + quickAdjustDeltaSeconds);
+    }
+    const nM = Math.floor(nextSec / 60);
+    const nS = nextSec % 60;
+    const nextStr = `${nM}:${nS < 10 ? '0' : ''}${nS}`;
+
+    const absD = Math.abs(quickAdjustDeltaSeconds);
+    const dM = Math.floor(absD / 60);
+    const dS = absD % 60;
+    let deltaStr = '';
+    if (dM > 0 && dS > 0) {
+      deltaStr = `${quickAdjustDeltaSeconds > 0 ? '+' : '-'}${dM}分${dS}秒`;
+    } else if (dM > 0) {
+      deltaStr = `${quickAdjustDeltaSeconds > 0 ? '+' : '-'}${dM}分`;
+    } else if (dS > 0) {
+      deltaStr = `${quickAdjustDeltaSeconds > 0 ? '+' : '-'}${dS}秒`;
+    } else {
+      deltaStr = '±0秒';
+    }
+
+    return { currentStr, nextStr, deltaStr, isOver: isCurrentOver };
+  };
+
+  // クイックタイム変更の確定適用
+  const handleConfirmQuickTimeAdjust = () => {
+    if (!quickAdjustTargetSeat) return;
+    const seatId = quickAdjustTargetSeat.id;
+    const deltaSec = quickAdjustDeltaSeconds;
+    if (deltaSec === 0) {
+      setIsQuickAdjustModalVisible(false);
+      return;
+    }
+
+    const now = Date.now();
+    const nowStr = getCurrentTimeFormatted();
+
+    setSeats((prev) =>
+      prev.map((s) => {
+        if (s.id !== seatId) return s;
+
+        let newTargetEnd = s.targetEndTimestamp;
+        let newPausedRemaining = s.pausedRemainingSeconds;
+
+        if (s.isPaused) {
+          const baseRemaining = s.pausedRemainingSeconds || 0;
+          newPausedRemaining = Math.max(0, baseRemaining + deltaSec);
+        } else {
+          const currentDiffSec = Math.floor((s.targetEndTimestamp - now) / 1000);
+          if (currentDiffSec < 0) {
+            newTargetEnd = now + Math.max(0, deltaSec) * 1000;
+          } else {
+            newTargetEnd = Math.max(now, s.targetEndTimestamp + deltaSec * 1000);
+          }
+        }
+
+        const absDelta = Math.abs(deltaSec);
+        const dm = Math.floor(absDelta / 60);
+        const ds = absDelta % 60;
+        let deltaText = '';
+        if (dm > 0 && ds > 0) {
+          deltaText = `${dm}分${ds}秒`;
+        } else if (dm > 0) {
+          deltaText = `${dm}分`;
+        } else {
+          deltaText = `${ds}秒`;
+        }
+        const historyText = deltaSec > 0 ? `${deltaText}追加放置` : `${deltaText}短縮`;
+
+        const historyItem = {
+          id: `h-${Date.now()}`,
+          time: nowStr,
+          text: historyText,
+          type: 'extend',
+        };
+        const prevHist = s.history || [];
+
+        return {
+          ...s,
+          targetEndTimestamp: newTargetEnd,
+          pausedRemainingSeconds: newPausedRemaining,
+          history: [...prevHist, historyItem],
+        };
+      })
+    );
+
+    setIsQuickAdjustModalVisible(false);
+    setQuickAdjustDeltaSeconds(0);
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 70]);
     }
   };
 
@@ -2812,11 +2956,12 @@ export default function SalonWorkScreen() {
 
               {/* 操作ボタングループ */}
               <View style={[styles.cardActionRow, { borderColor: theme.cardBorder }]}>
+                {/* ★ ユーザー指定: 左下「＋5分」を「タイム変更」にし、タップでモーダルを起動 */}
                 <TouchableOpacity
                   style={styles.actionBtn}
-                  onPress={() => handleExtend5Min(item.id)}
+                  onPress={() => handleOpenQuickTimeAdjustModal(item)}
                 >
-                  <Text style={[styles.actionBtnText, { color: theme.textSecondary }]}>＋5分</Text>
+                  <Text style={[styles.actionBtnText, { color: theme.textSecondary }]}>タイム変更</Text>
                 </TouchableOpacity>
 
                 <View style={[styles.actionDivider, { backgroundColor: theme.cardBorder }]} />
@@ -4077,6 +4222,259 @@ export default function SalonWorkScreen() {
                 <Ionicons name="checkmark-circle" size={16} color="#FFFFFF" style={{ marginRight: 4 }} />
                 <Text style={[styles.actionModalChangeBtnText, { color: '#FFFFFF', fontWeight: '700' }]}>
                   タイマーを止める
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* ★ ユーザー指定: クイックタイム変更モーダル（左下「タイム変更」から起動: +30秒, +1分, +3分, +5分 & -30秒/+30秒） */}
+      <Modal
+        visible={isQuickAdjustModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setIsQuickAdjustModalVisible(false)}
+      >
+        <TouchableOpacity
+          style={styles.actionModalOverlay}
+          activeOpacity={1}
+          onPress={() => setIsQuickAdjustModalVisible(false)}
+        >
+          <View
+            style={[styles.actionModalCard, { backgroundColor: theme.cardBg, maxWidth: 360 }]}
+            onStartShouldSetResponder={() => true}
+          >
+            {/* ヘッダー */}
+            <View style={styles.actionModalHeaderRow}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Ionicons name="timer" size={20} color={theme.accent} />
+                <Text style={[styles.actionModalTitle, { color: theme.textPrimary, marginBottom: 0 }]}>
+                  {quickAdjustTargetSeat?.seatLabel || '対象席'} のタイム変更
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => setIsQuickAdjustModalVisible(false)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Ionicons name="close" size={22} color={theme.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            {/* タイム比較プレビューカード */}
+            {(() => {
+              const preview = getQuickAdjustPreview();
+              return (
+                <View
+                  style={[
+                    styles.quickTimePreviewBox,
+                    {
+                      backgroundColor: isEcoMode ? '#1C1C1E' : '#F8FAFC',
+                      borderColor: quickAdjustDeltaSeconds !== 0 ? theme.accent : theme.cardBorder,
+                    },
+                  ]}
+                >
+                  <View style={styles.quickTimePreviewCol}>
+                    <Text style={[styles.quickTimePreviewSubLabel, { color: theme.textTertiary }]}>
+                      現在の残り
+                    </Text>
+                    <Text
+                      style={[
+                        styles.quickTimePreviewDigits,
+                        { color: preview.isOver ? theme.danger : theme.textPrimary },
+                      ]}
+                    >
+                      {preview.currentStr}
+                    </Text>
+                  </View>
+
+                  <View style={{ alignItems: 'center', paddingHorizontal: 8 }}>
+                    <Ionicons
+                      name="arrow-forward"
+                      size={20}
+                      color={quickAdjustDeltaSeconds !== 0 ? theme.accent : theme.textTertiary}
+                    />
+                    <View
+                      style={[
+                        styles.quickTimeDeltaBadge,
+                        {
+                          backgroundColor:
+                            quickAdjustDeltaSeconds > 0
+                              ? (isEcoMode ? '#0B243B' : '#DBEAFE')
+                              : quickAdjustDeltaSeconds < 0
+                              ? (isEcoMode ? '#331214' : '#FEE2E2')
+                              : (isEcoMode ? '#2C2C2E' : '#E5E5EA'),
+                          borderColor:
+                            quickAdjustDeltaSeconds > 0
+                              ? '#3B82F6'
+                              : quickAdjustDeltaSeconds < 0
+                              ? '#EF4444'
+                              : 'transparent',
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.quickTimeDeltaText,
+                          {
+                            color:
+                              quickAdjustDeltaSeconds > 0
+                                ? '#2563EB'
+                                : quickAdjustDeltaSeconds < 0
+                                ? theme.danger
+                                : theme.textSecondary,
+                          },
+                        ]}
+                      >
+                        {preview.deltaStr}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.quickTimePreviewCol}>
+                    <Text style={[styles.quickTimePreviewSubLabel, { color: theme.textTertiary }]}>
+                      変更後
+                    </Text>
+                    <Text
+                      style={[
+                        styles.quickTimePreviewDigits,
+                        {
+                          color:
+                            quickAdjustDeltaSeconds !== 0
+                              ? theme.accent
+                              : theme.textPrimary,
+                          fontWeight: '800',
+                        },
+                      ]}
+                    >
+                      {preview.nextStr}
+                    </Text>
+                  </View>
+                </View>
+              );
+            })()}
+
+            {/* ★ ユーザー指定: プラス３０秒、１分、３分、５分を作る */}
+            <View style={{ marginTop: 14 }}>
+              <Text style={[styles.quickTimeSectionTitle, { color: theme.textSecondary }]}>
+                ⚡ クイック追加
+              </Text>
+              <View style={styles.quickTimeButtonRow}>
+                {[
+                  { sec: 30, label: '+30秒' },
+                  { sec: 60, label: '+1分' },
+                  { sec: 180, label: '+3分' },
+                  { sec: 300, label: '+5分' },
+                ].map((btn) => (
+                  <TouchableOpacity
+                    key={btn.sec}
+                    style={[
+                      styles.quickTimeAddPill,
+                      {
+                        backgroundColor: isEcoMode ? '#1E293B' : '#EFF6FF',
+                        borderColor: isEcoMode ? '#3B82F6' : '#93C5FD',
+                      },
+                    ]}
+                    activeOpacity={0.7}
+                    onPress={() => handleAddQuickAdjustDelta(btn.sec)}
+                  >
+                    <Text
+                      style={[
+                        styles.quickTimeAddPillText,
+                        { color: isEcoMode ? '#93C5FD' : '#1D4ED8' },
+                      ]}
+                    >
+                      {btn.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            {/* ★ ユーザー指定: そして−３０秒と＋３０秒できるボタンもつけて */}
+            <View style={{ marginTop: 14 }}>
+              <Text style={[styles.quickTimeSectionTitle, { color: theme.textSecondary }]}>
+                ⚙️ 30秒単位で微調整
+              </Text>
+              <View style={styles.quickTimeAdjustRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.quickTimeStepBtn,
+                    {
+                      backgroundColor: isEcoMode ? '#2C2C2E' : '#F3F4F6',
+                      borderColor: theme.cardBorder,
+                    },
+                  ]}
+                  activeOpacity={0.7}
+                  onPress={() => handleAddQuickAdjustDelta(-30)}
+                >
+                  <Ionicons name="remove-circle-outline" size={17} color={theme.textPrimary} style={{ marginRight: 4 }} />
+                  <Text style={[styles.quickTimeStepBtnText, { color: theme.textPrimary }]}>-30秒</Text>
+                </TouchableOpacity>
+
+                {quickAdjustDeltaSeconds !== 0 ? (
+                  <TouchableOpacity
+                    style={[
+                      styles.quickTimeResetBtn,
+                      {
+                        backgroundColor: isEcoMode ? '#252528' : '#F2F2F7',
+                        borderColor: theme.cardBorder,
+                      },
+                    ]}
+                    activeOpacity={0.7}
+                    onPress={() => setQuickAdjustDeltaSeconds(0)}
+                  >
+                    <Ionicons name="refresh" size={13} color={theme.textSecondary} style={{ marginRight: 2 }} />
+                    <Text style={{ fontSize: 11, color: theme.textSecondary, fontWeight: '600' }}>リセット</Text>
+                  </TouchableOpacity>
+                ) : null}
+
+                <TouchableOpacity
+                  style={[
+                    styles.quickTimeStepBtn,
+                    {
+                      backgroundColor: isEcoMode ? '#0B243B' : '#EFF6FF',
+                      borderColor: '#93C5FD',
+                    },
+                  ]}
+                  activeOpacity={0.7}
+                  onPress={() => handleAddQuickAdjustDelta(30)}
+                >
+                  <Ionicons name="add-circle-outline" size={17} color={theme.accent} style={{ marginRight: 4 }} />
+                  <Text style={[styles.quickTimeStepBtnText, { color: theme.accent }]}>+30秒</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* ボタングループ */}
+            <View style={[styles.actionModalTopButtonsRow, { marginTop: 20 }]}>
+              <TouchableOpacity
+                style={[
+                  styles.actionModalCancelBtn,
+                  { backgroundColor: isEcoMode ? '#2C2C2E' : '#E5E5EA' },
+                ]}
+                onPress={() => setIsQuickAdjustModalVisible(false)}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.actionModalCancelBtnText, { color: theme.textPrimary }]}>
+                  キャンセル
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.actionModalChangeBtn,
+                  {
+                    backgroundColor: quickAdjustDeltaSeconds !== 0 ? theme.accent : (isEcoMode ? '#3A3A3C' : '#CBD5E1'),
+                  },
+                ]}
+                onPress={handleConfirmQuickTimeAdjust}
+                disabled={quickAdjustDeltaSeconds === 0}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="checkmark-sharp" size={16} color="#FFFFFF" style={{ marginRight: 4 }} />
+                <Text style={[styles.actionModalChangeBtnText, { color: '#FFFFFF', fontWeight: '700' }]}>
+                  変更を適用する
                 </Text>
               </TouchableOpacity>
             </View>
@@ -6022,6 +6420,93 @@ const styles = StyleSheet.create({
   actionModalStopBtnText: {
     fontSize: 15,
     fontWeight: '700',
+  },
+  // ★ クイックタイム変更モーダル用スタイル
+  quickTimePreviewBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    marginTop: 12,
+  },
+  quickTimePreviewCol: {
+    alignItems: 'center',
+    flex: 1,
+  },
+  quickTimePreviewSubLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  quickTimePreviewDigits: {
+    fontSize: 22,
+    fontWeight: '800',
+    fontVariant: ['tabular-nums'],
+  },
+  quickTimeDeltaBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    borderWidth: 1,
+    marginTop: 3,
+  },
+  quickTimeDeltaText: {
+    fontSize: 11,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  quickTimeSectionTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  quickTimeButtonRow: {
+    flexDirection: 'row',
+    gap: 6,
+    justifyContent: 'space-between',
+  },
+  quickTimeAddPill: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 9,
+    borderRadius: 10,
+    borderWidth: 1.2,
+  },
+  quickTimeAddPillText: {
+    fontSize: 13,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  quickTimeAdjustRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  quickTimeStepBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  quickTimeStepBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
+  quickTimeResetBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
   },
   actionModalStatusPillsSection: {
     width: '100%',
