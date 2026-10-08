@@ -257,7 +257,6 @@ export default function SalonWorkScreen() {
           let escLevel = s.escalationLevel || 0;
 
           // ヘルプ確認（またはヘルプなし確認）に達していない場合の段階的エスカレーション
-          const isNoHelp = s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none';
           const isConfirmed = isNoHelp || !s.assistantStaffName || s.assistantStaffConfirmed;
 
           // ① 30秒リマインド（強い振動）
