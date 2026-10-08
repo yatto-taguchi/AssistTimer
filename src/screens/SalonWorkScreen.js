@@ -1743,14 +1743,22 @@ export default function SalonWorkScreen() {
     const currentStr = `${isCurrentOver ? '+' : ''}${cM}:${cS < 10 ? '0' : ''}${cS}`;
 
     let nextSec = 0;
+    let nextIsOver = false;
     if (isCurrentOver) {
-      nextSec = Math.max(0, quickAdjustDeltaSeconds);
+      if (quickAdjustDeltaSeconds === 0) {
+        nextSec = currentRemainingSec;
+        nextIsOver = true;
+      } else {
+        nextSec = Math.max(0, quickAdjustDeltaSeconds);
+        nextIsOver = false;
+      }
     } else {
-      nextSec = Math.max(0, currentRemainingSec + quickAdjustDeltaSeconds);
+      const calcSec = currentRemainingSec + quickAdjustDeltaSeconds;
+      nextSec = Math.max(0, calcSec);
     }
     const nM = Math.floor(nextSec / 60);
     const nS = nextSec % 60;
-    const nextStr = `${nM}:${nS < 10 ? '0' : ''}${nS}`;
+    const nextStr = `${nextIsOver ? '+' : ''}${nM}:${nS < 10 ? '0' : ''}${nS}`;
 
     const absD = Math.abs(quickAdjustDeltaSeconds);
     const dM = Math.floor(absD / 60);
@@ -4242,11 +4250,11 @@ export default function SalonWorkScreen() {
           onPress={() => setIsQuickAdjustModalVisible(false)}
         >
           <View
-            style={[styles.actionModalCard, { backgroundColor: theme.cardBg, maxWidth: 360 }]}
+            style={[styles.actionModalCard, { backgroundColor: theme.cardBg, width: '92%', maxWidth: 360, padding: 20, alignItems: 'stretch' }]}
             onStartShouldSetResponder={() => true}
           >
             {/* ヘッダー */}
-            <View style={styles.actionModalHeaderRow}>
+            <View style={[styles.actionModalHeaderRow, { width: '100%', marginBottom: 4 }]}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <Ionicons name="timer" size={20} color={theme.accent} />
                 <Text style={[styles.actionModalTitle, { color: theme.textPrimary, marginBottom: 0 }]}>
@@ -4271,6 +4279,7 @@ export default function SalonWorkScreen() {
                     {
                       backgroundColor: isEcoMode ? '#1C1C1E' : '#F8FAFC',
                       borderColor: quickAdjustDeltaSeconds !== 0 ? theme.accent : theme.cardBorder,
+                      width: '100%',
                     },
                   ]}
                 >
@@ -4288,7 +4297,7 @@ export default function SalonWorkScreen() {
                     </Text>
                   </View>
 
-                  <View style={{ alignItems: 'center', paddingHorizontal: 8 }}>
+                  <View style={{ alignItems: 'center', paddingHorizontal: 6 }}>
                     <Ionicons
                       name="arrow-forward"
                       size={20}
@@ -4342,6 +4351,8 @@ export default function SalonWorkScreen() {
                           color:
                             quickAdjustDeltaSeconds !== 0
                               ? theme.accent
+                              : preview.isOver
+                              ? theme.danger
                               : theme.textPrimary,
                           fontWeight: '800',
                         },
@@ -4355,11 +4366,11 @@ export default function SalonWorkScreen() {
             })()}
 
             {/* ★ ユーザー指定: プラス３０秒、１分、３分、５分を作る */}
-            <View style={{ marginTop: 14 }}>
+            <View style={{ width: '100%', marginTop: 14 }}>
               <Text style={[styles.quickTimeSectionTitle, { color: theme.textSecondary }]}>
                 ⚡ クイック追加
               </Text>
-              <View style={styles.quickTimeButtonRow}>
+              <View style={[styles.quickTimeButtonRow, { width: '100%' }]}>
                 {[
                   { sec: 30, label: '+30秒' },
                   { sec: 60, label: '+1分' },
@@ -4392,11 +4403,11 @@ export default function SalonWorkScreen() {
             </View>
 
             {/* ★ ユーザー指定: そして−３０秒と＋３０秒できるボタンもつけて */}
-            <View style={{ marginTop: 14 }}>
+            <View style={{ width: '100%', marginTop: 14 }}>
               <Text style={[styles.quickTimeSectionTitle, { color: theme.textSecondary }]}>
                 ⚙️ 30秒単位で微調整
               </Text>
-              <View style={styles.quickTimeAdjustRow}>
+              <View style={[styles.quickTimeAdjustRow, { width: '100%' }]}>
                 <TouchableOpacity
                   style={[
                     styles.quickTimeStepBtn,
@@ -4447,7 +4458,7 @@ export default function SalonWorkScreen() {
             </View>
 
             {/* ボタングループ */}
-            <View style={[styles.actionModalTopButtonsRow, { marginTop: 20 }]}>
+            <View style={[styles.actionModalTopButtonsRow, { width: '100%', marginTop: 20 }]}>
               <TouchableOpacity
                 style={[
                   styles.actionModalCancelBtn,
@@ -6423,14 +6434,15 @@ const styles = StyleSheet.create({
   },
   // ★ クイックタイム変更モーダル用スタイル
   quickTimePreviewBox: {
+    width: '100%',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 12,
     paddingHorizontal: 14,
-    borderRadius: 12,
+    borderRadius: 14,
     borderWidth: 1.5,
-    marginTop: 12,
+    marginTop: 10,
   },
   quickTimePreviewCol: {
     alignItems: 'center',
@@ -6459,20 +6471,23 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
   quickTimeSectionTitle: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
     marginBottom: 6,
   },
   quickTimeButtonRow: {
+    width: '100%',
     flexDirection: 'row',
     gap: 6,
     justifyContent: 'space-between',
   },
   quickTimeAddPill: {
     flex: 1,
+    minHeight: 42,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 9,
+    paddingVertical: 8,
+    paddingHorizontal: 2,
     borderRadius: 10,
     borderWidth: 1.2,
   },
@@ -6482,16 +6497,19 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
   quickTimeAdjustRow: {
+    width: '100%',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
   },
   quickTimeStepBtn: {
     flex: 1,
+    minHeight: 42,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 8,
+    paddingHorizontal: 6,
     borderRadius: 10,
     borderWidth: 1,
   },
@@ -6504,7 +6522,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 8,
-    paddingVertical: 6,
+    paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
   },
