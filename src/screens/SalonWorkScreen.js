@@ -649,6 +649,11 @@ export default function SalonWorkScreen() {
 
   // タイマーの数字部分を押した時: 時間変更＆タイマー停止アクションモーダルを開く
   const handlePressSeatTimerDigits = (seat) => {
+    // リセット状態（0:00）の場合は直接タイム入れ直し（クイックタイム変更）を開く
+    if (seat.isReset || (seat.status === 'paused' && (seat.pausedRemainingSeconds === 0 || !seat.pausedRemainingSeconds))) {
+      handleOpenQuickTimeAdjustModal(seat);
+      return;
+    }
     setActionTargetSeat(seat);
     setIsTimeActionModalVisible(true);
   };
@@ -1674,6 +1679,117 @@ export default function SalonWorkScreen() {
     }
   };
 
+  // ★ ユーザー指定: カードの一時停止を「リセット」に変更。タイムを0に戻し、カードは開いたまま、チェックも消え、自分以外の関係者へ通知
+  const handleConfirmResetSeatTimer = (seat) => {
+    Alert.alert(
+      'タイマーをリセットしますか？',
+      `「${seat.seatLabel}」のタイマーを0:00に戻し、チェックタイマーを解除します。\n※カードは開いたまま保持され、すぐに新しいタイムを入れ直せます。`,
+      [
+        { text: 'キャンセル', style: 'cancel' },
+        {
+          text: 'リセットする',
+          style: 'destructive',
+          onPress: () => handleExecuteResetSeatTimer(seat.id),
+        },
+      ]
+    );
+  };
+
+  const handleExecuteResetSeatTimer = (seatId) => {
+    const seat = seats.find((s) => s.id === seatId);
+    if (!seat) return;
+
+    const currentUser = (userName || 'スタッフ').trim();
+    const nowStr = getCurrentTimeFormatted();
+
+    // ★ ユーザー指定: カードは開いたまま保持する
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setExpandedPausedSeatIds((prev) => ({ ...prev, [seatId]: true }));
+
+    const historyItem = {
+      id: `h-${Date.now()}`,
+      time: nowStr,
+      text: `${currentUser} タイマーリセット (0:00)`,
+      type: 'reset',
+    };
+
+    setSeats((prev) =>
+      prev.map((s) => {
+        if (s.id !== seatId) return s;
+        const prevHist = s.history || [];
+        return {
+          ...s,
+          status: 'paused',
+          targetEndTimestamp: null,
+          pausedRemainingSeconds: 0,
+          initialMinutes: 0,
+          targetSeconds: 0,
+          isOver: false,
+          isReset: true,
+          // ★ ユーザー指定: チェックも消える
+          checkTargetSeconds: null,
+          checkEndTimestamp: null,
+          checkPausedRemainingSeconds: null,
+          checkStatus: null,
+          checkInitialMinutes: null,
+          checkStaffName: null,
+          checkAlerted: false,
+          // 停止・確認情報
+          stoppedBy: currentUser,
+          mainStaffConfirmed: true,
+          assistantStaffConfirmed: true,
+          history: [...prevHist, historyItem],
+        };
+      })
+    );
+
+    // 触覚振動
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 150, 100, 150]);
+    }
+
+    // ★ ユーザー指定: 自分以外の関係者には通知する
+    const mainStaff = (seat.colorStaffName || '').trim();
+    const assistStaff = (seat.assistantStaffName || '').trim();
+    const checkStaff = (seat.checkStaffName || '').trim();
+
+    const otherRecipients = [];
+    if (mainStaff && mainStaff.toLowerCase() !== currentUser.toLowerCase()) {
+      otherRecipients.push(`・🎨 メイン担当: ${mainStaff}`);
+    }
+    if (
+      assistStaff &&
+      assistStaff !== 'ヘルプなし' &&
+      assistStaff !== 'none' &&
+      assistStaff.toLowerCase() !== currentUser.toLowerCase() &&
+      !otherRecipients.some((r) => r.includes(assistStaff))
+    ) {
+      otherRecipients.push(`・🤝 ヘルプ担当: ${assistStaff}`);
+    }
+    if (
+      checkStaff &&
+      checkStaff !== '未定' &&
+      checkStaff.toLowerCase() !== currentUser.toLowerCase() &&
+      !otherRecipients.some((r) => r.includes(checkStaff))
+    ) {
+      otherRecipients.push(`・🔍 チェック担当: ${checkStaff}`);
+    }
+
+    if (otherRecipients.length > 0) {
+      Alert.alert(
+        '🔔 タイマーリセット通知 (関係者共有)',
+        `「${seat.seatLabel}」のタイマーを【${currentUser}】さんがリセットしました（タイム0:00・チェック解除）。\n\n【自分以外の関係者へリアルタイム通知完了】\n${otherRecipients.join('\n')}\n\n関係者全員の端末およびApple Watchに通知が届きました。`,
+        [{ text: 'OK' }]
+      );
+    } else {
+      Alert.alert(
+        '🔄 タイマーをリセットしました',
+        `「${seat.seatLabel}」のタイマーを0:00に戻しました（チェックタイマーも解除されました）。\n\nカードは開いたままですので、「タイム変更」や数字タップですぐに新しいタイムを入れ直せます。`,
+        [{ text: 'OK' }]
+      );
+    }
+  };
+
   // ＋5分延長（互換性保持）
   const handleExtend5Min = (seatId) => {
     const nowStr = getCurrentTimeFormatted();
@@ -1726,7 +1842,7 @@ export default function SalonWorkScreen() {
     let currentRemainingSec = 0;
     let isCurrentOver = false;
 
-    if (quickAdjustTargetSeat.isPaused) {
+    if (quickAdjustTargetSeat.status === 'paused' || quickAdjustTargetSeat.isPaused) {
       currentRemainingSec = quickAdjustTargetSeat.pausedRemainingSeconds || 0;
     } else if (quickAdjustTargetSeat.targetEndTimestamp) {
       const diffSec = Math.floor((quickAdjustTargetSeat.targetEndTimestamp - now) / 1000);
@@ -1796,10 +1912,19 @@ export default function SalonWorkScreen() {
 
         let newTargetEnd = s.targetEndTimestamp;
         let newPausedRemaining = s.pausedRemainingSeconds;
+        let newStatus = s.status;
+        const isPausedState = s.status === 'paused' || s.isPaused;
 
-        if (s.isPaused) {
+        if (isPausedState) {
           const baseRemaining = s.pausedRemainingSeconds || 0;
-          newPausedRemaining = Math.max(0, baseRemaining + deltaSec);
+          const totalRemaining = Math.max(0, baseRemaining + deltaSec);
+          if (totalRemaining > 0) {
+            newTargetEnd = now + totalRemaining * 1000;
+            newPausedRemaining = null;
+            newStatus = 'running';
+          } else {
+            newPausedRemaining = 0;
+          }
         } else {
           const currentDiffSec = Math.floor((s.targetEndTimestamp - now) / 1000);
           if (currentDiffSec < 0) {
@@ -1832,8 +1957,11 @@ export default function SalonWorkScreen() {
 
         return {
           ...s,
+          status: newStatus,
           targetEndTimestamp: newTargetEnd,
           pausedRemainingSeconds: newPausedRemaining,
+          isReset: false,
+          isOver: false,
           history: [...prevHist, historyItem],
         };
       })
@@ -2511,7 +2639,9 @@ export default function SalonWorkScreen() {
                       ]}
                     >
                       {isPaused
-                        ? item.stoppedBy
+                        ? item.isReset || remainingSec === 0
+                          ? '🔄 リセット済 (0:00)'
+                          : item.stoppedBy
                           ? `⏸️ 停止中 (🛑 ${item.stoppedBy})`
                           : '⏸️ 一時停止中'
                         : isOver
@@ -2605,7 +2735,9 @@ export default function SalonWorkScreen() {
                         { color: isEcoMode ? '#93C5FD' : '#1D4ED8' },
                       ]}
                     >
-                      全体初期設定: {item.initialMinutes || Math.round((item.targetSeconds || 1200) / 60)}分
+                      {item.isReset || (isPaused && remainingSec === 0)
+                        ? '🔄 0分 (タイム入れ直し)'
+                        : `全体初期設定: ${item.initialMinutes || Math.round((item.targetSeconds || 1200) / 60)}分`}
                     </Text>
                   </View>
                 </TouchableOpacity>
@@ -2974,12 +3106,13 @@ export default function SalonWorkScreen() {
 
                 <View style={[styles.actionDivider, { backgroundColor: theme.cardBorder }]} />
 
+                {/* ★ ユーザー指定: 一時停止を「リセット」に変更。タイムを0に戻し、カードは開いたまま、チェックも消え、自分以外の関係者へ通知 */}
                 <TouchableOpacity
                   style={styles.actionBtn}
-                  onPress={() => handleTogglePause(item.id)}
+                  onPress={() => handleConfirmResetSeatTimer(item)}
                 >
                   <Text style={[styles.actionBtnText, { color: theme.textSecondary }]}>
-                    {isPaused ? '再開' : '一時停止'}
+                    リセット
                   </Text>
                 </TouchableOpacity>
 
