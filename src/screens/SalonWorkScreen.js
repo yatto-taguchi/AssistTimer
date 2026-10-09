@@ -168,6 +168,8 @@ export default function SalonWorkScreen() {
   const [modalComment, setModalComment] = useState('');
   const [isEditingExistingTimer, setIsEditingExistingTimer] = useState(false); // 時間変更モードか否か
   const [timerSetupMode, setTimerSetupMode] = useState('default'); // 'default' | 'new' (新しく測る) | 'additional' (追加タイム)
+  // ★ ユーザー指定: タイム設定モーダルでの席名変更ステート
+  const [isEditingSeatLabel, setIsEditingSeatLabel] = useState(false);
 
   // ★ 放置タイムのお気に入りパネル用ステート（全体タイム＋チェックタイムのペアも保存可能）
   const [favoritePresets, setFavoritePresets] = useState([
@@ -630,8 +632,21 @@ export default function SalonWorkScreen() {
     Alert.alert('参加完了', `「${newSalonItem.name}」に接続しました！`);
   };
 
+  // ★ ユーザー指定: タイム設定モーダルでの席名変更の保存
+  const handleSaveSeatLabel = () => {
+    const trimmed = (modalSeatLabel || '').trim() || '席';
+    setModalSeatLabel(trimmed);
+    setIsEditingSeatLabel(false);
+    if (targetSeatId) {
+      setSeats((prev) =>
+        prev.map((s) => (s.id === targetSeatId ? { ...s, seatLabel: trimmed } : s))
+      );
+    }
+  };
+
   // 待機席タップ → タイム設定モーダルを開く（新規設定）
   const handleOpenSetTimerModal = (seat) => {
+    setIsEditingSeatLabel(false);
     setTargetSeatId(seat.id);
     setModalSeatLabel(seat.seatLabel);
     setModalTargetMinutes(20);
@@ -662,6 +677,7 @@ export default function SalonWorkScreen() {
   const handleProceedToEditTimer = () => {
     if (!actionTargetSeat) return;
     setIsTimeActionModalVisible(false);
+    setIsEditingSeatLabel(false);
     const seat = actionTargetSeat;
     setTargetSeatId(seat.id);
     setModalSeatLabel(seat.seatLabel);
@@ -684,6 +700,7 @@ export default function SalonWorkScreen() {
   const handleProceedToNewTimer = () => {
     if (!actionTargetSeat) return;
     setIsTimeActionModalVisible(false);
+    setIsEditingSeatLabel(false);
     const seat = actionTargetSeat;
     setTargetSeatId(seat.id);
     setModalSeatLabel(seat.seatLabel);
@@ -704,6 +721,7 @@ export default function SalonWorkScreen() {
   const handleProceedToAddTimer = () => {
     if (!actionTargetSeat) return;
     setIsTimeActionModalVisible(false);
+    setIsEditingSeatLabel(false);
     const seat = actionTargetSeat;
     setTargetSeatId(seat.id);
     setModalSeatLabel(seat.seatLabel);
@@ -3395,16 +3413,77 @@ export default function SalonWorkScreen() {
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: theme.cardBg }]}>
             <View style={styles.modalHeader}>
-              <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>
-                {timerSetupMode === 'additional'
-                  ? `${modalSeatLabel} の追加タイム設定`
-                  : timerSetupMode === 'new'
-                  ? `${modalSeatLabel} の新規タイマー設定`
-                  : isEditingExistingTimer
-                  ? `${modalSeatLabel} のタイマー変更`
-                  : `${modalSeatLabel} のタイム設定`}
-              </Text>
-              <TouchableOpacity onPress={() => setIsSetTimerModalVisible(false)}>
+              {isEditingSeatLabel ? (
+                <View style={styles.modalSeatLabelInputRow}>
+                  <Ionicons name="pencil" size={15} color={theme.accent} style={{ marginRight: 6 }} />
+                  <TextInput
+                    style={[
+                      styles.modalSeatLabelInput,
+                      {
+                        backgroundColor: theme.inputBg,
+                        color: theme.textPrimary,
+                        borderColor: theme.accent,
+                      },
+                    ]}
+                    value={modalSeatLabel}
+                    onChangeText={setModalSeatLabel}
+                    placeholder="席名を入力"
+                    placeholderTextColor={theme.textTertiary}
+                    autoFocus={true}
+                    maxLength={20}
+                    returnKeyType="done"
+                    onSubmitEditing={handleSaveSeatLabel}
+                    selectTextOnFocus={true}
+                  />
+                  <TouchableOpacity
+                    style={[styles.modalSeatLabelSaveBtn, { backgroundColor: theme.accent }]}
+                    onPress={handleSaveSeatLabel}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="checkmark" size={16} color="#FFFFFF" style={{ marginRight: 2 }} />
+                    <Text style={styles.modalSeatLabelSaveBtnText}>保存</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.modalHeaderLeftGroup}>
+                  {/* ★ ユーザー指定: タイム設定画面で「2番席」等の名前を変更できるようにする */}
+                  <TouchableOpacity
+                    style={[
+                      styles.modalSeatLabelPill,
+                      {
+                        backgroundColor: isEcoMode ? '#1E293B' : '#EFF6FF',
+                        borderColor: theme.accent,
+                      },
+                    ]}
+                    onPress={() => setIsEditingSeatLabel(true)}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons name="pencil" size={13} color={theme.accent} style={{ marginRight: 4 }} />
+                    <Text style={[styles.modalSeatLabelPillText, { color: theme.accent }]} numberOfLines={1}>
+                      {modalSeatLabel || '席名'}
+                    </Text>
+                    <Text style={[styles.modalSeatLabelEditHint, { color: theme.accent }]}>編集</Text>
+                  </TouchableOpacity>
+
+                  <Text style={[styles.modalTitleSuffix, { color: theme.textPrimary }]}>
+                    {timerSetupMode === 'additional'
+                      ? 'の追加タイム設定'
+                      : timerSetupMode === 'new'
+                      ? 'の新規タイマー設定'
+                      : isEditingExistingTimer
+                      ? 'のタイマー変更'
+                      : 'のタイム設定'}
+                  </Text>
+                </View>
+              )}
+
+              <TouchableOpacity
+                onPress={() => {
+                  setIsEditingSeatLabel(false);
+                  setIsSetTimerModalVisible(false);
+                }}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
                 <Ionicons name="close" size={24} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
@@ -6033,6 +6112,65 @@ const styles = StyleSheet.create({
   },
   modalTitle: {
     fontSize: 16,
+    fontWeight: '700',
+  },
+  modalHeaderLeftGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 8,
+    flexWrap: 'wrap',
+  },
+  modalSeatLabelPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    borderWidth: 1.2,
+    maxWidth: 160,
+  },
+  modalSeatLabelPillText: {
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  modalSeatLabelEditHint: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginLeft: 4,
+    opacity: 0.8,
+  },
+  modalTitleSuffix: {
+    fontSize: 16,
+    fontWeight: '700',
+    marginLeft: 4,
+  },
+  modalSeatLabelInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 8,
+  },
+  modalSeatLabelInput: {
+    flex: 1,
+    height: 38,
+    borderWidth: 1.5,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  modalSeatLabelSaveBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    height: 38,
+    borderRadius: 8,
+    marginLeft: 6,
+  },
+  modalSeatLabelSaveBtnText: {
+    color: '#FFFFFF',
+    fontSize: 13,
     fontWeight: '700',
   },
   sheetSectionTitle: {
