@@ -108,7 +108,7 @@ export default function SalonWorkScreen() {
     return `${h}:${m}`;
   };
 
-  // ★ ユーザー指定: 右上ヘルプアサインボタンの表示ラベル（絵文字なし、文字のみ、何も選択していない時は「未定」）
+  // ★ ユーザー指定: 全体タイマー右側ヘルプ担当ボタンの表示ラベル（「チェック未定」ではなく「ヘルプ未定 ▾」）
   const getHelpHeaderButtonLabel = (seat, isAlert) => {
     const staff = (seat?.assistantStaffName || '').trim();
     const isNoHelp = staff === 'ヘルプなし' || staff === 'none';
@@ -120,27 +120,27 @@ export default function SalonWorkScreen() {
     }
 
     if (isAlert) {
-      if (actionLabel) {
+      if (actionLabel && actionLabel !== 'チェック') {
         return `${actionLabel}未定 (あと1分) ▾`;
       }
-      return '未定 (あと1分) ▾';
+      return 'ヘルプ未定 (あと1分) ▾';
     }
 
     // スタッフが決まっている場合
     if (staff && staff !== '') {
-      if (actionLabel) {
+      if (actionLabel && actionLabel !== 'チェック') {
         return `${actionLabel} ${staff} ▾`;
       }
       return `${staff} ▾`;
     }
 
-    // スタッフが未定で、工程だけ指定されている場合
-    if (actionLabel) {
+    // スタッフが未定で、工程だけ指定されている場合（シャンプー、コーミング等。※チェックの場合は全体ヘルプと紛らわしいためヘルプ未定）
+    if (actionLabel && actionLabel !== 'チェック') {
       return `${actionLabel}未定 ▾`;
     }
 
-    // 何も選択していない時
-    return '未定 ▾';
+    // ★ ユーザー指定: チェック未定ではなく「ヘルプ未定」にする
+    return 'ヘルプ未定 ▾';
   };
 
   // 表示名（ニックネーム）編集用ステート
@@ -454,7 +454,7 @@ export default function SalonWorkScreen() {
           status: 'running',
           colorStaffName: savedName || 'タグチ',
           assistantStaffName: '',
-          actionStatus: 'check',
+          actionStatus: null,
           isShampooing: false,
           targetSeconds: 1200,
           initialMinutes: 20,
