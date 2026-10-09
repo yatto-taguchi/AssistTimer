@@ -1097,7 +1097,7 @@ export default function SalonWorkScreen() {
       // 第3者またはチェック担当が止めた場合 -> タイマー設定者（creatorName）へ通知が送られる！
       Alert.alert(
         '🔔 タイマー設定者へチェック完了通知を送信',
-        `「${targetSeat?.seatLabel || '対象席'}」のチェックタイマーを停止しました。\n\n【リアルタイム通知送信完了】\n・⏱️ タイマー設定者: 【${creatorName}】さん\n・🔍 チェック実施者: 【${checker}】さん\n\n設定者の端末およびApple Watchにチェック完了通知が届きました。`,
+        `「${targetSeat?.seatLabel || '対象席'}」のチェックタイマーを停止しました。\n\n【リアルタイム通知送信完了】\n・📝 タイマー設定者: 【${creatorName}】さん\n・🔍 チェック実施者: 【${checker}】さん\n\n設定者の端末およびApple Watchにチェック完了通知が届きました。`,
         [{ text: 'OK' }]
       );
     }
@@ -2397,11 +2397,11 @@ export default function SalonWorkScreen() {
                 activeOpacity={0.7}
               >
                 <View style={styles.idleRowLeft}>
-                  <View style={[styles.idleSeatBadge, { backgroundColor: theme.inputBg }]}>
-                    <Text style={[styles.idleSeatBadgeText, { color: theme.textPrimary }]}>
-                      🪑 {item.seatLabel}
-                    </Text>
-                  </View>
+                    <View style={[styles.idleSeatBadge, { backgroundColor: theme.inputBg }]}>
+                      <Text style={[styles.idleSeatBadgeText, { color: theme.textPrimary }]}>
+                        ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
+                      </Text>
+                    </View>
                   <Text style={[styles.idleStatusText, { color: theme.textTertiary }]}>
                     空席・待機中
                   </Text>
@@ -2464,7 +2464,7 @@ export default function SalonWorkScreen() {
                 <View style={styles.pausedRowLeft}>
                   <View style={[styles.pausedSeatBadge, { backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7' }]}>
                     <Text style={[styles.pausedSeatBadgeText, { color: theme.textPrimary }]}>
-                      🪑 {item.seatLabel}
+                      ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
                     </Text>
                   </View>
                   <View style={styles.pausedTimeContainer}>
@@ -2539,7 +2539,7 @@ export default function SalonWorkScreen() {
                   </TouchableOpacity>
 
                   <Text style={[styles.pausedStaffText, { color: theme.textSecondary }]} numberOfLines={1}>
-                    ⏱️{item.colorStaffName || '未'}
+                    📝 {item.colorStaffName || '未'}
                   </Text>
 
                   <Ionicons name="chevron-down" size={18} color={theme.textTertiary} style={{ marginLeft: 4 }} />
@@ -2601,11 +2601,11 @@ export default function SalonWorkScreen() {
                 <View style={styles.cardHeaderLeft}>
                   <View style={[styles.seatLabelContainer, item.isFreeTimer && { backgroundColor: theme.accentLight }]}>
                     <Text style={[styles.seatLabelText, { color: item.isFreeTimer ? theme.accent : theme.textPrimary }]}>
-                      {item.isFreeTimer ? `⏱️ ${item.seatLabel}` : item.seatLabel}
+                      ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
                     </Text>
                   </View>
 
-                  {/* ★ ユーザー指定: 1番席の右の所にタイマー作成者の名前を表示 */}
+                  {/* ★ ユーザー指定: 1番席の右の所にタイマー作成者の名前を表示（絵文字は📝） */}
                   {item.colorStaffName ? (
                     <View
                       style={[
@@ -2617,7 +2617,7 @@ export default function SalonWorkScreen() {
                       ]}
                     >
                       <Text style={[styles.headerCreatorText, { color: theme.textSecondary }]}>
-                        ⏱️ {item.colorStaffName}
+                        📝 {item.colorStaffName}
                       </Text>
                     </View>
                   ) : null}
@@ -3993,7 +3993,9 @@ export default function SalonWorkScreen() {
                   style={[styles.assignSeatItem, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
                   onPress={() => handleAssignMainTimerToSeat(seat.id)}
                 >
-                  <Text style={[styles.assignSeatName, { color: theme.textPrimary }]}>🪑 {seat.seatLabel}</Text>
+                  <Text style={[styles.assignSeatName, { color: theme.textPrimary }]}>
+                    ⌚️ {seat.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
+                  </Text>
                   <View style={[styles.assignSeatBtn, { backgroundColor: theme.accent }]}>
                     <Text style={styles.assignSeatBtnText}>この席にセット</Text>
                   </View>
@@ -4408,7 +4410,7 @@ export default function SalonWorkScreen() {
               <Ionicons name="notifications-outline" size={18} color="#059669" style={{ marginRight: 8 }} />
               <View style={{ flex: 1 }}>
                 <Text style={{ fontSize: 12, fontWeight: '700', color: '#059669' }}>
-                  タイマー設定者（⏱️ {checkStopTargetSeat?.colorStaffName || '担当'} さん）へ通知
+                  タイマー設定者（📝 {checkStopTargetSeat?.colorStaffName || '担当'} さん）へ通知
                 </Text>
                 <Text style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
                   停止すると、設定者の端末およびApple Watchにチェック完了の通知がリアルタイム送信されます。
@@ -4727,7 +4729,7 @@ export default function SalonWorkScreen() {
                   🤝 ヘルプ担当の指定・変更
                 </Text>
                 <Text style={[styles.helpAssignSubtitle, { color: theme.textSecondary }]}>
-                  {helpAssignTargetSeat?.seatLabel} （作成者: ⏱️ {helpAssignTargetSeat?.colorStaffName || '未設定'}）
+                  {helpAssignTargetSeat?.seatLabel} （作成者: 📝 {helpAssignTargetSeat?.colorStaffName || '未設定'}）
                 </Text>
               </View>
               <TouchableOpacity onPress={() => setIsHelpAssignModalVisible(false)}>
@@ -5414,7 +5416,7 @@ export default function SalonWorkScreen() {
               {/* タイマー作成者（メイン）行 */}
               <View style={styles.proxyStatusRow}>
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                  <Text style={{ fontSize: 13, marginRight: 6 }}>⏱️</Text>
+                  <Text style={{ fontSize: 13, marginRight: 6 }}>📝</Text>
                   <Text style={[styles.proxyStaffName, { color: theme.textPrimary }]}>
                     {confirmProxyTargetSeat?.colorStaffName || '未設定'}
                     <Text style={{ fontSize: 11, color: theme.textTertiary }}>（タイマー作成）</Text>
