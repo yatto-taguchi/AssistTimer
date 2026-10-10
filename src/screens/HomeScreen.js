@@ -1790,22 +1790,29 @@ export default function HomeScreen({ navigation }) {
   const isSmallDevice = screenHeight < 720;
   const isTinyDevice = screenHeight < 680;
 
-  // インジケーター（タイマー円）の位置：
-  // 小型端末では上方に引き上げて下部の操作ボタン領域・広告クリアランスを完全確保
-  const contentTopShift = isTinyDevice ? 8 : (isSmallDevice ? 18 : 45);
+  // 上部バランサー領域の高さ（クイックアクセスバー、ジャンル選択バッジ、統計サマリーの収容領域）
+  const topBalanceHeight = isTinyDevice ? 130 : (isSmallDevice ? 126 : 138);
 
-  // 上側コントロール群（クイックアクセスバー・ジャンルバッジ・サマリー）の垂直シフト
-  // 統計サマリーのON/OFFに関わらず基本位置を完全固定し、アコーディオン展開時のみ上へスライドして高さを吸収
-  const topControlsShift = (isHomeStatsEnabled && !isHomeStatsCollapsed) 
-    ? (isSmallDevice ? -44 : -36) 
-    : (isSmallDevice ? -16 : -10);
+  // インジケーター（タイマー円）の位置：
+  // 統計サマリー展開時でもタイマー円との安全なクリアランス（標準11px、小型3〜5px）を維持し、端末サイズ別に最適固定
+  const contentTopShift = isTinyDevice ? 18 : (isSmallDevice ? 20 : 26);
+
+  // 上側コントロール群（クイックアクセスバー・ジャンルバッジ・サマリー）の垂直シフト：
+  // 標準端末（iPhone 16 Pro等）は常に0固定（タブバー裏への潜り込み・見切れを根本解消）。
+  // 小型端末（iPhone SE等）のみ、サマリー展開時の高さ増加を吸収するため微小スライド（-10px）を適用。
+  const topControlsShift = (isHomeStatsEnabled && !isHomeStatsCollapsed)
+    ? (isSmallDevice ? -10 : 0)
+    : 0;
 
   // ボタン群（スタート・リセット・記録保存）の垂直位置も完全固定
-  const timerMarginBottom = isTinyDevice ? 12 : (isSmallDevice ? 20 : 40);
-  const controlsTopShift = isTinyDevice ? 6 : (isSmallDevice ? 14 : 27);
+  const timerMarginBottom = isTinyDevice ? 12 : (isSmallDevice ? 14 : 22);
+  const controlsTopShift = isTinyDevice ? 10 : (isSmallDevice ? 8 : 16);
 
-  // 小型端末でのタイマー円半径（超小型端末では250px、通常は280px）
-  const timerRadius = isTinyDevice ? 125 : 140;
+  // NEWSバッジの垂直位置（タブバー下線との干渉を防ぐ安全クリアランス）
+  const newsBadgeTop = isTinyDevice ? 10 : 14;
+
+  // 小型端末でのタイマー円半径（超小型端末では240px、小型端末では250px、通常は280px）
+  const timerRadius = isTinyDevice ? 120 : (isSmallDevice ? 125 : 140);
   const timerContainerSize = timerRadius * 2;
 
   return (
@@ -1815,7 +1822,10 @@ export default function HomeScreen({ navigation }) {
         <Animated.View 
           style={[
             styles.newsBadgeContainer, 
-            { opacity: controlsOpacity }
+            { 
+              top: newsBadgeTop,
+              opacity: controlsOpacity 
+            }
           ]} 
           pointerEvents={controlsVisible ? 'auto' : 'none'}
         >
@@ -1828,7 +1838,7 @@ export default function HomeScreen({ navigation }) {
 
         <View style={styles.content}>
           {/* タイマー上部クイックアクセスバー ＆ バランサー領域 */}
-          <View style={styles.topBalanceContainer}>
+          <View style={[styles.topBalanceContainer, { height: topBalanceHeight }]}>
             <Animated.View 
               style={[
                 styles.quickAccessBarWrapper, 
@@ -3501,18 +3511,15 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   newsBadgeContainer: {
     position: 'absolute',
-    top: 7,
-    left: 8,
+    left: 10,
     zIndex: 100,
   },
   content: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    top: -20, // 画面全体の垂直位置を20px上へシフト
   },
   topBalanceContainer: {
-    height: screenHeight < 700 ? 54 : 84, // bottomActionArea (height 64 + marginTop 20 = 84) と釣り合わせ、タイマー位置をスタート前の中央位置に完全一致させる
     width: '100%',
     alignItems: 'center',
     justifyContent: 'flex-start', // 上端基準にすることで、サマリーの有無（ON/OFF）による重心変動・位置ズレを完全排除
