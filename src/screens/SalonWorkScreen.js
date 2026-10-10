@@ -138,6 +138,8 @@ export default function SalonWorkScreen() {
   const [isAddSeatModalVisible, setIsAddSeatModalVisible] = useState(false);
   const [isAssignMainTimerModalVisible, setIsAssignMainTimerModalVisible] = useState(false);
   const [isProModalVisible, setIsProModalVisible] = useState(false);
+  // 🧪 開発・テスト用サロン共有モードフラグ（__DEV__ 時は初期値 true、本番リリースビルドでは自動非表示）
+  const [isDevTestMode, setIsDevTestMode] = useState(typeof __DEV__ !== 'undefined' ? __DEV__ : false);
   const [isTimeActionModalVisible, setIsTimeActionModalVisible] = useState(false); // 時間変更 & タイマー停止確認モーダル
   const [actionTargetSeat, setActionTargetSeat] = useState(null); // 時間変更/停止の対象席
   // ヘルプ（アシスタント）柔軟指定・変更モーダル用
@@ -652,6 +654,112 @@ export default function SalonWorkScreen() {
     setInputInviteCode('');
     setInputSalonName('');
     Alert.alert('参加完了', `「${newSalonItem.name}」に接続しました！`);
+  };
+
+  // 🧪 サロン共有モード（PRO）テスト用サロンの作成・切り替え
+  const handleCreateTestProSalon = () => {
+    const testId = 'workspace-pro-demo';
+    const exists = savedSalons.find((s) => s.id === testId);
+
+    const testSalonItem = exists || {
+      id: testId,
+      name: '表参道店 (PROサロン共有)',
+      type: 'salon',
+      inviteCode: '888-999',
+      isPro: true,
+      role: 'owner',
+      memberCount: 5,
+      description: 'PROサロン共有中 (5名オンライン / 店舗全体同期)',
+    };
+
+    let updatedSalons = savedSalons;
+    if (!exists) {
+      updatedSalons = [...savedSalons, testSalonItem];
+      setSavedSalons(updatedSalons);
+      saveSalonsToStorage(updatedSalons, testSalonItem.id);
+    }
+
+    setCurrentSalon(testSalonItem);
+    AsyncStorage.setItem('@salon_current_salon_id', testSalonItem.id).catch((e) => console.warn(e));
+
+    // サンプルスタッフ・座席の追加（複数人共有のリアルなシミュレーション）
+    setSeats((prev) => {
+      const hasStaffSeats = prev.some((s) => s.id === 'seat-test-2');
+      if (hasStaffSeats) return prev;
+      const testSeats = [
+        ...prev,
+        {
+          id: 'seat-test-2',
+          seatLabel: '2番席',
+          status: 'running',
+          colorStaffName: '佐藤',
+          assistantStaffName: '渡辺',
+          actionStatus: null,
+          isShampooing: false,
+          targetSeconds: 1500,
+          initialMinutes: 25,
+          targetEndTimestamp: Date.now() + 14 * 60 * 1000 + 20 * 1000,
+          checkTargetSeconds: 420,
+          checkStatus: 'running',
+          checkEndTimestamp: Date.now() + 4 * 60 * 1000 + 15 * 1000,
+          comment: '白髪染めリタッチ (チェック後乳化)',
+          history: ['25分放置開始 (担当: 佐藤)', '7分チェックセット'],
+        },
+        {
+          id: 'seat-test-3',
+          seatLabel: '3番席 (個室)',
+          status: 'running',
+          colorStaffName: '田中',
+          assistantStaffName: '',
+          actionStatus: null,
+          isShampooing: true,
+          targetSeconds: 1800,
+          initialMinutes: 30,
+          targetEndTimestamp: Date.now() + 2 * 60 * 1000 + 10 * 1000,
+          comment: 'シャンプー中',
+          history: ['30分放置開始 (担当: 田中)', 'シャンプー台移動'],
+        },
+      ];
+      saveSeatsToStorage(testSeats);
+      return testSeats;
+    });
+
+    setIsSwitcherModalVisible(false);
+    setIsProModalVisible(false);
+    Alert.alert(
+      '🧪 サロン共有モード（PRO）に切り替えました',
+      'テスト用「表参道店 (PROサロン共有)」を開始しました。\n\n・5名オンライン、3席稼働のサロン現場をシミュレートしています。\n・上部バーからいつでも「タイマー同期モード (無料)」に戻せます。\n・長押しまたはゴミ箱でこのテストサロンを削除できます。'
+    );
+  };
+
+  // サロン・ワークスペースの削除（テスト用サロンや参加サロンの退出用）
+  const handleDeleteSalon = (salonToDelete) => {
+    if (salonToDelete.id === 'workspace-free') {
+      Alert.alert('削除不可', 'デフォルトの「タイマー同期モード」は削除できません');
+      return;
+    }
+    Alert.alert(
+      'サロンの削除',
+      `「${salonToDelete.name}」を削除しますか？\n（いつでも「コードで参加」またはテストボタンから再追加できます）`,
+      [
+        { text: 'キャンセル', style: 'cancel' },
+        {
+          text: '削除する',
+          style: 'destructive',
+          onPress: () => {
+            const updated = savedSalons.filter((s) => s.id !== salonToDelete.id);
+            setSavedSalons(updated);
+            let nextSalon = currentSalon;
+            if (currentSalon?.id === salonToDelete.id) {
+              nextSalon = updated[0] || createDefaultFreeSalon();
+              setCurrentSalon(nextSalon);
+              AsyncStorage.setItem('@salon_current_salon_id', nextSalon.id).catch((e) => console.warn(e));
+            }
+            saveSalonsToStorage(updated, nextSalon.id);
+          },
+        },
+      ]
+    );
   };
 
   // ★ ユーザー指定: タイム設定モーダルでの席名変更の保存
@@ -3381,6 +3489,11 @@ export default function SalonWorkScreen() {
                           },
                         ]}
                         onPress={() => handleSelectSalon(salon)}
+                        onLongPress={() => {
+                          if (salon.id !== 'workspace-free') {
+                            handleDeleteSalon(salon);
+                          }
+                        }}
                         activeOpacity={0.7}
                       >
                         <View style={styles.salonSelectLeft}>
@@ -3413,7 +3526,7 @@ export default function SalonWorkScreen() {
                           </View>
                         </View>
 
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                           {/* 🔑 招待コードボタン（押した後にモーダル内でコード確認・共有画面にスムーズ切り替え） */}
                           <TouchableOpacity
                             style={[
@@ -3434,6 +3547,20 @@ export default function SalonWorkScreen() {
                             <Ionicons name="key-outline" size={13} color={theme.accent} style={{ marginRight: 4 }} />
                             <Text style={[styles.inviteCodeTriggerBtnText, { color: theme.accent }]}>招待コード</Text>
                           </TouchableOpacity>
+
+                          {/* 🗑️ 削除ボタン（デフォルトのタイマー同期モード以外） */}
+                          {salon.id !== 'workspace-free' && (
+                            <TouchableOpacity
+                              style={{ padding: 4 }}
+                              onPress={(e) => {
+                                e.stopPropagation();
+                                handleDeleteSalon(salon);
+                              }}
+                              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            >
+                              <Ionicons name="trash-outline" size={17} color={theme.textTertiary} />
+                            </TouchableOpacity>
+                          )}
 
                           {isSelected ? (
                             <Ionicons name="checkmark-circle" size={20} color={theme.accent} />
@@ -3482,6 +3609,29 @@ export default function SalonWorkScreen() {
                           💡 2人までのタイマー同期はずっと完全無料です
                         </Text>
                       </View>
+
+                      {/* 🧪 開発・テスト用ボタン（本番リリースビルドでは自動非表示） */}
+                      {(typeof __DEV__ !== 'undefined' && __DEV__ || isDevTestMode) && (
+                        <TouchableOpacity
+                          style={{
+                            marginTop: 10,
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            backgroundColor: '#10B981',
+                            paddingVertical: 7,
+                            paddingHorizontal: 12,
+                            borderRadius: 8,
+                          }}
+                          onPress={handleCreateTestProSalon}
+                          activeOpacity={0.7}
+                        >
+                          <Ionicons name="flask" size={14} color="#FFFFFF" style={{ marginRight: 6 }} />
+                          <Text style={{ fontSize: 11, fontWeight: '700', color: '#FFFFFF' }}>
+                            🧪 サロン共有モードをテスト作成（開発用）
+                          </Text>
+                        </TouchableOpacity>
+                      )}
                     </View>
                   )}
                 </ScrollView>
@@ -4342,7 +4492,18 @@ export default function SalonWorkScreen() {
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: theme.cardBg }]}>
             <View style={styles.modalHeader}>
-              <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>PRO サロンプランのご案内</Text>
+              <TouchableOpacity
+                activeOpacity={0.8}
+                onLongPress={() => {
+                  setIsDevTestMode((prev) => {
+                    const next = !prev;
+                    Alert.alert('デバッグモード', next ? '🧪 テストボタンを表示しました' : 'テストボタンを非表示にしました');
+                    return next;
+                  });
+                }}
+              >
+                <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>PRO サロンプランのご案内</Text>
+              </TouchableOpacity>
               <TouchableOpacity onPress={() => setIsProModalVisible(false)}>
                 <Ionicons name="close" size={24} color={theme.textSecondary} />
               </TouchableOpacity>
@@ -4357,6 +4518,18 @@ export default function SalonWorkScreen() {
                 3人以上のスタッフでタイマーをリアルタイム同期する場合は、サロン共有モード（PROプラン）をご利用いただくことで、全スタッフが無制限に同一サロンボードへ参加・同期可能になります。
               </Text>
             </View>
+
+            {/* 🧪 開発・テスト用ボタン（本番リリースビルドでは自動非表示） */}
+            {(typeof __DEV__ !== 'undefined' && __DEV__ || isDevTestMode) && (
+              <TouchableOpacity
+                style={[styles.submitButton, { backgroundColor: '#10B981', marginBottom: 8 }]}
+                onPress={handleCreateTestProSalon}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="flask" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
+                <Text style={styles.submitButtonText}>🧪 サロン共有モードをテスト体験（開発用）</Text>
+              </TouchableOpacity>
+            )}
 
             <TouchableOpacity
               style={[styles.submitButton, { backgroundColor: theme.accent }]}
