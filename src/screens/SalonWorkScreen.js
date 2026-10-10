@@ -12,6 +12,7 @@ import {
   Platform,
   Vibration,
   LayoutAnimation,
+  Share,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -31,6 +32,57 @@ export const getActionStatusInfo = (statusId, isShampooing) => {
   if (!actualId) return null;
   return SALON_ACTION_STATUS_OPTIONS.find((opt) => opt.id === actualId) || null;
 };
+
+// ランダムな6桁（3桁-3桁）の安全な招待コード生成関数（例: 738-921）
+export const generateRandomInviteCode = () => {
+  const part1 = Math.floor(100 + Math.random() * 900); // 100〜999
+  const part2 = Math.floor(100 + Math.random() * 900); // 100〜999
+  return `${part1}-${part2}`;
+};
+
+// デフォルトのワークスペース（タイマー同期モード・2人まで同期無料・1名利用中）
+export const createDefaultFreeSalon = (customCode) => ({
+  id: 'workspace-free',
+  name: 'タイマー同期モード (無料)',
+  type: 'pair',
+  inviteCode: customCode || generateRandomInviteCode(),
+  isPro: false,
+  role: 'owner',
+  memberCount: 1,
+  description: '2人までタイマー同期無料 (1名利用中 / ペア招待可能)',
+});
+
+export const DEFAULT_FREE_SALON = createDefaultFreeSalon();
+
+// デフォルトの初期座席マスター（メインタイマー連動＋1番席サンプルのみ）
+export const getDefaultInitialSeats = (staffName = 'スタイリスト') => [
+  {
+    id: 'seat-1',
+    seatLabel: '1番席 (サンプル)',
+    status: 'running',
+    colorStaffName: staffName,
+    assistantStaffName: '',
+    actionStatus: null,
+    isShampooing: false,
+    targetSeconds: 1200,
+    initialMinutes: 20,
+    targetEndTimestamp: Date.now() + 19 * 60 * 1000 + 54 * 1000, // 残り19分54秒
+    checkTargetSeconds: 600, // 10分チェック
+    checkInitialMinutes: 10,
+    checkEndTimestamp: Date.now() + 9 * 60 * 1000 + 54 * 1000, // チェックまで残り9分54秒
+    checkStatus: 'running',
+    checkStaffName: '',
+    comment: 'サンプルタイマー (タップして操作・編集できます)',
+    timeUpTimestamp: null,
+    mainStaffConfirmed: true,
+    assistantStaffConfirmed: false,
+    sosTriggered: false,
+    escalationLevel: 0,
+    history: [
+      { id: 'h-1-1', time: '18:49', text: '20分放置 (チェック: 10分)', type: 'timer' },
+    ],
+  },
+];
 
 // サロン・グループ・個人無料枠の切り替え可能な固定席マルチタイマー画面
 export default function SalonWorkScreen() {
@@ -66,9 +118,9 @@ export default function SalonWorkScreen() {
   };
 
   // ユーザー・サロン状態
-  const [userName, setUserName] = useState('タグチ');
-  const [currentSalon, setCurrentSalon] = useState(null);
-  const [savedSalons, setSavedSalons] = useState([]);
+  const [userName, setUserName] = useState('スタイリスト');
+  const [currentSalon, setCurrentSalon] = useState(DEFAULT_FREE_SALON);
+  const [savedSalons, setSavedSalons] = useState([DEFAULT_FREE_SALON]);
   const [filterMode, setFilterMode] = useState('all'); // 'all' | 'my'
   const [now, setNow] = useState(Date.now());
 
@@ -78,6 +130,9 @@ export default function SalonWorkScreen() {
 
   // モーダル表示状態
   const [isSwitcherModalVisible, setIsSwitcherModalVisible] = useState(false);
+  const [switcherSubView, setSwitcherSubView] = useState('list'); // 'list' | 'inviteCode' (モーダル内画面切り替え)
+  const [editingSalonForCode, setEditingSalonForCode] = useState(null); // コード変更対象のサロン
+  const [inputNewInviteCode, setInputNewInviteCode] = useState(''); // 新しいコード入力バッファ
   const [isJoinCodeModalVisible, setIsJoinCodeModalVisible] = useState(false);
   const [isSetTimerModalVisible, setIsSetTimerModalVisible] = useState(false);
   const [isAddSeatModalVisible, setIsAddSeatModalVisible] = useState(false);
@@ -373,17 +428,38 @@ export default function SalonWorkScreen() {
     return () => clearInterval(timer);
   }, []);
 
-  // サロン内で利用可能なスタッフ候補リスト（現在登録中のメンバー＋初期候補）
-  const defaultSalonStaffs = ['タグチ', 'ヤマモト', '佐藤', '田中', '渡辺', '伊藤', '中村', '小林'];
+  // サロン内で利用可能なスタッフ候補リスト（現在登録中のメンバー＋ユーザー名）
   const salonStaffList = useMemo(() => {
-    const list = new Set(defaultSalonStaffs);
+    const list = new Set();
     if (userName) list.add(userName);
     seats.forEach((s) => {
       if (s.colorStaffName) list.add(s.colorStaffName);
-      if (s.assistantStaffName) list.add(s.assistantStaffName);
+      if (s.assistantStaffName && s.assistantStaffName !== 'ヘルプなし' && s.assistantStaffName !== 'none') {
+        list.add(s.assistantStaffName);
+      }
     });
     return Array.from(list);
   }, [userName, seats]);
+
+  // ストレージ保存ヘルパー
+  const saveSeatsToStorage = async (newSeats) => {
+    try {
+      await AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(newSeats));
+    } catch (e) {
+      console.warn('Failed to save seats to AsyncStorage', e);
+    }
+  };
+
+  const saveSalonsToStorage = async (newSalons, activeSalonId) => {
+    try {
+      await AsyncStorage.setItem('@salon_saved_salons', JSON.stringify(newSalons));
+      if (activeSalonId) {
+        await AsyncStorage.setItem('@salon_current_salon_id', activeSalonId);
+      }
+    } catch (e) {
+      console.warn('Failed to save salons to AsyncStorage', e);
+    }
+  };
 
   // 初期ロード
   useEffect(() => {
@@ -393,6 +469,7 @@ export default function SalonWorkScreen() {
   const loadInitialData = async () => {
     try {
       const savedName = await AsyncStorage.getItem('@assist_timer_user_name');
+      const activeUserName = savedName || 'スタイリスト';
       if (savedName) setUserName(savedName);
 
       const savedFavs = await AsyncStorage.getItem('@salon_favorite_timer_presets');
@@ -403,166 +480,52 @@ export default function SalonWorkScreen() {
         }
       }
 
-      // デモ用登録サロン一覧（本番サロン、別店舗、グループ、個人無料枠）
-      const initialSalons = [
-        {
-          id: 'salon-01',
-          name: 'LITT HAIR DESIGN 本店',
-          type: 'salon', // 'salon' | 'group' | 'pair'
-          inviteCode: '738-921',
-          isPro: false,
-          role: 'stylist',
-          description: 'ペア無料枠 (2名参加中)',
-        },
-        {
-          id: 'salon-02',
-          name: 'LITT 表参道店 (ヘルプ先)',
-          type: 'salon',
-          inviteCode: '412-880',
-          isPro: true,
-          role: 'stylist',
-          description: 'Proサロンプラン (8名参加中)',
-        },
-        {
-          id: 'salon-03',
-          name: '1F カラー・アシスタントチーム',
-          type: 'group',
-          inviteCode: 'GRP-101',
-          isPro: true,
-          role: 'assistant',
-          description: 'フロア別グループ',
-        },
-        {
-          id: 'salon-04',
-          name: '田中 × ヤマモト ペア',
-          type: 'pair',
-          inviteCode: 'PAIR-55',
-          isPro: false,
-          role: 'stylist',
-          description: '1対1 個人無料枠ペア',
-        },
-      ];
-      setSavedSalons(initialSalons);
-      setCurrentSalon(initialSalons[0]);
+      // 1. サロンデータの読み込み・初期化（デフォルトは「タイマー同期モード (無料)」のみ。架空のサロン・チームはなし）
+      const savedSalonsJson = await AsyncStorage.getItem('@salon_saved_salons');
+      let loadedSalons = [createDefaultFreeSalon()];
+      if (savedSalonsJson) {
+        try {
+          const parsed = JSON.parse(savedSalonsJson);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            // 古いデモコード「FREE-01」があれば自動でランダムな6桁安全コードへアップグレード
+            // かつ「マイサロン」「二人通信モード」等があれば「タイマー同期モード (無料)」へ自動更新
+            loadedSalons = parsed.map((s) => {
+              let updated = { ...s };
+              if (updated.inviteCode === 'FREE-01' || !updated.inviteCode) {
+                updated.inviteCode = generateRandomInviteCode();
+              }
+              if (updated.id === 'workspace-free') {
+                updated.name = 'タイマー同期モード (無料)';
+                updated.description = '2人までタイマー同期無料 (1名利用中 / ペア招待可能)';
+              }
+              return updated;
+            });
+            saveSalonsToStorage(loadedSalons);
+          }
+        } catch (e) {
+          console.warn('Failed to parse saved salons', e);
+        }
+      }
+      setSavedSalons(loadedSalons);
 
-      // デモ用初期固定席マスター
-      // 1番席: 稼働中, 2番席: 待機中(最小化), 3番席: シャンプー中(超過), 4番席: 待機中, 5番席: 待機中
-      const initialSeats = [
-        {
-          id: 'seat-1',
-          seatLabel: '1番席',
-          status: 'running',
-          colorStaffName: savedName || 'タグチ',
-          assistantStaffName: '',
-          actionStatus: null,
-          isShampooing: false,
-          targetSeconds: 1200,
-          initialMinutes: 20,
-          targetEndTimestamp: Date.now() + 19 * 60 * 1000 + 54 * 1000, // 残り19分54秒
-          checkTargetSeconds: 600, // 10分チェック
-          checkInitialMinutes: 10,
-          checkEndTimestamp: Date.now() + 9 * 60 * 1000 + 54 * 1000, // チェックまで残り9分54秒
-          checkStatus: 'running',
-          checkStaffName: '',
-          comment: '',
-          timeUpTimestamp: null,
-          mainStaffConfirmed: true,
-          assistantStaffConfirmed: false,
-          sosTriggered: false,
-          escalationLevel: 0,
-          history: [
-            { id: 'h-1-1', time: '14:15', text: '10分放置', type: 'timer' },
-            { id: 'h-1-2', time: '14:25', text: '田口チェック', type: 'check' },
-            { id: 'h-1-3', time: '18:49', text: 'ヤマモトチェック完了', type: 'check' },
-            { id: 'h-1-4', time: '18:49', text: '20分放置 (チェック: 10分)', type: 'timer' },
-          ],
-        },
-        {
-          id: 'seat-2',
-          seatLabel: '2番席',
-          status: 'idle', // 待機中（最小化スリムバー）
-          colorStaffName: '',
-          assistantStaffName: null,
-          isShampooing: false,
-          targetSeconds: 0,
-          initialMinutes: 0,
-          targetEndTimestamp: 0,
-          comment: '',
-          timeUpTimestamp: null,
-          mainStaffConfirmed: true,
-          assistantStaffConfirmed: false,
-          sosTriggered: false,
-          escalationLevel: 0,
-          history: [],
-        },
-        {
-          id: 'seat-3',
-          seatLabel: '3番席 (個室)',
-          status: 'running',
-          colorStaffName: '佐藤',
-          assistantStaffName: '田中',
-          isShampooing: true, // シャンプー中
-          targetSeconds: 1500,
-          initialMinutes: 22,
-          targetEndTimestamp: Date.now() - 45 * 1000, // 超過45秒
-          comment: 'トリートメント浸透中',
-          timeUpTimestamp: Date.now() - 45 * 1000,
-          mainStaffConfirmed: true,
-          assistantStaffConfirmed: false,
-          sosTriggered: false,
-          escalationLevel: 1, // 30秒リマインド通過
-          history: [
-            { id: 'h-3-1', time: '13:55', text: '10分放置', type: 'timer' },
-            { id: 'h-3-2', time: '14:05', text: '田口チェック', type: 'check' },
-            { id: 'h-3-3', time: '14:10', text: '7分追加放置', type: 'extend' },
-            { id: 'h-3-4', time: '14:17', text: '伊藤シャンプー', type: 'action' },
-          ],
-        },
-        {
-          id: 'seat-4',
-          seatLabel: '4番席',
-          status: 'running',
-          colorStaffName: savedName || 'タグチ',
-          assistantStaffName: 'タグチ',
-          isShampooing: true,
-          targetSeconds: 1200,
-          initialMinutes: 20,
-          targetEndTimestamp: Date.now() + 17 * 60 * 1000 + 24 * 1000, // 残り17分24秒
-          checkTargetSeconds: 600, // 10分チェック
-          checkInitialMinutes: 10,
-          checkEndTimestamp: Date.now() + 7 * 60 * 1000 + 24 * 1000, // チェックまで残り7分24秒
-          checkStatus: 'running',
-          checkStaffName: 'タグチ',
-          comment: '',
-          timeUpTimestamp: null,
-          mainStaffConfirmed: true,
-          assistantStaffConfirmed: true,
-          sosTriggered: false,
-          escalationLevel: 0,
-          history: [
-            { id: 'h-4-1', time: '18:36', text: '20分放置 (チェック: 10分)', type: 'timer' },
-          ],
-        },
-        {
-          id: 'seat-5',
-          seatLabel: '5番席 (シャンプー台)',
-          status: 'idle', // 待機中
-          colorStaffName: '',
-          assistantStaffName: null,
-          isShampooing: false,
-          targetSeconds: 0,
-          initialMinutes: 0,
-          targetEndTimestamp: 0,
-          comment: '',
-          timeUpTimestamp: null,
-          mainStaffConfirmed: true,
-          assistantStaffConfirmed: false,
-          sosTriggered: false,
-          escalationLevel: 0,
-          history: [],
-        },
-      ];
-      setSeats(initialSeats);
+      const savedCurrentSalonId = await AsyncStorage.getItem('@salon_current_salon_id');
+      const foundSalon = loadedSalons.find((s) => s.id === savedCurrentSalonId) || loadedSalons[0];
+      setCurrentSalon(foundSalon);
+
+      // 2. 席データの読み込み・初期化（デフォルトはメインタイマと1番席サンプルのみ。余計な席は排除し本人が追加）
+      const savedSeatsJson = await AsyncStorage.getItem('@salon_saved_seats');
+      let loadedSeats = getDefaultInitialSeats(activeUserName);
+      if (savedSeatsJson) {
+        try {
+          const parsed = JSON.parse(savedSeatsJson);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            loadedSeats = parsed;
+          }
+        } catch (e) {
+          console.warn('Failed to parse saved seats', e);
+        }
+      }
+      setSeats(loadedSeats);
     } catch (e) {
       console.warn('Failed to load initial salon data', e);
     }
@@ -605,16 +568,73 @@ export default function SalonWorkScreen() {
   // サロン・グループ切り替え
   const handleSelectSalon = (salon) => {
     setCurrentSalon(salon);
+    AsyncStorage.setItem('@salon_current_salon_id', salon.id).catch((e) => console.warn(e));
     setIsSwitcherModalVisible(false);
+  };
+
+  // 招待コードの共有・コピー（OS標準の共有シート / LINE・メッセージ等）
+  const handleShareInviteCode = async (salon) => {
+    const targetSalon = salon || currentSalon;
+    if (!targetSalon) return;
+    const code = targetSalon.inviteCode || generateRandomInviteCode();
+    const isPair = targetSalon.type === 'pair';
+    const name = targetSalon.name || (isPair ? 'タイマー同期モード' : 'サロン');
+    try {
+      const message = isPair
+        ? `【Assist Timer】タイマー同期モード（完全無料）の招待コードです。\n\n🔑 ペア招待コード: ${code}\n\nアプリを開き、サロン画面 > ワークスペース切り替え > 「コードで参加」に入力すると、2人でタイマーをリアルタイム同期（無料）できます！`
+        : `【Assist Timer】サロン「${name}」の招待コードです。\n\n🔑 招待コード: ${code}\n\nアプリを開き、サロン画面 > ワークスペース切り替え > 「コードで参加」に入力して参加してください。`;
+      await Share.share({
+        message,
+        title: isPair ? `タイマー同期の招待コード: ${code}` : `${name}の招待コード: ${code}`,
+      });
+    } catch (e) {
+      Alert.alert('招待コード', `招待コード: ${code}`);
+    }
+  };
+
+  // 招待コードの直接変更・保存
+  const handleSaveCustomInviteCode = () => {
+    const clean = (inputNewInviteCode || '').trim().toUpperCase();
+    if (!clean) {
+      Alert.alert('入力エラー', '招待コードを入力してください');
+      return;
+    }
+    if (clean.length < 4 || clean.length > 15) {
+      Alert.alert('入力エラー', '招待コードは4〜15文字で入力してください');
+      return;
+    }
+    if (!editingSalonForCode) return;
+
+    const targetId = editingSalonForCode.id;
+    const updated = savedSalons.map((s) => (s.id === targetId ? { ...s, inviteCode: clean } : s));
+    setSavedSalons(updated);
+    if (currentSalon?.id === targetId) {
+      setCurrentSalon({ ...currentSalon, inviteCode: clean });
+    }
+    saveSalonsToStorage(updated, currentSalon?.id);
+    setSwitcherSubView('list');
+    Alert.alert('招待コードを更新しました', `招待コード: ${clean}\n\nパートナーにこのコードを共有してご参加ください。`);
+  };
+
+  // ランダムコード再生成
+  const handleRegenerateRandomCode = () => {
+    const newCode = generateRandomInviteCode();
+    setInputNewInviteCode(newCode);
   };
 
   // 招待コードで新規参加
   const handleJoinByCode = () => {
-    const code = inputInviteCode.trim();
-    if (!code) {
+    const rawCode = inputInviteCode.trim().toUpperCase();
+    if (!rawCode) {
       Alert.alert('入力エラー', '招待コードを入力してください');
       return;
     }
+    // 6桁数字のみで打たれた場合は自動で3桁-3桁にフォーマット
+    let code = rawCode;
+    if (/^\d{6}$/.test(rawCode)) {
+      code = `${rawCode.slice(0, 3)}-${rawCode.slice(3)}`;
+    }
+
     const newSalonItem = {
       id: `salon-${Date.now()}`,
       name: inputSalonName.trim() || `サロン (${code})`,
@@ -622,10 +642,12 @@ export default function SalonWorkScreen() {
       inviteCode: code,
       isPro: false,
       role: 'assistant',
-      description: 'コード参加サロン',
+      description: 'コード参加サロン (メンバー共有中)',
     };
-    setSavedSalons((prev) => [newSalonItem, ...prev]);
+    const updatedSalons = [newSalonItem, ...savedSalons];
+    setSavedSalons(updatedSalons);
     setCurrentSalon(newSalonItem);
+    saveSalonsToStorage(updatedSalons, newSalonItem.id);
     setIsJoinCodeModalVisible(false);
     setInputInviteCode('');
     setInputSalonName('');
@@ -638,9 +660,11 @@ export default function SalonWorkScreen() {
     setModalSeatLabel(trimmed);
     setIsEditingSeatLabel(false);
     if (targetSeatId) {
-      setSeats((prev) =>
-        prev.map((s) => (s.id === targetSeatId ? { ...s, seatLabel: trimmed } : s))
-      );
+      setSeats((prev) => {
+        const updated = prev.map((s) => (s.id === targetSeatId ? { ...s, seatLabel: trimmed } : s));
+        saveSeatsToStorage(updated);
+        return updated;
+      });
     }
   };
 
@@ -2047,10 +2071,14 @@ export default function SalonWorkScreen() {
           style: isFree ? 'destructive' : 'default',
           onPress: () => {
             if (isFree) {
-              setSeats((prev) => prev.filter((s) => s.id !== seatId));
+              setSeats((prev) => {
+                const updated = prev.filter((s) => s.id !== seatId);
+                saveSeatsToStorage(updated);
+                return updated;
+              });
             } else {
-              setSeats((prev) =>
-                prev.map((s) => {
+              setSeats((prev) => {
+                const updated = prev.map((s) => {
                   if (s.id !== seatId) return s;
                   return {
                     ...s,
@@ -2068,9 +2096,33 @@ export default function SalonWorkScreen() {
                     checkAlerted: false,
                     comment: '',
                   };
-                })
-              );
+                });
+                saveSeatsToStorage(updated);
+                return updated;
+              });
             }
+          },
+        },
+      ]
+    );
+  };
+
+  // 待機席の削除（席マスターから削除）
+  const handleDeleteSeat = (seatId, seatLabel) => {
+    Alert.alert(
+      '席の削除確認',
+      `「${seatLabel}」をサロンボードから削除しますか？`,
+      [
+        { text: 'キャンセル', style: 'cancel' },
+        {
+          text: '削除する',
+          style: 'destructive',
+          onPress: () => {
+            setSeats((prev) => {
+              const updated = prev.filter((s) => s.id !== seatId);
+              saveSeatsToStorage(updated);
+              return updated;
+            });
           },
         },
       ]
@@ -2091,7 +2143,11 @@ export default function SalonWorkScreen() {
       targetEndTimestamp: 0,
       comment: '',
     };
-    setSeats((prev) => [...prev, newSeat]);
+    setSeats((prev) => {
+      const updated = [...prev, newSeat];
+      saveSeatsToStorage(updated);
+      return updated;
+    });
     setNewSeatName('');
     setIsAddSeatModalVisible(false);
   };
@@ -2202,17 +2258,15 @@ export default function SalonWorkScreen() {
           <View style={styles.subInfoRow}>
             <View style={[styles.liveDot, { backgroundColor: theme.success }]} />
             <Text style={[styles.subInfoText, { color: theme.textSecondary }]}>
-              {currentSalon?.type === 'pair' ? '個人無料枠' : currentSalon?.description || 'オンライン中'}
+              {currentSalon?.type === 'pair'
+                ? '2人までタイマー同期無料 (ペア招待可能)'
+                : (currentSalon?.description || 'オンライン中')}
             </Text>
             {currentSalon?.isPro ? (
               <View style={[styles.proBadge, { backgroundColor: '#FFD700' }]}>
                 <Text style={styles.proBadgeText}>PRO</Text>
               </View>
-            ) : (
-              <View style={[styles.freeBadge, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder }]}>
-                <Text style={[styles.freeBadgeText, { color: theme.accent }]}>無料</Text>
-              </View>
-            )}
+            ) : null}
           </View>
         </TouchableOpacity>
 
@@ -2394,6 +2448,7 @@ export default function SalonWorkScreen() {
                   },
                 ]}
                 onPress={() => handleOpenSetTimerModal(item)}
+                onLongPress={() => handleDeleteSeat(item.id, item.seatLabel)}
                 activeOpacity={0.7}
               >
                 <View style={styles.idleRowLeft}>
@@ -3172,188 +3227,424 @@ export default function SalonWorkScreen() {
         visible={isSwitcherModalVisible}
         transparent={true}
         animationType="slide"
-        onRequestClose={() => setIsSwitcherModalVisible(false)}
+        onRequestClose={() => {
+          if (switcherSubView === 'inviteCode') {
+            setSwitcherSubView('list');
+          } else {
+            setIsSwitcherModalVisible(false);
+          }
+        }}
       >
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: theme.cardBg }]}>
             <View style={styles.modalHeader}>
-              <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>
-                ワークスペースの切り替え
-              </Text>
-              <TouchableOpacity onPress={() => setIsSwitcherModalVisible(false)}>
+              {switcherSubView === 'inviteCode' ? (
+                <TouchableOpacity
+                  style={{ flexDirection: 'row', alignItems: 'center' }}
+                  onPress={() => setSwitcherSubView('list')}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="chevron-back" size={22} color={theme.accent} style={{ marginRight: 4 }} />
+                  <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>
+                    招待コードの確認・共有
+                  </Text>
+                </TouchableOpacity>
+              ) : (
+                <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>
+                  ワークスペースの切り替え
+                </Text>
+              )}
+              <TouchableOpacity
+                onPress={() => {
+                  setSwitcherSubView('list');
+                  setIsSwitcherModalVisible(false);
+                }}
+              >
                 <Ionicons name="close" size={24} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
-            {/* 👤 あなたの表示名（ニックネーム）設定カード */}
-            <View
-              style={[
-                styles.userNameCard,
-                {
-                  backgroundColor: isEcoMode ? '#252528' : '#F6F8FA',
-                  borderColor: isEditingUserName ? theme.accent : theme.cardBorder,
-                },
-              ]}
-            >
-              {!isEditingUserName ? (
-                <View style={styles.userNameDisplayRow}>
-                  <View style={styles.userNameLeft}>
-                    <Ionicons
-                      name="person-circle"
-                      size={32}
-                      color={theme.accent}
-                      style={{ marginRight: 8 }}
-                    />
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.userNameSectionLabel, { color: theme.textTertiary }]}>
-                        あなたの表示名（サロン・Watch共通）
-                      </Text>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 1 }}>
-                        <Text style={[styles.userNameValue, { color: theme.textPrimary }]}>
-                          {userName || '未設定'}
+            {switcherSubView === 'list' ? (
+              <>
+                {/* 👤 あなたの表示名（ニックネーム）設定カード */}
+                <View
+                  style={[
+                    styles.userNameCard,
+                    {
+                      backgroundColor: isEcoMode ? '#252528' : '#F6F8FA',
+                      borderColor: isEditingUserName ? theme.accent : theme.cardBorder,
+                    },
+                  ]}
+                >
+                  {!isEditingUserName ? (
+                    <View style={styles.userNameDisplayRow}>
+                      <View style={styles.userNameLeft}>
+                        <Ionicons
+                          name="person-circle"
+                          size={32}
+                          color={theme.accent}
+                          style={{ marginRight: 8 }}
+                        />
+                        <View style={{ flex: 1 }}>
+                          <Text style={[styles.userNameSectionLabel, { color: theme.textTertiary }]}>
+                            あなたの表示名（サロン・Watch共通）
+                          </Text>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 1 }}>
+                            <Text style={[styles.userNameValue, { color: theme.textPrimary }]}>
+                              {userName || '未設定'}
+                            </Text>
+                            <Text style={[styles.userNameHintSmall, { color: theme.textTertiary }]}>
+                              （推奨: 3〜5文字）
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+                      <TouchableOpacity
+                        style={[
+                          styles.userNameEditBtn,
+                          { backgroundColor: theme.cardBg, borderColor: theme.cardBorder },
+                        ]}
+                        onPress={() => {
+                          setInputUserName(userName || '');
+                          setIsEditingUserName(true);
+                        }}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons name="pencil" size={13} color={theme.accent} style={{ marginRight: 4 }} />
+                        <Text style={[styles.userNameEditBtnText, { color: theme.accent }]}>変更</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : (
+                    <View style={styles.userNameEditBox}>
+                      <View style={styles.userNameEditHeader}>
+                        <Text style={[styles.userNameSectionLabel, { color: theme.textTertiary }]}>
+                          表示名（ニックネーム）の変更
                         </Text>
-                        <Text style={[styles.userNameHintSmall, { color: theme.textTertiary }]}>
-                          （推奨: 3〜5文字）
+                        <Text style={[styles.userNameWatchHint, { color: theme.accent }]}>
+                          Watch推奨: 3〜5文字
+                        </Text>
+                      </View>
+                      <View style={styles.userNameInputRow}>
+                        <TextInput
+                          style={[
+                            styles.userNameTextInput,
+                            {
+                              backgroundColor: theme.cardBg,
+                              color: theme.textPrimary,
+                              borderColor: theme.cardBorder,
+                            },
+                          ]}
+                          value={inputUserName}
+                          onChangeText={setInputUserName}
+                          placeholder="例: タグチ、KEN、サトウ"
+                          placeholderTextColor={theme.textTertiary}
+                          maxLength={10}
+                          autoFocus={true}
+                        />
+                        <TouchableOpacity
+                          style={[styles.userNameSaveBtn, { backgroundColor: theme.accent }]}
+                          onPress={handleSaveUserName}
+                          activeOpacity={0.7}
+                        >
+                          <Text style={styles.userNameSaveBtnText}>保存</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[
+                            styles.userNameCancelBtn,
+                            { backgroundColor: theme.cardBg, borderColor: theme.cardBorder },
+                          ]}
+                          onPress={() => setIsEditingUserName(false)}
+                          activeOpacity={0.7}
+                        >
+                          <Text style={[styles.userNameCancelBtnText, { color: theme.textSecondary }]}>✕</Text>
+                        </TouchableOpacity>
+                      </View>
+                      <Text style={[styles.userNameCharCount, { color: theme.textTertiary }]}>
+                        {inputUserName.length}/10文字 （カタカナ・英字・漢字対応）
+                      </Text>
+                    </View>
+                  )}
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 340 }}>
+                  <Text style={[styles.sheetSectionTitle, { color: theme.textSecondary }]}>ワークスペース / サロン</Text>
+                  {savedSalons.map((salon) => {
+                    const isSelected = salon.id === currentSalon?.id;
+                    return (
+                      <TouchableOpacity
+                        key={salon.id}
+                        style={[
+                          styles.salonSelectItem,
+                          {
+                            backgroundColor: isSelected ? theme.accentLight : theme.inputBg,
+                            borderColor: isSelected ? theme.accent : theme.cardBorder,
+                          },
+                        ]}
+                        onPress={() => handleSelectSalon(salon)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={styles.salonSelectLeft}>
+                          <Ionicons
+                            name={
+                              salon.type === 'group'
+                                ? 'people'
+                                : salon.type === 'pair'
+                                ? 'person-add'
+                                : 'business'
+                            }
+                            size={22}
+                            color={isSelected ? theme.accent : theme.textSecondary}
+                            style={{ marginRight: 10 }}
+                          />
+                          <View style={{ flex: 1 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                              <Text style={[styles.salonSelectName, { color: theme.textPrimary }]} numberOfLines={1}>
+                                {salon.name}
+                              </Text>
+                              {salon.isPro ? (
+                                <View style={[styles.proBadge, { backgroundColor: '#FFD700', marginLeft: 6 }]}>
+                                  <Text style={styles.proBadgeText}>PRO</Text>
+                                </View>
+                              ) : null}
+                            </View>
+                            <Text style={[styles.salonSelectDesc, { color: theme.textSecondary }]} numberOfLines={1}>
+                              {salon.description}
+                            </Text>
+                          </View>
+                        </View>
+
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          {/* 🔑 招待コードボタン（押した後にモーダル内でコード確認・共有画面にスムーズ切り替え） */}
+                          <TouchableOpacity
+                            style={[
+                              styles.inviteCodeTriggerBtn,
+                              {
+                                backgroundColor: isSelected ? theme.cardBg : (isEcoMode ? '#2C2C2E' : '#FFFFFF'),
+                                borderColor: isSelected ? theme.accent : theme.cardBorder,
+                              },
+                            ]}
+                            onPress={(e) => {
+                              e.stopPropagation();
+                              setEditingSalonForCode(salon);
+                              setInputNewInviteCode(salon.inviteCode);
+                              setSwitcherSubView('inviteCode');
+                            }}
+                            activeOpacity={0.7}
+                          >
+                            <Ionicons name="key-outline" size={13} color={theme.accent} style={{ marginRight: 4 }} />
+                            <Text style={[styles.inviteCodeTriggerBtnText, { color: theme.accent }]}>招待コード</Text>
+                          </TouchableOpacity>
+
+                          {isSelected ? (
+                            <Ionicons name="checkmark-circle" size={20} color={theme.accent} />
+                          ) : null}
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+
+                  {/* サロン共有モード（3人以上の店舗・チーム共有）が未登録の場合の対比案内 */}
+                  {savedSalons.filter((s) => s.type === 'salon' || s.type === 'group').length === 0 && (
+                    <View
+                      style={{
+                        padding: 14,
+                        borderRadius: 12,
+                        backgroundColor: isEcoMode ? '#222225' : '#F8F9FA',
+                        borderColor: theme.cardBorder,
+                        borderWidth: 1,
+                        marginTop: 10,
+                        marginBottom: 10,
+                        alignItems: 'center',
+                      }}
+                    >
+                      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 4 }}>
+                        <Ionicons name="business-outline" size={17} color={theme.textTertiary} style={{ marginRight: 6 }} />
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: theme.textPrimary }}>
+                          サロン共有モード（3人以上）
+                        </Text>
+                        <View style={[styles.proBadge, { backgroundColor: '#FFD700', marginLeft: 6 }]}>
+                          <Text style={styles.proBadgeText}>PRO</Text>
+                        </View>
+                      </View>
+                      <Text style={{ fontSize: 11, color: theme.textSecondary, textAlign: 'center', lineHeight: 16 }}>
+                        3人以上のスタッフでタイマーをリアルタイム同期する場合は、PROプランのサロン共有モードをご利用ください。
+                      </Text>
+                      <View
+                        style={{
+                          marginTop: 8,
+                          paddingVertical: 4,
+                          paddingHorizontal: 10,
+                          borderRadius: 6,
+                          backgroundColor: theme.accentLight,
+                        }}
+                      >
+                        <Text style={{ fontSize: 10, color: theme.accent, fontWeight: '600', textAlign: 'center' }}>
+                          💡 2人までのタイマー同期はずっと完全無料です
                         </Text>
                       </View>
                     </View>
-                  </View>
+                  )}
+                </ScrollView>
+
+                <View style={styles.switcherActionRow}>
                   <TouchableOpacity
-                    style={[
-                      styles.userNameEditBtn,
-                      { backgroundColor: theme.cardBg, borderColor: theme.cardBorder },
-                    ]}
+                    style={[styles.switcherActionBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
                     onPress={() => {
-                      setInputUserName(userName || '');
-                      setIsEditingUserName(true);
+                      setIsSwitcherModalVisible(false);
+                      setIsJoinCodeModalVisible(true);
                     }}
-                    activeOpacity={0.7}
                   >
-                    <Ionicons name="pencil" size={13} color={theme.accent} style={{ marginRight: 4 }} />
-                    <Text style={[styles.userNameEditBtnText, { color: theme.accent }]}>変更</Text>
+                    <Ionicons name="key-outline" size={16} color={theme.accent} style={{ marginRight: 4 }} />
+                    <Text style={[styles.switcherActionBtnText, { color: theme.accent }]}>コードで参加</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.switcherActionBtn, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder }]}
+                    onPress={() => {
+                      setIsSwitcherModalVisible(false);
+                      setIsProModalVisible(true);
+                    }}
+                  >
+                    <Ionicons name="star-outline" size={16} color={theme.accent} style={{ marginRight: 4 }} />
+                    <Text style={[styles.switcherActionBtnText, { color: theme.accent }]}>PROプラン</Text>
                   </TouchableOpacity>
                 </View>
-              ) : (
-                <View style={styles.userNameEditBox}>
-                  <View style={styles.userNameEditHeader}>
-                    <Text style={[styles.userNameSectionLabel, { color: theme.textTertiary }]}>
-                      表示名（ニックネーム）の変更
+              </>
+            ) : (
+              /* 🔑 招待コードの確認・共有・変更ビュー（押した後に確実に表示される！） */
+              <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingVertical: 6 }}>
+                {/* 対象サロンの概要 */}
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    backgroundColor: isEcoMode ? '#252528' : '#F6F8FA',
+                    padding: 12,
+                    borderRadius: 12,
+                    borderColor: theme.cardBorder,
+                    borderWidth: 1,
+                    marginBottom: 14,
+                  }}
+                >
+                  <Ionicons
+                    name={
+                      editingSalonForCode?.type === 'group'
+                        ? 'people'
+                        : editingSalonForCode?.type === 'pair'
+                        ? 'person-add'
+                        : 'business'
+                    }
+                    size={26}
+                    color={theme.accent}
+                    style={{ marginRight: 10 }}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 15, fontWeight: '700', color: theme.textPrimary }} numberOfLines={1}>
+                      {editingSalonForCode?.name || 'サロン'}
                     </Text>
-                    <Text style={[styles.userNameWatchHint, { color: theme.accent }]}>
-                      Watch推奨: 3〜5文字
+                    <Text style={{ fontSize: 11, color: theme.textSecondary }}>
+                      {editingSalonForCode?.description}
                     </Text>
                   </View>
-                  <View style={styles.userNameInputRow}>
+                </View>
+
+                <Text style={[styles.codeModalHintText, { color: theme.textSecondary }]}>
+                  {editingSalonForCode?.type === 'pair'
+                    ? 'ペア相手にこの招待コードを伝えると、2人でタイマーをリアルタイム同期（無料）できます。'
+                    : 'スタッフにこの招待コードを伝えてサロンに参加してもらいます。'}
+                </Text>
+
+                {/* 🔑 大きな招待コード表示ボックス */}
+                <View
+                  style={{
+                    backgroundColor: isEcoMode ? '#1C1C1E' : '#F0F8FF',
+                    borderColor: theme.accent,
+                    borderWidth: 1.5,
+                    borderRadius: 16,
+                    paddingVertical: 18,
+                    alignItems: 'center',
+                    marginBottom: 14,
+                  }}
+                >
+                  <Text style={{ fontSize: 11, fontWeight: '600', color: theme.textSecondary, marginBottom: 4 }}>
+                    {editingSalonForCode?.type === 'pair' ? 'タイマー同期のペア招待コード（無料）' : 'このサロンの招待コード'}
+                  </Text>
+                  <Text style={{ fontSize: 32, fontWeight: '800', letterSpacing: 3, color: theme.accent }}>
+                    {editingSalonForCode?.inviteCode || '---'}
+                  </Text>
+                </View>
+
+                {/* 📤 共有 / コピー ボタン */}
+                <TouchableOpacity
+                  style={[styles.codeShareFullBtn, { backgroundColor: theme.accent, borderColor: theme.accent }]}
+                  onPress={() => handleShareInviteCode(editingSalonForCode)}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="share-outline" size={18} color="#FFFFFF" style={{ marginRight: 6 }} />
+                  <Text style={[styles.codeShareFullBtnText, { color: '#FFFFFF' }]}>
+                    {editingSalonForCode?.type === 'pair' ? 'ペア招待コードを共有 / コピー' : '招待コードを共有 / コピー'}
+                  </Text>
+                </TouchableOpacity>
+
+                {/* コードの直接変更・再生成セクション */}
+                <View
+                  style={{
+                    marginTop: 12,
+                    paddingTop: 12,
+                    borderTopWidth: 1,
+                    borderTopColor: theme.cardBorder,
+                  }}
+                >
+                  <Text style={[styles.inputLabel, { color: theme.textSecondary, marginBottom: 6 }]}>
+                    コードの変更・再発行（任意）
+                  </Text>
+                  <View style={styles.codeModalInputRow}>
                     <TextInput
                       style={[
-                        styles.userNameTextInput,
+                        styles.codeModalTextInput,
                         {
-                          backgroundColor: theme.cardBg,
-                          color: theme.textPrimary,
+                          backgroundColor: theme.inputBg,
+                          color: theme.accent,
                           borderColor: theme.cardBorder,
                         },
                       ]}
-                      value={inputUserName}
-                      onChangeText={setInputUserName}
-                      placeholder="例: タグチ、KEN、サトウ"
+                      placeholder="例: 738-921"
                       placeholderTextColor={theme.textTertiary}
-                      maxLength={10}
-                      autoFocus={true}
+                      value={inputNewInviteCode}
+                      onChangeText={setInputNewInviteCode}
+                      autoCapitalize="characters"
+                      maxLength={15}
                     />
                     <TouchableOpacity
-                      style={[styles.userNameSaveBtn, { backgroundColor: theme.accent }]}
-                      onPress={handleSaveUserName}
+                      style={[styles.codeRandomBtn, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder }]}
+                      onPress={handleRegenerateRandomCode}
                       activeOpacity={0.7}
                     >
-                      <Text style={styles.userNameSaveBtnText}>保存</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[
-                        styles.userNameCancelBtn,
-                        { backgroundColor: theme.cardBg, borderColor: theme.cardBorder },
-                      ]}
-                      onPress={() => setIsEditingUserName(false)}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={[styles.userNameCancelBtnText, { color: theme.textSecondary }]}>✕</Text>
+                      <Ionicons name="shuffle" size={16} color={theme.accent} style={{ marginRight: 4 }} />
+                      <Text style={[styles.codeRandomBtnText, { color: theme.accent }]}>再生成</Text>
                     </TouchableOpacity>
                   </View>
-                  <Text style={[styles.userNameCharCount, { color: theme.textTertiary }]}>
-                    {inputUserName.length}/10文字 （カタカナ・英字・漢字対応）
-                  </Text>
+
+                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
+                    <TouchableOpacity
+                      style={[styles.submitButton, { flex: 1, backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderWidth: 1 }]}
+                      onPress={() => setSwitcherSubView('list')}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.submitButtonText, { color: theme.textSecondary }]}>戻る</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.submitButton, { flex: 2, backgroundColor: theme.accent }]}
+                      onPress={handleSaveCustomInviteCode}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.submitButtonText}>保存する</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
-              )}
-            </View>
-
-            <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 340 }}>
-              <Text style={[styles.sheetSectionTitle, { color: theme.textSecondary }]}>参加中のサロン・グループ</Text>
-              {savedSalons.map((salon) => {
-                const isSelected = salon.id === currentSalon?.id;
-                return (
-                  <TouchableOpacity
-                    key={salon.id}
-                    style={[
-                      styles.salonSelectItem,
-                      {
-                        backgroundColor: isSelected ? theme.accentLight : theme.inputBg,
-                        borderColor: isSelected ? theme.accent : theme.cardBorder,
-                      },
-                    ]}
-                    onPress={() => handleSelectSalon(salon)}
-                  >
-                    <View style={styles.salonSelectLeft}>
-                      <Ionicons
-                        name={
-                          salon.type === 'group'
-                            ? 'people'
-                            : salon.type === 'pair'
-                            ? 'person-add'
-                            : 'business'
-                        }
-                        size={22}
-                        color={isSelected ? theme.accent : theme.textSecondary}
-                        style={{ marginRight: 10 }}
-                      />
-                      <View>
-                        <Text style={[styles.salonSelectName, { color: theme.textPrimary }]}>
-                          {salon.name}
-                        </Text>
-                        <Text style={[styles.salonSelectDesc, { color: theme.textSecondary }]}>
-                          {salon.description} • コード: {salon.inviteCode}
-                        </Text>
-                      </View>
-                    </View>
-                    {isSelected ? (
-                      <Ionicons name="checkmark-circle" size={20} color={theme.accent} />
-                    ) : null}
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-
-            <View style={styles.switcherActionRow}>
-              <TouchableOpacity
-                style={[styles.switcherActionBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
-                onPress={() => {
-                  setIsSwitcherModalVisible(false);
-                  setIsJoinCodeModalVisible(true);
-                }}
-              >
-                <Ionicons name="key-outline" size={16} color={theme.accent} style={{ marginRight: 4 }} />
-                <Text style={[styles.switcherActionBtnText, { color: theme.accent }]}>コードで参加</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.switcherActionBtn, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder }]}
-                onPress={() => {
-                  setIsSwitcherModalVisible(false);
-                  setIsProModalVisible(true);
-                }}
-              >
-                <Ionicons name="star-outline" size={16} color={theme.accent} style={{ marginRight: 4 }} />
-                <Text style={[styles.switcherActionBtnText, { color: theme.accent }]}>PROプラン</Text>
-              </TouchableOpacity>
-            </View>
+              </ScrollView>
+            )}
           </View>
         </View>
       </Modal>
@@ -4060,10 +4351,10 @@ export default function SalonWorkScreen() {
             <View style={styles.proModalContent}>
               <Ionicons name="people-circle" size={54} color={theme.accent} style={{ alignSelf: 'center', marginBottom: 10 }} />
               <Text style={[styles.proModalText, { color: theme.textPrimary }]}>
-                1対1のペア共有は<Text style={{ fontWeight: 'bold', color: theme.success }}>完全無料</Text>で無期限にご利用いただけます。
+                1対1の「タイマー同期モード」は<Text style={{ fontWeight: 'bold', color: theme.success }}>完全無料</Text>で無期限にご利用いただけます。
               </Text>
               <Text style={[styles.proModalSubText, { color: theme.textSecondary }]}>
-                3人以上のスタッフで店舗全体・複数フロアをリアルタイム共有する場合は、オーナーがProサロンプランにご登録いただくことで、全スタッフが無制限に同一サロンボードへ参加・同期可能になります。
+                3人以上のスタッフでタイマーをリアルタイム同期する場合は、サロン共有モード（PROプラン）をご利用いただくことで、全スタッフが無制限に同一サロンボードへ参加・同期可能になります。
               </Text>
             </View>
 
@@ -7593,5 +7884,65 @@ const styles = StyleSheet.create({
   quickHistoryChipText: {
     fontSize: 12,
     fontWeight: '600',
+  },
+  // 招待コード関連スタイル
+  inviteCodeTriggerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  inviteCodeTriggerBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  codeModalHintText: {
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 14,
+  },
+  codeModalInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 16,
+  },
+  codeModalTextInput: {
+    flex: 1,
+    height: 44,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    paddingHorizontal: 12,
+    fontSize: 17,
+    fontWeight: '700',
+    letterSpacing: 2,
+    textAlign: 'center',
+  },
+  codeRandomBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    height: 44,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  codeRandomBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  codeShareFullBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    marginBottom: 10,
+  },
+  codeShareFullBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
   },
 });
