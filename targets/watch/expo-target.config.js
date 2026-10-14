@@ -1,0 +1,10 @@
+/** @type {import('@bacons/apple-targets/app.plugin').ConfigFunction} */
+module.exports = config => ({
+  type: "watch",
+  name: "AssistTimerWatch",
+  displayName: "AssistTimer",
+  icon: "../../assets/icon.png",
+  colors: { $accent: "#0A84FF" },
+  deploymentTarget: "10.0",
+  bundleIdentifier: ".watchkitapp",
+});
