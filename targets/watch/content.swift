@@ -536,10 +536,9 @@ struct ContentView: View {
             )
         } else {
             // ★ 00:00になっている場合は、タップしたらタイム入力画面にそのまま移動！
-            let isZero = !item.isRunning && (item.totalSeconds == 0 || item.pausedRemainingSeconds <= 0)
             TimeActionSheet(
                 item: item,
-                initialReinputMode: isZero,
+                initialReinputMode: item.isZero,
                 onAdjust: { deltaSec in
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         timers[idx].targetEndTime = timers[idx].targetEndTime.addingTimeInterval(Double(deltaSec))
