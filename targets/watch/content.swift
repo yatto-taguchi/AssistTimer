@@ -848,345 +848,10 @@ struct SeatTimerCard: View {
     @ViewBuilder
     private var expandedCardView: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // ① ヘッダー部（左: 席番号、右: 担当＋あなた）
-            HStack(alignment: .center, spacing: 4) {
-                // 席番号（左側: 見切れそうになったら「...」で省略）
-                HStack(spacing: 3) {
-                    Image(systemName: "applewatch")
-                        .font(.system(size: 11, weight: .bold))
-                    Text("\(item.seatNumber)番席")
-                        .font(.system(size: 14, weight: .heavy))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-                .foregroundColor(.white)
-                .layoutPriority(0)
-                
-                Spacer(minLength: 6)
-                
-                // 担当表示（右上に寄せる: 固定サイズで文字潰れを防止）
-                Group {
-                    if item.creatorName == currentUserName {
-                        // 自分が作成者の場合: 「⭐️ 担当: あなた」
-                        HStack(spacing: 3) {
-                            Image(systemName: "star.fill")
-                                .font(.system(size: 8))
-                                .foregroundColor(Color(hex: "#FFD60A"))
-                            Text("担当: あなた")
-                                .font(.system(size: 11, weight: .heavy))
-                                .foregroundColor(Color(hex: "#FFD60A"))
-                                .lineLimit(1)
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2.5)
-                        .background(Color(hex: "#FFD60A").opacity(0.18))
-                        .cornerRadius(6)
-                    } else if item.shampooStaff == currentUserName || item.checkStaff == currentUserName {
-                        // 他人作成で自分がヘルプの場合: 「担当: 佐藤 ★あなた」
-                        HStack(spacing: 4) {
-                            Text("担当: \(item.creatorName)")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundColor(Color(hex: "#E5E5EA"))
-                                .lineLimit(1)
-                            
-                            HStack(spacing: 2) {
-                                Image(systemName: "star.fill")
-                                    .font(.system(size: 7))
-                                Text("あなた")
-                                    .font(.system(size: 9.5, weight: .heavy))
-                                    .lineLimit(1)
-                            }
-                            .foregroundColor(Color(hex: "#FFD60A"))
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1.5)
-                            .background(Color(hex: "#FFD60A").opacity(0.18))
-                            .cornerRadius(4)
-                        }
-                    } else {
-                        // 他人が担当の席: 「担当: ヤマモト」
-                        Text("担当: \(item.creatorName)")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(Color(hex: "#C7C7CC"))
-                            .lineLimit(1)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.white.opacity(0.1))
-                            .cornerRadius(5)
-                    }
-                }
-                .layoutPriority(1)
-                .fixedSize(horizontal: true, vertical: false)
-            }
-            
-            // ② 全体タイマー行（★数字を真ん中配置・操作ボタン撤廃・棒状インジケーター搭載）
-            Button(action: onOpenTimeAction) {
-                VStack(alignment: .center, spacing: 3) {
-                    // カウント時間数字（中央揃え・特大）
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        if item.isOvertime {
-                            Text("超過")
-                                .font(.system(size: 12, weight: .heavy))
-                                .foregroundColor(Color(hex: "#FF453A"))
-                        }
-                        
-                        Text(formatSeconds(abs(item.remainingSeconds)))
-                            .font(.system(size: 32, weight: .black, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundColor(item.isOvertime ? Color(hex: "#FF453A") : Color(hex: "#64D2FF"))
-                    }
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    
-                    // カウント時間の下に全体タイムを小さく中央表示
-                    HStack(spacing: 4) {
-                        Image(systemName: "timer")
-                            .font(.system(size: 9))
-                        Text("\(item.totalSeconds / 60)分設定")
-                            .font(.system(size: 10, weight: .semibold))
-                        
-                        if !item.isRunning {
-                            Text("• ⏸️ 停止中")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(Color(hex: "#FF9F0A"))
-                        }
-                    }
-                    .foregroundColor(item.isOvertime ? Color(hex: "#FF857D") : Color(hex: "#90C0E0"))
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    
-                    // ★ 棒状インジケーター（プログレスバー）
-                    GeometryReader { geo in
-                        let totalW = geo.size.width
-                        let barW = totalW * CGFloat(progressRatio)
-                        
-                        ZStack(alignment: .leading) {
-                            // 背景トラック
-                            Capsule()
-                                .fill(Color.white.opacity(0.12))
-                                .frame(height: 4)
-                            
-                            // 進行バー
-                            Capsule()
-                                .fill(
-                                    item.isOvertime ?
-                                    LinearGradient(colors: [Color(hex: "#FF453A"), Color(hex: "#FF6961")], startPoint: .leading, endPoint: .trailing) :
-                                    (progressRatio < 0.2 ?
-                                        LinearGradient(colors: [Color(hex: "#FF9F0A"), Color(hex: "#FFD60A")], startPoint: .leading, endPoint: .trailing) :
-                                        LinearGradient(colors: [Color(hex: "#0A84FF"), Color(hex: "#64D2FF")], startPoint: .leading, endPoint: .trailing)
-                                    )
-                                )
-                                .frame(width: max(4, barW), height: 4)
-                        }
-                    }
-                    .frame(height: 4)
-                    .padding(.horizontal, 4)
-                    .padding(.top, 4)
-                    .padding(.bottom, 2)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(item.isOvertime ? Color(hex: "#FF453A").opacity(0.18) : (isRelatedToMe ? Color(hex: "#0A84FF").opacity(0.22) : Color(hex: "#0A84FF").opacity(0.12)))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(item.isOvertime ? Color(hex: "#FF453A").opacity(0.5) : (isRelatedToMe ? Color(hex: "#0A84FF").opacity(0.5) : Color(hex: "#0A84FF").opacity(0.25)), lineWidth: 1)
-                )
-            }
-            .buttonStyle(.plain)
-            
-            // ③ シャンプー・ヘルプ担当行
-            if let staff = item.shampooStaff {
-                // スタッフ指定済み ➔ タップで施術操作シート（シャンプーする／コーミングする／スタッフ変更）が開く
-                Button(action: onOpenShampooAction) {
-                    HStack(spacing: 5) {
-                        Image(systemName: item.status == .shampoo ? "drop.fill" : (item.status == .combing ? "comb.fill" : (item.helpProcess == "コーミング" ? "comb.fill" : "drop.fill")))
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(item.status == .shampoo || item.status == .combing ? .white : Color(hex: "#0A84FF"))
-                        
-                        Text(item.status == .shampoo ? "流し中:" : (item.status == .combing ? "コーミング中:" : "\(item.helpProcess):"))
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(Color(hex: "#C0C0C8"))
-                        
-                        Text(staff)
-                            .font(.system(size: 11, weight: .heavy))
-                            .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : .white)
-                        
-                        Spacer()
-                        
-                        HStack(spacing: 2) {
-                            Text(item.status == .shampoo || item.status == .combing ? "施術中" : "操作")
-                                .font(.system(size: 9, weight: .semibold))
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 8, weight: .bold))
-                        }
-                        .foregroundColor(item.status == .shampoo || item.status == .combing ? Color.white.opacity(0.8) : Color(hex: "#8E8E93"))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 7)
-                    .background(
-                        item.status == .shampoo || item.status == .combing ?
-                        Color(hex: "#0A84FF").opacity(0.3) :
-                        (staff == currentUserName ? Color(hex: "#FFD60A").opacity(0.14) : Color.white.opacity(0.08))
-                    )
-                    .cornerRadius(8)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(
-                                item.status == .shampoo || item.status == .combing ?
-                                Color(hex: "#0A84FF").opacity(0.7) :
-                                (staff == currentUserName ? Color(hex: "#FFD60A").opacity(0.4) : Color.white.opacity(0.12)),
-                                lineWidth: 1
-                            )
-                    )
-                }
-                .buttonStyle(.plain)
-                
-            } else if item.isRecruiting {
-                // ★ 全員に募集中！ ➔ オレンジの枠で「📢 ◯◯: 募集中 (全員に通知済)」
-                Button(action: onOpenSelectHelpStaff) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "megaphone.fill")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(Color(hex: "#FF9F0A"))
-                        
-                        Text("\(item.helpProcess): 募集中")
-                            .font(.system(size: 11, weight: .heavy))
-                            .foregroundColor(Color(hex: "#FFD60A"))
-                        
-                        Spacer()
-                        
-                        Text("私が入る >")
-                            .font(.system(size: 10, weight: .heavy))
-                            .foregroundColor(Color(hex: "#FF9F0A"))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 7)
-                    .background(Color(hex: "#FF9F0A").opacity(0.2))
-                    .cornerRadius(8)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color(hex: "#FF9F0A").opacity(0.7), lineWidth: 1)
-                    )
-                }
-                .buttonStyle(.plain)
-                
-            } else if item.isNoHelpNeeded {
-                Button(action: onOpenSelectHelpStaff) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "person.fill")
-                            .font(.system(size: 10))
-                        Text("👤 ヘルプなし (ワンマン)")
-                            .font(.system(size: 10, weight: .medium))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 7)
-                    .background(Color.white.opacity(0.06))
-                    .foregroundColor(Color(hex: "#8E8E93"))
-                    .cornerRadius(8)
-                }
-                .buttonStyle(.plain)
-                
-            } else if !item.isZero {
-                // 指定なし ➔ タイマー稼働中・設定時のみ「ヘルプを指定してください」を表示（00:00未稼働・停止中はヘルプ不要なため非表示）
-                Button(action: onOpenSelectHelpStaff) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "person.crop.circle.badge.plus")
-                            .font(.system(size: 11, weight: .bold))
-                        Text("ヘルプを指定してください")
-                            .font(.system(size: 11, weight: .heavy))
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 8, weight: .bold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 7)
-                    .background(Color(hex: "#FF9F0A").opacity(0.18))
-                    .foregroundColor(Color(hex: "#FFD60A"))
-                    .cornerRadius(8)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color(hex: "#FF9F0A").opacity(0.55), lineWidth: 1)
-                    )
-                }
-                .buttonStyle(.plain)
-            }
-            
-            // ④ チェックタイマー行
-            if let checkSec = item.checkRemainingSeconds {
-                Button(action: onOpenCheckAction) {
-                    HStack(alignment: .center) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "magnifyingglass")
-                                .font(.system(size: 11, weight: .bold))
-                            VStack(alignment: .leading, spacing: 0) {
-                                Text("チェックまで")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundColor(Color(hex: "#A0E0B0"))
-                                Text(formatSeconds(checkSec))
-                                    .font(.system(size: 16, weight: .black, design: .rounded))
-                                    .monospacedDigit()
-                                    .foregroundColor(Color(hex: "#30D158"))
-                            }
-                        }
-                        
-                        Spacer()
-                        
-                        if let cStaff = item.checkStaff {
-                            HStack(spacing: 3) {
-                                Image(systemName: "person.fill.checkmark")
-                                    .font(.system(size: 9))
-                                Text(cStaff)
-                                    .font(.system(size: 11, weight: .heavy))
-                            }
-                            .foregroundColor(Color(hex: "#30D158"))
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 5)
-                            .background(Color(hex: "#30D158").opacity(0.2))
-                            .cornerRadius(6)
-                        } else {
-                            Button(action: onClaimCheck) {
-                                Text("私がチェック")
-                                    .font(.system(size: 10, weight: .heavy))
-                                    .foregroundColor(.black)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 5)
-                                    .background(Color(hex: "#30D158"))
-                                    .cornerRadius(6)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(Color(hex: "#30D158").opacity(0.14))
-                    .cornerRadius(10)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color(hex: "#30D158").opacity(0.4), lineWidth: 1)
-                    )
-                }
-                .buttonStyle(.plain)
-            } else if item.isCheckCompleted {
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 10))
-                    Text("チェック完了")
-                        .font(.system(size: 10, weight: .bold))
-                    if let cStaff = item.checkStaff {
-                        Text("(\(cStaff))")
-                            .font(.system(size: 10))
-                    }
-                }
-                .foregroundColor(Color(hex: "#30D158").opacity(0.8))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Color(hex: "#30D158").opacity(0.08))
-                .cornerRadius(6)
-            }
+            headerSection
+            mainTimerSection
+            helpStaffSection
+            checkTimerSection
         }
         .padding(9)
         .background(Color(hex: "#1C1C1E"))
@@ -1195,6 +860,422 @@ struct SeatTimerCard: View {
             RoundedRectangle(cornerRadius: 14)
                 .stroke(item.isOvertime ? Color(hex: "#FF453A").opacity(0.6) : (isRelatedToMe ? Color(hex: "#FFD60A").opacity(0.4) : Color.white.opacity(0.12)), lineWidth: isRelatedToMe ? 1.5 : 1)
         )
+    }
+    
+    // MARK: - ① ヘッダー部
+    @ViewBuilder
+    private var headerSection: some View {
+        HStack(alignment: .center, spacing: 4) {
+            // 席番号（左側: 見切れそうになったら「...」で省略）
+            HStack(spacing: 3) {
+                Image(systemName: "applewatch")
+                    .font(.system(size: 11, weight: .bold))
+                Text("\(item.seatNumber)番席")
+                    .font(.system(size: 14, weight: .heavy))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .foregroundColor(.white)
+            .layoutPriority(0)
+            
+            Spacer(minLength: 6)
+            
+            // 担当表示（右上に寄せる: 固定サイズで文字潰れを防止）
+            creatorRoleBadge
+                .layoutPriority(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+    
+    @ViewBuilder
+    private var creatorRoleBadge: some View {
+        if item.creatorName == currentUserName {
+            // 自分が作成者の場合: 「⭐️ 担当: あなた」
+            HStack(spacing: 3) {
+                Image(systemName: "star.fill")
+                    .font(.system(size: 8))
+                    .foregroundColor(Color(hex: "#FFD60A"))
+                Text("担当: あなた")
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundColor(Color(hex: "#FFD60A"))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2.5)
+            .background(Color(hex: "#FFD60A").opacity(0.18))
+            .cornerRadius(6)
+        } else if item.shampooStaff == currentUserName || item.checkStaff == currentUserName {
+            // 他人作成で自分がヘルプの場合: 「担当: 佐藤 ★あなた」
+            HStack(spacing: 4) {
+                Text("担当: \(item.creatorName)")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(Color(hex: "#E5E5EA"))
+                    .lineLimit(1)
+                
+                HStack(spacing: 2) {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 7))
+                    Text("あなた")
+                        .font(.system(size: 9.5, weight: .heavy))
+                        .lineLimit(1)
+                }
+                .foregroundColor(Color(hex: "#FFD60A"))
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1.5)
+                .background(Color(hex: "#FFD60A").opacity(0.18))
+                .cornerRadius(4)
+            }
+        } else {
+            // 他人が担当の席: 「担当: ヤマモト」
+            Text("担当: \(item.creatorName)")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(Color(hex: "#C7C7CC"))
+                .lineLimit(1)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.white.opacity(0.1))
+                .cornerRadius(5)
+        }
+    }
+    
+    // MARK: - ② メインタイマー部
+    private var progressGradient: LinearGradient {
+        if item.isOvertime {
+            return LinearGradient(colors: [Color(hex: "#FF453A"), Color(hex: "#FF6961")], startPoint: .leading, endPoint: .trailing)
+        } else if progressRatio < 0.2 {
+            return LinearGradient(colors: [Color(hex: "#FF9F0A"), Color(hex: "#FFD60A")], startPoint: .leading, endPoint: .trailing)
+        } else {
+            return LinearGradient(colors: [Color(hex: "#0A84FF"), Color(hex: "#64D2FF")], startPoint: .leading, endPoint: .trailing)
+        }
+    }
+    
+    private var timerCardBackground: Color {
+        if item.isOvertime {
+            return Color(hex: "#FF453A").opacity(0.18)
+        } else if isRelatedToMe {
+            return Color(hex: "#0A84FF").opacity(0.22)
+        } else {
+            return Color(hex: "#0A84FF").opacity(0.12)
+        }
+    }
+    
+    private var timerCardStroke: Color {
+        if item.isOvertime {
+            return Color(hex: "#FF453A").opacity(0.5)
+        } else if isRelatedToMe {
+            return Color(hex: "#0A84FF").opacity(0.5)
+        } else {
+            return Color(hex: "#0A84FF").opacity(0.25)
+        }
+    }
+    
+    @ViewBuilder
+    private var mainTimerSection: some View {
+        Button(action: onOpenTimeAction) {
+            VStack(alignment: .center, spacing: 3) {
+                // カウント時間数字（中央揃え・特大）
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    if item.isOvertime {
+                        Text("超過")
+                            .font(.system(size: 12, weight: .heavy))
+                            .foregroundColor(Color(hex: "#FF453A"))
+                    }
+                    
+                    Text(formatSeconds(abs(item.remainingSeconds)))
+                        .font(.system(size: 32, weight: .black, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(item.isOvertime ? Color(hex: "#FF453A") : Color(hex: "#64D2FF"))
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                
+                // カウント時間の下に全体タイムを小さく中央表示
+                HStack(spacing: 4) {
+                    Image(systemName: "timer")
+                        .font(.system(size: 9))
+                    Text("\(item.totalSeconds / 60)分設定")
+                        .font(.system(size: 10, weight: .semibold))
+                    
+                    if !item.isRunning {
+                        Text("• ⏸️ 停止中")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(Color(hex: "#FF9F0A"))
+                    }
+                }
+                .foregroundColor(item.isOvertime ? Color(hex: "#FF857D") : Color(hex: "#90C0E0"))
+                .frame(maxWidth: .infinity, alignment: .center)
+                
+                // ★ 棒状インジケーター（プログレスバー）
+                GeometryReader { geo in
+                    let totalW = geo.size.width
+                    let barW = totalW * CGFloat(progressRatio)
+                    
+                    ZStack(alignment: .leading) {
+                        // 背景トラック
+                        Capsule()
+                            .fill(Color.white.opacity(0.12))
+                            .frame(height: 4)
+                        
+                        // 進行バー
+                        Capsule()
+                            .fill(progressGradient)
+                            .frame(width: max(4, barW), height: 4)
+                    }
+                }
+                .frame(height: 4)
+                .padding(.horizontal, 4)
+                .padding(.top, 4)
+                .padding(.bottom, 2)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(timerCardBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(timerCardStroke, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+    
+    // MARK: - ③ シャンプー・ヘルプ担当部
+    private var isShampooOrCombing: Bool {
+        item.status == .shampoo || item.status == .combing
+    }
+
+    private var shampooStatusIcon: String {
+        if item.status == .shampoo {
+            return "drop.fill"
+        } else if item.status == .combing || item.helpProcess == "コーミング" {
+            return "comb.fill"
+        } else {
+            return "drop.fill"
+        }
+    }
+    
+    private var shampooStatusTitle: String {
+        if item.status == .shampoo {
+            return "流し中:"
+        } else if item.status == .combing {
+            return "コーミング中:"
+        } else {
+            return "\(item.helpProcess):"
+        }
+    }
+
+    private func staffButtonBackground(staff: String) -> Color {
+        if isShampooOrCombing {
+            return Color(hex: "#0A84FF").opacity(0.3)
+        } else if staff == currentUserName {
+            return Color(hex: "#FFD60A").opacity(0.14)
+        } else {
+            return Color.white.opacity(0.08)
+        }
+    }
+
+    private func staffButtonStroke(staff: String) -> Color {
+        if isShampooOrCombing {
+            return Color(hex: "#0A84FF").opacity(0.7)
+        } else if staff == currentUserName {
+            return Color(hex: "#FFD60A").opacity(0.4)
+        } else {
+            return Color.white.opacity(0.12)
+        }
+    }
+
+    @ViewBuilder
+    private func staffAssignedButton(staff: String) -> some View {
+        Button(action: onOpenShampooAction) {
+            HStack(spacing: 5) {
+                Image(systemName: shampooStatusIcon)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(isShampooOrCombing ? .white : Color(hex: "#0A84FF"))
+                
+                Text(shampooStatusTitle)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(Color(hex: "#C0C0C8"))
+                
+                Text(staff)
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : .white)
+                
+                Spacer()
+                
+                HStack(spacing: 2) {
+                    Text(isShampooOrCombing ? "施術中" : "操作")
+                        .font(.system(size: 9, weight: .semibold))
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                }
+                .foregroundColor(isShampooOrCombing ? Color.white.opacity(0.8) : Color(hex: "#8E8E93"))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(staffButtonBackground(staff: staff))
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(staffButtonStroke(staff: staff), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+    
+    @ViewBuilder
+    private var helpStaffSection: some View {
+        if let staff = item.shampooStaff {
+            staffAssignedButton(staff: staff)
+        } else if item.isRecruiting {
+            // ★ 全員に募集中！
+            Button(action: onOpenSelectHelpStaff) {
+                HStack(spacing: 5) {
+                    Image(systemName: "megaphone.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Color(hex: "#FF9F0A"))
+                    
+                    Text("\(item.helpProcess): 募集中")
+                        .font(.system(size: 11, weight: .heavy))
+                        .foregroundColor(Color(hex: "#FFD60A"))
+                    
+                    Spacer()
+                    
+                    Text("私が入る >")
+                        .font(.system(size: 10, weight: .heavy))
+                        .foregroundColor(Color(hex: "#FF9F0A"))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+                .background(Color(hex: "#FF9F0A").opacity(0.2))
+                .cornerRadius(8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color(hex: "#FF9F0A").opacity(0.7), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+            
+        } else if item.isNoHelpNeeded {
+            Button(action: onOpenSelectHelpStaff) {
+                HStack(spacing: 4) {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 10))
+                    Text("👤 ヘルプなし (ワンマン)")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .background(Color.white.opacity(0.06))
+                .foregroundColor(Color(hex: "#8E8E93"))
+                .cornerRadius(8)
+            }
+            .buttonStyle(.plain)
+            
+        } else if !item.isZero {
+            // 指定なし ➔ タイマー稼働中・設定時のみ「ヘルプを指定してください」を表示
+            Button(action: onOpenSelectHelpStaff) {
+                HStack(spacing: 5) {
+                    Image(systemName: "person.crop.circle.badge.plus")
+                        .font(.system(size: 11, weight: .bold))
+                    Text("ヘルプを指定してください")
+                        .font(.system(size: 11, weight: .heavy))
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+                .background(Color(hex: "#FF9F0A").opacity(0.18))
+                .foregroundColor(Color(hex: "#FFD60A"))
+                .cornerRadius(8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color(hex: "#FF9F0A").opacity(0.55), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+        }
+    }
+    
+    // MARK: - ④ チェックタイマー部
+    @ViewBuilder
+    private var checkTimerSection: some View {
+        if let checkSec = item.checkRemainingSeconds {
+            Button(action: onOpenCheckAction) {
+                HStack(alignment: .center) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 11, weight: .bold))
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text("チェックまで")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(Color(hex: "#A0E0B0"))
+                            Text(formatSeconds(checkSec))
+                                .font(.system(size: 16, weight: .black, design: .rounded))
+                                .monospacedDigit()
+                                .foregroundColor(Color(hex: "#30D158"))
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    if let cStaff = item.checkStaff {
+                        HStack(spacing: 3) {
+                            Image(systemName: "person.fill.checkmark")
+                                .font(.system(size: 9))
+                            Text(cStaff)
+                                .font(.system(size: 11, weight: .heavy))
+                        }
+                        .foregroundColor(Color(hex: "#30D158"))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .background(Color(hex: "#30D158").opacity(0.2))
+                        .cornerRadius(6)
+                    } else {
+                        Button(action: onClaimCheck) {
+                            Text("私がチェック")
+                                .font(.system(size: 10, weight: .heavy))
+                                .foregroundColor(.black)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 5)
+                                .background(Color(hex: "#30D158"))
+                                .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color(hex: "#30D158").opacity(0.14))
+                .cornerRadius(10)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color(hex: "#30D158").opacity(0.4), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+        } else if item.isCheckCompleted {
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.system(size: 10))
+                Text("チェック完了")
+                    .font(.system(size: 10, weight: .bold))
+                if let cStaff = item.checkStaff {
+                    Text("(\(cStaff))")
+                        .font(.system(size: 10))
+                }
+            }
+            .foregroundColor(Color(hex: "#30D158").opacity(0.8))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color(hex: "#30D158").opacity(0.08))
+            .cornerRadius(6)
+        }
     }
     
     private func formatSeconds(_ seconds: Int) -> String {
