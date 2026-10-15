@@ -1513,10 +1513,13 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - 下段に定番ピル（10分、15分、20分など）も併設し、定番タイムのワンタップ即決と無段階微調整を両立。
 - **空状態（0席時）UI**:
   - iPhone側に席が1つもない場合、Watch側には「📱 iPhoneで席を追加してください」「サロンワーク画面の客席と自動でリアルタイム連動します」と親切なプレースホルダーカードを常時案内。
-
-
-
-
+- **初期客席・スタッフ構成方針（A案確定）**:
+  - スタッフメンバーは完全な空（`[]`）で初期化。
+  - 客席はアプリ初回起動時に機能体験を円滑にするため「1番席 (サンプル)」が1席のみ登録され、担当者にはログインスタイリスト名が自動設定される。
+- **通信堅牢化 ＆ 競合排除システム (Robustness & Deduplication)**:
+  - **iOS Native保留キュー (`pendingUserInfo`)**: WCSessionがアクティベート完了前に呼ばれた `transferUserInfo` をドロップせず内部キューに保持し、`activationDidCompleteWith` のコールバックで自動フラッシュ。アプリ起動直後やスリープ復帰直後の送信漏れを根本解消。
+  - **メンバーリスト自動キャッシュ＆フォールバック**: `syncSeatsToWatch` 呼び出し時に第3引数 `currentMembers` が省略された場合でも、直前メモリキャッシュおよび `AsyncStorage`（`@salon_staff_members`）から自動補完し、Watch側のメンバー一覧が空配列で意図せず上書きされる不整合を完全排除。
+  - **リスナー二重処理ガード (`isSalonWorkScreenActive`)**: `SalonWorkScreen` の表示中（アクティブ時）は画面側リスナーがUIステート・ストレージ保存・Watch同期を一元処理し、最上位 `AppContext` 側のリスナーはスキップ。画面非表示時やバックグラウンド時のみ `AppContext` が代理実行することで、二重実行・重複送信・競合（Race Condition）を100%防止。
 
 
 

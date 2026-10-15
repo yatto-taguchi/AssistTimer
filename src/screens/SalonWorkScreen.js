@@ -85,14 +85,35 @@ export const getDefaultInitialSeats = (staffName = 'スタイリスト') => [
   },
 ];
 
+// キャッシュされた最新スタッフメンバー一覧（引数省略時の自動フォールバック用）
+let _cachedStaffMembers = [];
+
 // ★ Apple Watchへの客席・スタッフ名リアルタイム同期ヘルパー
-export const syncSeatsToWatch = (currentSeats, currentName, currentMembers = null) => {
+export const syncSeatsToWatch = async (currentSeats, currentName, currentMembers = null) => {
   if (Platform.OS !== 'ios') return;
   try {
+    let finalMembers = currentMembers;
+    if (Array.isArray(finalMembers)) {
+      _cachedStaffMembers = finalMembers;
+    } else if (_cachedStaffMembers.length > 0) {
+      finalMembers = _cachedStaffMembers;
+    } else {
+      try {
+        const saved = await AsyncStorage.getItem('@salon_staff_members');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            finalMembers = parsed;
+            _cachedStaffMembers = parsed;
+          }
+        }
+      } catch {}
+    }
+
     const watchPayload = {
       type: 'SYNC_SEATS',
       userName: (currentName || 'スタイリスト').trim(),
-      members: Array.isArray(currentMembers) ? currentMembers : [],
+      members: Array.isArray(finalMembers) ? finalMembers : [],
       timestamp: Date.now(),
       seats: (currentSeats || []).map((s, index) => {
         let seatNum = index + 1;
@@ -529,7 +550,7 @@ export default function SalonWorkScreen() {
     // ① 同期リクエスト (Watch側から「最新の客席データをちょうだい」と要求された時)
     if (action === 'REQUEST_SYNC') {
       setSeats((currentSeats) => {
-        syncSeatsToWatch(currentSeats, userName);
+        syncSeatsToWatch(currentSeats, userName, staffMembers);
         return currentSeats;
       });
       return;
@@ -573,7 +594,7 @@ export default function SalonWorkScreen() {
         if (prevSeats.some((s) => s.id === newSeatObj.id)) return prevSeats;
         const updated = [...prevSeats, newSeatObj];
         saveSeatsToStorage(updated);
-        syncSeatsToWatch(updated, userName);
+        syncSeatsToWatch(updated, userName, staffMembers);
         return updated;
       });
       return;
@@ -731,8 +752,10 @@ export default function SalonWorkScreen() {
   // ★ Apple Watchとの接続・リスナー登録
   useEffect(() => {
     if (Platform.OS === 'ios') {
+      global.isSalonWorkScreenActive = true;
+
       WatchConnectivity.activate().then(() => {
-        syncSeatsToWatch(seats, userName);
+        syncSeatsToWatch(seats, userName, staffMembers);
       }).catch(() => {});
 
       const subMsg = WatchConnectivity.addMessageListener((message) => {
@@ -750,6 +773,7 @@ export default function SalonWorkScreen() {
       }) : null;
 
       return () => {
+        global.isSalonWorkScreenActive = false;
         if (subMsg?.remove) subMsg.remove();
         if (subCtx?.remove) subCtx.remove();
         if (subUser?.remove) subUser.remove();
@@ -868,7 +892,7 @@ export default function SalonWorkScreen() {
       }));
       setSeats(updatedSeats);
       saveSeatsToStorage(updatedSeats);
-      syncSeatsToWatch(updatedSeats, trimmed);
+      syncSeatsToWatch(updatedSeats, trimmed, staffMembers);
 
       if (Platform.OS !== 'web') {
         Vibration.vibrate([0, 100, 50, 100]);

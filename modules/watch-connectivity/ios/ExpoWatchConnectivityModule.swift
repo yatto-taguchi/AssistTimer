@@ -4,6 +4,7 @@ import WatchConnectivity
 public class ExpoWatchConnectivityModule: Module {
   private var sessionDelegate: SessionDelegate?
   private var pendingApplicationContext: [String: Any]?
+  private var pendingUserInfo: [String: Any]?
 
   private var session: WCSession? {
     return WCSession.isSupported() ? WCSession.default : nil
@@ -120,12 +121,14 @@ public class ExpoWatchConnectivityModule: Module {
       }
 
       guard session.activationState == .activated else {
+        self.pendingUserInfo = userInfo
         session.activate()
-        promise.resolve(false)
+        promise.resolve(true)
         return
       }
 
       let transfer = session.transferUserInfo(userInfo)
+      self.pendingUserInfo = nil
       promise.resolve(transfer.isTransferring)
     }
   }
@@ -138,6 +141,12 @@ public class ExpoWatchConnectivityModule: Module {
     } catch {
       print("[ExpoWatchConnectivity] flushPendingApplicationContext failed: \(error.localizedDescription)")
     }
+  }
+
+  fileprivate func flushPendingUserInfo(session: WCSession) {
+    guard let pending = self.pendingUserInfo else { return }
+    session.transferUserInfo(pending)
+    self.pendingUserInfo = nil
   }
 
   fileprivate func dispatchEvent(_ name: String, _ body: [String: Any]) {
@@ -159,6 +168,7 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
       DispatchQueue.main.async {
         if let s = session as WCSession? {
           self.module?.flushPendingApplicationContext(session: s)
+          self.module?.flushPendingUserInfo(session: s)
         }
       }
     }

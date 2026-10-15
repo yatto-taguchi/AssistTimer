@@ -438,6 +438,11 @@ export const AppProvider = ({ children }) => {
       if (!data || !data.action) return;
       const { action, seatId, userName: watchUser, extra } = data;
 
+      // ★ SalonWorkScreenが表示中の場合は、画面側リスナーがUIステートとストレージの更新・同期を直接担うため二重実行を回避
+      if (global.isSalonWorkScreenActive) {
+        return;
+      }
+
       // ① 同期要求 (Watch起動時/画面表示時に最新データを求められた時)
       if (action === 'REQUEST_SYNC') {
         await syncSeatsToWatchGlobal();
