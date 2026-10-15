@@ -74,16 +74,23 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
+      guard session.isPaired else {
+        promise.resolve(false)
+        return
+      }
+
+      let cleanContext = self.sanitizeDictionary(context)
+
       guard session.activationState == .activated else {
         // まだアクティベート中の場合は保留キューに保管し、アクティベート完了時に自動送信
-        self.pendingApplicationContext = context
+        self.pendingApplicationContext = cleanContext
         session.activate()
         promise.resolve(true)
         return
       }
 
       do {
-        try session.updateApplicationContext(context)
+        try session.updateApplicationContext(cleanContext)
         self.pendingApplicationContext = nil
         promise.resolve(true)
       } catch {
@@ -97,6 +104,11 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
+      guard session.isPaired else {
+        promise.reject("E_NOT_PAIRED", "Apple Watch is not paired")
+        return
+      }
+
       guard session.activationState == .activated else {
         promise.reject("E_NOT_ACTIVATED", "Session is not activated")
         return
@@ -107,7 +119,9 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
-      session.sendMessage(message, replyHandler: { reply in
+      let cleanMessage = self.sanitizeDictionary(message)
+
+      session.sendMessage(cleanMessage, replyHandler: { reply in
         promise.resolve(reply)
       }, errorHandler: { error in
         promise.reject("E_SEND_FAILED", error.localizedDescription)
@@ -120,20 +134,60 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
+      guard session.isPaired else {
+        promise.resolve(false)
+        return
+      }
+
+      let cleanUserInfo = self.sanitizeDictionary(userInfo)
+
       guard session.activationState == .activated else {
-        self.pendingUserInfo = userInfo
+        self.pendingUserInfo = cleanUserInfo
         session.activate()
         promise.resolve(true)
         return
       }
 
-      let transfer = session.transferUserInfo(userInfo)
+      let transfer = session.transferUserInfo(cleanUserInfo)
       self.pendingUserInfo = nil
       promise.resolve(transfer.isTransferring)
     }
   }
 
+  fileprivate func sanitizePropertyListValue(_ value: Any) -> Any? {
+    if value is NSNull {
+      return nil
+    }
+    if let dict = value as? [String: Any] {
+      var cleanDict: [String: Any] = [:]
+      for (k, v) in dict {
+        if let cleanVal = sanitizePropertyListValue(v) {
+          cleanDict[k] = cleanVal
+        }
+      }
+      return cleanDict
+    }
+    if let arr = value as? [Any] {
+      var cleanArr: [Any] = []
+      for elem in arr {
+        if let cleanElem = sanitizePropertyListValue(elem) {
+          cleanArr.append(cleanElem)
+        }
+      }
+      return cleanArr
+    }
+    if value is String || value is NSNumber || value is Date || value is Data {
+      return value
+    }
+    return String(describing: value)
+  }
+
+  fileprivate func sanitizeDictionary(_ dict: [String: Any]) -> [String: Any] {
+    return (sanitizePropertyListValue(dict) as? [String: Any]) ?? [:]
+  }
+
   fileprivate func flushPendingApplicationContext(session: WCSession) {
+    guard session.isPaired else { return }
     guard let pending = self.pendingApplicationContext else { return }
     do {
       try session.updateApplicationContext(pending)
@@ -144,6 +198,7 @@ public class ExpoWatchConnectivityModule: Module {
   }
 
   fileprivate func flushPendingUserInfo(session: WCSession) {
+    guard session.isPaired else { return }
     guard let pending = self.pendingUserInfo else { return }
     session.transferUserInfo(pending)
     self.pendingUserInfo = nil

@@ -1520,7 +1520,8 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
   - **iOS Native保留キュー (`pendingUserInfo`)**: WCSessionがアクティベート完了前に呼ばれた `transferUserInfo` をドロップせず内部キューに保持し、`activationDidCompleteWith` のコールバックで自動フラッシュ。アプリ起動直後やスリープ復帰直後の送信漏れを根本解消。
   - **メンバーリスト自動キャッシュ＆フォールバック**: `syncSeatsToWatch` 呼び出し時に第3引数 `currentMembers` が省略された場合でも、直前メモリキャッシュおよび `AsyncStorage`（`@salon_staff_members`）から自動補完し、Watch側のメンバー一覧が空配列で意図せず上書きされる不整合を完全排除。
   - **リスナー二重処理ガード (`isSalonWorkScreenActive`)**: `SalonWorkScreen` の表示中（アクティブ時）は画面側リスナーがUIステート・ストレージ保存・Watch同期を一元処理し、最上位 `AppContext` 側のリスナーはスキップ。画面非表示時やバックグラウンド時のみ `AppContext` が代理実行することで、二重実行・重複送信・競合（Race Condition）を100%防止。
-
-
-
-
+  - **WCSession PropertyList型安全サニタイズ ＆ isPairedガード (Build 31)**:
+    - **クラッシュ根本根絶**: Apple公式の `WCSession` 仕様上、`transferUserInfo` および `updateApplicationContext` は Property List 型（NSString, NSNumber, NSDate, NSData, NSArray, NSDictionary）のみを受け付け、JavaScript から渡された `null`（`NSNull`）が含まれると Objective-C の致命的例外（`NSInvalidArgumentException`）がスローされてアプリが強制終了（SIGABRT クラッシュ）する問題を解決。
+    - **Native再帰サニタイズ (`sanitizeDictionary`)**: `ExpoWatchConnectivityModule.swift` 内に再帰的サニタイズ関数を新設し、辞書・配列内の `NSNull` を完全に除去・安全置換した上で `WCSession` に受け渡す安全防壁を確立。
+    - **JS側二重防御**: `SalonWorkScreen.js` および `AppContext.js` の `watchPayload` において、`checkTargetSeconds` や `checkEndTimestamp` を `null` ではなく `0` で送信し、Bridge通過前の段階から `null` を完全排除。Watch側 `content.swift` では `> 0` チェックにより `nil` として正常パース。
+    - **ペアリング安全ガード (`isPaired`)**: `transferUserInfo`、`updateApplicationContext`、`sendMessage`、および保留フラッシュ処理のすべてに `guard session.isPaired else { return }` を徹底し、Apple Watchが未ペアリングまたは接続準備中の端末環境でも例外クラッシュを100%未然防止。

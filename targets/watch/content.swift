@@ -128,10 +128,10 @@ extension SeatTimerItem {
             self.status = .normal
         }
         
-        self.checkTotalSeconds = (dictionary["checkTotalSeconds"] as? NSNumber)?.intValue ?? (dictionary["checkTotalSeconds"] as? Int) ?? (dictionary["checkTargetSeconds"] as? Int)
-        if let checkEndMs = (dictionary["checkEndTimestamp"] as? NSNumber)?.doubleValue ?? (dictionary["checkEndTimestamp"] as? Double) ?? (dictionary["checkTargetEndTime"] as? Double) {
-            self.checkTargetEndTime = Date(timeIntervalSince1970: checkEndMs / 1000.0)
-        }
+        let rawCheckSec = (dictionary["checkTotalSeconds"] as? NSNumber)?.intValue ?? (dictionary["checkTotalSeconds"] as? Int) ?? (dictionary["checkTargetSeconds"] as? Int)
+        self.checkTotalSeconds = (rawCheckSec != nil && rawCheckSec! > 0) ? rawCheckSec : nil
+        let rawCheckEndMs = (dictionary["checkEndTimestamp"] as? NSNumber)?.doubleValue ?? (dictionary["checkEndTimestamp"] as? Double) ?? (dictionary["checkTargetEndTime"] as? Double)
+        self.checkTargetEndTime = (rawCheckEndMs != nil && rawCheckEndMs! > 0) ? Date(timeIntervalSince1970: rawCheckEndMs! / 1000.0) : nil
         let rawCheckStaff = (dictionary["checkStaff"] as? String) ?? (dictionary["checkStaffName"] as? String)
         self.checkStaff = (rawCheckStaff?.isEmpty == false) ? rawCheckStaff : nil
         self.isCheckCompleted = (dictionary["isCheckCompleted"] as? NSNumber)?.boolValue ?? (dictionary["isCheckCompleted"] as? Bool) ?? false
