@@ -1,7 +1,9 @@
 import ExpoModulesCore
 import WatchConnectivity
 
-public class ExpoWatchConnectivityModule: Module, WCSessionDelegate {
+public class ExpoWatchConnectivityModule: Module {
+  private var sessionDelegate: SessionDelegate?
+
   private var session: WCSession? {
     return WCSession.isSupported() ? WCSession.default : nil
   }
@@ -14,6 +16,16 @@ public class ExpoWatchConnectivityModule: Module, WCSessionDelegate {
       "onApplicationContextReceived"
     )
 
+    OnCreate {
+      if WCSession.isSupported() {
+        let delegate = SessionDelegate(module: self)
+        self.sessionDelegate = delegate
+        let s = WCSession.default
+        s.delegate = delegate
+        s.activate()
+      }
+    }
+
     AsyncFunction("activate") { (promise: Promise) in
       guard WCSession.isSupported() else {
         promise.resolve(["supported": false, "activated": false])
@@ -21,8 +33,14 @@ public class ExpoWatchConnectivityModule: Module, WCSessionDelegate {
       }
       
       let s = WCSession.default
-      s.delegate = self
-      s.activate()
+      if self.sessionDelegate == nil {
+        let delegate = SessionDelegate(module: self)
+        self.sessionDelegate = delegate
+        s.delegate = delegate
+      }
+      if s.activationState != .activated {
+        s.activate()
+      }
       promise.resolve([
         "supported": true,
         "isPaired": s.isPaired,
@@ -54,7 +72,6 @@ public class ExpoWatchConnectivityModule: Module, WCSessionDelegate {
       }
 
       guard session.activationState == .activated else {
-        // まだアクティベートされていない場合はアクティベートを試行
         session.activate()
         promise.reject("E_NOT_ACTIVATED", "WCSession is not yet activated")
         return
@@ -80,7 +97,6 @@ public class ExpoWatchConnectivityModule: Module, WCSessionDelegate {
       }
 
       guard session.isReachable else {
-        // Reachableでない場合はフォールバックとしてupdateApplicationContextに回すか、エラーを返す
         promise.reject("E_NOT_REACHABLE", "Apple Watch is not currently reachable")
         return
       }
@@ -93,31 +109,49 @@ public class ExpoWatchConnectivityModule: Module, WCSessionDelegate {
     }
   }
 
-  // MARK: - WCSessionDelegate
+  fileprivate func dispatchEvent(_ name: String, _ body: [String: Any]) {
+    sendEvent(name, body)
+  }
+}
 
-  public func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
+// MARK: - WCSessionDelegate 専用内部クラス (NSObject準拠)
+private class SessionDelegate: NSObject, WCSessionDelegate {
+  weak var module: ExpoWatchConnectivityModule?
+
+  init(module: ExpoWatchConnectivityModule) {
+    self.module = module
+    super.init()
+  }
+
+  func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
     // アクティベーション完了
   }
 
-  public func sessionDidBecomeInactive(_ session: WCSession) {
+  func sessionDidBecomeInactive(_ session: WCSession) {
     // 複数Watch切り替え時
   }
 
-  public func sessionDidDeactivate(_ session: WCSession) {
+  func sessionDidDeactivate(_ session: WCSession) {
     // 新しいセッションに再アクティベート
     session.activate()
   }
 
-  public func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
-    sendEvent("onMessageReceived", ["message": message])
+  func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
+    DispatchQueue.main.async {
+      self.module?.dispatchEvent("onMessageReceived", ["message": message])
+    }
   }
 
-  public func session(_ session: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
-    sendEvent("onMessageReceived", ["message": message])
+  func session(_ session: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
+    DispatchQueue.main.async {
+      self.module?.dispatchEvent("onMessageReceived", ["message": message])
+    }
     replyHandler(["status": "acknowledged"])
   }
 
-  public func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
-    sendEvent("onApplicationContextReceived", ["context": applicationContext])
+  func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
+    DispatchQueue.main.async {
+      self.module?.dispatchEvent("onApplicationContextReceived", ["context": applicationContext])
+    }
   }
 }
