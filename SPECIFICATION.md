@@ -1461,11 +1461,15 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **ダイレクト操作ジャンプ**:
       - サムネイルタイルをタップすると、その席のタイマー操作画面（`TimeActionSheet`）へ即座にアクセス可能。
 
-### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-28)
+### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-29)
 - **概要**:
-  - iPhoneアプリ（`SalonWorkScreen`）とApple Watchアプリ（`ContentView`）間の完全リアルタイム双方向同期を実現。
+  - iPhoneアプリ（`AppContext` / `SalonWorkScreen`）とApple Watchアプリ（`ContentView`）間の完全リアルタイム双方向同期を実現。
   - プロトタイプ時のデモ固定4席を完全撤廃し、iPhone側で管理されている実際の客席データとスタッフ名を1対1で完全連動。
 - **アーキテクチャ**:
+  - **アプリ最上位グローバル同期管理 (`AppContext.js` & `App.js`)**:
+    - React Navigation の `lazy: false` により全タブを常時稼働させ、ユーザーがどの画面を開いていてもアプリ起動と同時に最上位から `WatchConnectivity.activate()` および `syncSeatsToWatchGlobal()` を実行。
+    - 端末ストレージ（AsyncStorage）から保存済み座席データを即座に読み出し、アプリ起動の瞬間にWatchへ自動プッシュ送信。
+    - Watchからの同期要求（`REQUEST_SYNC`）や新席追加（`ADD_SEAT`）のリスナーをグローバル常時待機させ、画面未表示による通信不成立やすれ違いを完全排除。
   - **ローカルExpoモジュール (`modules/watch-connectivity`)**:
     - Apple標準フレームワーク `WatchConnectivity`（`WCSession`）を最新のExpo Modules API（Swift）でネイティブ実装（`ExpoWatchConnectivityModule.swift`）。
     - Objective-Cの `NSObjectProtocol` 適合要件を満たす専用デリゲートクラス `SessionDelegate: NSObject, WCSessionDelegate` を分離実装。
@@ -1489,10 +1493,13 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - `ADJUST_TIME`: タイム変更（+5分、+1分など）の加算
     - `STOP_TIMER` / `START_TIMER` / `RESET_ZERO`: タイマーの一時停止、再入力、および00:00リセット
     - `CLEAR_STAFF`: 担当者の解除
-- **新規席追加シートUI (AddSeatSheet)**:
-  - watchOSで特大文字が見切れる標準 `Stepper` を完全撤廃。
-  - 左に「客席番号:」、右に「マイナス丸ボタン（−）」「白太字の中央文字（◯番席）」「プラス丸ボタン（＋）」を配置したwatchOS専用の美しい円形ステッパーUI（直径28px・触覚フィードバック付き）へ刷新。
-  - `.lineLimit(1)` および `.minimumScaleFactor(0.85)` により、40mmから49mm Ultraまで全画面での美しい表示を完全保証。
+- **新規席追加シートUI (AddSeatSheet) ＆ 任意タイム設定 (TimeActionSheet)**:
+  - **watchOS専用円形ステッパー**: 左に「客席番号:」、右に「マイナス丸ボタン（−）」「白太字の中央文字（◯番席）」「プラス丸ボタン（＋）」を配置した円形ステッパーUI（直径28px・触覚付き）。
+  - **トグル（Digital Crown）無段階時間調整（分デフォルト／秒タップ切替）**:
+    - 中央に「MM分 : SS秒」の特大デジタル数字を配置。
+    - **デフォルト（分モード）**: リューズ（Crown）を回すと1分刻み（0〜90分）でスムーズに無段階調整。
+    - **秒タップ切替**: 「秒（SS）」をタップするとグリーン枠でハイライトされ、Crownを回すと1秒刻み（0〜59秒）で精密微調整。分タップで即座に分モードへ復帰。
+    - 下段に定番ピル（10分、15分、20分など）も併設し、定番タイムのワンタップ即決と無段階微調整を両立。
 - **通信堅牢化・クラッシュセーフティ機構**:
   - **バックグラウンド待機通信の完全対応 (`transferUserInfo` / `didReceiveUserInfo`)**: iPhoneがスリープや画面消灯中にWatch側から送られた席追加・タイマー操作もキュー経由で安全にiPhoneへ受信・自動反映。
   - **客席バインディングのクラッシュ耐性 (`binding(for id:)`)**: `fatalError` を完全撤廃し、配列更新やアニメーション中のID不整合時にも安全なフォールバックBindingを返すことで、Apple Watchアプリの突然のクラッシュを100%防止。

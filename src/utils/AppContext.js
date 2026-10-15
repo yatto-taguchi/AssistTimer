@@ -21,6 +21,95 @@ try {
 // RevenueCat APIキー設定
 export const REVENUECAT_PUBLIC_APPLE_KEY = 'appl_jEzBjFMGADnabxXSYPQqMxFYKXJ';
 
+// WatchConnectivityモジュールの安全インポート
+let WatchConnectivity = null;
+if (Platform.OS === 'ios') {
+  try {
+    const wc = require('watch-connectivity');
+    WatchConnectivity = wc && wc.default ? wc.default : wc;
+  } catch (e) {
+    console.warn('[AppContext] WatchConnectivity failed to import:', e);
+  }
+}
+
+// ★ アプリ全体からWatchへ最新客席データをプッシュ送信するグローバルヘルパー
+export const syncSeatsToWatchGlobal = async (customSeats = null, customUserName = null) => {
+  if (Platform.OS !== 'ios' || !WatchConnectivity) return;
+  try {
+    let seats = customSeats;
+    let userName = customUserName;
+
+    if (!seats) {
+      const savedJson = await AsyncStorage.getItem('@salon_saved_seats');
+      if (savedJson) {
+        try {
+          seats = JSON.parse(savedJson);
+        } catch {}
+      }
+    }
+
+    if (!userName) {
+      userName = await AsyncStorage.getItem('@assist_timer_user_name');
+    }
+
+    const activeUser = (userName || 'スタイリスト').trim();
+    const finalSeats = Array.isArray(seats) && seats.length > 0 ? seats : [
+      {
+        id: 'seat-1',
+        seatNumber: 1,
+        seatLabel: '1番席 (サンプル)',
+        status: 'running',
+        colorStaffName: activeUser,
+        targetSeconds: 1200,
+        targetEndTimestamp: Date.now() + 19 * 60 * 1000 + 54 * 1000,
+        checkTargetSeconds: 600,
+        checkEndTimestamp: Date.now() + 9 * 60 * 1000 + 54 * 1000,
+      }
+    ];
+
+    const watchPayload = {
+      type: 'SYNC_SEATS',
+      userName: activeUser,
+      timestamp: Date.now(),
+      seats: finalSeats.map((s, index) => {
+        let seatNum = s.seatNumber || (index + 1);
+        if (s.seatLabel) {
+          const match = s.seatLabel.match(/\d+/);
+          if (match) seatNum = parseInt(match[0], 10);
+        }
+
+        const isRunning = s.status === 'running';
+        const targetEnd = s.targetEndTimestamp || Date.now();
+        const pausedRem = Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
+
+        return {
+          id: String(s.id),
+          seatNumber: seatNum,
+          seatLabel: s.seatLabel || `${seatNum}番席`,
+          creatorName: s.colorStaffName || activeUser,
+          totalSeconds: s.targetSeconds || 600,
+          targetEndTimestamp: targetEnd,
+          isRunning: isRunning,
+          pausedRemainingSeconds: pausedRem,
+          helpProcess: s.actionStatus === 'shampoo' || s.isShampooing ? 'シャンプー' : (s.actionStatus || 'シャンプー'),
+          shampooStaff: s.assistantStaffName || '',
+          isRecruiting: !s.assistantStaffName && isRunning,
+          status: s.isShampooing || s.actionStatus === 'shampoo' ? 'shampoo' : (s.actionStatus || 'normal'),
+          checkTargetSeconds: s.checkTargetSeconds || null,
+          checkEndTimestamp: s.checkEndTimestamp || null,
+          checkStaffName: s.checkStaffName || '',
+          isCheckCompleted: s.checkStatus === 'completed',
+          isCollapsed: false,
+        };
+      }),
+    };
+
+    await WatchConnectivity.syncData(watchPayload);
+  } catch (e) {
+    console.warn('[AppContext] syncSeatsToWatchGlobal failed:', e);
+  }
+};
+
 import { NEWS_ITEMS } from '../data/newsData';
 
 export const AppContext = createContext();
@@ -311,6 +400,164 @@ export const AppProvider = ({ children }) => {
       }
     };
     loadSettings();
+  }, []);
+
+  // ★ Apple Watch グローバル初期化＆アプリ最上位常時同期リスナー
+  useEffect(() => {
+    if (Platform.OS !== 'ios' || !WatchConnectivity) return;
+
+    let subMsg = null;
+    let subCtx = null;
+    let subUser = null;
+
+    const initGlobalWatch = async () => {
+      try {
+        await WatchConnectivity.activate();
+        // アプリ起動直後に即座にAsyncStorageの最新客席データをWatchへプッシュ！
+        await syncSeatsToWatchGlobal();
+      } catch (e) {
+        console.warn('[AppContext] initGlobalWatch failed:', e);
+      }
+    };
+
+    initGlobalWatch();
+
+    const handleGlobalWatchAction = async (data) => {
+      if (!data || !data.action) return;
+      const { action, seatId, userName: watchUser, extra } = data;
+
+      // ① 同期要求 (Watch起動時/画面表示時に最新データを求められた時)
+      if (action === 'REQUEST_SYNC') {
+        await syncSeatsToWatchGlobal();
+        return;
+      }
+
+      // ② Watch側での新規席追加
+      if (action === 'ADD_SEAT') {
+        try {
+          const seatNum = extra?.seatNumber || 1;
+          const totalSec = extra?.totalSeconds || 900;
+          const checkSec = extra?.checkTotalSeconds || null;
+          const targetEnd = Date.now() + totalSec * 1000;
+          const checkEnd = checkSec ? Date.now() + checkSec * 1000 : null;
+
+          const savedJson = await AsyncStorage.getItem('@salon_saved_seats');
+          let currentSeats = [];
+          if (savedJson) {
+            try { currentSeats = JSON.parse(savedJson) || []; } catch {}
+          }
+          if (currentSeats.length === 0) {
+            currentSeats = [
+              {
+                id: 'seat-1',
+                seatNumber: 1,
+                seatLabel: '1番席 (サンプル)',
+                status: 'running',
+                colorStaffName: watchUser || 'スタイリスト',
+                targetSeconds: 1200,
+                targetEndTimestamp: Date.now() + 19 * 60 * 1000 + 54 * 1000,
+                checkTargetSeconds: 600,
+                checkEndTimestamp: Date.now() + 9 * 60 * 1000 + 54 * 1000,
+              }
+            ];
+          }
+
+          const newSeatObj = {
+            id: seatId || String(Date.now()),
+            seatNumber: seatNum,
+            seatLabel: `${seatNum}番席`,
+            status: 'running',
+            colorStaffName: watchUser || 'スタイリスト',
+            targetSeconds: totalSec,
+            targetEndTimestamp: targetEnd,
+            checkTargetSeconds: checkSec,
+            checkEndTimestamp: checkEnd,
+            checkStaffName: '',
+            checkStatus: checkSec ? 'running' : 'stopped',
+            actionStatus: null,
+            isShampooing: false,
+            assistantStaffName: '',
+            history: [
+              {
+                id: String(Date.now()),
+                type: 'start',
+                text: `Apple Watchからタイマー開始 (${Math.round(totalSec / 60)}分)`,
+                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                staff: watchUser || 'スタイリスト',
+              }
+            ],
+          };
+
+          if (!currentSeats.some(s => s.id === newSeatObj.id)) {
+            const updated = [...currentSeats, newSeatObj];
+            await AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(updated));
+            await syncSeatsToWatchGlobal(updated, watchUser);
+          }
+        } catch (e) {
+          console.warn('[AppContext] ADD_SEAT failed:', e);
+        }
+        return;
+      }
+
+      // その他の操作（シャンプー開始、タイマー操作等）もAsyncStorageの座席に反映して同期
+      try {
+        const savedJson = await AsyncStorage.getItem('@salon_saved_seats');
+        if (!savedJson) return;
+        const currentSeats = JSON.parse(savedJson);
+        if (!Array.isArray(currentSeats)) return;
+
+        let hasChanged = false;
+        const updated = currentSeats.map(s => {
+          if (s.id !== seatId) return s;
+          hasChanged = true;
+          switch (action) {
+            case 'START_SHAMPOO':
+              return { ...s, isShampooing: true, actionStatus: 'shampoo', assistantStaffName: watchUser || s.assistantStaffName };
+            case 'FINISH_SHAMPOO':
+              return { ...s, isShampooing: false, actionStatus: null };
+            case 'ENTER_HELP':
+              return { ...s, status: 'paused', assistantStaffName: watchUser || 'ヘルプ', isShampooing: true, actionStatus: 'shampoo' };
+            case 'STOP_TIMER':
+              return { ...s, status: 'paused' };
+            case 'START_TIMER': {
+              const targetSec = extra?.targetSeconds || 600;
+              return { ...s, status: 'running', targetSeconds: targetSec, targetEndTimestamp: Date.now() + targetSec * 1000 };
+            }
+            case 'RESET_ZERO':
+              return { ...s, status: 'stopped', targetSeconds: 0, targetEndTimestamp: Date.now(), isShampooing: false, actionStatus: null, assistantStaffName: '' };
+            case 'CLAIM_CHECK':
+              return { ...s, checkStaffName: watchUser || 'チェック担当' };
+            case 'COMPLETE_CHECK':
+              return { ...s, checkStatus: 'completed', checkStaffName: watchUser || s.checkStaffName };
+            default:
+              return s;
+          }
+        });
+
+        if (hasChanged) {
+          await AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(updated));
+          await syncSeatsToWatchGlobal(updated, watchUser);
+        }
+      } catch (e) {
+        console.warn('[AppContext] handleGlobalWatchAction update seats failed:', e);
+      }
+    };
+
+    subMsg = WatchConnectivity.addMessageListener(handleGlobalWatchAction);
+    subCtx = WatchConnectivity.addApplicationContextListener((ctx) => {
+      if (ctx && ctx.action) handleGlobalWatchAction(ctx);
+    });
+    if (WatchConnectivity.addUserInfoListener) {
+      subUser = WatchConnectivity.addUserInfoListener((ui) => {
+        if (ui && ui.action) handleGlobalWatchAction(ui);
+      });
+    }
+
+    return () => {
+      if (subMsg?.remove) subMsg.remove();
+      if (subCtx?.remove) subCtx.remove();
+      if (subUser?.remove) subUser.remove();
+    };
   }, []);
 
   // RevenueCat の初期化とサブスクリプション状態の自動同期
@@ -912,6 +1159,7 @@ export const AppProvider = ({ children }) => {
         controlsVisible,
         showControls,
         resetControlsVisible,
+        syncSeatsToWatchGlobal,
       }}
     >
       {children}

@@ -62,6 +62,7 @@ function MainTabs() {
         )}
         screenOptions={({ route }) => ({
           headerShown: false,
+          lazy: false,
           tabBarActiveTintColor: isEcoMode ? '#888' : '#007AFF', // 選択中を明るいグレーに
           tabBarInactiveTintColor: isEcoMode ? '#333' : '#8E8E93', // 非選択中もうっすら見えるように
           tabBarShowLabel: !isEcoMode,
