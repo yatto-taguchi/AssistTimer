@@ -84,7 +84,7 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
-      guard session.isPaired else {
+      guard session.isPaired, session.isWatchAppInstalled else {
         promise.resolve(false)
         return
       }
@@ -111,6 +111,11 @@ public class ExpoWatchConnectivityModule: Module {
 
       guard session.isPaired else {
         promise.reject("E_NOT_PAIRED", "Apple Watch is not paired")
+        return
+      }
+
+      guard session.isWatchAppInstalled else {
+        promise.reject("E_NOT_INSTALLED", "Watch app is not installed")
         return
       }
 
@@ -143,7 +148,7 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
-      guard session.isPaired else {
+      guard session.isPaired, session.isWatchAppInstalled else {
         promise.resolve(false)
         return
       }
@@ -187,7 +192,7 @@ public class ExpoWatchConnectivityModule: Module {
   }
 
   fileprivate func flushPendingApplicationContext(session: WCSession) {
-    guard session.isPaired else { return }
+    guard session.isPaired, session.isWatchAppInstalled else { return }
     guard let pending = self.pendingApplicationContext else { return }
     do {
       try session.updateApplicationContext(pending)
@@ -198,7 +203,7 @@ public class ExpoWatchConnectivityModule: Module {
   }
 
   fileprivate func flushPendingUserInfo(session: WCSession) {
-    guard session.isPaired else { return }
+    guard session.isPaired, session.isWatchAppInstalled else { return }
     guard let pending = self.pendingUserInfo else { return }
     session.transferUserInfo(pending)
     self.pendingUserInfo = nil

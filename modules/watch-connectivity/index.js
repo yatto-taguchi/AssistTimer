@@ -88,6 +88,11 @@ export const WatchConnectivity = {
   transferUserInfo: async (userInfo) => {
     if (!NativeModule || Platform.OS !== 'ios') return false;
     try {
+      const isPaired = typeof NativeModule.isPaired === 'function' ? NativeModule.isPaired() : !!NativeModule.isPaired;
+      const isInstalled = typeof NativeModule.isWatchAppInstalled === 'function' ? NativeModule.isWatchAppInstalled() : !!NativeModule.isWatchAppInstalled;
+      if (!isPaired || !isInstalled) {
+        return false;
+      }
       if (NativeModule.transferUserInfo) {
         return await NativeModule.transferUserInfo(userInfo);
       }
@@ -98,19 +103,14 @@ export const WatchConnectivity = {
     }
   },
 
-  // ★ トリプル送信メソッド（1: 次回起動時 2: スリープ時待機キュー 3: 起動中即時）
+  // ★ 安定同期メソッド（1: 次回起動時最新状態保存 updateApplicationContext / 2: 起動中リアルタイム即時送信 sendMessage）
   syncData: async (data) => {
     if (!NativeModule || Platform.OS !== 'ios') return false;
     try {
-      // 1. 次回起動時・最新状態の永続保存（Apple公式推奨）
+      // 1. 次回起動時・最新状態の永続保存（Apple公式推奨・消灯スリープ復帰時にも自動同期）
       await NativeModule.updateApplicationContext(data).catch(() => {});
 
-      // 2. バックグラウンド・スリープ中待機キューへの確実なキューイング（キュー送信）
-      if (NativeModule.transferUserInfo) {
-        await NativeModule.transferUserInfo(data).catch(() => {});
-      }
-
-      // 3. 画面起動中であればリアルタイム即時送信
+      // 2. 画面起動中であればリアルタイム即時送信
       let reachable = false;
       try {
         reachable = typeof NativeModule.isReachable === 'function'

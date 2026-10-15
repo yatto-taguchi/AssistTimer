@@ -1528,3 +1528,6 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **通信判定順序最適化**: `activationState == .activated` 判定を `isPaired` より先に行い、アクティベート中の一時的な未ペアリング判定によるキュー保存漏れを防止。
     - **SwiftUIパース安全性完全化**: `SeatTimerItem.init` の強制アンラップ（`!`）を完全撤廃し、オプショナルバインディング構文に改修。
     - **UIスタイル完全定義**: サロン画面のメンバー管理モーダルの全スタイルを `StyleSheet.create` に明示定義し、`maxLength={10}` により入力文字数を安全制限。
+  - **Watchアプリ未インストール時の例外クラッシュ根絶 ＆ 安定同期アーキテクチャ (Build 32)**:
+    - **`isWatchAppInstalled` ガードの徹底配置**: Apple公式の `WCSession` 仕様上、Watchアプリ（AssistTimerWatch）が未インストール・更新処理中・またはユーザーがWatchアプリをOFFにした状態で `transferUserInfo` を呼び出すと `NSInvalidArgumentException`（Objective-C致命的例外）がスローされ、iPhoneアプリが起動直後に即死クラッシュする問題を根本根絶。`ExpoWatchConnectivityModule.swift` の `transferUserInfo`、`updateApplicationContext`、`sendMessage`、`flushPendingUserInfo`、`flushPendingApplicationContext` の全メソッドに `guard session.isWatchAppInstalled` を徹底配置。
+    - **クラッシュ源 `transferUserInfo` の `syncData` からの完全排除と安定同期への回帰**: 客席タイマー・スタッフ同期に求められるのは「最新状態のスナップショット」であり、履歴をFIFOキューイングする `transferUserInfo` は不要かつ危険であるため `syncData` から完全排除。Build 29 で実証された安全無敵の2本柱（`updateApplicationContext`: 次回起動時最新データ同期 ＋ `sendMessage`: 起動中リアルタイム即時送信）に回帰。JS側の `transferUserInfo` にも事前ガードを二重化。これにより、WatchアプリをOFFにしていようがONにしていようが、あるいはApple Watchを持っていなくても、iPhoneアプリが100%安全かつ安定して起動・稼働することを完全保証。
