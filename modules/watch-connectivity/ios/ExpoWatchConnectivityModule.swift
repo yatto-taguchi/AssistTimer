@@ -3,6 +3,7 @@ import WatchConnectivity
 
 public class ExpoWatchConnectivityModule: Module {
   private var sessionDelegate: SessionDelegate?
+  private var pendingApplicationContext: [String: Any]?
 
   private var session: WCSession? {
     return WCSession.isSupported() ? WCSession.default : nil
@@ -72,13 +73,16 @@ public class ExpoWatchConnectivityModule: Module {
       }
 
       guard session.activationState == .activated else {
+        // まだアクティベート中の場合は保留キューに保管し、アクティベート完了時に自動送信
+        self.pendingApplicationContext = context
         session.activate()
-        promise.reject("E_NOT_ACTIVATED", "WCSession is not yet activated")
+        promise.resolve(true)
         return
       }
 
       do {
         try session.updateApplicationContext(context)
+        self.pendingApplicationContext = nil
         promise.resolve(true)
       } catch {
         promise.reject("E_UPDATE_FAILED", error.localizedDescription)
@@ -109,6 +113,16 @@ public class ExpoWatchConnectivityModule: Module {
     }
   }
 
+  fileprivate func flushPendingApplicationContext(session: WCSession) {
+    guard let pending = self.pendingApplicationContext else { return }
+    do {
+      try session.updateApplicationContext(pending)
+      self.pendingApplicationContext = nil
+    } catch {
+      print("[ExpoWatchConnectivity] flushPendingApplicationContext failed: \(error.localizedDescription)")
+    }
+  }
+
   fileprivate func dispatchEvent(_ name: String, _ body: [String: Any]) {
     sendEvent(name, body)
   }
@@ -124,7 +138,13 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
   }
 
   func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
-    // アクティベーション完了
+    if activationState == .activated {
+      DispatchQueue.main.async {
+        if let s = session as WCSession? {
+          self.module?.flushPendingApplicationContext(session: s)
+        }
+      }
+    }
   }
 
   func sessionDidBecomeInactive(_ session: WCSession) {

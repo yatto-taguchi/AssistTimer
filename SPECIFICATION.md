@@ -1096,6 +1096,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 
 ### 6.2. 変更履歴 (Changelog)
 
+| 2026-10-15 | TestFlight（Build 27）実機検証において、①iPhone側のサンプルの1番席がApple Watch側に表示されない（席が見当たらない）、および②Watch側で「新しい席を追加」を押した際に表示される席番号ステッパーの文字が特大で見切れて表示される不具合が発生していた問題 | ①**Watch側パースロジックの完全堅牢化 (`SeatTimerItem.init?(dictionary:)`)**: iPhone側から送られる `status: 'normal'`（放置中）と `isRunning: true` に対し、Watch側が `status == "running"` で `isRunning` を上書きしていたバグを修正し、`dictionary["isRunning"] as? Bool` を最優先判定するよう抜本改善。Cocoaブリッジの `NSNumber` / `Double` / `Int` 型キャストのフォールバックを完備。<br>②**iPhone側未アクティベート時保留キュー (`pendingApplicationContext`) の新設**: iPhone起動直後にネイティブ `WCSession` が未アクティベート（`.notActivated`）の場合でも、初回送信データを破棄せず安全に保留し、`activationDidCompleteWith` 完了時に自動でWatchへプッシュ配信するすれ違い防止機構を実装。<br>③**Watch ➔ iPhone プル同期要求 (`REQUEST_SYNC`) の新設**: Watch側アプリ起動時（`activationDidCompleteWith`）および画面表示時（`.onAppear`）に即座に `REQUEST_SYNC` を送信し、iPhone側から最新の座席データを即座に返信・同期するプル型リフレッシュを完備。<br>④**Watchからの席追加同期 (`ADD_SEAT`) の新設**: Watch側の「新しい席を追加（`AddSeatSheet`）」でタイマースタートした際、iPhone側へ新席データを即座に送信し、iPhone側ステートとAsyncStorageへ自動保存。<br>⑤**watchOS専用円形ステッパーUIへの刷新**: 見切れ原因となっていたwatchOS標準の `Stepper` を完全撤廃。左に「客席番号:」、右に「マイナス丸ボタン（−）」「白太字の中央文字（◯番席）」「プラス丸ボタン（＋）」を配置したwatchOS専用の美しい円形ステッパーUI（直径28px・触覚フィードバック付き）へ刷新。<br>⑥**新ビルド番号 `28` へ更新**: `app.json` の `buildNumber` を `28` へインクリメントし、TestFlight実機配信ビルドの準備を完了。
 | 2026-10-15 | EAS Build（Build 26）において、`ExpoWatchConnectivityModule` が `Module, WCSessionDelegate` を直接継承していたため、Swiftの型安全規約（`WCSessionDelegate` は Objective-C 由来の `NSObjectProtocol` への適合が必須だが `Module` は純粋な Swift クラスであるため直接準拠不可）に抵触し、`cannot declare conformance to 'NSObjectProtocol' in Swift; 'ExpoWatchConnectivityModule' should inherit 'NSObject' instead` コンパイルエラーでビルドが失敗していた問題 | ①**`NSObject` 準拠の内部デリゲートクラス新設 (`SessionDelegate`)**: `WCSessionDelegate` の適合を `NSObject` を継承する専用の内部クラス `SessionDelegate` へ分離移譲。モジュール側は `SessionDelegate` インスタンスを保持し、Watchからの受信イベント（`onMessageReceived` / `onApplicationContextReceived`）を安全にメインスレッドへ転送するアーキテクチャへ刷新。<br>②**新ビルド番号 `27` へ更新**: `app.json` の `buildNumber` を `27` へインクリメントし、TestFlight実機配信ビルドを再開。 |
 | 2026-10-15 | EAS Build（Build 25）において、ローカルExpoモジュール名がApple標準フレームワークと同一の `WatchConnectivity`（Podspec名およびターゲット名）になっていたため、Swiftコンパイラが自モジュールへの参照と解釈して `import WatchConnectivity` を無視（`ignoring import; file 'WatchConnectivityModule.swift' is part of module 'WatchConnectivity'`）し、iOSネイティブコンパイルで `cannot find type 'WCSession' in scope` などの未解決エラーが発生してクラウドビルドが失敗していた問題 | ①**Expoモジュール名およびPod名の完全重複回避 (`ExpoWatchConnectivity`)**: Podspec名およびターゲット名を `WatchConnectivity` ➔ `ExpoWatchConnectivity` へ改名。クラス名も `ExpoWatchConnectivityModule` へ更新し、Apple標準フレームワーク `WatchConnectivity` との名称衝突を完全に解消。<br>②**watchOS側 `content.swift` のインポート最上部配置**: `targets/watch/content.swift` の最上部（1行目）に `import WatchConnectivity` を確実に配置し、型解決の順序安全性を担保。<br>③**新ビルド番号 `26` へ更新**: `app.json` の `buildNumber` を `26` へインクリメントし、TestFlight実機配信ビルドを再開。 |
 | 2026-10-15 | TestFlight実機においてiPhoneアプリとApple Watchアプリの客席タイマーが連動しておらず、アプリ側は1席（サンプル）のみなのにWatch側にはプロトタイプ時の固定デモ4席（3番席、1番席、2番席、4番席）が表示されたままになっていた不具合 | ①**Watch側の固定デモ4席の完全撤廃と空状態案内UI新設**: `content.swift` のデモ4席ハードコードを撤廃し、iPhoneから届いた最新客席データを受け取る空配列 `@State private var timers: [SeatTimerItem] = []` に更新。席が0件の時は「📱 iPhoneで席を追加してください」「サロンワーク画面の客席と自動でリアルタイム連動します」と親切なプレースホルダーカードを表示。<br>②**Expo Modules APIによるWatchConnectivityローカルモジュール新設 (`modules/watch-connectivity`)**: Expo SDK 54 / React Native New Architecture環境下で確実に動作する `WatchConnectivityModule.swift`（Swiftネイティブ）およびJSラッパーを作成。`WCSession` による `updateApplicationContext`（バックグラウンド/次回起動時同期）と `sendMessage`（起動中即時同期）のハイブリッド送信機構を構築。<br>③**iPhone（SalonWorkScreen）⇄ Watch（content.swift）双方向リアルタイム完全連動**: iPhone側で席追加・削除・タイマー開始/停止/時間調整/スタッフ名変更が行われた瞬間にWatchへ最新客席データを自動プッシュ同期。またWatch側での操作（シャンプー開始/完了、ステータス変更、ヘルプ入る、ヘルプ指名/募集、チェック立候補/完了/解除、タイム調整、タイマー停止/再入力/リセット）をiPhoneへ即座に送信し、iPhoneアプリの座席ステート（`seats`）とAsyncStorageへ自動反映。<br>④**新ビルド番号 `25` へ更新**: `app.json` の `buildNumber` を `25` へインクリメントし、TestFlight実機検証用の提出準備を完了。 |
@@ -1460,21 +1461,24 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **ダイレクト操作ジャンプ**:
       - サムネイルタイルをタップすると、その席のタイマー操作画面（`TimeActionSheet`）へ即座にアクセス可能。
 
-### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 25)
+### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-28)
 - **概要**:
   - iPhoneアプリ（`SalonWorkScreen`）とApple Watchアプリ（`ContentView`）間の完全リアルタイム双方向同期を実現。
   - プロトタイプ時のデモ固定4席を完全撤廃し、iPhone側で管理されている実際の客席データとスタッフ名を1対1で完全連動。
 - **アーキテクチャ**:
   - **ローカルExpoモジュール (`modules/watch-connectivity`)**:
-    - Apple標準フレームワーク `WatchConnectivity`（`WCSession`）を最新のExpo Modules API（Swift）でネイティブ実装。
+    - Apple標準フレームワーク `WatchConnectivity`（`WCSession`）を最新のExpo Modules API（Swift）でネイティブ実装（`ExpoWatchConnectivityModule.swift`）。
+    - Objective-Cの `NSObjectProtocol` 適合要件を満たす専用デリゲートクラス `SessionDelegate: NSObject, WCSessionDelegate` を分離実装。
+    - **未アクティベート時保留キュー (`pendingApplicationContext`)**: iPhone起動直後にセッションが準備中の場合でも送信データを安全に保管し、アクティベート完了時に自動でWatchへプッシュ配信するすれ違い防止機構を完備。
     - `updateApplicationContext`（バックグラウンド・次回起動時同期）と `sendMessage`（起動中リアルタイム即時同期）のハイブリッド送信方式。
 - **同期データ構造 (`SYNC_SEATS`)**:
   - `userName`: ログイン中のスタイリスト名（Watch側で自動反映され、「私が担当」などの操作と直結）
   - `seats`: 客席配列（`id`, `seatNumber`, `seatLabel`, `creatorName`, `totalSeconds`, `targetEndTimestamp`, `isRunning`, `pausedRemainingSeconds`, `helpProcess`, `shampooStaff`, `isRecruiting`, `status`, `checkTargetSeconds`, `checkEndTimestamp`, `checkStaffName`, `isCheckCompleted`, `isCollapsed`）
-- **空状態（0席時）UI**:
-  - iPhone側に席が1つもない場合、Watch側には「📱 iPhoneで席を追加してください」「サロンワーク画面の客席と自動でリアルタイム連動します」と親切なプレースホルダーカードを常時案内。
-- **Watch → iPhone 逆方向アクション連動**:
-  - Watch側で行われた以下の全操作を即時にiPhoneへプッシュ通知し、iPhoneアプリの座席ステート（`seats`）と端末ストレージ（AsyncStorage）へ自動反映：
+  - **完全堅牢パース (Robust Parsing)**: Watch側 `SeatTimerItem.init?(dictionary:)` において、`isRunning` のBool優先判定、およびCocoaブリッジの `NSNumber` / `Double` / `Int` 型キャストのフォールバックを完備。
+- **双方向アクション・イベント連動**:
+  - **Watch ➔ iPhone 逆方向アクション連動**:
+    - `REQUEST_SYNC`: Watch側アプリ起動時（`activationDidCompleteWith`）および画面表示時（`.onAppear`）に自動送信。iPhone側から最新の座席データを即時返信（プル型同期）。
+    - `ADD_SEAT`: Watch側の「席追加シート（`AddSeatSheet`）」でタイマースタートした際、iPhone側へ新席データを即座に送信し、iPhone側ステートとAsyncStorageへ自動保存。
     - `START_SHAMPOO` / `FINISH_SHAMPOO`: シャンプー状態の開始・完了
     - `UPDATE_STATUS`: コーミング中、チェック中、放置中などのステータス変更
     - `ENTER_HELP`: 超過時の「シャンプー入る」ワンタップ確定
@@ -1485,6 +1489,12 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - `ADJUST_TIME`: タイム変更（+5分、+1分など）の加算
     - `STOP_TIMER` / `START_TIMER` / `RESET_ZERO`: タイマーの一時停止、再入力、および00:00リセット
     - `CLEAR_STAFF`: 担当者の解除
+- **新規席追加シートUI (AddSeatSheet)**:
+  - watchOSで特大文字が見切れる標準 `Stepper` を完全撤廃。
+  - 左に「客席番号:」、右に「マイナス丸ボタン（−）」「白太字の中央文字（◯番席）」「プラス丸ボタン（＋）」を配置したwatchOS専用の美しい円形ステッパーUI（直径28px・触覚フィードバック付き）へ刷新。
+  - `.lineLimit(1)` および `.minimumScaleFactor(0.85)` により、40mmから49mm Ultraまで全画面での美しい表示を完全保証。
+- **空状態（0席時）UI**:
+  - iPhone側に席が1つもない場合、Watch側には「📱 iPhoneで席を追加してください」「サロンワーク画面の客席と自動でリアルタイム連動します」と親切なプレースホルダーカードを常時案内。
 
 
 

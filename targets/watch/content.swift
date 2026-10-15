@@ -66,10 +66,13 @@ struct SeatTimerItem: Identifiable, Equatable {
 // MARK: - SeatTimerItem 辞書相互変換（iPhone連携用）
 extension SeatTimerItem {
     init?(dictionary: [String: Any]) {
-        guard let id = dictionary["id"] as? String else { return nil }
+        // IDの安全な取得 (String または NSNumber)
+        let rawId = (dictionary["id"] as? String) ?? (dictionary["id"] as? NSNumber)?.stringValue
+        guard let id = rawId, !id.isEmpty else { return nil }
         self.id = id
         
-        if let num = dictionary["seatNumber"] as? Int {
+        // 席番号
+        if let num = (dictionary["seatNumber"] as? NSNumber)?.intValue ?? (dictionary["seatNumber"] as? Int) {
             self.seatNumber = num
         } else if let label = dictionary["seatLabel"] as? String {
             let digits = label.compactMap { $0.isNumber ? String($0) : nil }.joined()
@@ -79,20 +82,26 @@ extension SeatTimerItem {
         }
         
         self.creatorName = (dictionary["creatorName"] as? String) ?? (dictionary["colorStaffName"] as? String) ?? "スタイリスト"
-        self.totalSeconds = (dictionary["totalSeconds"] as? Int) ?? (dictionary["targetSeconds"] as? Int) ?? 600
+        self.totalSeconds = (dictionary["totalSeconds"] as? NSNumber)?.intValue ?? (dictionary["totalSeconds"] as? Int) ?? (dictionary["targetSeconds"] as? Int) ?? 600
         
-        if let endMs = dictionary["targetEndTimestamp"] as? Double {
+        // 終了時刻
+        if let endMs = (dictionary["targetEndTimestamp"] as? NSNumber)?.doubleValue ?? (dictionary["targetEndTimestamp"] as? Double) {
             self.targetEndTime = Date(timeIntervalSince1970: endMs / 1000.0)
-        } else if let endSec = dictionary["targetEndTime"] as? Double {
+        } else if let endSec = (dictionary["targetEndTime"] as? NSNumber)?.doubleValue ?? (dictionary["targetEndTime"] as? Double) {
             self.targetEndTime = Date(timeIntervalSince1970: endSec)
         } else {
             self.targetEndTime = Date().addingTimeInterval(TimeInterval(self.totalSeconds))
         }
         
-        let statusStr = dictionary["status"] as? String ?? "running"
-        self.isRunning = (statusStr == "running")
+        // ★ isRunning の正確な判定 (Bool を最優先、なければ status 文字列)
+        if let running = dictionary["isRunning"] as? Bool {
+            self.isRunning = running
+        } else {
+            let statusStr = dictionary["status"] as? String ?? ""
+            self.isRunning = (statusStr == "running")
+        }
         
-        if let paused = dictionary["pausedRemainingSeconds"] as? Int {
+        if let paused = (dictionary["pausedRemainingSeconds"] as? NSNumber)?.intValue ?? (dictionary["pausedRemainingSeconds"] as? Int) {
             self.pausedRemainingSeconds = paused
         } else {
             let rem = Int(self.targetEndTime.timeIntervalSince(Date()))
@@ -105,20 +114,22 @@ extension SeatTimerItem {
         self.isRecruiting = (dictionary["isRecruiting"] as? Bool) ?? false
         self.isNoHelpNeeded = (dictionary["isNoHelpNeeded"] as? Bool) ?? false
         
+        // 施術ステータス (normal, shampoo, combing, check)
         let actionStatus = dictionary["actionStatus"] as? String
+        let statusStr = dictionary["status"] as? String
         let isShampooing = dictionary["isShampooing"] as? Bool ?? false
-        if isShampooing || actionStatus == "shampoo" {
+        if isShampooing || actionStatus == "shampoo" || statusStr == "shampoo" {
             self.status = .shampoo
-        } else if actionStatus == "combing" {
+        } else if actionStatus == "combing" || statusStr == "combing" {
             self.status = .combing
-        } else if actionStatus == "check" {
+        } else if actionStatus == "check" || statusStr == "check" {
             self.status = .check
         } else {
             self.status = .normal
         }
         
-        self.checkTotalSeconds = (dictionary["checkTotalSeconds"] as? Int) ?? (dictionary["checkTargetSeconds"] as? Int)
-        if let checkEndMs = (dictionary["checkEndTimestamp"] as? Double) ?? (dictionary["checkTargetEndTime"] as? Double) {
+        self.checkTotalSeconds = (dictionary["checkTotalSeconds"] as? NSNumber)?.intValue ?? (dictionary["checkTotalSeconds"] as? Int) ?? (dictionary["checkTargetSeconds"] as? Int)
+        if let checkEndMs = (dictionary["checkEndTimestamp"] as? NSNumber)?.doubleValue ?? (dictionary["checkEndTimestamp"] as? Double) ?? (dictionary["checkTargetEndTime"] as? Double) {
             self.checkTargetEndTime = Date(timeIntervalSince1970: checkEndMs / 1000.0)
         }
         let rawCheckStaff = (dictionary["checkStaff"] as? String) ?? (dictionary["checkStaffName"] as? String)
@@ -154,7 +165,14 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             if let context = session.receivedApplicationContext as [String: Any]?, !context.isEmpty {
                 self.processReceivedData(context)
             }
+            if activationState == .activated {
+                self.requestSyncFromPhone()
+            }
         }
+    }
+    
+    func requestSyncFromPhone() {
+        sendActionToPhone(action: "REQUEST_SYNC", seatId: "")
     }
     
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
@@ -452,6 +470,9 @@ struct ContentView: View {
                     self.currentUserName = receivedName
                 }
             }
+            .onAppear {
+                sessionManager.requestSyncFromPhone()
+            }
         }
     }
     
@@ -604,6 +625,14 @@ struct ContentView: View {
                 withAnimation {
                     timers.append(newSeat)
                 }
+                var extra: [String: Any] = [
+                    "seatNumber": newSeat.seatNumber,
+                    "totalSeconds": newSeat.totalSeconds
+                ]
+                if let checkSec = newSeat.checkTotalSeconds {
+                    extra["checkTotalSeconds"] = checkSec
+                }
+                sessionManager.sendActionToPhone(action: "ADD_SEAT", seatId: newSeat.id, extra: extra)
                 showNotification(text: "📤 \(newSeat.seatNumber)番席を新規作成しました", color: Color(hex: "#0A84FF"))
             }
         )
@@ -2207,12 +2236,47 @@ struct AddSeatSheet: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 8) {
-                HStack {
+                HStack(spacing: 6) {
                     Text("客席番号:")
-                        .font(.system(size: 12, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.gray)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                     Spacer()
-                    Stepper("\(seatNumber)番席", value: $seatNumber, in: 1...20)
-                        .font(.system(size: 13, weight: .heavy))
+                    Button(action: {
+                        if seatNumber > 1 {
+                            WKInterfaceDevice.current().play(.click)
+                            seatNumber -= 1
+                        }
+                    }) {
+                        Image(systemName: "minus")
+                            .font(.system(size: 11, weight: .bold))
+                            .frame(width: 28, height: 28)
+                            .background(Color.white.opacity(0.18))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Text("\(seatNumber)番席")
+                        .font(.system(size: 15, weight: .heavy, design: .rounded))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                        .frame(minWidth: 44)
+                    
+                    Button(action: {
+                        if seatNumber < 30 {
+                            WKInterfaceDevice.current().play(.click)
+                            seatNumber += 1
+                        }
+                    }) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .bold))
+                            .frame(width: 28, height: 28)
+                            .background(Color.white.opacity(0.18))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 4)
                 

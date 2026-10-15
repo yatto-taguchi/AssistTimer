@@ -515,8 +515,63 @@ export default function SalonWorkScreen() {
 
   // ★ Apple Watchからの操作受信ハンドラ
   const handleWatchAction = (message) => {
-    if (!message || !message.action || !message.seatId) return;
+    if (!message || !message.action) return;
     const { action, seatId, userName: watchUser, extra } = message;
+
+    // ① 同期リクエスト (Watch側から「最新の客席データをちょうだい」と要求された時)
+    if (action === 'REQUEST_SYNC') {
+      setSeats((currentSeats) => {
+        syncSeatsToWatch(currentSeats, userName);
+        return currentSeats;
+      });
+      return;
+    }
+
+    // ② Watch側での新規席追加
+    if (action === 'ADD_SEAT') {
+      const seatNum = extra?.seatNumber || 1;
+      const totalSec = extra?.totalSeconds || 900;
+      const checkSec = extra?.checkTotalSeconds || null;
+      const targetEnd = Date.now() + totalSec * 1000;
+      const checkEnd = checkSec ? Date.now() + checkSec * 1000 : null;
+
+      const newSeatObj = {
+        id: seatId || String(Date.now()),
+        seatNumber: seatNum,
+        seatLabel: `${seatNum}番席`,
+        status: 'running',
+        colorStaffName: watchUser || userName || 'スタイリスト',
+        targetSeconds: totalSec,
+        targetEndTimestamp: targetEnd,
+        checkTargetSeconds: checkSec,
+        checkEndTimestamp: checkEnd,
+        checkStaffName: '',
+        checkStatus: checkSec ? 'running' : 'stopped',
+        actionStatus: null,
+        isShampooing: false,
+        assistantStaffName: '',
+        history: [
+          {
+            id: String(Date.now()),
+            type: 'start',
+            text: `Apple Watchからタイマー開始 (${Math.round(totalSec / 60)}分)`,
+            time: getCurrentTimeFormatted(),
+            staff: watchUser || userName || 'スタイリスト',
+          },
+        ],
+      };
+
+      setSeats((prevSeats) => {
+        if (prevSeats.some((s) => s.id === newSeatObj.id)) return prevSeats;
+        const updated = [...prevSeats, newSeatObj];
+        saveSeatsToStorage(updated);
+        syncSeatsToWatch(updated, userName);
+        return updated;
+      });
+      return;
+    }
+
+    if (!seatId) return;
 
     setSeats((prevSeats) => {
       let hasChanged = false;
@@ -687,6 +742,13 @@ export default function SalonWorkScreen() {
       };
     }
   }, [userName]);
+
+  // ★ seats が更新された際、または初回ロード完了時に Watch へ最新データを同期
+  useEffect(() => {
+    if (Platform.OS === 'ios' && seats && seats.length > 0) {
+      syncSeatsToWatch(seats, userName);
+    }
+  }, [seats, userName]);
 
   const loadInitialData = async () => {
     try {
