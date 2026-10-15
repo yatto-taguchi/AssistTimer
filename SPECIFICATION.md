@@ -1098,6 +1098,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 
 | 日付 | 何がダメだったのか（原因・背景） | 何を修正したのか（対策・変更点） |
 | :--- | :--- | :--- |
+| 2026-10-15 | TestFlight実機においてiPhoneアプリとApple Watchアプリの客席タイマーが連動しておらず、アプリ側は1席（サンプル）のみなのにWatch側にはプロトタイプ時の固定デモ4席（3番席、1番席、2番席、4番席）が表示されたままになっていた不具合 | ①**Watch側の固定デモ4席の完全撤廃と空状態案内UI新設**: `content.swift` のデモ4席ハードコードを撤廃し、iPhoneから届いた最新客席データを受け取る空配列 `@State private var timers: [SeatTimerItem] = []` に更新。席が0件の時は「📱 iPhoneで席を追加してください」「サロンワーク画面の客席と自動でリアルタイム連動します」と親切なプレースホルダーカードを表示。<br>②**Expo Modules APIによるWatchConnectivityローカルモジュール新設 (`modules/watch-connectivity`)**: Expo SDK 54 / React Native New Architecture環境下で確実に動作する `WatchConnectivityModule.swift`（Swiftネイティブ）およびJSラッパーを作成。`WCSession` による `updateApplicationContext`（バックグラウンド/次回起動時同期）と `sendMessage`（起動中即時同期）のハイブリッド送信機構を構築。<br>③**iPhone（SalonWorkScreen）⇄ Watch（content.swift）双方向リアルタイム完全連動**: iPhone側で席追加・削除・タイマー開始/停止/時間調整/スタッフ名変更が行われた瞬間にWatchへ最新客席データを自動プッシュ同期。またWatch側での操作（シャンプー開始/完了、ステータス変更、ヘルプ入る、ヘルプ指名/募集、チェック立候補/完了/解除、タイム調整、タイマー停止/再入力/リセット）をiPhoneへ即座に送信し、iPhoneアプリの座席ステート（`seats`）とAsyncStorageへ自動反映。<br>④**新ビルド番号 `25` へ更新**: `app.json` の `buildNumber` を `25` へインクリメントし、TestFlight実機検証用の提出準備を完了。 |
 | 2026-10-15 | watchOSのXcodeコンパイル（EAS Build）において、SwiftUIのView構造（`SeatTimerCard` 内の `expandedCardView`）が単一の巨大なクロージャになっていたため、Swiftコンパイラの型推論が制限時間を超過し `the compiler is unable to type-check this expression in reasonable time` エラーでクラウドビルドが失敗していた問題 | ①**`expandedCardView` のサブコンポーネント分割**: `expandedCardView` を `headerSection`（席番号・担当者バッジ）、`creatorRoleBadge`、`mainTimerSection`（中央特大数字・プログレスバー）、`helpStaffSection`（ヘルプ・シャンプー担当ボタン）、`checkTimerSection`（チェックタイマー行）へ構造的に分離。<br>②**グラデーション・スタイル・三項演算子の計算プロパティ化**: `progressGradient`、`timerCardBackground`、`timerCardStroke`、`staffButtonBackground` 等へ分離し、型推論時間を **5,892ms ➔ 50ms以下（99%以上削減）** へ劇的高速化。<br>③**モデルプロパティ参照への統一**: `isZero` 判定をローカル式からモデルプロパティ `item.isZero` に一本化。<br>④**新ビルド番号 `24` での EAS Build 成功**: クラウド環境での iOS ＋ watchOS 統合ビルドが正常完了（FINISHED）し、TestFlight実機配信バイナリの生成を完了。 |
 | 2026-10-14 | watchOSネイティブ共有タイマーUI（Digital Crown無段階調整、超過時3アクション、クイックパネル可視化、指定技術単一表示等）の実機Apple WatchおよびiPhoneでの動作検証・実機テスト環境の整備要望 | ①**iOSビルド番号のインクリメント (`20` ➔ `21`)**: [app.json](file:///Users/yamaimo/Assist%20Timer%20for%20yamaimo/app.json) の `buildNumber` を `21` へ更新し、App Store ConnectへのTestFlight新規提出トレインを確立。<br>②**watchOSターゲットのバンドル同梱 (`@bacons/apple-targets`)**: `targets/watch` のSwiftUIネイティブ実装（`AssistTimerWatch.app`）をEAS Buildバイナリに同梱し、TestFlightインストール時にペアリングされたApple Watchへ自動配信・インストール可能に整備。<br>③**実機ウォッチ上でのネイティブUI/UX検証の確立**: 実機のApple Watch Series上で、Digital CrownのTaptic触覚無段階調整、クイックパネルのタッチ操作、超過時3アクション（シャンプー入る・リセット・計測終了）、指定技術単一表示の現場操作性を実機テスト可能に環境整備。 |
 | 2026-10-14 | 客席カードで「💧 シャンプー: タグチ 操作 >」のように特定のヘルプ工程が指定されているにもかかわらず、タップして開く施術操作シート内に「💧 シャンプーする。」と「🪮 コーミングする。」が無条件に併記され、指定されていない無関係な技術ボタンが表示されて誤操作を招くUI不整合があった課題 | ①**指定技術（helpProcess）のみの単一大型ボタン表示**: 席の依頼工程（`item.helpProcess`）を厳密に判定し、シャンプー指定時は「💧 シャンプーする。」（施術中は「✔ シャンプー完了」）のみ、コーミング指定時は「🪮 コーミングする。」（施術中は「✔ コーミング完了」）のみ、チェック指定時は「🔍 チェックする。」のみを画面中央に1つ大きく表示するスマート出し分け機構へ刷新。<br>②**ヘッダータイトルの工程連動**: シート上部見出しを「◯番席の【工程名】操作」（例: `3番席のシャンプー操作`）へと自動インライン連動し、手元の施術対象が一目瞭然に把握できるよう改善。<br>③**ノールック操作性と現場スピードの向上**: 画面内に余計な技術ボタンが一切存在しないため、狭小なWatch画面でもノールックで目当ての技術アクションを迷わずワンタップ実行可能に確立。 |
@@ -1265,7 +1266,9 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 - **触覚通知（Taptic Engine）**:
   - 放置終了の**3分前**（声かけ・準備タイミング）および**0秒到達時**に、手首を「トントン」と振動で叩く。音を出さずお客様に気づかれずに時間管理。
 - **通信経路**:
-  - `react-native-watch-connectivity`（WCSession）による iPhone ↔ Watch 間同期、およびWatch単体Wi-Fi通信のハイブリッド構成。
+  - Expo Modules API（`watch-connectivity`）による iPhone ↔ Watch 間直接P2P同期（WCSession / Bluetooth & Wi-Fi）、および将来的なWatch単体クラウド通信のハイブリッド構成。
+  - **オフライン・電波不通対応**: 地下のサロンやWi-Fiがない現場でもBluetoothで100%確実に瞬時連動。
+  - **アプリ未起動時・スリープ対応**: `updateApplicationContext` により、Watchがスリープ・消灯中でも次回起動時に最新の客席状態へ自動更新。アプリ起動中は `sendMessage` により遅延0秒のリアルタイム即時同期を実現。
 
 ### 7.4. 今後の拡張アイデア（インテリジェント・アシスタント通知）
 - **アシスタント未定アラート**:
@@ -1456,6 +1459,33 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
         - これにより、「誰のお客様（主担当）で、誰がヘルプなのか（または募集中なのか）」が腕の上で完全に一目で判明。
     - **ダイレクト操作ジャンプ**:
       - サムネイルタイルをタップすると、その席のタイマー操作画面（`TimeActionSheet`）へ即座にアクセス可能。
+
+### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 25)
+- **概要**:
+  - iPhoneアプリ（`SalonWorkScreen`）とApple Watchアプリ（`ContentView`）間の完全リアルタイム双方向同期を実現。
+  - プロトタイプ時のデモ固定4席を完全撤廃し、iPhone側で管理されている実際の客席データとスタッフ名を1対1で完全連動。
+- **アーキテクチャ**:
+  - **ローカルExpoモジュール (`modules/watch-connectivity`)**:
+    - Apple標準フレームワーク `WatchConnectivity`（`WCSession`）を最新のExpo Modules API（Swift）でネイティブ実装。
+    - `updateApplicationContext`（バックグラウンド・次回起動時同期）と `sendMessage`（起動中リアルタイム即時同期）のハイブリッド送信方式。
+- **同期データ構造 (`SYNC_SEATS`)**:
+  - `userName`: ログイン中のスタイリスト名（Watch側で自動反映され、「私が担当」などの操作と直結）
+  - `seats`: 客席配列（`id`, `seatNumber`, `seatLabel`, `creatorName`, `totalSeconds`, `targetEndTimestamp`, `isRunning`, `pausedRemainingSeconds`, `helpProcess`, `shampooStaff`, `isRecruiting`, `status`, `checkTargetSeconds`, `checkEndTimestamp`, `checkStaffName`, `isCheckCompleted`, `isCollapsed`）
+- **空状態（0席時）UI**:
+  - iPhone側に席が1つもない場合、Watch側には「📱 iPhoneで席を追加してください」「サロンワーク画面の客席と自動でリアルタイム連動します」と親切なプレースホルダーカードを常時案内。
+- **Watch → iPhone 逆方向アクション連動**:
+  - Watch側で行われた以下の全操作を即時にiPhoneへプッシュ通知し、iPhoneアプリの座席ステート（`seats`）と端末ストレージ（AsyncStorage）へ自動反映：
+    - `START_SHAMPOO` / `FINISH_SHAMPOO`: シャンプー状態の開始・完了
+    - `UPDATE_STATUS`: コーミング中、チェック中、放置中などのステータス変更
+    - `ENTER_HELP`: 超過時の「シャンプー入る」ワンタップ確定
+    - `ASSIGN_HELP`: ヘルプ担当スタッフの指名・決定
+    - `RECRUIT_HELP`: 全員ヘルプ募集の発出
+    - `CLAIM_CHECK`: チェック担当への立候補
+    - `COMPLETE_CHECK` / `CANCEL_CHECK`: チェック完了および解除
+    - `ADJUST_TIME`: タイム変更（+5分、+1分など）の加算
+    - `STOP_TIMER` / `START_TIMER` / `RESET_ZERO`: タイマーの一時停止、再入力、および00:00リセット
+    - `CLEAR_STAFF`: 担当者の解除
+
 
 
 

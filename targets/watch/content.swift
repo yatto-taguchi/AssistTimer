@@ -62,6 +62,156 @@ struct SeatTimerItem: Identifiable, Equatable {
     }
 }
 
+// MARK: - SeatTimerItem 辞書相互変換（iPhone連携用）
+extension SeatTimerItem {
+    init?(dictionary: [String: Any]) {
+        guard let id = dictionary["id"] as? String else { return nil }
+        self.id = id
+        
+        if let num = dictionary["seatNumber"] as? Int {
+            self.seatNumber = num
+        } else if let label = dictionary["seatLabel"] as? String {
+            let digits = label.compactMap { $0.isNumber ? String($0) : nil }.joined()
+            self.seatNumber = Int(digits) ?? 1
+        } else {
+            self.seatNumber = 1
+        }
+        
+        self.creatorName = (dictionary["creatorName"] as? String) ?? (dictionary["colorStaffName"] as? String) ?? "スタイリスト"
+        self.totalSeconds = (dictionary["totalSeconds"] as? Int) ?? (dictionary["targetSeconds"] as? Int) ?? 600
+        
+        if let endMs = dictionary["targetEndTimestamp"] as? Double {
+            self.targetEndTime = Date(timeIntervalSince1970: endMs / 1000.0)
+        } else if let endSec = dictionary["targetEndTime"] as? Double {
+            self.targetEndTime = Date(timeIntervalSince1970: endSec)
+        } else {
+            self.targetEndTime = Date().addingTimeInterval(TimeInterval(self.totalSeconds))
+        }
+        
+        let statusStr = dictionary["status"] as? String ?? "running"
+        self.isRunning = (statusStr == "running")
+        
+        if let paused = dictionary["pausedRemainingSeconds"] as? Int {
+            self.pausedRemainingSeconds = paused
+        } else {
+            let rem = Int(self.targetEndTime.timeIntervalSince(Date()))
+            self.pausedRemainingSeconds = max(0, rem)
+        }
+        
+        self.helpProcess = (dictionary["helpProcess"] as? String) ?? (dictionary["actionStatus"] as? String) ?? "シャンプー"
+        let rawShampoo = (dictionary["shampooStaff"] as? String) ?? (dictionary["assistantStaffName"] as? String)
+        self.shampooStaff = (rawShampoo?.isEmpty == false) ? rawShampoo : nil
+        self.isRecruiting = (dictionary["isRecruiting"] as? Bool) ?? false
+        self.isNoHelpNeeded = (dictionary["isNoHelpNeeded"] as? Bool) ?? false
+        
+        let actionStatus = dictionary["actionStatus"] as? String
+        let isShampooing = dictionary["isShampooing"] as? Bool ?? false
+        if isShampooing || actionStatus == "shampoo" {
+            self.status = .shampoo
+        } else if actionStatus == "combing" {
+            self.status = .combing
+        } else if actionStatus == "check" {
+            self.status = .check
+        } else {
+            self.status = .normal
+        }
+        
+        self.checkTotalSeconds = (dictionary["checkTotalSeconds"] as? Int) ?? (dictionary["checkTargetSeconds"] as? Int)
+        if let checkEndMs = (dictionary["checkEndTimestamp"] as? Double) ?? (dictionary["checkTargetEndTime"] as? Double) {
+            self.checkTargetEndTime = Date(timeIntervalSince1970: checkEndMs / 1000.0)
+        }
+        let rawCheckStaff = (dictionary["checkStaff"] as? String) ?? (dictionary["checkStaffName"] as? String)
+        self.checkStaff = (rawCheckStaff?.isEmpty == false) ? rawCheckStaff : nil
+        self.isCheckCompleted = (dictionary["isCheckCompleted"] as? Bool) ?? false
+        self.isCollapsed = (dictionary["isCollapsed"] as? Bool) ?? false
+    }
+}
+
+import WatchConnectivity
+
+// MARK: - iPhone (WCSession) 通信マネージャー
+class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
+    static let shared = WatchSessionManager()
+    
+    @Published var timers: [SeatTimerItem] = []
+    @Published var currentUserName: String = "スタイリスト"
+    @Published var isConnectedToPhone: Bool = false
+    
+    override init() {
+        super.init()
+        if WCSession.isSupported() {
+            let session = WCSession.default
+            session.delegate = self
+            session.activate()
+        }
+    }
+    
+    // MARK: - WCSessionDelegate
+    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
+        DispatchQueue.main.async {
+            self.isConnectedToPhone = (activationState == .activated)
+            if let context = session.receivedApplicationContext as [String: Any]?, !context.isEmpty {
+                self.processReceivedData(context)
+            }
+        }
+    }
+    
+    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
+        DispatchQueue.main.async {
+            self.processReceivedData(applicationContext)
+        }
+    }
+    
+    func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
+        DispatchQueue.main.async {
+            self.processReceivedData(message)
+        }
+    }
+    
+    func session(_ session: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
+        DispatchQueue.main.async {
+            self.processReceivedData(message)
+            replyHandler(["status": "ok"])
+        }
+    }
+    
+    func processReceivedData(_ data: [String: Any]) {
+        // スタッフ名同期
+        if let name = data["userName"] as? String, !name.isEmpty {
+            self.currentUserName = name
+        }
+        
+        // 座席リスト同期
+        if let seatsArray = data["seats"] as? [[String: Any]] {
+            let parsed = seatsArray.compactMap { SeatTimerItem(dictionary: $0) }
+            self.timers = parsed
+        }
+    }
+    
+    // MARK: - iPhoneへのアクション送信
+    func sendActionToPhone(action: String, seatId: String, extra: [String: Any] = [:]) {
+        guard WCSession.isSupported() else { return }
+        let session = WCSession.default
+        var payload: [String: Any] = [
+            "action": action,
+            "seatId": seatId,
+            "userName": currentUserName,
+            "timestamp": Date().timeIntervalSince1970 * 1000.0
+        ]
+        for (k, v) in extra {
+            payload[k] = v
+        }
+        
+        if session.isReachable {
+            session.sendMessage(payload, replyHandler: nil) { error in
+                print("[WatchSession] sendMessage error: \(error.localizedDescription)")
+            }
+        } else {
+            session.transferUserInfo(payload)
+        }
+    }
+}
+
 // MARK: - 施術ステータス
 enum TreatmentStatus: String, CaseIterable {
     case normal = "放置中"
@@ -117,8 +267,10 @@ extension Color {
 
 // MARK: - メイン画面
 struct ContentView: View {
+    @StateObject private var sessionManager = WatchSessionManager.shared
+    
     // ログイン中の自ユーザー名（サロン設定・iPhone同期）
-    @State private var currentUserName: String = "タグチ"
+    @State private var currentUserName: String = "スタイリスト"
     
     // 新規席追加シートフラグ
     @State private var showingAddSeatSheet = false
@@ -142,78 +294,8 @@ struct ContentView: View {
     // 客席サムネイル・バードビューシートフラグ（画面長押しまたは右上⊞アイコンでオープン）
     @State private var showingThumbnailMap = false
     
-    // 客席タイマー一覧（デモ初期データ）
-    @State private var timers: [SeatTimerItem] = [
-        // 3番席: 自分がシャンプー担当 ＆ 超過中デモ（ユーザーのスクショと同じ状態: 16分16秒超過）
-        SeatTimerItem(
-            id: "3",
-            seatNumber: 3,
-            creatorName: "佐藤",
-            totalSeconds: 600, // 10分
-            targetEndTime: Date().addingTimeInterval(-976), // 16分16秒超過！
-            isRunning: true,
-            pausedRemainingSeconds: 0,
-            helpProcess: "シャンプー",
-            shampooStaff: "タグチ",
-            isRecruiting: false,
-            status: .normal,
-            checkTotalSeconds: nil,
-            checkTargetEndTime: nil,
-            checkStaff: nil,
-            isCollapsed: false
-        ),
-        // 1番席: 停止中デモ（動いていない・00:00）★ユーザーの「1番は動いてなくて、3番は動いている」を再現
-        SeatTimerItem(
-            id: "1",
-            seatNumber: 1,
-            creatorName: "タグチ",
-            totalSeconds: 600, // 10分設定
-            targetEndTime: Date(), // すでに停止
-            isRunning: false,
-            pausedRemainingSeconds: 0,
-            helpProcess: "シャンプー",
-            shampooStaff: nil,
-            isRecruiting: false,
-            status: .normal,
-            checkTotalSeconds: nil,
-            checkTargetEndTime: nil,
-            checkStaff: nil
-        ),
-        // 2番席: 全員募集中デモ（「コーミング: 募集中 私が入る >」表示）
-        SeatTimerItem(
-            id: "2",
-            seatNumber: 2,
-            creatorName: "ヤマモト",
-            totalSeconds: 1200, // 20分
-            targetEndTime: Date().addingTimeInterval(185), // あと3分05秒
-            isRunning: true,
-            pausedRemainingSeconds: 185,
-            helpProcess: "コーミング",
-            shampooStaff: nil,
-            isRecruiting: true,
-            status: .normal,
-            checkTotalSeconds: nil,
-            checkTargetEndTime: nil,
-            checkStaff: nil
-        ),
-        // 4番席: 停止中デモ
-        SeatTimerItem(
-            id: "4",
-            seatNumber: 4,
-            creatorName: "渡辺",
-            totalSeconds: 900,
-            targetEndTime: Date(),
-            isRunning: false,
-            pausedRemainingSeconds: 0,
-            helpProcess: "シャンプー",
-            shampooStaff: nil,
-            isRecruiting: false,
-            status: .normal,
-            checkTotalSeconds: nil,
-            checkTargetEndTime: nil,
-            checkStaff: nil
-        )
-    ]
+    // 客席タイマー一覧（iPhone同期受信データ、初期値は空）
+    @State private var timers: [SeatTimerItem] = []
     
     // 1秒周期の画面再描画トリガー
     @State private var now = Date()
@@ -359,44 +441,94 @@ struct ContentView: View {
                 now = input
                 checkUnassignedHelpAlerts()
             }
+            .onReceive(sessionManager.$timers) { received in
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    self.timers = received
+                }
+            }
+            .onReceive(sessionManager.$currentUserName) { receivedName in
+                if !receivedName.isEmpty {
+                    self.currentUserName = receivedName
+                }
+            }
         }
     }
     
+    // ★ 席が0件のときのプレースホルダー（iPhone同期案内）
+    @ViewBuilder
+    private var emptySeatsPlaceholderView: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "iphone.radiowaves.left.and.right")
+                .font(.system(size: 34))
+                .foregroundColor(Color(hex: "#0A84FF"))
+                .padding(.top, 14)
+            
+            Text("📱 iPhoneで席を追加してください")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+            
+            Text("サロンワーク画面の客席と\n自動でリアルタイム連動します")
+                .font(.system(size: 11))
+                .foregroundColor(Color(hex: "#8E8E93"))
+                .multilineTextAlignment(.center)
+                .lineSpacing(2)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 22)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color(hex: "#1C1C1E"))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color(hex: "#2C2C2E"), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 4)
+    }
+
     @ViewBuilder
     private var cardsScrollView: some View {
         ScrollView {
             VStack(spacing: 12) {
-                // ① 客席タイマーカード一覧
-                ForEach(sortedTimers) { item in
-                    SeatTimerCard(
-                        item: binding(for: item.id),
-                        currentUserName: currentUserName,
-                        now: now,
-                        onOpenTimeAction: {
-                            timeActionTargetId = item.id
-                            playHaptic(.click)
-                        },
-                        onOpenSelectHelpStaff: {
-                            selectHelpStaffTargetId = item.id
-                            playHaptic(.click)
-                        },
-                        onOpenShampooAction: {
-                            shampooActionTargetId = item.id
-                            playHaptic(.click)
-                        },
-                        onOpenCheckAction: {
-                            checkActionTargetId = item.id
-                            playHaptic(.click)
-                        },
-                        onClaimCheck: {
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
-                                    timers[idx].checkStaff = currentUserName
+                if timers.isEmpty {
+                    // ★ 席が0件の時のプレースホルダー表示
+                    emptySeatsPlaceholderView
+                } else {
+                    // ① 客席タイマーカード一覧
+                    ForEach(sortedTimers) { item in
+                        SeatTimerCard(
+                            item: binding(for: item.id),
+                            currentUserName: currentUserName,
+                            now: now,
+                            onOpenTimeAction: {
+                                timeActionTargetId = item.id
+                                playHaptic(.click)
+                            },
+                            onOpenSelectHelpStaff: {
+                                selectHelpStaffTargetId = item.id
+                                playHaptic(.click)
+                            },
+                            onOpenShampooAction: {
+                                shampooActionTargetId = item.id
+                                playHaptic(.click)
+                            },
+                            onOpenCheckAction: {
+                                checkActionTargetId = item.id
+                                playHaptic(.click)
+                            },
+                            onClaimCheck: {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                                        timers[idx].checkStaff = currentUserName
+                                    }
                                 }
+                                sessionManager.sendActionToPhone(action: "CLAIM_CHECK", seatId: item.id)
+                                showNotification(text: "📤 チェック担当に立候補しました", color: Color(hex: "#30D158"))
                             }
-                            showNotification(text: "📤 チェック担当に立候補しました", color: Color(hex: "#30D158"))
-                        }
-                    )
+                        )
+                    }
                 }
                 
                 // ② 一番下に「新しい席を追加」ボタンを配置
@@ -492,6 +624,7 @@ struct ContentView: View {
                             timers[idx].status = (process == "コーミング" ? .combing : .shampoo)
                             timers[idx].shampooStaff = currentUserName
                         }
+                        sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: item.id)
                         let process = item.helpProcess.isEmpty ? "シャンプー" : item.helpProcess
                         showNotification(
                             text: "📤 【\(item.seatNumber)番席】\(currentUserName)さんが\(process)に入りました",
@@ -515,6 +648,7 @@ struct ContentView: View {
                             timers[idx].isRecruiting = false
                             timers[idx].isNoHelpNeeded = false
                         }
+                        sessionManager.sendActionToPhone(action: "RESET_ZERO", seatId: item.id)
                         showNotification(
                             text: "⏱️ \(item.seatNumber)番席: 00:00にリセットしました",
                             color: Color(hex: "#FFD60A")
@@ -527,6 +661,7 @@ struct ContentView: View {
                             timers[idx].isRunning = false
                             timers[idx].isCollapsed = true
                         }
+                        sessionManager.sendActionToPhone(action: "FINISH_MEASURE", seatId: item.id)
                         showNotification(
                             text: "🏁 \(item.seatNumber)番席: 計測を終了しました",
                             color: Color(hex: "#8E8E93")
@@ -543,6 +678,7 @@ struct ContentView: View {
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         timers[idx].targetEndTime = timers[idx].targetEndTime.addingTimeInterval(Double(deltaSec))
                         timers[idx].pausedRemainingSeconds += deltaSec
+                        sessionManager.sendActionToPhone(action: "ADJUST_TIME", seatId: item.id, extra: ["secondsToAdd": deltaSec])
                         let deltaText = formatDeltaString(deltaSec)
                         showNotification(text: "⏱️ \(item.seatNumber)番席: \(deltaText)しました", color: Color(hex: "#0A84FF"))
                     }
@@ -551,6 +687,7 @@ struct ContentView: View {
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         timers[idx].isRunning = false
                         timers[idx].pausedRemainingSeconds = 0
+                        sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id)
                         showNotification(text: "⏹️ \(item.seatNumber)番席のタイマーを止めました", color: Color(hex: "#30D158"))
                     }
                 },
@@ -573,6 +710,7 @@ struct ContentView: View {
                             timers[idx].checkStaff = nil
                             timers[idx].isCheckCompleted = false
                         }
+                        sessionManager.sendActionToPhone(action: "START_TIMER", seatId: item.id, extra: ["targetSeconds": sec])
                         showNotification(
                             text: "⏱️ \(item.seatNumber)番席: \(timeStr)に再入力しました（チェック解除）",
                             color: Color(hex: "#FFD60A")
@@ -592,6 +730,7 @@ struct ContentView: View {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].isCheckCompleted = true
                     timers[idx].checkStaff = currentUserName
+                    sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
                     showNotification(text: "✅ チェック完了を全員へ通知しました", color: Color(hex: "#30D158"))
                 }
             },
@@ -599,6 +738,7 @@ struct ContentView: View {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].checkTargetEndTime = nil
                     timers[idx].checkTotalSeconds = nil
+                    sessionManager.sendActionToPhone(action: "CANCEL_CHECK", seatId: item.id)
                     playHaptic(.click)
                 }
             }
@@ -612,6 +752,7 @@ struct ContentView: View {
             onStartShampoo: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .shampoo
+                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "shampoo", "isShampooing": true])
                     showNotification(
                         text: "📤 【\(item.seatNumber)番席】シャンプー開始を全員へ通知しました",
                         color: Color(hex: "#0A84FF")
@@ -621,6 +762,7 @@ struct ContentView: View {
             onFinishShampoo: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .normal
+                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
                     showNotification(
                         text: "📤 【\(item.seatNumber)番席】シャンプー完了を全員へ通知しました",
                         color: Color(hex: "#30D158")
@@ -630,6 +772,7 @@ struct ContentView: View {
             onStartCombing: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .combing
+                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "combing", "isShampooing": false])
                     showNotification(
                         text: "📤 【\(item.seatNumber)番席】コーミング開始を全員へ通知しました",
                         color: Color(hex: "#0A84FF")
@@ -639,6 +782,7 @@ struct ContentView: View {
             onFinishCombing: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .normal
+                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
                     showNotification(
                         text: "📤 【\(item.seatNumber)番席】コーミング完了を全員へ通知しました",
                         color: Color(hex: "#30D158")
@@ -648,6 +792,7 @@ struct ContentView: View {
             onStartCheck: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .check
+                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "check", "isShampooing": false])
                     showNotification(
                         text: "📤 【\(item.seatNumber)番席】チェック開始を全員へ通知しました",
                         color: Color(hex: "#30D158")
@@ -657,6 +802,7 @@ struct ContentView: View {
             onFinishCheck: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .normal
+                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
                     showNotification(
                         text: "📤 【\(item.seatNumber)番席】チェック完了を全員へ通知しました",
                         color: Color(hex: "#30D158")
@@ -673,6 +819,7 @@ struct ContentView: View {
                     let oldStaff = timers[idx].shampooStaff ?? "担当者"
                     timers[idx].shampooStaff = nil
                     timers[idx].status = .normal
+                    sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
                     showNotification(
                         text: "📤 \(oldStaff)さんに担当解除を通知しました",
                         color: Color(hex: "#8E8E93")
@@ -694,6 +841,7 @@ struct ContentView: View {
                         timers[idx].shampooStaff = staff
                         timers[idx].isRecruiting = false
                     }
+                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": process, "assistantStaffName": staff])
                     showNotification(
                         text: "📤 \(staff)さんに【\(process)】を通知しました",
                         color: Color(hex: "#0A84FF")
@@ -707,6 +855,7 @@ struct ContentView: View {
                         timers[idx].shampooStaff = nil
                         timers[idx].isRecruiting = true
                     }
+                    sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": process])
                     // 募集するの場合は全員に通知する！
                     showNotification(
                         text: "📢 【\(item.seatNumber)番席】\(process)担当を全員に募集通知しました！",

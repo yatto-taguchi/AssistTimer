@@ -16,6 +16,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import WatchConnectivity from 'watch-connectivity';
 import { AppContext } from '../utils/AppContext';
 
 // サロン施術ステータス定義（呼び出し、コーミング、チェック、シャンプー、その他）
@@ -83,6 +84,53 @@ export const getDefaultInitialSeats = (staffName = 'スタイリスト') => [
     ],
   },
 ];
+
+// ★ Apple Watchへの客席・スタッフ名リアルタイム同期ヘルパー
+export const syncSeatsToWatch = (currentSeats, currentName) => {
+  if (Platform.OS !== 'ios') return;
+  try {
+    const watchPayload = {
+      type: 'SYNC_SEATS',
+      userName: (currentName || 'スタイリスト').trim(),
+      timestamp: Date.now(),
+      seats: (currentSeats || []).map((s, index) => {
+        let seatNum = index + 1;
+        if (s.seatLabel) {
+          const match = s.seatLabel.match(/\d+/);
+          if (match) seatNum = parseInt(match[0], 10);
+        }
+
+        const isRunning = s.status === 'running';
+        const targetEnd = s.targetEndTimestamp || Date.now();
+        const pausedRem = Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
+
+        return {
+          id: String(s.id),
+          seatNumber: seatNum,
+          seatLabel: s.seatLabel || `${seatNum}番席`,
+          creatorName: s.colorStaffName || 'スタイリスト',
+          totalSeconds: s.targetSeconds || 600,
+          targetEndTimestamp: targetEnd,
+          isRunning: isRunning,
+          pausedRemainingSeconds: pausedRem,
+          helpProcess: s.actionStatus === 'shampoo' || s.isShampooing ? 'シャンプー' : (s.actionStatus || 'シャンプー'),
+          shampooStaff: s.assistantStaffName || '',
+          isRecruiting: !s.assistantStaffName && isRunning,
+          status: s.isShampooing || s.actionStatus === 'shampoo' ? 'shampoo' : (s.actionStatus || 'normal'),
+          checkTargetSeconds: s.checkTargetSeconds || null,
+          checkEndTimestamp: s.checkEndTimestamp || null,
+          checkStaffName: s.checkStaffName || '',
+          isCheckCompleted: s.checkStatus === 'completed',
+          isCollapsed: false,
+        };
+      }),
+    };
+
+    WatchConnectivity.syncData(watchPayload);
+  } catch (e) {
+    console.warn('[WatchConnectivity] syncSeatsToWatch failed:', e);
+  }
+};
 
 // サロン・グループ・個人無料枠の切り替え可能な固定席マルチタイマー画面
 export default function SalonWorkScreen() {
@@ -447,6 +495,8 @@ export default function SalonWorkScreen() {
   const saveSeatsToStorage = async (newSeats) => {
     try {
       await AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(newSeats));
+      // ★ Apple Watchへ即時同期
+      syncSeatsToWatch(newSeats, userName);
     } catch (e) {
       console.warn('Failed to save seats to AsyncStorage', e);
     }
@@ -463,10 +513,180 @@ export default function SalonWorkScreen() {
     }
   };
 
+  // ★ Apple Watchからの操作受信ハンドラ
+  const handleWatchAction = (message) => {
+    if (!message || !message.action || !message.seatId) return;
+    const { action, seatId, userName: watchUser, extra } = message;
+
+    setSeats((prevSeats) => {
+      let hasChanged = false;
+      const updated = prevSeats.map((s) => {
+        if (s.id !== seatId) return s;
+        hasChanged = true;
+
+        switch (action) {
+          case 'START_SHAMPOO': {
+            return {
+              ...s,
+              isShampooing: true,
+              actionStatus: 'shampoo',
+              assistantStaffName: watchUser || s.assistantStaffName,
+            };
+          }
+          case 'FINISH_SHAMPOO': {
+            return {
+              ...s,
+              isShampooing: false,
+              actionStatus: null,
+            };
+          }
+          case 'UPDATE_STATUS': {
+            const nextStatus = extra?.actionStatus;
+            const isShampoo = extra?.isShampooing ?? (nextStatus === 'shampoo');
+            return {
+              ...s,
+              isShampooing: isShampoo,
+              actionStatus: nextStatus === 'normal' ? null : (nextStatus || null),
+            };
+          }
+          case 'ENTER_HELP': {
+            const process = s.helpProcess || s.actionStatus || 'シャンプー';
+            const isShampoo = process === 'シャンプー';
+            return {
+              ...s,
+              status: 'paused',
+              assistantStaffName: watchUser || 'ヘルプ',
+              isShampooing: isShampoo,
+              actionStatus: isShampoo ? 'shampoo' : (s.actionStatus || process),
+            };
+          }
+          case 'ASSIGN_HELP': {
+            const staff = extra?.assistantStaffName || watchUser || '';
+            const process = extra?.helpProcess || 'シャンプー';
+            return {
+              ...s,
+              assistantStaffName: staff,
+              actionStatus: process === 'シャンプー' ? 'shampoo' : process,
+              isShampooing: process === 'シャンプー',
+            };
+          }
+          case 'RECRUIT_HELP': {
+            return {
+              ...s,
+              assistantStaffName: '',
+            };
+          }
+          case 'CLAIM_CHECK': {
+            return {
+              ...s,
+              checkStaffName: watchUser || 'チェック担当',
+            };
+          }
+          case 'COMPLETE_CHECK': {
+            return {
+              ...s,
+              checkStatus: 'completed',
+              checkStaffName: watchUser || s.checkStaffName,
+            };
+          }
+          case 'CANCEL_CHECK': {
+            return {
+              ...s,
+              checkTargetSeconds: null,
+              checkEndTimestamp: null,
+              checkStaffName: '',
+              checkStatus: 'stopped',
+            };
+          }
+          case 'RESET_ZERO': {
+            return {
+              ...s,
+              status: 'stopped',
+              targetSeconds: 0,
+              targetEndTimestamp: Date.now(),
+              checkTargetSeconds: null,
+              checkEndTimestamp: null,
+              checkStaffName: '',
+              checkStatus: 'stopped',
+              actionStatus: null,
+              isShampooing: false,
+              assistantStaffName: '',
+            };
+          }
+          case 'STOP_TIMER': {
+            return {
+              ...s,
+              status: 'paused',
+            };
+          }
+          case 'START_TIMER': {
+            const targetSec = extra?.targetSeconds || 600;
+            return {
+              ...s,
+              status: 'running',
+              targetSeconds: targetSec,
+              targetEndTimestamp: Date.now() + targetSec * 1000,
+              colorStaffName: watchUser || s.colorStaffName,
+            };
+          }
+          case 'ADJUST_TIME': {
+            const secondsToAdd = extra?.secondsToAdd || 300;
+            const currentEnd = s.targetEndTimestamp || Date.now();
+            const newEnd = Math.max(Date.now(), currentEnd) + secondsToAdd * 1000;
+            return {
+              ...s,
+              status: 'running',
+              targetSeconds: (s.targetSeconds || 0) + secondsToAdd,
+              targetEndTimestamp: newEnd,
+            };
+          }
+          case 'CLEAR_STAFF': {
+            return {
+              ...s,
+              assistantStaffName: '',
+              isShampooing: false,
+              actionStatus: null,
+            };
+          }
+          default:
+            return s;
+        }
+      });
+
+      if (hasChanged) {
+        saveSeatsToStorage(updated);
+      }
+      return updated;
+    });
+  };
+
   // 初期ロード
   useEffect(() => {
     loadInitialData();
   }, []);
+
+  // ★ Apple Watchとの接続・リスナー登録
+  useEffect(() => {
+    if (Platform.OS === 'ios') {
+      WatchConnectivity.activate().then(() => {
+        syncSeatsToWatch(seats, userName);
+      }).catch(() => {});
+
+      const subMsg = WatchConnectivity.addMessageListener((message) => {
+        handleWatchAction(message);
+      });
+      const subCtx = WatchConnectivity.addApplicationContextListener((context) => {
+        if (context && context.action) {
+          handleWatchAction(context);
+        }
+      });
+
+      return () => {
+        if (subMsg?.remove) subMsg.remove();
+        if (subCtx?.remove) subCtx.remove();
+      };
+    }
+  }, [userName]);
 
   const loadInitialData = async () => {
     try {
@@ -528,6 +748,8 @@ export default function SalonWorkScreen() {
         }
       }
       setSeats(loadedSeats);
+      // ★ 初回ロード時にもWatchへ最新客席データをプッシュ
+      syncSeatsToWatch(loadedSeats, activeUserName);
     } catch (e) {
       console.warn('Failed to load initial salon data', e);
     }
@@ -547,13 +769,14 @@ export default function SalonWorkScreen() {
       setIsEditingUserName(false);
 
       // 既存席の担当者名に旧名が設定されていた場合、新名へ同期
-      setSeats((prev) =>
-        prev.map((s) => ({
-          ...s,
-          colorStaffName: s.colorStaffName === oldName ? trimmed : s.colorStaffName,
-          assistantStaffName: s.assistantStaffName === oldName ? trimmed : s.assistantStaffName,
-        }))
-      );
+      const updatedSeats = seats.map((s) => ({
+        ...s,
+        colorStaffName: s.colorStaffName === oldName ? trimmed : s.colorStaffName,
+        assistantStaffName: s.assistantStaffName === oldName ? trimmed : s.assistantStaffName,
+      }));
+      setSeats(updatedSeats);
+      saveSeatsToStorage(updatedSeats);
+      syncSeatsToWatch(updatedSeats, trimmed);
 
       if (Platform.OS !== 'web') {
         Vibration.vibrate([0, 100, 50, 100]);

@@ -1,0 +1,6 @@
+{
+  "name": "watch-connectivity",
+  "version": "1.0.0",
+  "description": "WatchConnectivity local expo module for AssistTimer",
+  "main": "index.js"
+}
