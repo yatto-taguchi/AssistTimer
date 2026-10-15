@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import WatchConnectivity
 
 // MARK: - データモデル (絶対終了時刻 targetEndTime 基準)
 struct SeatTimerItem: Identifiable, Equatable {

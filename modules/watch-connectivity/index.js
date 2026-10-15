@@ -6,12 +6,12 @@ let emitter = null;
 
 if (Platform.OS === 'ios') {
   try {
-    NativeModule = requireNativeModule('WatchConnectivity');
+    NativeModule = requireNativeModule('ExpoWatchConnectivity');
     if (NativeModule) {
       emitter = new EventEmitter(NativeModule);
     }
   } catch (e) {
-    console.warn('[WatchConnectivity] Native module not found or failed to load:', e);
+    console.warn('[ExpoWatchConnectivity] Native module not found or failed to load:', e);
   }
 }
 

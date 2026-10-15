@@ -1,13 +1,13 @@
 import ExpoModulesCore
 import WatchConnectivity
 
-public class WatchConnectivityModule: Module, WCSessionDelegate {
+public class ExpoWatchConnectivityModule: Module, WCSessionDelegate {
   private var session: WCSession? {
     return WCSession.isSupported() ? WCSession.default : nil
   }
 
   public func definition() -> ModuleDefinition {
-    Name("WatchConnectivity")
+    Name("ExpoWatchConnectivity")
 
     Events(
       "onMessageReceived",
