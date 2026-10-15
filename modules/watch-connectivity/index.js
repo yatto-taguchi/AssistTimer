@@ -121,6 +121,16 @@ export const WatchConnectivity = {
     });
     return subscription;
   },
+
+  addUserInfoListener: (callback) => {
+    if (!emitter) return { remove: () => {} };
+    const subscription = emitter.addListener('onUserInfoReceived', (event) => {
+      if (event && event.userInfo) {
+        callback(event.userInfo);
+      }
+    });
+    return subscription;
+  },
 };
 
 export default WatchConnectivity;

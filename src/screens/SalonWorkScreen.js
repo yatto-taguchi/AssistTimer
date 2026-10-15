@@ -735,10 +735,16 @@ export default function SalonWorkScreen() {
           handleWatchAction(context);
         }
       });
+      const subUser = WatchConnectivity.addUserInfoListener ? WatchConnectivity.addUserInfoListener((userInfo) => {
+        if (userInfo && userInfo.action) {
+          handleWatchAction(userInfo);
+        }
+      }) : null;
 
       return () => {
         if (subMsg?.remove) subMsg.remove();
         if (subCtx?.remove) subCtx.remove();
+        if (subUser?.remove) subUser.remove();
       };
     }
   }, [userName]);

@@ -93,8 +93,8 @@ extension SeatTimerItem {
             self.targetEndTime = Date().addingTimeInterval(TimeInterval(self.totalSeconds))
         }
         
-        // ★ isRunning の正確な判定 (Bool を最優先、なければ status 文字列)
-        if let running = dictionary["isRunning"] as? Bool {
+        // ★ isRunning の正確な判定 (Bool / NSNumber を最優先、なければ status 文字列)
+        if let running = (dictionary["isRunning"] as? NSNumber)?.boolValue ?? (dictionary["isRunning"] as? Bool) {
             self.isRunning = running
         } else {
             let statusStr = dictionary["status"] as? String ?? ""
@@ -111,13 +111,13 @@ extension SeatTimerItem {
         self.helpProcess = (dictionary["helpProcess"] as? String) ?? (dictionary["actionStatus"] as? String) ?? "シャンプー"
         let rawShampoo = (dictionary["shampooStaff"] as? String) ?? (dictionary["assistantStaffName"] as? String)
         self.shampooStaff = (rawShampoo?.isEmpty == false) ? rawShampoo : nil
-        self.isRecruiting = (dictionary["isRecruiting"] as? Bool) ?? false
-        self.isNoHelpNeeded = (dictionary["isNoHelpNeeded"] as? Bool) ?? false
+        self.isRecruiting = (dictionary["isRecruiting"] as? NSNumber)?.boolValue ?? (dictionary["isRecruiting"] as? Bool) ?? false
+        self.isNoHelpNeeded = (dictionary["isNoHelpNeeded"] as? NSNumber)?.boolValue ?? (dictionary["isNoHelpNeeded"] as? Bool) ?? false
         
         // 施術ステータス (normal, shampoo, combing, check)
         let actionStatus = dictionary["actionStatus"] as? String
         let statusStr = dictionary["status"] as? String
-        let isShampooing = dictionary["isShampooing"] as? Bool ?? false
+        let isShampooing = (dictionary["isShampooing"] as? NSNumber)?.boolValue ?? (dictionary["isShampooing"] as? Bool) ?? false
         if isShampooing || actionStatus == "shampoo" || statusStr == "shampoo" {
             self.status = .shampoo
         } else if actionStatus == "combing" || statusStr == "combing" {
@@ -134,8 +134,8 @@ extension SeatTimerItem {
         }
         let rawCheckStaff = (dictionary["checkStaff"] as? String) ?? (dictionary["checkStaffName"] as? String)
         self.checkStaff = (rawCheckStaff?.isEmpty == false) ? rawCheckStaff : nil
-        self.isCheckCompleted = (dictionary["isCheckCompleted"] as? Bool) ?? false
-        self.isCollapsed = (dictionary["isCollapsed"] as? Bool) ?? false
+        self.isCheckCompleted = (dictionary["isCheckCompleted"] as? NSNumber)?.boolValue ?? (dictionary["isCheckCompleted"] as? Bool) ?? false
+        self.isCollapsed = (dictionary["isCollapsed"] as? NSNumber)?.boolValue ?? (dictionary["isCollapsed"] as? Bool) ?? false
     }
 }
 
@@ -910,10 +910,30 @@ struct ContentView: View {
     }
     
     private func binding(for id: String) -> Binding<SeatTimerItem> {
-        guard let index = timers.firstIndex(where: { $0.id == id }) else {
-            fatalError("Timer not found")
+        if let index = timers.firstIndex(where: { $0.id == id }) {
+            return $timers[index]
         }
-        return $timers[index]
+        // 万が一アニメーション中や配列更新の合間に見つからない場合でも、fatalErrorでクラッシュさせずに安全にフォールバック
+        return Binding(
+            get: {
+                self.timers.first(where: { $0.id == id }) ?? SeatTimerItem(
+                    id: id,
+                    seatNumber: 1,
+                    creatorName: "",
+                    totalSeconds: 0,
+                    targetEndTime: Date(),
+                    isRunning: false,
+                    pausedRemainingSeconds: 0,
+                    shampooStaff: nil,
+                    status: .normal
+                )
+            },
+            set: { newValue in
+                if let idx = self.timers.firstIndex(where: { $0.id == id }) {
+                    self.timers[idx] = newValue
+                }
+            }
+        )
     }
     
     private func playHaptic(_ type: WKHapticType) {

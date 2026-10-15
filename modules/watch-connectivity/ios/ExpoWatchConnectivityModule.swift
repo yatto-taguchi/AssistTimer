@@ -14,7 +14,8 @@ public class ExpoWatchConnectivityModule: Module {
 
     Events(
       "onMessageReceived",
-      "onApplicationContextReceived"
+      "onApplicationContextReceived",
+      "onUserInfoReceived"
     )
 
     OnCreate {
@@ -172,6 +173,13 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
   func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
     DispatchQueue.main.async {
       self.module?.dispatchEvent("onApplicationContextReceived", ["context": applicationContext])
+    }
+  }
+
+  func session(_ session: WCSession, didReceiveUserInfo userInfo: [String : Any] = [:]) {
+    DispatchQueue.main.async {
+      self.module?.dispatchEvent("onMessageReceived", ["message": userInfo])
+      self.module?.dispatchEvent("onUserInfoReceived", ["userInfo": userInfo])
     }
   }
 }
