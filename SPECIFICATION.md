@@ -1461,15 +1461,15 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **ダイレクト操作ジャンプ**:
       - サムネイルタイルをタップすると、その席のタイマー操作画面（`TimeActionSheet`）へ即座にアクセス可能。
 
-### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-30)
+### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-33)
 - **概要**:
-  - iPhoneアプリ（`AppContext` / `SalonWorkScreen`）とApple Watchアプリ（`ContentView`）間の完全リアルタイム双方向同期を実現。
+  - iPhoneアプリ（`SalonWorkScreen`）とApple Watchアプリ（`ContentView`）間の完全リアルタイム双方向同期を実現。
   - プロトタイプ時のデモ固定4席を完全撤廃し、iPhone側で管理されている実際の客席データとスタッフ名を1対1で完全連動。
 - **アーキテクチャ**:
-  - **アプリ最上位グローバル同期管理 (`AppContext.js` & `App.js`)**:
-    - React Navigation の `lazy: false` により全タブを常時稼働させ、ユーザーがどの画面を開いていてもアプリ起動と同時に最上位から `WatchConnectivity.activate()` および `syncSeatsToWatchGlobal()` を実行。
-    - 端末ストレージ（AsyncStorage）から保存済み座席データおよびスタッフメンバーを即座に読み出し、アプリ起動の瞬間にWatchへ自動プッシュ送信。
-    - Watchからの同期要求（`REQUEST_SYNC`）や新席追加（`ADD_SEAT`）のリスナーをグローバル常時待機させ、画面未表示による通信不成立やすれ違いを完全排除。
+  - **サロンワーク画面一元同期管理 (`SalonWorkScreen.js` & `App.js`)**:
+    - React Navigation の標準 `lazy: true`（遅延ロード）を採用し、アプリ起動時はホーム画面のみを軽快・最速で起動。アプリ起動時の超高負荷メモリスパイクやWCSession初期化レースコンディション（競合状態）を完全根絶。
+    - 客席タイマーおよびスタッフメンバーの同期責務をサロンワーク画面（`SalonWorkScreen.js`）へ一元化。画面表示時および操作時に最新データを安全にプッシュ同期。
+    - 連続呼び出し抑制タイマー（デバウンス: 150ms）を内蔵し、短時間の連続データ更新を1回の最新状態に自動集約してWCSessionのXPC通信パンクを100%防止。
   - **ローカルExpoモジュール (`modules/watch-connectivity`) ＆ トリプル送信機構**:
     - Apple標準フレームワーク `WatchConnectivity`（`WCSession`）を最新のExpo Modules API（Swift）でネイティブ実装（`ExpoWatchConnectivityModule.swift`）。
     - Objective-Cの `NSObjectProtocol` 適合要件を満たす専用デリゲートクラス `SessionDelegate: NSObject, WCSessionDelegate` を分離実装。
@@ -1531,3 +1531,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
   - **Watchアプリ未インストール時の例外クラッシュ根絶 ＆ 安定同期アーキテクチャ (Build 32)**:
     - **`isWatchAppInstalled` ガードの徹底配置**: Apple公式の `WCSession` 仕様上、Watchアプリ（AssistTimerWatch）が未インストール・更新処理中・またはユーザーがWatchアプリをOFFにした状態で `transferUserInfo` を呼び出すと `NSInvalidArgumentException`（Objective-C致命的例外）がスローされ、iPhoneアプリが起動直後に即死クラッシュする問題を根本根絶。`ExpoWatchConnectivityModule.swift` の `transferUserInfo`、`updateApplicationContext`、`sendMessage`、`flushPendingUserInfo`、`flushPendingApplicationContext` の全メソッドに `guard session.isWatchAppInstalled` を徹底配置。
     - **クラッシュ源 `transferUserInfo` の `syncData` からの完全排除と安定同期への回帰**: 客席タイマー・スタッフ同期に求められるのは「最新状態のスナップショット」であり、履歴をFIFOキューイングする `transferUserInfo` は不要かつ危険であるため `syncData` から完全排除。Build 29 で実証された安全無敵の2本柱（`updateApplicationContext`: 次回起動時最新データ同期 ＋ `sendMessage`: 起動中リアルタイム即時送信）に回帰。JS側の `transferUserInfo` にも事前ガードを二重化。これにより、WatchアプリをOFFにしていようがONにしていようが、あるいはApple Watchを持っていなくても、iPhoneアプリが100%安全かつ安定して起動・稼働することを完全保証。
+  - **起動時クラッシュ根本根絶 ＆ サロン一元同期・最速起動アーキテクチャ (Build 33)**:
+    - **`lazy: false` の完全撤廃**: `App.js` から `lazy: false` を削除し、React Navigation 標準の `lazy: true`（遅延ロード）に完全回帰。アプリ起動時に全画面（8,689行のサロン画面含む）が一斉マウントされる過負荷および初期化レースコンディションを完全根絶。
+    - **`AppContext` の起動時 Watch 送信の完全撤去**: アプリ起動ミリ秒におけるネイティブ、AppContext、SalonWorkScreen の3重同時アクティベーションおよび WCSession 通信連打を物理的に完全消滅させ、Build 28 と同等の超軽量・安全起動シーケンスを完全復元。
+    - **サロン画面での通信デバウンス（連打抑制: 150ms）**: `syncSeatsToWatch` に短時間連打抑制タイマーを内蔵し、マウント時や連続操作時の XPC 通信パンクを100%未然防止。

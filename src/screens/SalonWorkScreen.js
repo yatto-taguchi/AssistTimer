@@ -87,8 +87,10 @@ export const getDefaultInitialSeats = (staffName = 'スタイリスト') => [
 
 // キャッシュされた最新スタッフメンバー一覧（引数省略時の自動フォールバック用）
 let _cachedStaffMembers = [];
+let _syncDebounceTimer = null;
+let _pendingWatchPayload = null;
 
-// ★ Apple Watchへの客席・スタッフ名リアルタイム同期ヘルパー
+// ★ Apple Watchへの客席・スタッフ名リアルタイム同期ヘルパー（デバウンスによる安全一元送信）
 export const syncSeatsToWatch = async (currentSeats, currentName, currentMembers = null) => {
   if (Platform.OS !== 'ios') return;
   try {
@@ -148,7 +150,16 @@ export const syncSeatsToWatch = async (currentSeats, currentName, currentMembers
       }),
     };
 
-    WatchConnectivity.syncData(watchPayload);
+    _pendingWatchPayload = watchPayload;
+    if (_syncDebounceTimer) {
+      clearTimeout(_syncDebounceTimer);
+    }
+    _syncDebounceTimer = setTimeout(() => {
+      if (_pendingWatchPayload) {
+        WatchConnectivity.syncData(_pendingWatchPayload).catch(() => {});
+        _pendingWatchPayload = null;
+      }
+    }, 150);
   } catch (e) {
     console.warn('[WatchConnectivity] syncSeatsToWatch failed:', e);
   }
@@ -752,8 +763,6 @@ export default function SalonWorkScreen() {
   // ★ Apple Watchとの接続・リスナー登録
   useEffect(() => {
     if (Platform.OS === 'ios') {
-      global.isSalonWorkScreenActive = true;
-
       WatchConnectivity.activate().then(() => {
         syncSeatsToWatch(seats, userName, staffMembers);
       }).catch(() => {});
@@ -773,7 +782,6 @@ export default function SalonWorkScreen() {
       }) : null;
 
       return () => {
-        global.isSalonWorkScreenActive = false;
         if (subMsg?.remove) subMsg.remove();
         if (subCtx?.remove) subCtx.remove();
         if (subUser?.remove) subUser.remove();
