@@ -1525,3 +1525,6 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **Native再帰サニタイズ (`sanitizeDictionary`)**: `ExpoWatchConnectivityModule.swift` 内に再帰的サニタイズ関数を新設し、辞書・配列内の `NSNull` を完全に除去・安全置換した上で `WCSession` に受け渡す安全防壁を確立。
     - **JS側二重防御**: `SalonWorkScreen.js` および `AppContext.js` の `watchPayload` において、`checkTargetSeconds` や `checkEndTimestamp` を `null` ではなく `0` で送信し、Bridge通過前の段階から `null` を完全排除。Watch側 `content.swift` では `> 0` チェックにより `nil` として正常パース。
     - **ペアリング安全ガード (`isPaired`)**: `transferUserInfo`、`updateApplicationContext`、`sendMessage`、および保留フラッシュ処理のすべてに `guard session.isPaired else { return }` を徹底し、Apple Watchが未ペアリングまたは接続準備中の端末環境でも例外クラッシュを100%未然防止。
+    - **通信判定順序最適化**: `activationState == .activated` 判定を `isPaired` より先に行い、アクティベート中の一時的な未ペアリング判定によるキュー保存漏れを防止。
+    - **SwiftUIパース安全性完全化**: `SeatTimerItem.init` の強制アンラップ（`!`）を完全撤廃し、オプショナルバインディング構文に改修。
+    - **UIスタイル完全定義**: サロン画面のメンバー管理モーダルの全スタイルを `StyleSheet.create` に明示定義し、`maxLength={10}` により入力文字数を安全制限。

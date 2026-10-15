@@ -74,11 +74,6 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
-      guard session.isPaired else {
-        promise.resolve(false)
-        return
-      }
-
       let cleanContext = self.sanitizeDictionary(context)
 
       guard session.activationState == .activated else {
@@ -86,6 +81,11 @@ public class ExpoWatchConnectivityModule: Module {
         self.pendingApplicationContext = cleanContext
         session.activate()
         promise.resolve(true)
+        return
+      }
+
+      guard session.isPaired else {
+        promise.resolve(false)
         return
       }
 
@@ -104,13 +104,13 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
-      guard session.isPaired else {
-        promise.reject("E_NOT_PAIRED", "Apple Watch is not paired")
+      guard session.activationState == .activated else {
+        promise.reject("E_NOT_ACTIVATED", "Session is not activated")
         return
       }
 
-      guard session.activationState == .activated else {
-        promise.reject("E_NOT_ACTIVATED", "Session is not activated")
+      guard session.isPaired else {
+        promise.reject("E_NOT_PAIRED", "Apple Watch is not paired")
         return
       }
 
@@ -134,17 +134,17 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
-      guard session.isPaired else {
-        promise.resolve(false)
-        return
-      }
-
       let cleanUserInfo = self.sanitizeDictionary(userInfo)
 
       guard session.activationState == .activated else {
         self.pendingUserInfo = cleanUserInfo
         session.activate()
         promise.resolve(true)
+        return
+      }
+
+      guard session.isPaired else {
+        promise.resolve(false)
         return
       }
 

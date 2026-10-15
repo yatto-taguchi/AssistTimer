@@ -6546,6 +6546,7 @@ export default function SalonWorkScreen() {
                 onChangeText={setInputNewMemberName}
                 onSubmitEditing={handleAddStaffMember}
                 returnKeyType="done"
+                maxLength={10}
               />
               <TouchableOpacity
                 style={{
@@ -7098,6 +7099,37 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'flex-end',
+  },
+  modalContent: {
+    borderRadius: 16,
+    padding: 20,
+    borderWidth: 1,
+    marginHorizontal: 16,
+    marginBottom: 20,
+  },
+  modalHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  modalInput: {
+    height: 42,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    fontSize: 14,
+  },
+  modalButtonPrimary: {
+    height: 44,
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalButtonPrimaryText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
   },
   modalCard: {
     borderTopLeftRadius: 20,
