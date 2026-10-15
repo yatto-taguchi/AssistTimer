@@ -112,6 +112,22 @@ public class ExpoWatchConnectivityModule: Module {
         promise.reject("E_SEND_FAILED", error.localizedDescription)
       })
     }
+
+    AsyncFunction("transferUserInfo") { (userInfo: [String: Any], promise: Promise) in
+      guard let session = self.session else {
+        promise.reject("E_NOT_SUPPORTED", "WatchConnectivity is not supported on this device")
+        return
+      }
+
+      guard session.activationState == .activated else {
+        session.activate()
+        promise.resolve(false)
+        return
+      }
+
+      let transfer = session.transferUserInfo(userInfo)
+      promise.resolve(transfer.isTransferring)
+    }
   }
 
   fileprivate func flushPendingApplicationContext(session: WCSession) {

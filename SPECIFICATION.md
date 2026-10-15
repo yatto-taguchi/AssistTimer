@@ -1461,27 +1461,38 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **ダイレクト操作ジャンプ**:
       - サムネイルタイルをタップすると、その席のタイマー操作画面（`TimeActionSheet`）へ即座にアクセス可能。
 
-### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-29)
+### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-30)
 - **概要**:
   - iPhoneアプリ（`AppContext` / `SalonWorkScreen`）とApple Watchアプリ（`ContentView`）間の完全リアルタイム双方向同期を実現。
   - プロトタイプ時のデモ固定4席を完全撤廃し、iPhone側で管理されている実際の客席データとスタッフ名を1対1で完全連動。
 - **アーキテクチャ**:
   - **アプリ最上位グローバル同期管理 (`AppContext.js` & `App.js`)**:
     - React Navigation の `lazy: false` により全タブを常時稼働させ、ユーザーがどの画面を開いていてもアプリ起動と同時に最上位から `WatchConnectivity.activate()` および `syncSeatsToWatchGlobal()` を実行。
-    - 端末ストレージ（AsyncStorage）から保存済み座席データを即座に読み出し、アプリ起動の瞬間にWatchへ自動プッシュ送信。
+    - 端末ストレージ（AsyncStorage）から保存済み座席データおよびスタッフメンバーを即座に読み出し、アプリ起動の瞬間にWatchへ自動プッシュ送信。
     - Watchからの同期要求（`REQUEST_SYNC`）や新席追加（`ADD_SEAT`）のリスナーをグローバル常時待機させ、画面未表示による通信不成立やすれ違いを完全排除。
-  - **ローカルExpoモジュール (`modules/watch-connectivity`)**:
+  - **ローカルExpoモジュール (`modules/watch-connectivity`) ＆ トリプル送信機構**:
     - Apple標準フレームワーク `WatchConnectivity`（`WCSession`）を最新のExpo Modules API（Swift）でネイティブ実装（`ExpoWatchConnectivityModule.swift`）。
     - Objective-Cの `NSObjectProtocol` 適合要件を満たす専用デリゲートクラス `SessionDelegate: NSObject, WCSessionDelegate` を分離実装。
-    - **未アクティベート時保留キュー (`pendingApplicationContext`)**: iPhone起動直後にセッションが準備中の場合でも送信データを安全に保管し、アクティベート完了時に自動でWatchへプッシュ配信するすれ違い防止機構を完備。
-    - `updateApplicationContext`（バックグラウンド・次回起動時同期）と `sendMessage`（起動中リアルタイム即時同期）のハイブリッド送信方式。
+    - **100%届くトリプル送信 (Triple-Dispatch Sync)**:
+      1. `sendMessage`: Watch画面起動中におけるリアルタイム即時送信
+      2. `transferUserInfo`: iPhone/Watchがスリープや画面消灯中、または未到達時でも確実にキューイングするバックグラウンド待機送信（Apple推奨）
+      3. `updateApplicationContext`: 次回アプリ起動時やバックグラウンド復帰時に即座に最新状態を展開する永続コンテキスト更新
+    - Watch側 `WatchSessionManager` に `didReceiveUserInfo` および `sessionReachabilityDidChange` を完全実装し、待機キューからの自動受信と接続状態監視を両立。
+    - Watch画面ナビゲーションバーに「🟢 接続中 / ⚪ 待機中」ステータスドットと、ワンタップで手動同期できる「再同期ボタン（🔄）」を配置。
 - **同期データ構造 (`SYNC_SEATS`)**:
   - `userName`: ログイン中のスタイリスト名（Watch側で自動反映され、「私が担当」などの操作と直結）
+  - `members`: 登録スタッフメンバー一覧（`string[]`、初期値は空 `[]`）
   - `seats`: 客席配列（`id`, `seatNumber`, `seatLabel`, `creatorName`, `totalSeconds`, `targetEndTimestamp`, `isRunning`, `pausedRemainingSeconds`, `helpProcess`, `shampooStaff`, `isRecruiting`, `status`, `checkTargetSeconds`, `checkEndTimestamp`, `checkStaffName`, `isCheckCompleted`, `isCollapsed`）
   - **完全堅牢パース (Robust Parsing)**: Watch側 `SeatTimerItem.init?(dictionary:)` において、`isRunning` のBool優先判定、およびCocoaブリッジの `NSNumber` / `Double` / `Int` 型キャストのフォールバックを完備。
+- **スタッフメンバー管理機能 ＆ 動的スタッフ表示 (Build 30)**:
+  - **初期状態「空」設計**: 架空のサンプルスタッフ（タグチ、佐藤等）を完全撤廃し、初期値は完全な空 `[]`。
+  - **iPhone側メンバー管理UI**: サロンワーク画面ヘッダーに「👥 メンバー」ボタンを配置。タップで開くモーダルからスタッフ名を入力して即時登録・削除可能（ストレージ `@salon_staff_members` に自動永続化）。
+  - **Watch側動的スタッフ表示＆空状態案内**:
+    - メンバーが0人の場合: 「📱 スマホアプリでメンバーを追加してください」「サロン画面の「メンバー」から追加するとここに自動でスタッフが表示されます」の案内カードを親切に常時表示。
+    - メンバー登録時: スマホで登録した実際のスタッフ名を一覧表示し、ワンタップでヘルプ指名が可能。
 - **双方向アクション・イベント連動**:
   - **Watch ➔ iPhone 逆方向アクション連動**:
-    - `REQUEST_SYNC`: Watch側アプリ起動時（`activationDidCompleteWith`）および画面表示時（`.onAppear`）に自動送信。iPhone側から最新の座席データを即時返信（プル型同期）。
+    - `REQUEST_SYNC`: Watch側アプリ起動時（`activationDidCompleteWith`）、画面表示時（`.onAppear`）、および手動再同期ボタンタップ時に自動送信。iPhone側から最新の座席・メンバーデータを即時返信（プル型同期）。
     - `ADD_SEAT`: Watch側の「席追加シート（`AddSeatSheet`）」でタイマースタートした際、iPhone側へ新席データを即座に送信し、iPhone側ステートとAsyncStorageへ自動保存。
     - `START_SHAMPOO` / `FINISH_SHAMPOO`: シャンプー状態の開始・完了
     - `UPDATE_STATUS`: コーミング中、チェック中、放置中などのステータス変更
@@ -1500,9 +1511,6 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **デフォルト（分モード）**: リューズ（Crown）を回すと1分刻み（0〜90分）でスムーズに無段階調整。
     - **秒タップ切替**: 「秒（SS）」をタップするとグリーン枠でハイライトされ、Crownを回すと1秒刻み（0〜59秒）で精密微調整。分タップで即座に分モードへ復帰。
     - 下段に定番ピル（10分、15分、20分など）も併設し、定番タイムのワンタップ即決と無段階微調整を両立。
-- **通信堅牢化・クラッシュセーフティ機構**:
-  - **バックグラウンド待機通信の完全対応 (`transferUserInfo` / `didReceiveUserInfo`)**: iPhoneがスリープや画面消灯中にWatch側から送られた席追加・タイマー操作もキュー経由で安全にiPhoneへ受信・自動反映。
-  - **客席バインディングのクラッシュ耐性 (`binding(for id:)`)**: `fatalError` を完全撤廃し、配列更新やアニメーション中のID不整合時にも安全なフォールバックBindingを返すことで、Apple Watchアプリの突然のクラッシュを100%防止。
 - **空状態（0席時）UI**:
   - iPhone側に席が1つもない場合、Watch側には「📱 iPhoneで席を追加してください」「サロンワーク画面の客席と自動でリアルタイム連動します」と親切なプレースホルダーカードを常時案内。
 

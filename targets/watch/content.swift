@@ -146,6 +146,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     static let shared = WatchSessionManager()
     
     @Published var timers: [SeatTimerItem] = []
+    @Published var members: [String] = []
     @Published var currentUserName: String = "スタイリスト"
     @Published var isConnectedToPhone: Bool = false
     
@@ -168,6 +169,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             if activationState == .activated {
                 self.requestSyncFromPhone()
             }
+        }
+    }
+    
+    func sessionReachabilityDidChange(_ session: WCSession) {
+        DispatchQueue.main.async {
+            self.isConnectedToPhone = session.isReachable
         }
     }
     
@@ -194,10 +201,22 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
     
+    // ★ バックグラウンドキュー経由の確実な受信
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String : Any] = [:]) {
+        DispatchQueue.main.async {
+            self.processReceivedData(userInfo)
+        }
+    }
+    
     func processReceivedData(_ data: [String: Any]) {
         // スタッフ名同期
         if let name = data["userName"] as? String, !name.isEmpty {
             self.currentUserName = name
+        }
+        
+        // 登録メンバー一覧同期
+        if let membersArray = data["members"] as? [String] {
+            self.members = membersArray
         }
         
         // 座席リスト同期
@@ -414,6 +433,22 @@ struct ContentView: View {
             .navigationTitle("共有タイマー")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(action: {
+                        playHaptic(.click)
+                        sessionManager.requestSyncFromPhone()
+                        showNotification(text: "🔄 iPhoneへ同期要求送信", color: Color(hex: "#0A84FF"))
+                    }) {
+                        HStack(spacing: 3) {
+                            Circle()
+                                .fill(sessionManager.isConnectedToPhone ? Color(hex: "#30D158") : Color.gray)
+                                .frame(width: 6, height: 6)
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(Color(hex: "#0A84FF"))
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(action: {
                         playHaptic(.click)
@@ -864,6 +899,7 @@ struct ContentView: View {
         SelectHelpWorkflowSheet(
             item: item,
             currentUserName: currentUserName,
+            staffCandidates: sessionManager.members,
             onAssignStaff: { process, staff in
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
@@ -2761,6 +2797,7 @@ struct SelectHelpWorkflowSheet: View {
     @Environment(\.dismiss) var dismiss
     let item: SeatTimerItem
     let currentUserName: String
+    let staffCandidates: [String]
     let onAssignStaff: (String, String) -> Void // (工程, スタッフ名) -> 相手に通知
     let onRecruitAll: (String) -> Void          // (工程) -> 全員に通知
     
@@ -2775,9 +2812,6 @@ struct SelectHelpWorkflowSheet: View {
         ("チェック", "magnifyingglass", "#30D158"),
         ("その他", "ellipsis.circle", "#8E8E93")
     ]
-    
-    // サロン内のスタッフ候補リスト
-    let staffCandidates = ["タグチ", "佐藤", "ヤマモト", "渡辺", "鈴木"]
     
     var body: some View {
         ScrollView {
@@ -2888,42 +2922,66 @@ struct SelectHelpWorkflowSheet: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 2)
                     
-                    ForEach(staffCandidates, id: \.self) { staff in
-                        let isMe = (staff == currentUserName)
-                        let isSelected = (item.shampooStaff == staff)
-                        
-                        Button(action: {
-                            onAssignStaff(selectedProcess, staff)
-                            dismiss()
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: isMe ? "star.fill" : "person.fill")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
-                                
-                                Text(isMe ? "\(staff)（あなた）" : staff)
-                                    .font(.system(size: 12, weight: isMe ? .heavy : .bold))
-                                
-                                Spacer()
-                                
-                                if isSelected {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 12, weight: .bold))
-                                        .foregroundColor(Color(hex: "#30D158"))
-                                }
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 7)
-                            .background(isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12))
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
-                            )
+                    if staffCandidates.isEmpty {
+                        // ★ メンバーが0人の場合の案内カード
+                        VStack(spacing: 5) {
+                            Image(systemName: "person.crop.circle.badge.plus")
+                                .font(.system(size: 24))
+                                .foregroundColor(Color(hex: "#0A84FF"))
+                                .padding(.top, 2)
+                            Text("📱 スマホアプリでメンバーを追加してください")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.white)
+                                .multilineTextAlignment(.center)
+                            Text("サロン画面の「メンバー」から追加すると\nここに自動でスタッフが表示されます")
+                                .font(.system(size: 8.5))
+                                .foregroundColor(Color(hex: "#8E8E93"))
+                                .multilineTextAlignment(.center)
+                                .lineSpacing(2)
                         }
-                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 6)
+                        .background(Color.white.opacity(0.06))
+                        .cornerRadius(8)
+                    } else {
+                        ForEach(staffCandidates, id: \.self) { staff in
+                            let isMe = (staff == currentUserName)
+                            let isSelected = (item.shampooStaff == staff)
+                            
+                            Button(action: {
+                                onAssignStaff(selectedProcess, staff)
+                                dismiss()
+                            }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: isMe ? "star.fill" : "person.fill")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
+                                    
+                                    Text(isMe ? "\(staff)（あなた）" : staff)
+                                        .font(.system(size: 12, weight: isMe ? .heavy : .bold))
+                                    
+                                    Spacer()
+                                    
+                                    if isSelected {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 12, weight: .bold))
+                                            .foregroundColor(Color(hex: "#30D158"))
+                                    }
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12))
+                                .foregroundColor(.white)
+                                .cornerRadius(8)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
             }

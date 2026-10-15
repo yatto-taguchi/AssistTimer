@@ -32,12 +32,13 @@ if (Platform.OS === 'ios') {
   }
 }
 
-// ★ アプリ全体からWatchへ最新客席データをプッシュ送信するグローバルヘルパー
-export const syncSeatsToWatchGlobal = async (customSeats = null, customUserName = null) => {
+// ★ アプリ全体からWatchへ最新客席データ＆スタッフメンバーをプッシュ送信するグローバルヘルパー
+export const syncSeatsToWatchGlobal = async (customSeats = null, customUserName = null, customMembers = null) => {
   if (Platform.OS !== 'ios' || !WatchConnectivity) return;
   try {
     let seats = customSeats;
     let userName = customUserName;
+    let members = customMembers;
 
     if (!seats) {
       const savedJson = await AsyncStorage.getItem('@salon_saved_seats');
@@ -52,8 +53,18 @@ export const syncSeatsToWatchGlobal = async (customSeats = null, customUserName 
       userName = await AsyncStorage.getItem('@assist_timer_user_name');
     }
 
+    if (!members) {
+      const savedMembersJson = await AsyncStorage.getItem('@salon_staff_members');
+      if (savedMembersJson) {
+        try {
+          members = JSON.parse(savedMembersJson);
+        } catch {}
+      }
+    }
+
     const activeUser = (userName || 'スタイリスト').trim();
-    const finalSeats = Array.isArray(seats) && seats.length > 0 ? seats : [
+    const finalMembers = Array.isArray(members) ? members : [];
+    const finalSeats = Array.isArray(seats) && seats.length > 0 ? seats : (seats === null ? [
       {
         id: 'seat-1',
         seatNumber: 1,
@@ -65,11 +76,12 @@ export const syncSeatsToWatchGlobal = async (customSeats = null, customUserName 
         checkTargetSeconds: 600,
         checkEndTimestamp: Date.now() + 9 * 60 * 1000 + 54 * 1000,
       }
-    ];
+    ] : []);
 
     const watchPayload = {
       type: 'SYNC_SEATS',
       userName: activeUser,
+      members: finalMembers,
       timestamp: Date.now(),
       seats: finalSeats.map((s, index) => {
         let seatNum = s.seatNumber || (index + 1);

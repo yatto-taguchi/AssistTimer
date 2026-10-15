@@ -85,14 +85,39 @@ export const WatchConnectivity = {
     }
   },
 
-  // 両方に送信する便利メソッド（起動中なら即時反映、スリープ中なら次回起動時に同期）
+  transferUserInfo: async (userInfo) => {
+    if (!NativeModule || Platform.OS !== 'ios') return false;
+    try {
+      if (NativeModule.transferUserInfo) {
+        return await NativeModule.transferUserInfo(userInfo);
+      }
+      return false;
+    } catch (e) {
+      console.warn('[WatchConnectivity] transferUserInfo failed:', e);
+      return false;
+    }
+  },
+
+  // ★ トリプル送信メソッド（1: 次回起動時 2: スリープ時待機キュー 3: 起動中即時）
   syncData: async (data) => {
     if (!NativeModule || Platform.OS !== 'ios') return false;
     try {
-      // 1. バックグラウンド永続更新（Apple公式推奨）
+      // 1. 次回起動時・最新状態の永続保存（Apple公式推奨）
       await NativeModule.updateApplicationContext(data).catch(() => {});
-      // 2. 画面起動中であればリアルタイム即時更新
-      if (NativeModule.isReachable && NativeModule.isReachable()) {
+
+      // 2. バックグラウンド・スリープ中待機キューへの確実なキューイング（キュー送信）
+      if (NativeModule.transferUserInfo) {
+        await NativeModule.transferUserInfo(data).catch(() => {});
+      }
+
+      // 3. 画面起動中であればリアルタイム即時送信
+      let reachable = false;
+      try {
+        reachable = typeof NativeModule.isReachable === 'function'
+          ? NativeModule.isReachable()
+          : !!NativeModule.isReachable;
+      } catch {}
+      if (reachable) {
         await NativeModule.sendMessage(data).catch(() => {});
       }
       return true;

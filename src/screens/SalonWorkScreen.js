@@ -86,12 +86,13 @@ export const getDefaultInitialSeats = (staffName = 'スタイリスト') => [
 ];
 
 // ★ Apple Watchへの客席・スタッフ名リアルタイム同期ヘルパー
-export const syncSeatsToWatch = (currentSeats, currentName) => {
+export const syncSeatsToWatch = (currentSeats, currentName, currentMembers = null) => {
   if (Platform.OS !== 'ios') return;
   try {
     const watchPayload = {
       type: 'SYNC_SEATS',
       userName: (currentName || 'スタイリスト').trim(),
+      members: Array.isArray(currentMembers) ? currentMembers : [],
       timestamp: Date.now(),
       seats: (currentSeats || []).map((s, index) => {
         let seatNum = index + 1;
@@ -199,6 +200,11 @@ export default function SalonWorkScreen() {
   // 第三者・代理確認モーダル用ステート
   const [isConfirmProxyModalVisible, setIsConfirmProxyModalVisible] = useState(false);
   const [confirmProxyTargetSeat, setConfirmProxyTargetSeat] = useState(null);
+
+  // ★ サロン所属スタッフメンバー管理（初期値は空 []、スマホ側から追加・編集・削除可能）
+  const [staffMembers, setStaffMembers] = useState([]);
+  const [isMemberManageModalVisible, setIsMemberManageModalVisible] = useState(false);
+  const [inputNewMemberName, setInputNewMemberName] = useState('');
 
   // 施術履歴（タイムライン）手動追加モーダル用ステート
   const [isAddHistoryModalVisible, setIsAddHistoryModalVisible] = useState(false);
@@ -478,10 +484,12 @@ export default function SalonWorkScreen() {
     return () => clearInterval(timer);
   }, []);
 
-  // サロン内で利用可能なスタッフ候補リスト（現在登録中のメンバー＋ユーザー名）
+  // サロン内で利用可能なスタッフ候補リスト（登録メンバーリストを優先、初期値は空）
   const salonStaffList = useMemo(() => {
     const list = new Set();
-    if (userName) list.add(userName);
+    staffMembers.forEach((m) => {
+      if (m && m.trim()) list.add(m.trim());
+    });
     seats.forEach((s) => {
       if (s.colorStaffName) list.add(s.colorStaffName);
       if (s.assistantStaffName && s.assistantStaffName !== 'ヘルプなし' && s.assistantStaffName !== 'none') {
@@ -489,14 +497,14 @@ export default function SalonWorkScreen() {
       }
     });
     return Array.from(list);
-  }, [userName, seats]);
+  }, [staffMembers, seats]);
 
   // ストレージ保存ヘルパー
   const saveSeatsToStorage = async (newSeats) => {
     try {
       await AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(newSeats));
-      // ★ Apple Watchへ即時同期
-      syncSeatsToWatch(newSeats, userName);
+      // ★ Apple Watchへ即時同期 (登録メンバーも含めて送信)
+      syncSeatsToWatch(newSeats, userName, staffMembers);
     } catch (e) {
       console.warn('Failed to save seats to AsyncStorage', e);
     }
@@ -749,12 +757,12 @@ export default function SalonWorkScreen() {
     }
   }, [userName]);
 
-  // ★ seats が更新された際、または初回ロード完了時に Watch へ最新データを同期
+  // ★ seats または staffMembers が更新された際、Watch へ最新データを同期
   useEffect(() => {
-    if (Platform.OS === 'ios' && seats && seats.length > 0) {
-      syncSeatsToWatch(seats, userName);
+    if (Platform.OS === 'ios' && seats) {
+      syncSeatsToWatch(seats, userName, staffMembers);
     }
-  }, [seats, userName]);
+  }, [seats, userName, staffMembers]);
 
   const loadInitialData = async () => {
     try {
@@ -816,8 +824,24 @@ export default function SalonWorkScreen() {
         }
       }
       setSeats(loadedSeats);
-      // ★ 初回ロード時にもWatchへ最新客席データをプッシュ
-      syncSeatsToWatch(loadedSeats, activeUserName);
+
+      // 3. スタッフメンバー一覧の読み込み（初期値は空 []）
+      const savedMembersJson = await AsyncStorage.getItem('@salon_staff_members');
+      let loadedMembers = [];
+      if (savedMembersJson) {
+        try {
+          const parsed = JSON.parse(savedMembersJson);
+          if (Array.isArray(parsed)) {
+            loadedMembers = parsed;
+          }
+        } catch (e) {
+          console.warn('Failed to parse saved staff members', e);
+        }
+      }
+      setStaffMembers(loadedMembers);
+
+      // ★ 初回ロード時にもWatchへ最新客席データ＆メンバーをプッシュ
+      syncSeatsToWatch(loadedSeats, activeUserName, loadedMembers);
     } catch (e) {
       console.warn('Failed to load initial salon data', e);
     }
@@ -856,6 +880,55 @@ export default function SalonWorkScreen() {
     } catch (e) {
       console.warn('Failed to save user name', e);
     }
+  };
+
+  // ★ スタッフメンバーの追加（スマホ側で追加・即座にApple Watchへ同期）
+  const handleAddStaffMember = async () => {
+    const trimmed = inputNewMemberName.trim();
+    if (!trimmed) return;
+    if (staffMembers.includes(trimmed)) {
+      Alert.alert('確認', 'このスタッフ名は既に登録されています。');
+      return;
+    }
+    const updated = [...staffMembers, trimmed];
+    setStaffMembers(updated);
+    setInputNewMemberName('');
+    try {
+      await AsyncStorage.setItem('@salon_staff_members', JSON.stringify(updated));
+      // Apple Watchへ即時同期
+      syncSeatsToWatch(seats, userName, updated);
+    } catch (e) {
+      console.warn('Failed to save staff members', e);
+    }
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate(40);
+    }
+  };
+
+  // ★ スタッフメンバーの削除
+  const handleRemoveStaffMember = (memberToRemove) => {
+    Alert.alert(
+      'メンバーの削除',
+      `「${memberToRemove}」さんをスタッフ一覧から削除しますか？`,
+      [
+        { text: 'キャンセル', style: 'cancel' },
+        {
+          text: '削除',
+          style: 'destructive',
+          onPress: async () => {
+            const updated = staffMembers.filter((m) => m !== memberToRemove);
+            setStaffMembers(updated);
+            try {
+              await AsyncStorage.setItem('@salon_staff_members', JSON.stringify(updated));
+              // Apple Watchへ即時同期
+              syncSeatsToWatch(seats, userName, updated);
+            } catch (e) {
+              console.warn('Failed to save staff members after remove', e);
+            }
+          },
+        },
+      ]
+    );
   };
 
   // サロン・グループ切り替え
@@ -2669,17 +2742,31 @@ export default function SalonWorkScreen() {
           </View>
         </TouchableOpacity>
 
-        {/* 席追加（席マスターを増やす）ボタン */}
-        <TouchableOpacity
-          style={[styles.addSeatHeaderButton, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder }]}
-          onPress={() => {
-            setNewSeatName(`${seats.length + 1}番席`);
-            setIsAddSeatModalVisible(true);
-          }}
-        >
-          <Ionicons name="add" size={17} color={theme.accent} />
-          <Text style={[styles.addSeatHeaderText, { color: theme.accent }]}>席追加</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          {/* ★ メンバー管理ボタン */}
+          <TouchableOpacity
+            style={[styles.addSeatHeaderButton, { backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7', borderColor: theme.cardBorder }]}
+            onPress={() => setIsMemberManageModalVisible(true)}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="people" size={15} color={theme.textPrimary} />
+            <Text style={[styles.addSeatHeaderText, { color: theme.textPrimary, marginLeft: 2 }]}>
+              メンバー{staffMembers.length > 0 ? ` (${staffMembers.length})` : ''}
+            </Text>
+          </TouchableOpacity>
+
+          {/* 席追加（席マスターを増やす）ボタン */}
+          <TouchableOpacity
+            style={[styles.addSeatHeaderButton, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder }]}
+            onPress={() => {
+              setNewSeatName(`${seats.length + 1}番席`);
+              setIsAddSeatModalVisible(true);
+            }}
+          >
+            <Ionicons name="add" size={17} color={theme.accent} />
+            <Text style={[styles.addSeatHeaderText, { color: theme.accent }]}>席追加</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* 2. 最上部・メインタイマー連動ウィジェット (HomeScreen連携) */}
@@ -5680,34 +5767,42 @@ export default function SalonWorkScreen() {
                   <Text style={[styles.helpSectionLabel, { color: theme.textTertiary, marginTop: 8, marginBottom: 6 }]}>
                     スタッフ一覧から指名（タップで指定）
                   </Text>
-                  <View style={styles.staffChipsContainer}>
-                    {salonStaffList.map((staff) => {
-                      const isCurrent = helpAssignTargetSeat?.assistantStaffName === staff;
-                      return (
-                        <TouchableOpacity
-                          key={staff}
-                          style={[
-                            styles.staffChip,
-                            {
-                              backgroundColor: isCurrent ? theme.accent : (isEcoMode ? '#2C2C2E' : '#F2F2F7'),
-                              borderColor: isCurrent ? theme.accent : theme.cardBorder,
-                            },
-                          ]}
-                          onPress={() => handleAssignAssistant(staff, selectedHelpAction)}
-                          activeOpacity={0.7}
-                        >
-                          <Text
+                  {salonStaffList.length === 0 ? (
+                    <View style={{ paddingVertical: 12, alignItems: 'center' }}>
+                      <Text style={{ fontSize: 12, color: theme.textTertiary, textAlign: 'center', lineHeight: 18 }}>
+                        スタッフがまだ登録されていません{'\n'}ヘッダーの「メンバー」ボタンからスタッフを追加できます
+                      </Text>
+                    </View>
+                  ) : (
+                    <View style={styles.staffChipsContainer}>
+                      {salonStaffList.map((staff) => {
+                        const isCurrent = helpAssignTargetSeat?.assistantStaffName === staff;
+                        return (
+                          <TouchableOpacity
+                            key={staff}
                             style={[
-                              styles.staffChipText,
-                              { color: isCurrent ? '#FFFFFF' : theme.textPrimary, fontWeight: isCurrent ? '700' : '600' },
+                              styles.staffChip,
+                              {
+                                backgroundColor: isCurrent ? theme.accent : (isEcoMode ? '#2C2C2E' : '#F2F2F7'),
+                                borderColor: isCurrent ? theme.accent : theme.cardBorder,
+                              },
                             ]}
+                            onPress={() => handleAssignAssistant(staff, selectedHelpAction)}
+                            activeOpacity={0.7}
                           >
-                            🤝 {staff} {isCurrent ? '（現在）' : ''}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
+                            <Text
+                              style={[
+                                styles.staffChipText,
+                                { color: isCurrent ? '#FFFFFF' : theme.textPrimary, fontWeight: isCurrent ? '700' : '600' },
+                              ]}
+                            >
+                              🤝 {staff} {isCurrent ? '（現在）' : ''}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  )}
 
                   {/* ③ 直接入力して指名 */}
                   <Text style={[styles.helpSectionLabel, { color: theme.textTertiary, marginTop: 10 }]}>
@@ -5842,37 +5937,45 @@ export default function SalonWorkScreen() {
               <Text style={[styles.helpSectionLabel, { color: theme.textTertiary, marginTop: 6, marginBottom: 6 }]}>
                 サロン参加スタッフから指名（タップで指定）
               </Text>
-              <View style={styles.staffChipsContainer}>
-                {salonStaffList.map((staff) => {
-                  const isCurrent = checkStaffTargetSeat?.checkStaffName === staff;
-                  return (
-                    <TouchableOpacity
-                      key={staff}
-                      style={[
-                        styles.staffChip,
-                        {
-                          backgroundColor: isCurrent ? '#10B981' : (isEcoMode ? '#2C2C2E' : '#F2F2F7'),
-                          borderColor: isCurrent ? '#10B981' : theme.cardBorder,
-                        },
-                      ]}
-                      onPress={() => handleAssignCheckStaff(checkStaffTargetSeat?.id, staff)}
-                      activeOpacity={0.7}
-                    >
-                      <Text
+              {salonStaffList.length === 0 ? (
+                <View style={{ paddingVertical: 12, alignItems: 'center' }}>
+                  <Text style={{ fontSize: 12, color: theme.textTertiary, textAlign: 'center', lineHeight: 18 }}>
+                    スタッフがまだ登録されていません{'\n'}ヘッダーの「メンバー」ボタンからスタッフを追加できます
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.staffChipsContainer}>
+                  {salonStaffList.map((staff) => {
+                    const isCurrent = checkStaffTargetSeat?.checkStaffName === staff;
+                    return (
+                      <TouchableOpacity
+                        key={staff}
                         style={[
-                          styles.staffChipText,
+                          styles.staffChip,
                           {
-                            color: isCurrent ? '#FFFFFF' : theme.textPrimary,
-                            fontWeight: isCurrent ? '700' : '600',
+                            backgroundColor: isCurrent ? '#10B981' : (isEcoMode ? '#2C2C2E' : '#F2F2F7'),
+                            borderColor: isCurrent ? '#10B981' : theme.cardBorder,
                           },
                         ]}
+                        onPress={() => handleAssignCheckStaff(checkStaffTargetSeat?.id, staff)}
+                        activeOpacity={0.7}
                       >
-                        🔍 {staff} {isCurrent ? '（現在）' : ''}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
+                        <Text
+                          style={[
+                            styles.staffChipText,
+                            {
+                              color: isCurrent ? '#FFFFFF' : theme.textPrimary,
+                              fontWeight: isCurrent ? '700' : '600',
+                            },
+                          ]}
+                        >
+                          🔍 {staff} {isCurrent ? '（現在）' : ''}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              )}
 
               {/* ③ 直接名前入力フォーム */}
               <Text style={[styles.helpSectionLabel, { color: theme.textTertiary, marginTop: 12 }]}>
@@ -6371,6 +6474,123 @@ export default function SalonWorkScreen() {
             </TouchableOpacity>
           </View>
         </TouchableOpacity>
+      </Modal>
+
+      {/* ★ スタッフメンバー管理モーダル */}
+      <Modal
+        visible={isMemberManageModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsMemberManageModalVisible(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalOverlay}
+        >
+          <View style={[styles.modalContent, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, maxHeight: '80%' }]}>
+            <View style={styles.modalHeaderRow}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Ionicons name="people" size={20} color={theme.accent} style={{ marginRight: 8 }} />
+                <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>スタッフメンバー管理</Text>
+              </View>
+              <TouchableOpacity onPress={() => setIsMemberManageModalVisible(false)}>
+                <Ionicons name="close" size={24} color={theme.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={{ fontSize: 12, color: theme.textSecondary, marginBottom: 12, lineHeight: 17 }}>
+              サロン内でヘルプやチェックを担当するスタッフ名を登録します。{'\n'}
+              Apple Watchのスタッフ選択にも自動でリアルタイム連動します。
+            </Text>
+
+            {/* スタッフ追加入力欄 */}
+            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 16 }}>
+              <TextInput
+                style={[
+                  styles.modalInput,
+                  {
+                    flex: 1,
+                    backgroundColor: theme.inputBg,
+                    color: theme.textPrimary,
+                    borderColor: theme.cardBorder,
+                    marginBottom: 0,
+                  }
+                ]}
+                placeholder="スタッフ名 (例: 田中)"
+                placeholderTextColor={theme.textTertiary}
+                value={inputNewMemberName}
+                onChangeText={setInputNewMemberName}
+                onSubmitEditing={handleAddStaffMember}
+                returnKeyType="done"
+              />
+              <TouchableOpacity
+                style={{
+                  backgroundColor: theme.accent,
+                  paddingHorizontal: 16,
+                  borderRadius: 10,
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                }}
+                onPress={handleAddStaffMember}
+              >
+                <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 13 }}>＋追加</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* 登録済みメンバーリスト */}
+            <Text style={{ fontSize: 12, fontWeight: '700', color: theme.textSecondary, marginBottom: 8 }}>
+              登録メンバー一覧 ({staffMembers.length}名)
+            </Text>
+
+            <ScrollView style={{ maxHeight: 220 }} showsVerticalScrollIndicator={false}>
+              {staffMembers.length === 0 ? (
+                <View style={{ paddingVertical: 24, alignItems: 'center' }}>
+                  <Ionicons name="person-add-outline" size={32} color={theme.textTertiary} style={{ marginBottom: 6 }} />
+                  <Text style={{ fontSize: 12, color: theme.textTertiary, textAlign: 'center', lineHeight: 18 }}>
+                    まだメンバーが登録されていません{'\n'}上の入力欄からスタッフを追加してください
+                  </Text>
+                </View>
+              ) : (
+                <View style={{ gap: 8 }}>
+                  {staffMembers.map((member, idx) => (
+                    <View
+                      key={`${member}-${idx}`}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        paddingHorizontal: 12,
+                        paddingVertical: 10,
+                        backgroundColor: theme.inputBg,
+                        borderRadius: 8,
+                        borderColor: theme.cardBorder,
+                        borderWidth: 1,
+                      }}
+                    >
+                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                        <Ionicons name="person" size={14} color={theme.accent} style={{ marginRight: 8 }} />
+                        <Text style={{ fontSize: 14, fontWeight: '600', color: theme.textPrimary }}>{member}</Text>
+                      </View>
+                      <TouchableOpacity
+                        onPress={() => handleRemoveStaffMember(member)}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      >
+                        <Ionicons name="trash-outline" size={18} color={theme.danger} />
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </ScrollView>
+
+            <TouchableOpacity
+              style={[styles.modalButtonPrimary, { backgroundColor: theme.accent, marginTop: 16 }]}
+              onPress={() => setIsMemberManageModalVisible(false)}
+            >
+              <Text style={styles.modalButtonPrimaryText}>完了</Text>
+            </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
