@@ -84,7 +84,7 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
-      guard session.isPaired, session.isWatchAppInstalled else {
+      guard session.isPaired else {
         promise.resolve(false)
         return
       }
@@ -94,7 +94,8 @@ public class ExpoWatchConnectivityModule: Module {
         self.pendingApplicationContext = nil
         promise.resolve(true)
       } catch {
-        promise.reject("E_UPDATE_FAILED", error.localizedDescription)
+        print("[ExpoWatchConnectivity] updateApplicationContext warning: \(error.localizedDescription)")
+        promise.resolve(false)
       }
     }
 
@@ -114,13 +115,13 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
-      guard session.isWatchAppInstalled else {
-        promise.reject("E_NOT_INSTALLED", "Watch app is not installed")
-        return
-      }
-
+      // ★ isReachable が true（Watchが目の前で起動中）であれば、isWatchAppInstalled判定遅延に関わらず直ちに送信
       guard session.isReachable else {
-        promise.reject("E_NOT_REACHABLE", "Apple Watch is not currently reachable")
+        if !session.isWatchAppInstalled {
+          promise.reject("E_NOT_INSTALLED", "Watch app is not installed")
+        } else {
+          promise.reject("E_NOT_REACHABLE", "Apple Watch is not currently reachable")
+        }
         return
       }
 
@@ -192,7 +193,7 @@ public class ExpoWatchConnectivityModule: Module {
   }
 
   fileprivate func flushPendingApplicationContext(session: WCSession) {
-    guard session.isPaired, session.isWatchAppInstalled else { return }
+    guard session.isPaired else { return }
     guard let pending = self.pendingApplicationContext else { return }
     do {
       try session.updateApplicationContext(pending)

@@ -91,8 +91,8 @@ let _cachedStaffMembers = [];
 let _syncDebounceTimer = null;
 let _pendingWatchPayload = null;
 
-// ★ Apple Watchへの客席・スタッフ名リアルタイム同期ヘルパー（デバウンスによる安全一元送信）
-export const syncSeatsToWatch = async (currentSeats, currentName, currentMembers = null) => {
+// ★ Apple Watchへの客席・スタッフ名リアルタイム同期ヘルパー（即時送信対応＆デバウンス両立）
+export const syncSeatsToWatch = async (currentSeats, currentName, currentMembers = null, options = {}) => {
   if (Platform.OS !== 'ios') return;
   try {
     let finalMembers = currentMembers;
@@ -150,6 +150,16 @@ export const syncSeatsToWatch = async (currentSeats, currentName, currentMembers
         };
       }),
     };
+
+    if (options.immediate) {
+      if (_syncDebounceTimer) {
+        clearTimeout(_syncDebounceTimer);
+        _syncDebounceTimer = null;
+      }
+      _pendingWatchPayload = null;
+      WatchConnectivity.syncData(watchPayload).catch(() => {});
+      return;
+    }
 
     _pendingWatchPayload = watchPayload;
     if (_syncDebounceTimer) {
@@ -562,7 +572,7 @@ export default function SalonWorkScreen() {
     // ① 同期リクエスト (Watch側から「最新の客席データをちょうだい」と要求された時)
     if (action === 'REQUEST_SYNC') {
       setSeats((currentSeats) => {
-        syncSeatsToWatch(currentSeats, userName, staffMembers);
+        syncSeatsToWatch(currentSeats, userName, staffMembers, { immediate: true });
         return currentSeats;
       });
       return;
@@ -875,8 +885,18 @@ export default function SalonWorkScreen() {
       }
       setStaffMembers(loadedMembers);
 
-      // ★ 初回ロード時にもWatchへ最新客席データ＆メンバーをプッシュ
-      syncSeatsToWatch(loadedSeats, activeUserName, loadedMembers);
+      // ★ 初回ロード時にもWatchへ最新客席データ＆メンバーを即時プッシュ！
+      syncSeatsToWatch(loadedSeats, activeUserName, loadedMembers, { immediate: true });
+
+      // ★ Bluetooth接続確立のタイムラグ（1〜2.5秒）をカバーする全自動バックアップ再送
+      if (Platform.OS === 'ios') {
+        setTimeout(() => {
+          syncSeatsToWatch(loadedSeats, activeUserName, loadedMembers, { immediate: true });
+        }, 1200);
+        setTimeout(() => {
+          syncSeatsToWatch(loadedSeats, activeUserName, loadedMembers, { immediate: true });
+        }, 2500);
+      }
     } catch (e) {
       console.warn('Failed to load initial salon data', e);
     }

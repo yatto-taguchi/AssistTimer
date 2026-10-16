@@ -1461,7 +1461,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **ダイレクト操作ジャンプ**:
       - サムネイルタイルをタップすると、その席のタイマー操作画面（`TimeActionSheet`）へ即座にアクセス可能。
 
-### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-34)
+### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-35)
 - **概要**:
   - iPhoneアプリ（`SalonWorkScreen`）とApple Watchアプリ（`ContentView`）間の完全リアルタイム双方向同期を実現。
   - プロトタイプ時のデモ固定4席を完全撤廃し、iPhone側で管理されている実際の客席データとスタッフ名を1対1で完全連動。
@@ -1539,4 +1539,10 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **`KeyboardAvoidingView` インポート欠落の解消**: `SalonWorkScreen.js` のスタッフメンバー管理モーダルで使用していた `<KeyboardAvoidingView>` が `react-native` からインポートされておらず、サロンタブ表示時に `ReferenceError` で即死クラッシュしていた問題を完全解消。
     - **初期同期ガードの強化**: 初回レンダリング時（AsyncStorageロード前の空配列時）の不要なWatch送信をスキップし、データ読み込み完了後に確実に同期する安全ガードを配置。
     - **全ファイルAST静的検証による潜在バグの事前根絶**: `SettingsScreen.js` の未インポート `Alert` や `RecordsScreen.js` の未定義 `alert` 呼び出しも完全修正し、プロジェクト全JavaScriptファイルにおいて未定義変数が「0件（完全クリーン）」であることを機械的に保証。
+  - **完全全自動・リアルタイム双方向同期アーキテクチャ (Build 35)**:
+    - **過剰ガードの撤廃 ＆ Reachable即時送信の確立 (`ExpoWatchConnectivityModule.swift`)**: `session.isReachable`（相手のWatchが起動中）であれば、iOS側の遅延バグのある `isWatchAppInstalled` ガードで弾くことなく即座に `sendMessage` を送信。`updateApplicationContext` も `isPaired` ガードのみで安全に実行。
+    - **Expo SDK 54 完全適合イベントリスナーブリッジ (`index.js`)**: `NativeModule` 自体の EventEmitter 機能を直接購読する最新仕様に最適化し、Watch から iPhone へのアクション通知（`REQUEST_SYNC`、`ADD_SEAT` など）の受信切断を根本解決。
+    - **Watch側座席配列パースの完全堅牢化 (`content.swift`)**: `data["seats"]` の型ゆらぎによる配列消失を解消し、1席ずつ安全に取り出す堅牢パース構文を採用。
+    - **画面表示時の自動多重プッシュ ＆ 接続時自動要求 (`SalonWorkScreen.js` & `content.swift`)**: サロン画面表示時に即座プッシュに加え 1.2秒・2.5秒後にも自動バックアップ送信。Watch側も接続確立（緑色点灯）時に自動で `REQUEST_SYNC` を要求し、iPhone が 0秒（デバウンスなし）で即時返答。手動ボタンを一切押さずに「開くだけ・操作するだけで勝手に完全自動同期」を完全確立。
+
 

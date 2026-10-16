@@ -181,6 +181,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     func sessionReachabilityDidChange(_ session: WCSession) {
         DispatchQueue.main.async {
             self.isConnectedToPhone = session.isReachable
+            // ★ iPhoneとの接続が確立された瞬間（緑色点灯時）、自動で最新データを要求！手動タップ不要で完全自動同期
+            if session.isReachable {
+                self.requestSyncFromPhone()
+            }
         }
     }
     
@@ -220,14 +224,20 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             self.currentUserName = name
         }
         
-        // 登録メンバー一覧同期
-        if let membersArray = data["members"] as? [String] {
+        // 登録メンバー一覧同期（型ゆらぎを許容して確実にパース）
+        if let membersArray = (data["members"] as? [String]) ?? (data["members"] as? [Any])?.compactMap({ $0 as? String }) {
             self.members = membersArray
         }
         
-        // 座席リスト同期
-        if let seatsArray = data["seats"] as? [[String: Any]] {
-            let parsed = seatsArray.compactMap { SeatTimerItem(dictionary: $0) }
+        // 座席リスト同期（型ゆらぎを許容して1席ずつ確実にパース）
+        let rawSeats = (data["seats"] as? [Any]) ?? (data["seats"] as? [[String: Any]])
+        if let rawSeats = rawSeats {
+            let parsed = rawSeats.compactMap { elem -> SeatTimerItem? in
+                if let dict = elem as? [String: Any] {
+                    return SeatTimerItem(dictionary: dict)
+                }
+                return nil
+            }
             self.timers = parsed
         }
     }

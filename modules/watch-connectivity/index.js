@@ -8,12 +8,28 @@ if (Platform.OS === 'ios') {
   try {
     NativeModule = requireNativeModule('ExpoWatchConnectivity');
     if (NativeModule) {
-      emitter = new EventEmitter(NativeModule);
+      emitter = typeof NativeModule.addListener === 'function'
+        ? NativeModule
+        : new EventEmitter(NativeModule);
     }
   } catch (e) {
     console.warn('[ExpoWatchConnectivity] Native module not found or failed to load:', e);
   }
 }
+
+const safeAddListener = (eventName, callback) => {
+  if (NativeModule && typeof NativeModule.addListener === 'function') {
+    try {
+      return NativeModule.addListener(eventName, callback);
+    } catch {}
+  }
+  if (emitter && typeof emitter.addListener === 'function') {
+    try {
+      return emitter.addListener(eventName, callback);
+    } catch {}
+  }
+  return { remove: () => {} };
+};
 
 export const WatchConnectivity = {
   isSupported: () => {
@@ -79,8 +95,7 @@ export const WatchConnectivity = {
     try {
       return await NativeModule.sendMessage(message);
     } catch (e) {
-      // Watchがスリープ/非表示時はsendMessageが届かないことがあるため、warn程度に抑える
-      console.log('[WatchConnectivity] sendMessage failed (watch might be sleeping):', e?.message);
+      console.log('[WatchConnectivity] sendMessage failed:', e?.message);
       return null;
     }
   },
@@ -89,8 +104,7 @@ export const WatchConnectivity = {
     if (!NativeModule || Platform.OS !== 'ios') return false;
     try {
       const isPaired = typeof NativeModule.isPaired === 'function' ? NativeModule.isPaired() : !!NativeModule.isPaired;
-      const isInstalled = typeof NativeModule.isWatchAppInstalled === 'function' ? NativeModule.isWatchAppInstalled() : !!NativeModule.isWatchAppInstalled;
-      if (!isPaired || !isInstalled) {
+      if (!isPaired) {
         return false;
       }
       if (NativeModule.transferUserInfo) {
@@ -103,14 +117,11 @@ export const WatchConnectivity = {
     }
   },
 
-  // ★ 安定同期メソッド（1: 次回起動時最新状態保存 updateApplicationContext / 2: 起動中リアルタイム即時送信 sendMessage）
+  // ★ 安定・リアルタイム完全両立同期メソッド（最優先リアルタイム即時送信 ＋ 次回起動・消灯時永続保存）
   syncData: async (data) => {
     if (!NativeModule || Platform.OS !== 'ios') return false;
     try {
-      // 1. 次回起動時・最新状態の永続保存（Apple公式推奨・消灯スリープ復帰時にも自動同期）
-      await NativeModule.updateApplicationContext(data).catch(() => {});
-
-      // 2. 画面起動中であればリアルタイム即時送信
+      // 1. Watch画面起動中であればリアルタイム即時送信を最優先実行！
       let reachable = false;
       try {
         reachable = typeof NativeModule.isReachable === 'function'
@@ -118,8 +129,15 @@ export const WatchConnectivity = {
           : !!NativeModule.isReachable;
       } catch {}
       if (reachable) {
-        await NativeModule.sendMessage(data).catch(() => {});
+        try {
+          await NativeModule.sendMessage(data);
+        } catch (sendErr) {
+          console.log('[WatchConnectivity] immediate sendMessage skipped/retry via context:', sendErr?.message);
+        }
       }
+
+      // 2. 次回起動時・消灯スリープ復帰用の最新状態永続保存（Apple公式推奨）
+      await NativeModule.updateApplicationContext(data).catch(() => {});
       return true;
     } catch (e) {
       console.warn('[WatchConnectivity] syncData error:', e);
@@ -128,33 +146,27 @@ export const WatchConnectivity = {
   },
 
   addMessageListener: (callback) => {
-    if (!emitter) return { remove: () => {} };
-    const subscription = emitter.addListener('onMessageReceived', (event) => {
+    return safeAddListener('onMessageReceived', (event) => {
       if (event && event.message) {
         callback(event.message);
       }
     });
-    return subscription;
   },
 
   addApplicationContextListener: (callback) => {
-    if (!emitter) return { remove: () => {} };
-    const subscription = emitter.addListener('onApplicationContextReceived', (event) => {
+    return safeAddListener('onApplicationContextReceived', (event) => {
       if (event && event.context) {
         callback(event.context);
       }
     });
-    return subscription;
   },
 
   addUserInfoListener: (callback) => {
-    if (!emitter) return { remove: () => {} };
-    const subscription = emitter.addListener('onUserInfoReceived', (event) => {
+    return safeAddListener('onUserInfoReceived', (event) => {
       if (event && event.userInfo) {
         callback(event.userInfo);
       }
     });
-    return subscription;
   },
 };
 
