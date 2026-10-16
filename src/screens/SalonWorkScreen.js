@@ -13,6 +13,7 @@ import {
   Vibration,
   LayoutAnimation,
   Share,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -764,7 +765,9 @@ export default function SalonWorkScreen() {
   useEffect(() => {
     if (Platform.OS === 'ios') {
       WatchConnectivity.activate().then(() => {
-        syncSeatsToWatch(seats, userName, staffMembers);
+        if (Array.isArray(seats) && seats.length > 0) {
+          syncSeatsToWatch(seats, userName, staffMembers);
+        }
       }).catch(() => {});
 
       const subMsg = WatchConnectivity.addMessageListener((message) => {
@@ -791,7 +794,7 @@ export default function SalonWorkScreen() {
 
   // ★ seats または staffMembers が更新された際、Watch へ最新データを同期
   useEffect(() => {
-    if (Platform.OS === 'ios' && seats) {
+    if (Platform.OS === 'ios' && Array.isArray(seats) && seats.length > 0) {
       syncSeatsToWatch(seats, userName, staffMembers);
     }
   }, [seats, userName, staffMembers]);

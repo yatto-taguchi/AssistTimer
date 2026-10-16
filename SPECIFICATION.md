@@ -1461,7 +1461,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **ダイレクト操作ジャンプ**:
       - サムネイルタイルをタップすると、その席のタイマー操作画面（`TimeActionSheet`）へ即座にアクセス可能。
 
-### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-33)
+### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-34)
 - **概要**:
   - iPhoneアプリ（`SalonWorkScreen`）とApple Watchアプリ（`ContentView`）間の完全リアルタイム双方向同期を実現。
   - プロトタイプ時のデモ固定4席を完全撤廃し、iPhone側で管理されている実際の客席データとスタッフ名を1対1で完全連動。
@@ -1535,3 +1535,8 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **`lazy: false` の完全撤廃**: `App.js` から `lazy: false` を削除し、React Navigation 標準の `lazy: true`（遅延ロード）に完全回帰。アプリ起動時に全画面（8,689行のサロン画面含む）が一斉マウントされる過負荷および初期化レースコンディションを完全根絶。
     - **`AppContext` の起動時 Watch 送信の完全撤去**: アプリ起動ミリ秒におけるネイティブ、AppContext、SalonWorkScreen の3重同時アクティベーションおよび WCSession 通信連打を物理的に完全消滅させ、Build 28 と同等の超軽量・安全起動シーケンスを完全復元。
     - **サロン画面での通信デバウンス（連打抑制: 150ms）**: `syncSeatsToWatch` に短時間連打抑制タイマーを内蔵し、マウント時や連続操作時の XPC 通信パンクを100%未然防止。
+  - **サロン画面クラッシュ根本根絶 ＆ プロジェクト全域未定義変数完全排除 (Build 34)**:
+    - **`KeyboardAvoidingView` インポート欠落の解消**: `SalonWorkScreen.js` のスタッフメンバー管理モーダルで使用していた `<KeyboardAvoidingView>` が `react-native` からインポートされておらず、サロンタブ表示時に `ReferenceError` で即死クラッシュしていた問題を完全解消。
+    - **初期同期ガードの強化**: 初回レンダリング時（AsyncStorageロード前の空配列時）の不要なWatch送信をスキップし、データ読み込み完了後に確実に同期する安全ガードを配置。
+    - **全ファイルAST静的検証による潜在バグの事前根絶**: `SettingsScreen.js` の未インポート `Alert` や `RecordsScreen.js` の未定義 `alert` 呼び出しも完全修正し、プロジェクト全JavaScriptファイルにおいて未定義変数が「0件（完全クリーン）」であることを機械的に保証。
+

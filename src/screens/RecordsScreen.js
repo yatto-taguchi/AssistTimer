@@ -13,6 +13,7 @@ import {
   LayoutAnimation,
   Platform,
   UIManager,
+  Alert,
 } from 'react-native';
 const { width: screenWidth } = Dimensions.get('window');
 import { useIsFocused } from '@react-navigation/native';
@@ -131,7 +132,7 @@ export default function RecordsScreen() {
   const handleChangePhoto = async (recordId) => {
     const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (permissionResult.granted === false) {
-      alert("写真へのアクセス許可が必要です。");
+      Alert.alert("アクセス許可", "写真へのアクセス許可が必要です。");
       return;
     }
 

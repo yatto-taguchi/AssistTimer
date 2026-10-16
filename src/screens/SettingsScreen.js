@@ -3,7 +3,7 @@ import {
   StyleSheet, Text, View, Switch, TouchableOpacity, Modal, 
   TextInput, KeyboardAvoidingView, Platform, ScrollView,
   LayoutAnimation, UIManager, Vibration, Linking, Animated,
-  Image, Dimensions 
+  Image, Dimensions, Alert 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
