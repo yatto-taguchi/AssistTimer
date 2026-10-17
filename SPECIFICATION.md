@@ -950,6 +950,8 @@
 | `isNormalIndicatorEnabled`| boolean| 通常モード時のタイマーリング表示（カウントダウンおよび超過カウントアップ両対応） |
 | `alarmSoundType` | string | アラーム音の種類 (`kitchen` / `fast` / `digital` / `buzzer` / `bell` / `gong` / `none`) |
 | `isAlarmSoundEnabled` | boolean | アラーム音全体のマスター有効/無効 |
+| `isWatchAlarmSoundEnabled` | boolean | Apple Watch 側アラーム音（既定 false＝振動のみ） |
+| `isPhoneAlarmForWatchSeats` | boolean | Watch 連動中のサロン席も iPhone で鳴らす（既定 false＝Watch のみ） |
 | `isVoiceMasterEnabled` | boolean | 音声アナウンス全体のマスター有効/無効 |
 | `isCountUpEnabled` | boolean | カウントアップ（超過時間計測）有効/無効 |
 | `playsInSilentMode` | boolean | マナーモード時のアラーム・音声再生有効/無効 |
@@ -1582,5 +1584,20 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **サロン画面 (`SalonWorkScreen.js`)**: `isDataLoaded`（`loadInitialData` の `finally` で true）が立ってから `subscribeActions` を開始。読み込み前の空の席一覧に操作が適用され、その後の読み込みで上書きされて消える問題を防止。接続時の自動送信（`onStatusChanged`）も同じタイミングで開始。
     - **診断表示**: 「受信(画面)」を「受信(JS)」に改称し、保留中の件数を「画面準備待ち ◯件」として表示。
     - **残存課題**: サロン画面を一度も開いていない間は、Watch からの `REQUEST_SYNC` への返信（最新席データ送信）は保留され、サロン画面を開いた時点で実行される（その間 Watch は前回保存された applicationContext を表示）。
+  - **止めるまで鳴るアラーム（iPhone: AlarmKit / Watch: スマートアラーム）＋設定追加 (Build 38)**:
+    - **iPhone (`modules/alarm-kit`, `src/utils/alarmScheduler.js`)**: iOS 26 の AlarmKit をローカル Expo モジュール `ExpoAlarmKit` で呼び出し、タイマー終了時刻に純正アラームを予約。画面ロック中・バックグラウンド・マナーモード中でも、ユーザーが「停止」するまで鳴り続ける。キー文字列から SHA256 で固定 UUID を生成し、`setAlarms(source, 予定一覧)` が前回との差分だけ予約・取り消しする（操作は直列化）。初回予約時に許可ダイアログを表示（`NSAlarmKitUsageDescription`）。
+      - メインタイマー (`HomeScreen.js`): 動作中・準備カウント中は1秒ごとに終了時刻を渡し差分予約（キー `main-timer`）。一時停止・リセット・保存画面を開いた時は鳴動中のアラームも停止。0秒到達で状態が変わっても鳴動中のアラームは止めない。アプリ内の短いアラーム音（`playAlarm`）は従来どおり併用。
+      - サロン席 (`SalonWorkScreen.js`): 動作中の席の終了時刻（`<席ID>-main`）とチェック時刻（`<席ID>-check`）を予約。席の停止・リセット・チェック完了で一覧から消えると鳴動中のアラームも停止。Watch から `STOP_ALARM` を受けた席のアラームも停止。
+      - アラーム音 OFF 時は無音ファイル `assisttimer_silence.caf` を指定（AlarmKit に無音指定がないため）。**この場合に振動するかは実機未検証**。
+    - **Watch連動時の鳴らし分け**: Watch がペアリング済みかつ Watch アプリ導入済みの場合、サロン席のアラームとタイムアップ振動（6箇所）は既定で Watch のみ（iPhone では予約・振動しない）。設定「Watch連動中もiPhoneで鳴らす」ON で iPhone も鳴らす。メインタイマーは常に iPhone で鳴らす。
+    - **Watch (`targets/watch/alarm.swift` `WatchAlarmCoordinator`)**:
+      - アプリ表示中: 全画面の赤いアラーム表示＋1秒ごとに `.notification` / `.failure` の振動を交互に繰り返し、「止める」まで継続。
+      - バックグラウンド: スマートアラーム（`WKExtendedRuntimeSession.start(at:)`、`WKBackgroundModes: alarm`）で一番早い終了時刻を1件だけ予約し、開始時に `notifyUser(.notification)` を1.5秒間隔で繰り返す（アプリ非表示時はシステムのアラーム画面）。アプリ終了中に起動された場合は `WKApplicationDelegate.handle(_:)` で引き継ぐ。
+      - 予備: ローカル通知（終了時刻＋0/20/40/60/90/120秒、最大60件）。
+      - 終了前に把握していた予定のみ鳴らし（起動時点で過ぎていた古い予定では鳴らさない）、止めた予定とともに UserDefaults に12時間保持。Watch で止めると iPhone に `STOP_ALARM`（席ID）を送信。iPhone 側で席が停止・終了すると Watch の鳴動も止まる。
+      - `.backgroundTask(.watchConnectivity)` でバックグラウンド受信時も席データ・アラーム予定を更新。
+    - **設定 (`SettingsScreen.js`「アラーム・Apple Watch」)**: iPhoneのアラーム音（既存 `isAlarmSoundEnabled`、既定 ON）／Apple Watchのアラーム音（`isWatchAlarmSoundEnabled`、既定 OFF、`SYNC_SEATS` の `watchAlarmSound` で Watch へ送信）／Watch連動中もiPhoneで鳴らす（`isPhoneAlarmForWatchSeats`、既定 OFF）。
+    - **診断表示**: iPhone の通信状態カードに「⏰ iPhoneアラーム: 許可状態 / 予約件数 / 最終結果」、Watch の通信状態パネルに「⏰ スマートアラーム状態 / 鳴動件数 / 音」を追加。
+    - **制約・未検証事項**: AlarmKit は iOS 26 以降のみ（それ未満では予約されずアプリ内の振動・音のみ）。スマートアラームは同時に1件・アプリ表示中にしか予約できないため、2件目以降の席はアプリを再表示するまで通知（予備）のみ。watchOS の振動は Watch が消音モードでないと短い音を伴う場合がある（アプリ側で分離不可）。Watch のアラーム音設定が効くのは主に予備通知の音。
 
 

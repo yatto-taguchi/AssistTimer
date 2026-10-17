@@ -87,6 +87,9 @@ export default function SettingsScreen({ route }) {
     isCountdownEnabled, toggleCountdownEnabled,
     countdownSeconds, saveCountdownSeconds,
     alarmSoundType, toggleAlarmSoundType,
+    isAlarmSoundEnabled, toggleAlarmSoundEnabled,
+    isWatchAlarmSoundEnabled, toggleWatchAlarmSound,
+    isPhoneAlarmForWatchSeats, togglePhoneAlarmForWatchSeats,
     playsInSilentMode, togglePlaysInSilentMode,
     isVibrationEnabled, toggleVibrationEnabled,
     isVibration3SecOnly, toggleVibration3SecOnly,
@@ -1442,6 +1445,52 @@ export default function SettingsScreen({ route }) {
         </View>
           </View>
         )}
+      </View>
+
+      {/* ★ アラーム（止めるまで鳴る）・Apple Watch 設定 */}
+      <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>アラーム・Apple Watch</Text>
+      <View style={[styles.groupCard, { backgroundColor: cardBgColor, borderColor: cardBorderColor }]}>
+        <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
+          <View style={styles.settingTextContainer}>
+            <Text style={[styles.settingText, { color: textColor }]}>iPhoneのアラーム音</Text>
+            <Text style={[styles.settingDescription, { color: subTextColor }]}>
+              タイマー終了時、止めるまで鳴り続けます（画面ロック中・バックグラウンドでも動作）。OFFにすると無音のアラームになります。
+            </Text>
+          </View>
+          <Switch
+            value={isAlarmSoundEnabled}
+            onValueChange={toggleAlarmSoundEnabled}
+            trackColor={{ false: '#333', true: '#34C759' }}
+          />
+        </View>
+
+        <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
+          <View style={styles.settingTextContainer}>
+            <Text style={[styles.settingText, { color: textColor }]}>Apple Watchのアラーム音</Text>
+            <Text style={[styles.settingDescription, { color: subTextColor }]}>
+              OFFの場合は振動のみで知らせます。※Watchが消音モードでないと、振動に合わせて短い音が鳴る場合があります。
+            </Text>
+          </View>
+          <Switch
+            value={isWatchAlarmSoundEnabled}
+            onValueChange={toggleWatchAlarmSound}
+            trackColor={{ false: '#333', true: '#34C759' }}
+          />
+        </View>
+
+        <View style={[styles.settingRowInCard, { borderBottomWidth: 0 }]}>
+          <View style={styles.settingTextContainer}>
+            <Text style={[styles.settingText, { color: textColor }]}>Watch連動中もiPhoneで鳴らす</Text>
+            <Text style={[styles.settingDescription, { color: subTextColor }]}>
+              OFFの場合、Apple Watchと連動中のサロン席タイマーはWatchだけが振動します。
+            </Text>
+          </View>
+          <Switch
+            value={isPhoneAlarmForWatchSeats}
+            onValueChange={togglePhoneAlarmForWatchSeats}
+            trackColor={{ false: '#333', true: '#34C759' }}
+          />
+        </View>
       </View>
 
       {/* 4. その他設定グループカード */}

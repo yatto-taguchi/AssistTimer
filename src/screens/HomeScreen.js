@@ -20,6 +20,9 @@ import CheerYamaimoOverlay from '../components/CheerYamaimoOverlay';
 import NewsBadge from '../components/NewsBadge';
 import NewsModal from '../components/NewsModal';
 import { getUnreadNewsCount } from '../data/newsData';
+import { setAlarms, stopAllAlarms } from '../utils/alarmScheduler';
+
+const MAIN_ALARM_KEY = 'main-timer';
 
 const SILENT_LOOP_SOUND = require('../../assets/silent_loop.wav');
 
@@ -887,6 +890,31 @@ export default function HomeScreen({ navigation }) {
     vibrationIntensity, isVibWarningEnabled, isVibFinishEnabled, isVibOvertimeEnabled, targetTime
   ]);
 
+  // ★ メインタイマーの終了時刻を iPhone 純正アラーム（AlarmKit）に予約
+  // 画面ロック中・バックグラウンドでも、ユーザーが止めるまで鳴り続ける。
+  // 終了時刻は複数箇所（開始・再開・準備カウント終了・復帰時など）で ref が更新されるため、
+  // 動作中は1秒ごとに現在値を渡し、alarmScheduler 側で差分がある時だけ予約し直す。
+  useEffect(() => {
+    const soundOn = isAlarmSoundEnabled;
+    const buildDesired = () => {
+      let ts = null;
+      if (isPreCountingDown && prepEndTimeRef.current) {
+        ts = prepEndTimeRef.current + targetTime * 1000;
+      } else if (isRunning && !isCountUp && targetEndTimeRef.current) {
+        ts = targetEndTimeRef.current;
+      } else if (isRunning && isCountUp && overStartTimeRef.current) {
+        // 超過中は「鳴っているアラーム」を一覧に残しておく（過去時刻なので再予約はされない）
+        ts = overStartTimeRef.current;
+      }
+      return ts ? [{ key: MAIN_ALARM_KEY, timestamp: ts, title: '⏰ タイマー終了' }] : [];
+    };
+    const apply = () => setAlarms('main', buildDesired(), { soundOn, stopPassedOnRemove: false });
+    apply();
+    if (!isRunning && !isPreCountingDown) return undefined;
+    const id = setInterval(apply, 1000);
+    return () => clearInterval(id);
+  }, [isRunning, isCountUp, isPreCountingDown, isAlarmSoundEnabled, targetTime]);
+
   const formatTime = (timeInSeconds) => {
     const isNegative = timeInSeconds < 0;
     const absTime = Math.abs(timeInSeconds);
@@ -987,6 +1015,7 @@ export default function HomeScreen({ navigation }) {
           targetEndTimeRef.current = null;
           overStartTimeRef.current = null;
           cancelVibration();
+          stopAllAlarms('main');
           setIsRunning(false);
         }
       }
@@ -1012,6 +1041,7 @@ export default function HomeScreen({ navigation }) {
     setIsPreCountingDown(false);
     setIsCountUp(false);
     cancelVibration();
+    stopAllAlarms('main');
     targetEndTimeRef.current = null;
     prepEndTimeRef.current = null;
     overStartTimeRef.current = null;
@@ -1435,6 +1465,7 @@ export default function HomeScreen({ navigation }) {
     setIsRunning(false); // タイマーを止める
     setIsPreCountingDown(false);
     cancelVibration();
+    stopAllAlarms('main');
     targetEndTimeRef.current = null;
     prepEndTimeRef.current = null;
     overStartTimeRef.current = null;
@@ -1452,6 +1483,7 @@ export default function HomeScreen({ navigation }) {
     setIsRunning(false); // タイマーを止める
     setIsPreCountingDown(false);
     cancelVibration();
+    stopAllAlarms('main');
     targetEndTimeRef.current = null;
     prepEndTimeRef.current = null;
     overStartTimeRef.current = null;

@@ -20,6 +20,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import WatchConnectivity from 'watch-connectivity';
 import { AppContext } from '../utils/AppContext';
 import WatchDiagnosticsBar from '../components/WatchDiagnosticsBar';
+import { setAlarms, stopAlarm } from '../utils/alarmScheduler';
 
 // サロン施術ステータス定義（呼び出し、コーミング、チェック、シャンプー、その他）
 export const SALON_ACTION_STATUS_OPTIONS = [
@@ -91,6 +92,8 @@ export const getDefaultInitialSeats = (staffName = 'スタイリスト') => [
 let _cachedStaffMembers = [];
 let _syncDebounceTimer = null;
 let _pendingWatchPayload = null;
+// Watch 側アラーム音の設定（設定画面の値を SYNC_SEATS に含めて Watch へ届ける）
+let _watchAlarmSound = false;
 
 // ★ Apple Watchへの客席・スタッフ名リアルタイム同期ヘルパー（即時送信対応＆デバウンス両立）
 export const syncSeatsToWatch = async (currentSeats, currentName, currentMembers = null, options = {}) => {
@@ -118,6 +121,7 @@ export const syncSeatsToWatch = async (currentSeats, currentName, currentMembers
       type: 'SYNC_SEATS',
       userName: (currentName || 'スタイリスト').trim(),
       members: Array.isArray(finalMembers) ? finalMembers : [],
+      watchAlarmSound: _watchAlarmSound,
       timestamp: Date.now(),
       seats: (currentSeats || []).map((s, index) => {
         let seatNum = index + 1;
@@ -182,7 +186,10 @@ export default function SalonWorkScreen() {
   const { 
     isEcoMode,
     mainTimerState,
-    requestMainTimerAction
+    requestMainTimerAction,
+    isAlarmSoundEnabled,
+    isWatchAlarmSoundEnabled,
+    isPhoneAlarmForWatchSeats,
   } = useContext(AppContext);
 
   // テーマカラー設定
@@ -373,6 +380,26 @@ export default function SalonWorkScreen() {
   // ヘルプ担当指定モーダル用ScrollViewの参照
   const helpModalScrollViewRef = useRef(null);
 
+  // ★ Apple Watch と連動中か（ペアリング済み＋Watchアプリ導入済み）
+  const [watchLinked, setWatchLinked] = useState(false);
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return undefined;
+    const apply = (st) => {
+      if (st && typeof st === 'object' && !st.error) {
+        setWatchLinked(!!(st.isPaired && st.isWatchAppInstalled));
+      }
+    };
+    apply(WatchConnectivity.getStatus());
+    const sub = WatchConnectivity.addStatusListener(apply);
+    return () => { if (sub?.remove) sub.remove(); };
+  }, []);
+
+  // ★ サロン席のタイムアップを iPhone でも鳴らすか
+  // Watch 連動中は既定で「Watch のみ」。設定「Watch連動中もiPhoneで鳴らす」が ON なら iPhone も鳴らす。
+  const phoneAlarmAllowed = !watchLinked || !!isPhoneAlarmForWatchSeats;
+  const phoneAlarmAllowedRef = useRef(phoneAlarmAllowed);
+  phoneAlarmAllowedRef.current = phoneAlarmAllowed;
+
   // 500msごとの時計同期 & タイムアップ監視 & エスカレーションチェック
   useEffect(() => {
     const timer = setInterval(() => {
@@ -395,7 +422,7 @@ export default function SalonWorkScreen() {
           if (!isOver && remainingSec <= 60 && remainingSec > 0 && isHelpUndecided && !isNoHelp) {
             if (!oneMinuteHelpAlertRef.current[s.id]) {
               oneMinuteHelpAlertRef.current[s.id] = true;
-              if (Platform.OS !== 'web') {
+              if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
                 Vibration.vibrate([0, 500, 150, 500, 150, 500]);
               }
               const sActionInfo = getActionStatusInfo(s.actionStatus, s.isShampooing);
@@ -430,7 +457,7 @@ export default function SalonWorkScreen() {
               hasChanges = true;
               if (!checkAlertedRef.current[s.id]) {
                 checkAlertedRef.current[s.id] = true;
-                if (Platform.OS !== 'web') {
+                if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
                   Vibration.vibrate([0, 500, 150, 500]);
                 }
                 const chkMins = s.checkInitialMinutes || Math.round(s.checkTargetSeconds / 60);
@@ -468,7 +495,7 @@ export default function SalonWorkScreen() {
             timeUpTs = s.targetEndTimestamp;
             hasChanges = true;
             // 初回タイムアップ時の強い振動
-            if (Platform.OS !== 'web') {
+            if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
               Vibration.vibrate([0, 500, 200, 500, 200, 500]);
             }
           }
@@ -483,7 +510,7 @@ export default function SalonWorkScreen() {
           if (elapsedOverSec >= 30 && escLevel < 1 && !isConfirmed) {
             escLevel = 1;
             hasChanges = true;
-            if (Platform.OS !== 'web') {
+            if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
               Vibration.vibrate([0, 400, 150, 400]);
             }
           }
@@ -491,7 +518,7 @@ export default function SalonWorkScreen() {
           else if (elapsedOverSec >= 60 && escLevel < 2 && !isConfirmed) {
             escLevel = 2;
             hasChanges = true;
-            if (Platform.OS !== 'web') {
+            if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
               Vibration.vibrate([0, 400, 150, 400, 150, 400]);
             }
           }
@@ -499,7 +526,7 @@ export default function SalonWorkScreen() {
           else if (elapsedOverSec >= 180 && escLevel < 3 && !isConfirmed) {
             escLevel = 3;
             hasChanges = true;
-            if (Platform.OS !== 'web') {
+            if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
               Vibration.vibrate([0, 800, 200, 800, 200, 800]);
             }
             if (!escalatedAlertRef.current[s.id]) {
@@ -622,6 +649,15 @@ export default function SalonWorkScreen() {
         syncSeatsToWatch(updated, userName, staffMembers);
         return updated;
       });
+      return;
+    }
+
+    // ★ Watch でアラームを止めた → iPhone 側で鳴っている同じ席のアラームも止める
+    if (action === 'STOP_ALARM') {
+      if (seatId) {
+        stopAlarm('salon', `${seatId}-main`);
+        stopAlarm('salon', `${seatId}-check`);
+      }
       return;
     }
 
@@ -815,10 +851,33 @@ export default function SalonWorkScreen() {
 
   // ★ seats または staffMembers が更新された際、Watch へ最新データを同期
   useEffect(() => {
+    _watchAlarmSound = !!isWatchAlarmSoundEnabled;
     if (Platform.OS === 'ios' && Array.isArray(seats) && seats.length > 0) {
       syncSeatsToWatch(seats, userName, staffMembers);
     }
-  }, [seats, userName, staffMembers]);
+  }, [seats, userName, staffMembers, isWatchAlarmSoundEnabled]);
+
+  // ★ サロン席の終了時刻を iPhone 純正アラーム（AlarmKit）に予約
+  // 画面ロック中・バックグラウンドでも、止めるまで鳴り続ける。
+  // 席の停止・リセット・チェック完了で一覧から消えると、鳴っているアラームも止める。
+  // Watch 連動中（かつ「Watch連動中もiPhoneで鳴らす」が OFF）は iPhone では鳴らさない。
+  useEffect(() => {
+    if (Platform.OS !== 'ios' || !isDataLoaded) return;
+    const desired = [];
+    if (phoneAlarmAllowed && Array.isArray(seats)) {
+      seats.forEach((s) => {
+        if (!s || !s.id) return;
+        const label = s.seatLabel || '席';
+        if (s.status === 'running' && s.targetEndTimestamp) {
+          desired.push({ key: `${s.id}-main`, timestamp: Number(s.targetEndTimestamp), title: `${label} 放置タイム終了` });
+        }
+        if (s.checkTargetSeconds > 0 && (s.checkStatus === 'running' || s.checkStatus === 'timeup') && s.checkEndTimestamp) {
+          desired.push({ key: `${s.id}-check`, timestamp: Number(s.checkEndTimestamp), title: `${label} チェック時間` });
+        }
+      });
+    }
+    setAlarms('salon', desired, { soundOn: isAlarmSoundEnabled, stopPassedOnRemove: true });
+  }, [seats, phoneAlarmAllowed, isAlarmSoundEnabled, isDataLoaded]);
 
   const loadInitialData = async () => {
     try {

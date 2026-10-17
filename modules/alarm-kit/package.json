@@ -1,0 +1,6 @@
+{
+  "name": "alarm-kit",
+  "version": "1.0.0",
+  "description": "AlarmKit (iOS 26+) local expo module for AssistTimer",
+  "main": "index.js"
+}

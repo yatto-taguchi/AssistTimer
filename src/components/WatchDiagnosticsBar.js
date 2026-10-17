@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, Platform } from 'react-native';
 import WatchConnectivity from 'watch-connectivity';
+import { getAlarmDiagnostics, subscribeAlarmDiagnostics } from '../utils/alarmScheduler';
 
 // ★ Apple Watch 通信状態の常時表示（診断用）
 // どこで同期が止まっているかを画面上で確認するための小さなカード。
@@ -24,21 +25,48 @@ const activationLabel = (s) => {
   }
 };
 
+const authLabel = (s) => {
+  switch (s) {
+    case 'authorized': return '許可済';
+    case 'denied': return '拒否（設定アプリで許可が必要）';
+    case 'notDetermined': return '未確認';
+    case 'unavailable': return '利用不可';
+    default: return s || '不明';
+  }
+};
+
+function AlarmLine({ alarm, color }) {
+  if (!alarm) return null;
+  const text = !alarm.moduleLoaded
+    ? '⏰ iPhoneアラーム: ネイティブモジュール未読込'
+    : !alarm.available
+    ? '⏰ iPhoneアラーム: このiOSでは利用不可（iOS 26以降が必要）'
+    : `⏰ iPhoneアラーム: ${authLabel(alarm.authorization)} / 予約${alarm.scheduledCount}件${alarm.lastResult ? ` / 最終:${alarm.lastResult}` : ''}`;
+  const bad = !alarm.moduleLoaded || !alarm.available || alarm.authorization === 'denied';
+  return <Text style={[styles.line, { color: bad ? '#FF453A' : color }]}>{text}</Text>;
+}
+
 export default function WatchDiagnosticsBar({ theme }) {
   const [status, setStatus] = useState(() => WatchConnectivity.getStatus());
   const [diag, setDiag] = useState(() => WatchConnectivity.getDiagnostics());
+  const [alarm, setAlarm] = useState(() => getAlarmDiagnostics());
 
   useEffect(() => {
     if (Platform.OS !== 'ios') return undefined;
-    const refresh = () => setStatus(WatchConnectivity.getStatus());
+    const refresh = () => {
+      setStatus(WatchConnectivity.getStatus());
+      setAlarm(getAlarmDiagnostics());
+    };
     refresh();
     const timer = setInterval(refresh, 2000);
     const sub = WatchConnectivity.addStatusListener((s) => setStatus(s));
     const unsubscribe = WatchConnectivity.subscribeDiagnostics((d) => setDiag(d));
+    const unsubscribeAlarm = subscribeAlarmDiagnostics((a) => setAlarm(a));
     return () => {
       clearInterval(timer);
       if (sub?.remove) sub.remove();
       if (unsubscribe) unsubscribe();
+      if (unsubscribeAlarm) unsubscribeAlarm();
     };
   }, []);
 
@@ -51,6 +79,7 @@ export default function WatchDiagnosticsBar({ theme }) {
     return (
       <View style={[styles.card, { backgroundColor: theme?.cardBg, borderColor: theme?.cardBorder }]}>
         <Text style={[styles.title, { color: textColor }]}>⌚ Watch通信状態: ネイティブモジュール未読込</Text>
+        <AlarmLine alarm={alarm} color={subColor} />
       </View>
     );
   }
@@ -96,6 +125,7 @@ export default function WatchDiagnosticsBar({ theme }) {
       <Text style={[styles.line, { color: bridgeMismatch ? '#FF453A' : subColor }]}>
         受信(JS) {jsCount}回 {fmtTime(diag.lastJsReceivedAt)} {diag.lastJsReceivedKind || ''} {diag.lastJsReceivedAction || ''}{diag.queuedActions ? ` / 画面準備待ち ${diag.queuedActions}件` : ''}
       </Text>
+      <AlarmLine alarm={alarm} color={subColor} />
     </View>
   );
 }

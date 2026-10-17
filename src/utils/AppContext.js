@@ -59,6 +59,8 @@ export const AppProvider = ({ children }) => {
 
   const [alarmSoundType, setAlarmSoundType] = useState('digital'); // 'digital' | 'bell' | 'buzzer' | 'kitchen' | 'fast' | 'gong' | 'none'
   const [isAlarmSoundEnabled, setIsAlarmSoundEnabled] = useState(true); // アラーム音のマスター有効/無効
+  const [isWatchAlarmSoundEnabled, setIsWatchAlarmSoundEnabled] = useState(false); // Apple Watch側アラーム音（初期値: OFF＝振動のみ）
+  const [isPhoneAlarmForWatchSeats, setIsPhoneAlarmForWatchSeats] = useState(false); // Watch連動中の席もiPhoneで鳴らす（初期値: OFF＝Watchのみ）
   const [isVoiceMasterEnabled, setIsVoiceMasterEnabled] = useState(true); // 音声アナウンス全体のマスター有効/無効
   const [isCountUpEnabled, setIsCountUpEnabled] = useState(true); // カウントアップ（超過時間計測）有効/無効
   const [playsInSilentMode, setPlaysInSilentMode] = useState(true); // マナーモード時でも鳴らす
@@ -167,6 +169,8 @@ export const AppProvider = ({ children }) => {
         const cheerSoundVal = await AsyncStorage.getItem('isCheerSoundEnabled');
         const soundTypeVal = await AsyncStorage.getItem('alarmSoundType');
         const alarmSoundEnabledVal = await AsyncStorage.getItem('isAlarmSoundEnabled');
+        const watchAlarmSoundVal = await AsyncStorage.getItem('isWatchAlarmSoundEnabled');
+        const phoneAlarmForWatchVal = await AsyncStorage.getItem('isPhoneAlarmForWatchSeats');
         const voiceMasterVal = await AsyncStorage.getItem('isVoiceMasterEnabled');
         const countUpVal = await AsyncStorage.getItem('isCountUpEnabled');
         const silentModeVal = await AsyncStorage.getItem('playsInSilentMode');
@@ -242,6 +246,8 @@ export const AppProvider = ({ children }) => {
         setIsCheerSoundEnabled(cheerSound);
         if (soundTypeVal !== null) setAlarmSoundType(soundTypeVal);
         if (alarmSoundEnabledVal !== null) setIsAlarmSoundEnabled(JSON.parse(alarmSoundEnabledVal));
+        if (watchAlarmSoundVal !== null) setIsWatchAlarmSoundEnabled(JSON.parse(watchAlarmSoundVal));
+        if (phoneAlarmForWatchVal !== null) setIsPhoneAlarmForWatchSeats(JSON.parse(phoneAlarmForWatchVal));
         if (voiceMasterVal !== null) setIsVoiceMasterEnabled(JSON.parse(voiceMasterVal));
         if (countUpVal !== null) setIsCountUpEnabled(JSON.parse(countUpVal));
         if (silentModeVal !== null) setPlaysInSilentMode(JSON.parse(silentModeVal));
@@ -559,6 +565,20 @@ export const AppProvider = ({ children }) => {
     await AsyncStorage.setItem('isAlarmSoundEnabled', JSON.stringify(nextVal));
   };
 
+  // Apple Watch側アラーム音の有効/無効切替と保存
+  const toggleWatchAlarmSound = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isWatchAlarmSoundEnabled;
+    setIsWatchAlarmSoundEnabled(nextVal);
+    await AsyncStorage.setItem('isWatchAlarmSoundEnabled', JSON.stringify(nextVal));
+  };
+
+  // Watch連動中の席もiPhoneで鳴らすかの切替と保存
+  const togglePhoneAlarmForWatchSeats = async (value) => {
+    const nextVal = typeof value === 'boolean' ? value : !isPhoneAlarmForWatchSeats;
+    setIsPhoneAlarmForWatchSeats(nextVal);
+    await AsyncStorage.setItem('isPhoneAlarmForWatchSeats', JSON.stringify(nextVal));
+  };
+
   // 音声アナウンス全体の有効/無効切替と保存
   const toggleVoiceMasterEnabled = async (value) => {
     const nextVal = typeof value === 'boolean' ? value : !isVoiceMasterEnabled;
@@ -833,6 +853,10 @@ export const AppProvider = ({ children }) => {
         toggleAlarmSoundType,
         isAlarmSoundEnabled,
         toggleAlarmSoundEnabled,
+        isWatchAlarmSoundEnabled,
+        toggleWatchAlarmSound,
+        isPhoneAlarmForWatchSeats,
+        togglePhoneAlarmForWatchSeats,
         isVoiceMasterEnabled,
         toggleVoiceMasterEnabled,
         isCountUpEnabled,

@@ -170,6 +170,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     @Published var lastReceivedSeatCount: Int = -1
     @Published var receivedCount: Int = 0
     
+    // ★ Watch 側アラーム音（iPhone の設定画面から同期。初期値 OFF＝振動のみ）
+    @Published var alarmSoundEnabled: Bool = UserDefaults.standard.bool(forKey: "assisttimer.watchAlarmSound")
+    
     // ★ 有効化前に行われた操作の保留キュー（有効化完了時に自動送信。メインスレッドでのみ操作）
     private var pendingPayloads: [[String: Any]] = []
     
@@ -280,6 +283,14 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             self.members = membersArray
         }
         
+        // ★ Watch 側アラーム音の設定
+        if let sound = (data["watchAlarmSound"] as? NSNumber)?.boolValue ?? (data["watchAlarmSound"] as? Bool) {
+            if sound != self.alarmSoundEnabled {
+                self.alarmSoundEnabled = sound
+                UserDefaults.standard.set(sound, forKey: "assisttimer.watchAlarmSound")
+            }
+        }
+        
         // 座席リスト同期（型ゆらぎを許容して1席ずつ確実にパース）
         let rawSeats = (data["seats"] as? [Any]) ?? (data["seats"] as? [[String: Any]])
         if let rawSeats = rawSeats {
@@ -291,6 +302,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
             self.lastReceivedSeatCount = parsed.count
             self.timers = parsed
+            // ★ バックグラウンド受信でもアラーム予定（通知・スマートアラーム）を更新
+            WatchAlarmCoordinator.shared.update(timers: parsed, soundOn: self.alarmSoundEnabled)
         }
     }
     
@@ -418,6 +431,8 @@ extension Color {
 // MARK: - メイン画面
 struct ContentView: View {
     @StateObject private var sessionManager = WatchSessionManager.shared
+    // ★ タイムアップのアラーム（止めるまで鳴り続ける）
+    @ObservedObject private var alarm = WatchAlarmCoordinator.shared
     
     // ログイン中の自ユーザー名（サロン設定・iPhone同期）
     @State private var currentUserName: String = "スタイリスト"
@@ -541,6 +556,14 @@ struct ContentView: View {
                 if let banner = notificationBannerText {
                     bannerView(banner)
                 }
+                
+                if !alarm.ringing.isEmpty {
+                    alarmOverlay
+                        .zIndex(10)
+                }
+            }
+            .onChange(of: timers) { _, newTimers in
+                alarm.update(timers: newTimers, soundOn: sessionManager.alarmSoundEnabled)
             }
             .navigationTitle("共有タイマー")
             .navigationBarTitleDisplayMode(.inline)
@@ -606,6 +629,7 @@ struct ContentView: View {
             .onReceive(ticker) { input in
                 now = input
                 checkUnassignedHelpAlerts()
+                alarm.tick()
             }
             .onReceive(sessionManager.$timers) { received in
                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -619,6 +643,7 @@ struct ContentView: View {
             }
             .onAppear {
                 sessionManager.requestSyncFromPhone()
+                alarm.update(timers: timers, soundOn: sessionManager.alarmSoundEnabled)
             }
         }
     }
@@ -698,6 +723,10 @@ struct ContentView: View {
             Text("受信 \(sessionManager.receivedCount)回 \(diagTime(sessionManager.lastReceivedAt)) \(sessionManager.lastReceivedKind) \(sessionManager.lastReceivedSeatCount >= 0 ? "\(sessionManager.lastReceivedSeatCount)席" : "")")
                 .font(.system(size: 9))
                 .foregroundColor(Color(hex: "#8E8E93"))
+            Text("⏰ \(alarm.statusText)")
+                .font(.system(size: 9))
+                .foregroundColor(Color(hex: "#8E8E93"))
+                .lineLimit(2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(6)
@@ -706,6 +735,46 @@ struct ContentView: View {
                 .fill(Color(hex: "#1C1C1E"))
         )
         .padding(.horizontal, 4)
+    }
+
+    // ★ タイムアップ時の全画面アラーム表示（「止める」を押すまで振動を繰り返す）
+    @ViewBuilder
+    private var alarmOverlay: some View {
+        VStack(spacing: 8) {
+            Text("⏰ タイムアップ")
+                .font(.system(size: 17, weight: .heavy))
+                .foregroundColor(.white)
+            ForEach(alarm.ringing.prefix(3), id: \.key) { e in
+                Text(e.title)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            if alarm.ringing.count > 3 {
+                Text("ほか \(alarm.ringing.count - 3) 件")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.85))
+            }
+            Button(action: {
+                alarm.stop()
+                WKInterfaceDevice.current().play(.success)
+            }) {
+                Text("止める")
+                    .font(.system(size: 20, weight: .heavy))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(Color.white)
+                    .foregroundColor(Color(hex: "#FF3B30"))
+                    .cornerRadius(14)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 4)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(hex: "#FF3B30"))
+        .ignoresSafeArea()
     }
 
     @ViewBuilder
