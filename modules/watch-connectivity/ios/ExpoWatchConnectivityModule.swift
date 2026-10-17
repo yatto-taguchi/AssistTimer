@@ -6,6 +6,13 @@ public class ExpoWatchConnectivityModule: Module {
   private var pendingApplicationContext: [String: Any]?
   private var pendingUserInfo: [String: Any]?
 
+  // ★ 診断用（通信状態の画面表示に使用）
+  fileprivate var lastActivationError: String = ""
+  fileprivate var nativeReceivedCount: Int = 0
+  fileprivate var lastNativeReceivedAt: Double = 0
+  fileprivate var lastNativeReceivedKind: String = ""
+  fileprivate var lastNativeReceivedAction: String = ""
+
   private var session: WCSession? {
     return WCSession.isSupported() ? WCSession.default : nil
   }
@@ -16,7 +23,8 @@ public class ExpoWatchConnectivityModule: Module {
     Events(
       "onMessageReceived",
       "onApplicationContextReceived",
-      "onUserInfoReceived"
+      "onUserInfoReceived",
+      "onStatusChanged"
     )
 
     OnCreate {
@@ -66,6 +74,11 @@ public class ExpoWatchConnectivityModule: Module {
 
     Function("isReachable") { () -> Bool in
       return self.session?.isReachable ?? false
+    }
+
+    // ★ 診断用: 現在の通信状態をまとめて返す
+    Function("getStatus") { () -> [String: Any] in
+      return self.buildStatus()
     }
 
     AsyncFunction("updateApplicationContext") { (context: [String: Any], promise: Promise) in
@@ -213,6 +226,48 @@ public class ExpoWatchConnectivityModule: Module {
   fileprivate func dispatchEvent(_ name: String, _ body: [String: Any]) {
     sendEvent(name, body)
   }
+
+  fileprivate func activationStateText(_ state: WCSessionActivationState) -> String {
+    switch state {
+    case .activated: return "activated"
+    case .inactive: return "inactive"
+    case .notActivated: return "notActivated"
+    @unknown default: return "unknown"
+    }
+  }
+
+  fileprivate func buildStatus() -> [String: Any] {
+    guard WCSession.isSupported() else {
+      return ["supported": false]
+    }
+    let s = WCSession.default
+    let delegateOk = (sessionDelegate != nil) && (s.delegate === sessionDelegate)
+    return [
+      "supported": true,
+      "activationState": activationStateText(s.activationState),
+      "isPaired": s.isPaired,
+      "isWatchAppInstalled": s.isWatchAppInstalled,
+      "isReachable": s.isReachable,
+      "delegateOk": delegateOk,
+      "activationError": lastActivationError,
+      "nativeReceivedCount": nativeReceivedCount,
+      "lastNativeReceivedAt": lastNativeReceivedAt,
+      "lastNativeReceivedKind": lastNativeReceivedKind,
+      "lastNativeReceivedAction": lastNativeReceivedAction
+    ]
+  }
+
+  fileprivate func emitStatus() {
+    sendEvent("onStatusChanged", buildStatus())
+  }
+
+  // ★ JSへ渡す前にネイティブ層で受信を記録（JSに届いているかの切り分け用）
+  fileprivate func recordReceived(kind: String, body: [String: Any]) {
+    nativeReceivedCount += 1
+    lastNativeReceivedAt = Date().timeIntervalSince1970 * 1000.0
+    lastNativeReceivedKind = kind
+    lastNativeReceivedAction = (body["action"] as? String) ?? (body["type"] as? String) ?? "?"
+  }
 }
 
 // MARK: - WCSessionDelegate 専用内部クラス (NSObject準拠)
@@ -225,13 +280,26 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
   }
 
   func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
-    if activationState == .activated {
-      DispatchQueue.main.async {
-        if let s = session as WCSession? {
-          self.module?.flushPendingApplicationContext(session: s)
-          self.module?.flushPendingUserInfo(session: s)
-        }
+    let errorText = error?.localizedDescription ?? ""
+    DispatchQueue.main.async {
+      self.module?.lastActivationError = errorText
+      if activationState == .activated {
+        self.module?.flushPendingApplicationContext(session: session)
+        self.module?.flushPendingUserInfo(session: session)
       }
+      self.module?.emitStatus()
+    }
+  }
+
+  func sessionReachabilityDidChange(_ session: WCSession) {
+    DispatchQueue.main.async {
+      self.module?.emitStatus()
+    }
+  }
+
+  func sessionWatchStateDidChange(_ session: WCSession) {
+    DispatchQueue.main.async {
+      self.module?.emitStatus()
     }
   }
 
@@ -246,12 +314,14 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
 
   func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
     DispatchQueue.main.async {
+      self.module?.recordReceived(kind: "message", body: message)
       self.module?.dispatchEvent("onMessageReceived", ["message": message])
     }
   }
 
   func session(_ session: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
     DispatchQueue.main.async {
+      self.module?.recordReceived(kind: "message", body: message)
       self.module?.dispatchEvent("onMessageReceived", ["message": message])
     }
     replyHandler(["status": "acknowledged"])
@@ -259,13 +329,15 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
 
   func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
     DispatchQueue.main.async {
+      self.module?.recordReceived(kind: "context", body: applicationContext)
       self.module?.dispatchEvent("onApplicationContextReceived", ["context": applicationContext])
     }
   }
 
+  // ★ 予備ルート（transferUserInfo）で届いた操作は onUserInfoReceived のみで通知し、二重処理を防止
   func session(_ session: WCSession, didReceiveUserInfo userInfo: [String : Any] = [:]) {
     DispatchQueue.main.async {
-      self.module?.dispatchEvent("onMessageReceived", ["message": userInfo])
+      self.module?.recordReceived(kind: "userInfo", body: userInfo)
       self.module?.dispatchEvent("onUserInfoReceived", ["userInfo": userInfo])
     }
   }

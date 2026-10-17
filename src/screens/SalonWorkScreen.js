@@ -19,6 +19,7 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import WatchConnectivity from 'watch-connectivity';
 import { AppContext } from '../utils/AppContext';
+import WatchDiagnosticsBar from '../components/WatchDiagnosticsBar';
 
 // サロン施術ステータス定義（呼び出し、コーミング、チェック、シャンプー、その他）
 export const SALON_ACTION_STATUS_OPTIONS = [
@@ -766,41 +767,48 @@ export default function SalonWorkScreen() {
     });
   };
 
+  // ★ リスナーから常に「最新の」handleWatchAction を呼ぶための参照（stale closure 防止）
+  const handleWatchActionRef = useRef(null);
+  handleWatchActionRef.current = handleWatchAction;
+
   // 初期ロード
   useEffect(() => {
     loadInitialData();
   }, []);
 
-  // ★ Apple Watchとの接続・リスナー登録
+  // ★ Apple Watchとの接続・リスナー登録（登録は1回のみ。処理は ref 経由で最新の関数を呼ぶ）
   useEffect(() => {
     if (Platform.OS === 'ios') {
-      WatchConnectivity.activate().then(() => {
-        if (Array.isArray(seats) && seats.length > 0) {
-          syncSeatsToWatch(seats, userName, staffMembers);
-        }
-      }).catch(() => {});
+      WatchConnectivity.activate().catch(() => {});
 
-      const subMsg = WatchConnectivity.addMessageListener((message) => {
-        handleWatchAction(message);
-      });
-      const subCtx = WatchConnectivity.addApplicationContextListener((context) => {
-        if (context && context.action) {
-          handleWatchAction(context);
+      const callLatest = (payload) => {
+        if (payload && payload.action && handleWatchActionRef.current) {
+          handleWatchActionRef.current(payload);
         }
-      });
-      const subUser = WatchConnectivity.addUserInfoListener ? WatchConnectivity.addUserInfoListener((userInfo) => {
-        if (userInfo && userInfo.action) {
-          handleWatchAction(userInfo);
+      };
+
+      const subMsg = WatchConnectivity.addMessageListener(callLatest);
+      const subCtx = WatchConnectivity.addApplicationContextListener(callLatest);
+      const subUser = WatchConnectivity.addUserInfoListener ? WatchConnectivity.addUserInfoListener(callLatest) : null;
+
+      // ★ Watchと通信可能になった瞬間に、iPhone側からも最新の席データを即時送信（Watch側の要求が届かなくても同期させる保険）
+      let wasReachable = false;
+      const subStatus = WatchConnectivity.addStatusListener((status) => {
+        const reachable = !!(status && status.isReachable);
+        if (reachable && !wasReachable && handleWatchActionRef.current) {
+          handleWatchActionRef.current({ action: 'REQUEST_SYNC' });
         }
-      }) : null;
+        wasReachable = reachable;
+      });
 
       return () => {
         if (subMsg?.remove) subMsg.remove();
         if (subCtx?.remove) subCtx.remove();
         if (subUser?.remove) subUser.remove();
+        if (subStatus?.remove) subStatus.remove();
       };
     }
-  }, [userName]);
+  }, []);
 
   // ★ seats または staffMembers が更新された際、Watch へ最新データを同期
   useEffect(() => {
@@ -2756,6 +2764,8 @@ export default function SalonWorkScreen() {
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.bg }]}>
+      {/* ★ Apple Watch 通信状態の常時表示（診断用。不要になったらこの1行を削除） */}
+      <WatchDiagnosticsBar theme={theme} />
       {/* 1. 上部サロンヘッダー（タップでサロン・グループ・個人無料枠を切り替え！） */}
       <View style={[styles.headerContainer, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
         <TouchableOpacity

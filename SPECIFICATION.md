@@ -1461,7 +1461,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **ダイレクト操作ジャンプ**:
       - サムネイルタイルをタップすると、その席のタイマー操作画面（`TimeActionSheet`）へ即座にアクセス可能。
 
-### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-35)
+### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-36)
 - **概要**:
   - iPhoneアプリ（`SalonWorkScreen`）とApple Watchアプリ（`ContentView`）間の完全リアルタイム双方向同期を実現。
   - プロトタイプ時のデモ固定4席を完全撤廃し、iPhone側で管理されている実際の客席データとスタッフ名を1対1で完全連動。
@@ -1544,5 +1544,30 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **Expo SDK 54 完全適合イベントリスナーブリッジ (`index.js`)**: `NativeModule` 自体の EventEmitter 機能を直接購読する最新仕様に最適化し、Watch から iPhone へのアクション通知（`REQUEST_SYNC`、`ADD_SEAT` など）の受信切断を根本解決。
     - **Watch側座席配列パースの完全堅牢化 (`content.swift`)**: `data["seats"]` の型ゆらぎによる配列消失を解消し、1席ずつ安全に取り出す堅牢パース構文を採用。
     - **画面表示時の自動多重プッシュ ＆ 接続時自動要求 (`SalonWorkScreen.js` & `content.swift`)**: サロン画面表示時に即座プッシュに加え 1.2秒・2.5秒後にも自動バックアップ送信。Watch側も接続確立（緑色点灯）時に自動で `REQUEST_SYNC` を要求し、iPhone が 0秒（デバウンスなし）で即時返答。手動ボタンを一切押さずに「開くだけ・操作するだけで勝手に完全自動同期」を完全確立。
+    - ※ Build 35 実機テストでは双方向とも同期されなかった（Build 36 の訂正を参照）。
+  - **通信状態の常時表示（診断版）・stale closure / 二重処理 / 送信フォールバック修正 (Build 36)**:
+    - **目的**: Build 35 でも同期しなかったため、推測での修正をやめ、「どこで止まっているか」を実機画面で特定できる診断表示を両端末に常時表示する。不要になったら削除する。
+    - **iPhone側 通信状態カード (`src/components/WatchDiagnosticsBar.js`)**: サロン画面最上部に常時表示。2秒ごと＋状態変化イベントで更新。
+      - 接続ランプ: 緑=Watchと通信可能（`isReachable`）/ 黄=有効化済みだがWatch画面未接続 / 灰=未接続。
+      - ペアリング・Watchアプリ有無・有効化状態・受信設定（delegate）・有効化エラー。
+      - 最終送信（時刻・回数・席数・即時送信結果・保存結果）。
+      - 受信(本体)=ネイティブ層で受け取った回数 / 受信(画面)=JSに届いた回数。両者がずれたら赤表示（ネイティブ→JS間の断絶を示す）。
+    - **Nativeモジュール (`ExpoWatchConnectivityModule.swift`)**: `getStatus()` 関数と `onStatusChanged` イベントを追加。`sessionReachabilityDidChange` / `sessionWatchStateDidChange` を実装し、状態変化をJSへ通知。全受信ハンドラで受信を記録。
+    - **二重処理の修正**: `didReceiveUserInfo` が `onUserInfoReceived` と `onMessageReceived` の両方を発火していたため、`onUserInfoReceived` のみに修正。
+    - **JSラッパー (`modules/watch-connectivity/index.js`)**: `getStatus` / `addStatusListener` / `getDiagnostics` / `subscribeDiagnostics` を追加。`syncData` は送信結果 `{ messageResult, contextResult }` を返し診断ストアへ記録。
+    - **stale closure の修正 (`SalonWorkScreen.js`)**: Watch受信リスナーが初回レンダー時の `handleWatchAction`（`staffMembers=[]`）を掴み続け、`REQUEST_SYNC` 応答や `ADD_SEAT` 保存時に `members: []` を送っていた問題を、`useRef` 経由で常に最新の関数を呼ぶ方式に修正（リスナー登録はマウント時の1回のみ）。
+    - **接続時のiPhone側自動送信**: `onStatusChanged` で `isReachable` が false→true になった瞬間、iPhone側からも最新の席データを即時送信（Watch側の `REQUEST_SYNC` が届かなかった場合の保険）。
+    - **Watch側 (`content.swift`)**:
+      - 左上ランプを3色化（緑=iPhoneと通信可能 / 黄=有効化済み・iPhoneアプリ未接続 / 灰=未有効化）。`isConnectedToPhone` は `isReachable` のみで判定。
+      - 席一覧の最上部に通信状態パネルを常時表示（有効化状態・iPhoneアプリ有無・最終送信アクションと結果・受信回数/時刻/種類/席数）。
+      - `sendMessage` に replyHandler を付け、iPhoneの受信確認を「iPhone受信OK」として表示。失敗時は `transferUserInfo`（予備ルート）へ自動切替。
+      - 有効化前の操作は保留キューに積み、有効化完了時に自動送信（`REQUEST_SYNC` は有効化完了時に別途送るため保留しない）。
+    - **Build 35 以前の記述の訂正（未検証・誤り）**:
+      - 「iOSの `isWatchAppInstalled` 遅延バグ」は未検証の推測であり、根拠はない。
+      - 「Expo SDK 54 で EventEmitter リスナーが切断される」も未検証。従来の `new EventEmitter(NativeModule)` も動作していた可能性が高い。
+      - Watch左上の緑ランプは Build 35 まで `activationState == .activated` でも点灯しており、「緑＝通信可能」ではなかった（Build 36 で修正）。
+      - `WKCompanionAppBundleIdentifier` は `@bacons/apple-targets` がビルド設定（`INFOPLIST_KEY_WKCompanionAppBundleIdentifier`）で自動付与するため、`targets/watch/Info.plist` への手動追加は不要。
+      - 「リスナー二重処理ガード (`isSalonWorkScreenActive`)」は Build 33 で AppContext 側の Watch 処理を撤去したため現在は存在しない。Watchからの操作はサロン画面を一度でも開いている間のみ受信処理される（課題として残存）。
+    - **ビルド番号の管理**: `eas.json` が `appVersionSource: remote` ＋ `autoIncrement` のため、実際のビルド番号は EAS サーバー側で採番される（`app.json` の `ios.buildNumber` は参考値で、ビルドには使われない）。
 
 

@@ -154,7 +154,24 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     @Published var timers: [SeatTimerItem] = []
     @Published var members: [String] = []
     @Published var currentUserName: String = "スタイリスト"
+    // ★ 「iPhoneと即時通信できる状態（isReachable）」のみ true。有効化だけでは true にしない
     @Published var isConnectedToPhone: Bool = false
+    
+    // ★ 診断用（画面の通信状態パネルに常時表示）
+    // linkState: 0 = 未有効化(灰) / 1 = 有効化済み・iPhoneアプリ未接続(黄) / 2 = iPhoneと通信可能(緑)
+    @Published var linkState: Int = 0
+    @Published var activationStateText: String = "未有効化"
+    @Published var isCompanionAppInstalled: Bool = false
+    @Published var lastSentAction: String = "-"
+    @Published var lastSentAt: Date? = nil
+    @Published var lastSendResult: String = "-"
+    @Published var lastReceivedAt: Date? = nil
+    @Published var lastReceivedKind: String = "-"
+    @Published var lastReceivedSeatCount: Int = -1
+    @Published var receivedCount: Int = 0
+    
+    // ★ 有効化前に行われた操作の保留キュー（有効化完了時に自動送信。メインスレッドでのみ操作）
+    private var pendingPayloads: [[String: Any]] = []
     
     override init() {
         super.init()
@@ -165,14 +182,37 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
     
+    // ★ 現在のセッション状態を診断用プロパティへ反映（メインスレッドで呼ぶこと）
+    private func refreshLinkState(_ session: WCSession) {
+        switch session.activationState {
+        case .activated: activationStateText = "有効"
+        case .inactive: activationStateText = "一時停止"
+        case .notActivated: activationStateText = "未有効化"
+        @unknown default: activationStateText = "不明"
+        }
+        isCompanionAppInstalled = session.isCompanionAppInstalled
+        isConnectedToPhone = session.isReachable
+        if session.isReachable {
+            linkState = 2
+        } else if session.activationState == .activated {
+            linkState = 1
+        } else {
+            linkState = 0
+        }
+    }
+    
     // MARK: - WCSessionDelegate
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         DispatchQueue.main.async {
-            self.isConnectedToPhone = (activationState == .activated)
+            self.refreshLinkState(session)
+            if let error = error {
+                self.lastSendResult = "有効化エラー: \(error.localizedDescription)"
+            }
             if let context = session.receivedApplicationContext as [String: Any]?, !context.isEmpty {
-                self.processReceivedData(context)
+                self.processReceivedData(context, kind: "保存データ")
             }
             if activationState == .activated {
+                self.flushPendingPayloads(session)
                 self.requestSyncFromPhone()
             }
         }
@@ -180,11 +220,17 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     
     func sessionReachabilityDidChange(_ session: WCSession) {
         DispatchQueue.main.async {
-            self.isConnectedToPhone = session.isReachable
+            self.refreshLinkState(session)
             // ★ iPhoneとの接続が確立された瞬間（緑色点灯時）、自動で最新データを要求！手動タップ不要で完全自動同期
             if session.isReachable {
                 self.requestSyncFromPhone()
             }
+        }
+    }
+    
+    func sessionCompanionAppInstalledDidChange(_ session: WCSession) {
+        DispatchQueue.main.async {
+            self.refreshLinkState(session)
         }
     }
     
@@ -194,19 +240,19 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
         DispatchQueue.main.async {
-            self.processReceivedData(applicationContext)
+            self.processReceivedData(applicationContext, kind: "保存データ")
         }
     }
     
     func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
         DispatchQueue.main.async {
-            self.processReceivedData(message)
+            self.processReceivedData(message, kind: "即時")
         }
     }
     
     func session(_ session: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
         DispatchQueue.main.async {
-            self.processReceivedData(message)
+            self.processReceivedData(message, kind: "即時")
             replyHandler(["status": "ok"])
         }
     }
@@ -214,11 +260,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     // ★ バックグラウンドキュー経由の確実な受信
     func session(_ session: WCSession, didReceiveUserInfo userInfo: [String : Any] = [:]) {
         DispatchQueue.main.async {
-            self.processReceivedData(userInfo)
+            self.processReceivedData(userInfo, kind: "予備")
         }
     }
     
-    func processReceivedData(_ data: [String: Any]) {
+    func processReceivedData(_ data: [String: Any], kind: String = "-") {
+        // ★ 診断用: 受信記録
+        self.receivedCount += 1
+        self.lastReceivedAt = Date()
+        self.lastReceivedKind = kind
+        
         // スタッフ名同期
         if let name = data["userName"] as? String, !name.isEmpty {
             self.currentUserName = name
@@ -238,11 +289,21 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
                 return nil
             }
+            self.lastReceivedSeatCount = parsed.count
             self.timers = parsed
         }
     }
     
+    // ★ 送信結果をメインスレッドで記録
+    private func recordSend(_ result: String) {
+        DispatchQueue.main.async {
+            self.lastSendResult = result
+        }
+    }
+    
     // MARK: - iPhoneへのアクション送信
+    // ①即時通信できれば sendMessage（iPhoneの受信確認つき）→ 失敗したら transferUserInfo へ自動切替
+    // ②即時通信できなければ最初から transferUserInfo（iPhoneアプリ起動時に届く予備ルート）
     func sendActionToPhone(action: String, seatId: String, extra: [String: Any] = [:]) {
         guard WCSession.isSupported() else { return }
         let session = WCSession.default
@@ -256,12 +317,47 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             payload[k] = v
         }
         
-        if session.isReachable {
-            session.sendMessage(payload, replyHandler: nil) { error in
-                print("[WatchSession] sendMessage error: \(error.localizedDescription)")
+        DispatchQueue.main.async {
+            self.lastSentAction = action
+            self.lastSentAt = Date()
+            
+            guard session.activationState == .activated else {
+                // REQUEST_SYNC は有効化完了時に自動で送るので保留しない（重複防止）
+                if action != "REQUEST_SYNC" {
+                    self.pendingPayloads.append(payload)
+                }
+                self.lastSendResult = "未準備（有効化待ち・保留\(self.pendingPayloads.count)件）"
+                session.activate()
+                return
             }
+            self.deliver(payload, session: session)
+        }
+    }
+    
+    // ★ 有効化完了時に保留していた操作を順に送信（メインスレッドで呼ぶこと）
+    private func flushPendingPayloads(_ session: WCSession) {
+        guard !pendingPayloads.isEmpty else { return }
+        let queued = pendingPayloads
+        pendingPayloads.removeAll()
+        for p in queued {
+            deliver(p, session: session)
+        }
+    }
+    
+    // ★ 実際の送信（即時ルート → 失敗時は予備ルート）
+    private func deliver(_ payload: [String: Any], session: WCSession) {
+        if session.isReachable {
+            lastSendResult = "即時送信中…"
+            session.sendMessage(payload, replyHandler: { [weak self] _ in
+                self?.recordSend("iPhone受信OK")
+            }, errorHandler: { [weak self] error in
+                print("[WatchSession] sendMessage error: \(error.localizedDescription)")
+                session.transferUserInfo(payload)
+                self?.recordSend("即時失敗→予備ルート: \(error.localizedDescription)")
+            })
         } else {
             session.transferUserInfo(payload)
+            lastSendResult = "iPhone未接続→予備ルートで送信待ち"
         }
     }
 }
@@ -457,7 +553,7 @@ struct ContentView: View {
                     }) {
                         HStack(spacing: 3) {
                             Circle()
-                                .fill(sessionManager.isConnectedToPhone ? Color(hex: "#30D158") : Color.gray)
+                                .fill(linkColor)
                                 .frame(width: 6, height: 6)
                             Image(systemName: "arrow.triangle.2.circlepath")
                                 .font(.system(size: 10, weight: .bold))
@@ -561,10 +657,63 @@ struct ContentView: View {
         .padding(.horizontal, 4)
     }
 
+    // ★ 接続ランプの色（緑=iPhoneと通信可能 / 黄=有効化済み・iPhoneアプリ未接続 / 灰=未有効化）
+    private var linkColor: Color {
+        switch sessionManager.linkState {
+        case 2: return Color(hex: "#30D158")
+        case 1: return Color(hex: "#FFD60A")
+        default: return Color.gray
+        }
+    }
+    
+    private func diagTime(_ date: Date?) -> String {
+        guard let date = date else { return "--:--:--" }
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: date)
+    }
+    
+    // ★ 通信状態パネル（診断用・常時表示。不要になったら cardsScrollView から外す）
+    @ViewBuilder
+    private var diagnosticPanel: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(linkColor)
+                    .frame(width: 6, height: 6)
+                Text(sessionManager.linkState == 2 ? "iPhoneと通信可能" : (sessionManager.linkState == 1 ? "有効・iPhone未接続" : "未有効化"))
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.white)
+            }
+            Text("状態:\(sessionManager.activationStateText) / iPhoneアプリ:\(sessionManager.isCompanionAppInstalled ? "○" : "×")")
+                .font(.system(size: 9))
+                .foregroundColor(Color(hex: "#8E8E93"))
+            Text("送信 \(diagTime(sessionManager.lastSentAt)) \(sessionManager.lastSentAction)")
+                .font(.system(size: 9))
+                .foregroundColor(Color(hex: "#8E8E93"))
+            Text("結果: \(sessionManager.lastSendResult)")
+                .font(.system(size: 9))
+                .foregroundColor(Color(hex: "#8E8E93"))
+                .lineLimit(3)
+            Text("受信 \(sessionManager.receivedCount)回 \(diagTime(sessionManager.lastReceivedAt)) \(sessionManager.lastReceivedKind) \(sessionManager.lastReceivedSeatCount >= 0 ? "\(sessionManager.lastReceivedSeatCount)席" : "")")
+                .font(.system(size: 9))
+                .foregroundColor(Color(hex: "#8E8E93"))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(hex: "#1C1C1E"))
+        )
+        .padding(.horizontal, 4)
+    }
+
     @ViewBuilder
     private var cardsScrollView: some View {
         ScrollView {
             VStack(spacing: 12) {
+                diagnosticPanel
+                
                 if timers.isEmpty {
                     // ★ 席が0件の時のプレースホルダー表示
                     emptySeatsPlaceholderView

@@ -31,6 +31,36 @@ const safeAddListener = (eventName, callback) => {
   return { remove: () => {} };
 };
 
+// ★ 診断用ストア（画面の通信状態表示で使用）
+const diagnostics = {
+  lastSendAt: 0,
+  lastSendSeatCount: null,
+  lastSendMessageResult: '',
+  lastSendContextResult: '',
+  sendCount: 0,
+  jsReceivedCount: 0,
+  lastJsReceivedAt: 0,
+  lastJsReceivedKind: '',
+  lastJsReceivedAction: '',
+};
+const diagnosticsSubscribers = new Set();
+const updateDiagnostics = (patch) => {
+  Object.assign(diagnostics, patch);
+  const snapshot = { ...diagnostics };
+  diagnosticsSubscribers.forEach((cb) => {
+    try { cb(snapshot); } catch {}
+  });
+};
+const recordJsReceived = (kind, body) => {
+  updateDiagnostics({
+    jsReceivedCount: diagnostics.jsReceivedCount + 1,
+    lastJsReceivedAt: Date.now(),
+    lastJsReceivedKind: kind,
+    lastJsReceivedAction: (body && (body.action || body.type)) || '?',
+  });
+};
+const errorText = (e) => (e && (e.message || e.code)) ? String(e.message || e.code) : String(e);
+
 export const WatchConnectivity = {
   isSupported: () => {
     if (!NativeModule || Platform.OS !== 'ios') return false;
@@ -66,6 +96,29 @@ export const WatchConnectivity = {
     } catch {
       return false;
     }
+  },
+
+  // ★ 診断用: ネイティブ層の通信状態（有効化・ペアリング・受信回数など）
+  getStatus: () => {
+    if (!NativeModule || Platform.OS !== 'ios') return null;
+    try {
+      return typeof NativeModule.getStatus === 'function' ? NativeModule.getStatus() : null;
+    } catch (e) {
+      return { error: errorText(e) };
+    }
+  },
+
+  addStatusListener: (callback) => {
+    return safeAddListener('onStatusChanged', (event) => {
+      if (event) callback(event);
+    });
+  },
+
+  getDiagnostics: () => ({ ...diagnostics }),
+
+  subscribeDiagnostics: (callback) => {
+    diagnosticsSubscribers.add(callback);
+    return () => diagnosticsSubscribers.delete(callback);
   },
 
   activate: async () => {
@@ -117,37 +170,56 @@ export const WatchConnectivity = {
     }
   },
 
-  // ★ 安定・リアルタイム完全両立同期メソッド（最優先リアルタイム即時送信 ＋ 次回起動・消灯時永続保存）
+  // ★ 同期送信（①Watch画面が開いていれば即時送信 ＋ ②次回起動・復帰用の最新状態保存）
+  // 結果は診断ストアに記録し、画面の通信状態表示で確認できる
   syncData: async (data) => {
-    if (!NativeModule || Platform.OS !== 'ios') return false;
+    if (!NativeModule || Platform.OS !== 'ios') return null;
+    const seatCount = data && Array.isArray(data.seats) ? data.seats.length : null;
+    let messageResult = '';
+    let contextResult = '';
     try {
-      // 1. Watch画面起動中であればリアルタイム即時送信を最優先実行！
       let reachable = false;
       try {
         reachable = typeof NativeModule.isReachable === 'function'
           ? NativeModule.isReachable()
           : !!NativeModule.isReachable;
       } catch {}
+
       if (reachable) {
         try {
           await NativeModule.sendMessage(data);
+          messageResult = '即時OK';
         } catch (sendErr) {
-          console.log('[WatchConnectivity] immediate sendMessage skipped/retry via context:', sendErr?.message);
+          messageResult = `失敗: ${errorText(sendErr)}`;
         }
+      } else {
+        messageResult = '未接続のため即時送信なし';
       }
 
-      // 2. 次回起動時・消灯スリープ復帰用の最新状態永続保存（Apple公式推奨）
-      await NativeModule.updateApplicationContext(data).catch(() => {});
-      return true;
+      try {
+        const ok = await NativeModule.updateApplicationContext(data);
+        contextResult = ok ? '保存OK' : '保存されず';
+      } catch (ctxErr) {
+        contextResult = `失敗: ${errorText(ctxErr)}`;
+      }
     } catch (e) {
-      console.warn('[WatchConnectivity] syncData error:', e);
-      return false;
+      messageResult = messageResult || `失敗: ${errorText(e)}`;
     }
+
+    updateDiagnostics({
+      lastSendAt: Date.now(),
+      lastSendSeatCount: seatCount,
+      lastSendMessageResult: messageResult,
+      lastSendContextResult: contextResult,
+      sendCount: diagnostics.sendCount + 1,
+    });
+    return { messageResult, contextResult };
   },
 
   addMessageListener: (callback) => {
     return safeAddListener('onMessageReceived', (event) => {
       if (event && event.message) {
+        recordJsReceived('message', event.message);
         callback(event.message);
       }
     });
@@ -156,6 +228,7 @@ export const WatchConnectivity = {
   addApplicationContextListener: (callback) => {
     return safeAddListener('onApplicationContextReceived', (event) => {
       if (event && event.context) {
+        recordJsReceived('context', event.context);
         callback(event.context);
       }
     });
@@ -164,6 +237,7 @@ export const WatchConnectivity = {
   addUserInfoListener: (callback) => {
     return safeAddListener('onUserInfoReceived', (event) => {
       if (event && event.userInfo) {
+        recordJsReceived('userInfo', event.userInfo);
         callback(event.userInfo);
       }
     });
