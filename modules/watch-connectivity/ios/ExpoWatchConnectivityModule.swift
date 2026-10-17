@@ -13,6 +13,12 @@ public class ExpoWatchConnectivityModule: Module {
   fileprivate var lastNativeReceivedKind: String = ""
   fileprivate var lastNativeReceivedAction: String = ""
 
+  // ★ JSの受信準備が整う前に届いたWatchからの受信を保留（取りこぼし防止）
+  private let eventLock = NSLock()
+  private var jsReady: Bool = false
+  private var pendingEvents: [[String: Any]] = []
+  private let maxPendingEvents = 100
+
   private var session: WCSession? {
     return WCSession.isSupported() ? WCSession.default : nil
   }
@@ -79,6 +85,17 @@ public class ExpoWatchConnectivityModule: Module {
     // ★ 診断用: 現在の通信状態をまとめて返す
     Function("getStatus") { () -> [String: Any] in
       return self.buildStatus()
+    }
+
+    // ★ JSの受信準備完了を通知し、それまでに保留していた受信をまとめて受け取る
+    // 戻り値: [{ "name": イベント名, "body": イベント本体 }]
+    Function("takePendingEvents") { () -> [[String: Any]] in
+      self.eventLock.lock()
+      self.jsReady = true
+      let queued = self.pendingEvents
+      self.pendingEvents.removeAll()
+      self.eventLock.unlock()
+      return queued
     }
 
     AsyncFunction("updateApplicationContext") { (context: [String: Any], promise: Promise) in
@@ -224,6 +241,16 @@ public class ExpoWatchConnectivityModule: Module {
   }
 
   fileprivate func dispatchEvent(_ name: String, _ body: [String: Any]) {
+    eventLock.lock()
+    if !jsReady {
+      pendingEvents.append(["name": name, "body": body])
+      if pendingEvents.count > maxPendingEvents {
+        pendingEvents.removeFirst(pendingEvents.count - maxPendingEvents)
+      }
+      eventLock.unlock()
+      return
+    }
+    eventLock.unlock()
     sendEvent(name, body)
   }
 

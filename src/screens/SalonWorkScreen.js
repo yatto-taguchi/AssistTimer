@@ -247,6 +247,8 @@ export default function SalonWorkScreen() {
 
   // ★ サロン所属スタッフメンバー管理（初期値は空 []、スマホ側から追加・編集・削除可能）
   const [staffMembers, setStaffMembers] = useState([]);
+  // ★ 席データ等の初期読み込み完了フラグ（Watchからの操作の受け取り開始条件）
+  const [isDataLoaded, setIsDataLoaded] = useState(false);
   const [isMemberManageModalVisible, setIsMemberManageModalVisible] = useState(false);
   const [inputNewMemberName, setInputNewMemberName] = useState('');
 
@@ -776,39 +778,40 @@ export default function SalonWorkScreen() {
     loadInitialData();
   }, []);
 
-  // ★ Apple Watchとの接続・リスナー登録（登録は1回のみ。処理は ref 経由で最新の関数を呼ぶ）
+  // ★ Apple Watchとの接続（画面表示時に1回）
   useEffect(() => {
     if (Platform.OS === 'ios') {
       WatchConnectivity.activate().catch(() => {});
-
-      const callLatest = (payload) => {
-        if (payload && payload.action && handleWatchActionRef.current) {
-          handleWatchActionRef.current(payload);
-        }
-      };
-
-      const subMsg = WatchConnectivity.addMessageListener(callLatest);
-      const subCtx = WatchConnectivity.addApplicationContextListener(callLatest);
-      const subUser = WatchConnectivity.addUserInfoListener ? WatchConnectivity.addUserInfoListener(callLatest) : null;
-
-      // ★ Watchと通信可能になった瞬間に、iPhone側からも最新の席データを即時送信（Watch側の要求が届かなくても同期させる保険）
-      let wasReachable = false;
-      const subStatus = WatchConnectivity.addStatusListener((status) => {
-        const reachable = !!(status && status.isReachable);
-        if (reachable && !wasReachable && handleWatchActionRef.current) {
-          handleWatchActionRef.current({ action: 'REQUEST_SYNC' });
-        }
-        wasReachable = reachable;
-      });
-
-      return () => {
-        if (subMsg?.remove) subMsg.remove();
-        if (subCtx?.remove) subCtx.remove();
-        if (subUser?.remove) subUser.remove();
-        if (subStatus?.remove) subStatus.remove();
-      };
     }
   }, []);
+
+  // ★ Watchからの操作の受け取り（席データの読み込み完了後に開始）
+  // 読み込み完了前・サロン画面を開く前に届いた操作は watch-connectivity 側で保留され、
+  // ここで購読を始めた瞬間に古い順にまとめて反映される（取りこぼし・空データへの適用を防止）
+  useEffect(() => {
+    if (Platform.OS !== 'ios' || !isDataLoaded) return undefined;
+
+    const unsubscribeActions = WatchConnectivity.subscribeActions((payload) => {
+      if (payload && payload.action && handleWatchActionRef.current) {
+        handleWatchActionRef.current(payload);
+      }
+    });
+
+    // ★ Watchと通信可能になった瞬間に、iPhone側からも最新の席データを即時送信（Watch側の要求が届かなくても同期させる保険）
+    let wasReachable = false;
+    const subStatus = WatchConnectivity.addStatusListener((status) => {
+      const reachable = !!(status && status.isReachable);
+      if (reachable && !wasReachable && handleWatchActionRef.current) {
+        handleWatchActionRef.current({ action: 'REQUEST_SYNC' });
+      }
+      wasReachable = reachable;
+    });
+
+    return () => {
+      if (unsubscribeActions) unsubscribeActions();
+      if (subStatus?.remove) subStatus.remove();
+    };
+  }, [isDataLoaded]);
 
   // ★ seats または staffMembers が更新された際、Watch へ最新データを同期
   useEffect(() => {
@@ -907,6 +910,8 @@ export default function SalonWorkScreen() {
       }
     } catch (e) {
       console.warn('Failed to load initial salon data', e);
+    } finally {
+      setIsDataLoaded(true);
     }
   };
 

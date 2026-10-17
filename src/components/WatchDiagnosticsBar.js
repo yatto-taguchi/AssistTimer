@@ -94,7 +94,7 @@ export default function WatchDiagnosticsBar({ theme }) {
         受信(本体) {nativeCount}回 {fmtTime(status.lastNativeReceivedAt)} {status.lastNativeReceivedKind || ''} {status.lastNativeReceivedAction || ''}
       </Text>
       <Text style={[styles.line, { color: bridgeMismatch ? '#FF453A' : subColor }]}>
-        受信(画面) {jsCount}回 {fmtTime(diag.lastJsReceivedAt)} {diag.lastJsReceivedKind || ''} {diag.lastJsReceivedAction || ''}
+        受信(JS) {jsCount}回 {fmtTime(diag.lastJsReceivedAt)} {diag.lastJsReceivedKind || ''} {diag.lastJsReceivedAction || ''}{diag.queuedActions ? ` / 画面準備待ち ${diag.queuedActions}件` : ''}
       </Text>
     </View>
   );

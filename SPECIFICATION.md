@@ -1574,5 +1574,13 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **原因**: `ExpoWatchConnectivity.podspec` がモジュール直下（`modules/watch-connectivity/`）に置かれていた。Expo autolinking（`expo-modules-autolinking` 3.x）は podspec を「直下のサブフォルダ（例: `ios/`）」からしか探さないため、Expo モジュールとして解決されず `ExpoModulesProvider` に登録されていなかった。一方で React Native 側の autolinking がルートの podspec を拾ってビルドだけは行っていたため、ビルドは成功するが実行時に `requireNativeModule('ExpoWatchConnectivity')` が失敗し、JS 側の送受信がすべて無処理になっていた（Build 25 以降ずっと同じ状態だった可能性が高い）。
     - **修正**: podspec を `modules/watch-connectivity/ios/ExpoWatchConnectivity.podspec` へ移動（Expo 公式モジュールテンプレートと同じ配置）し、`package.json` 参照を `..` 経由、`source_files` を `**/*.{h,m,mm,swift,hpp,cpp}` に変更。
     - **検証**: `npx expo-modules-autolinking resolve --platform apple` で `watch-connectivity`（`modules: ["ExpoWatchConnectivityModule"]`）が解決されること、`react-native-config` 側からは外れて二重リンクにならないことを確認。
+    - **結果**: Build 37 実機で iPhone ⇄ Watch の双方向連動を確認。
+  - **Watchからの操作の取りこぼし対策 (Build 38)**:
+    - **症状（Build 37 の診断表示で判明）**: 受信(本体) 12回に対し受信(画面) 7回。サロン画面を開く前（リスナー未登録）や席データ読み込み前に届いた操作が捨てられていた。
+    - **ネイティブ保留 (`ExpoWatchConnectivityModule.swift`)**: JS の受信準備が整うまでの受信イベントを `pendingEvents`（最大100件、`NSLock` で保護）に保留。JS から `takePendingEvents()` が呼ばれた時点で準備完了とし、保留分を返却、以降は通常どおり `sendEvent` で即時通知。Watch 操作で iPhone アプリがバックグラウンド起動された直後の取りこぼしを防ぐ。
+    - **JS 一元受信 (`modules/watch-connectivity/index.js`)**: モジュール読み込み時（アプリ起動時）に受信リスナーを1回だけ登録し、直後に `takePendingEvents()` で保留分を回収。`action` 付きの受信は受け取り先が未登録の間 `actionQueue`（最大100件、`REQUEST_SYNC` は1件に集約）に保留し、新API `subscribeActions(cb)` の登録時に古い順にまとめて渡す。受信回数の記録もここに一本化（個別の `add*Listener` では記録しない）。
+    - **サロン画面 (`SalonWorkScreen.js`)**: `isDataLoaded`（`loadInitialData` の `finally` で true）が立ってから `subscribeActions` を開始。読み込み前の空の席一覧に操作が適用され、その後の読み込みで上書きされて消える問題を防止。接続時の自動送信（`onStatusChanged`）も同じタイミングで開始。
+    - **診断表示**: 「受信(画面)」を「受信(JS)」に改称し、保留中の件数を「画面準備待ち ◯件」として表示。
+    - **残存課題**: サロン画面を一度も開いていない間は、Watch からの `REQUEST_SYNC` への返信（最新席データ送信）は保留され、サロン画面を開いた時点で実行される（その間 Watch は前回保存された applicationContext を表示）。
 
 

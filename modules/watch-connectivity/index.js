@@ -42,6 +42,7 @@ const diagnostics = {
   lastJsReceivedAt: 0,
   lastJsReceivedKind: '',
   lastJsReceivedAction: '',
+  queuedActions: 0,
 };
 const diagnosticsSubscribers = new Set();
 const updateDiagnostics = (patch) => {
@@ -60,6 +61,66 @@ const recordJsReceived = (kind, body) => {
   });
 };
 const errorText = (e) => (e && (e.message || e.code)) ? String(e.message || e.code) : String(e);
+
+// ★ Watchからの操作（action 付きの受信）の一元管理
+// アプリ起動時に1回だけ受信リスナーを登録し、受け取り先（サロン画面）が準備できるまでは保留。
+// サロン画面を開く前や、画面のデータ読み込み中に届いた操作も取りこぼさない。
+const MAX_ACTION_QUEUE = 100;
+const actionQueue = [];
+const actionConsumers = new Set();
+
+const deliverAction = (payload) => {
+  if (actionConsumers.size === 0) {
+    // 同期要求は何件たまっても結果は同じなので1件だけ保留
+    if (payload.action === 'REQUEST_SYNC' && actionQueue.some((p) => p.action === 'REQUEST_SYNC')) return;
+    actionQueue.push(payload);
+    if (actionQueue.length > MAX_ACTION_QUEUE) {
+      actionQueue.splice(0, actionQueue.length - MAX_ACTION_QUEUE);
+    }
+    updateDiagnostics({ queuedActions: actionQueue.length });
+    return;
+  }
+  actionConsumers.forEach((cb) => {
+    try { cb(payload); } catch (e) { console.warn('[WatchConnectivity] action handler failed:', e); }
+  });
+};
+
+const handleIncoming = (kind, body) => {
+  if (!body) return;
+  recordJsReceived(kind, body);
+  if (body.action) deliverAction(body);
+};
+
+const EVENT_BODY_KEYS = {
+  onMessageReceived: ['message', 'message'],
+  onApplicationContextReceived: ['context', 'context'],
+  onUserInfoReceived: ['userInfo', 'userInfo'],
+};
+
+let globalListenersReady = false;
+const setupGlobalListeners = () => {
+  if (globalListenersReady || !NativeModule) return;
+  globalListenersReady = true;
+  Object.entries(EVENT_BODY_KEYS).forEach(([eventName, [kind, key]]) => {
+    safeAddListener(eventName, (event) => handleIncoming(kind, event && event[key]));
+  });
+  // ネイティブ側で JS 準備前に保留していた受信を回収（リスナー登録後に呼ぶので間に届いた分も漏れない）
+  try {
+    if (typeof NativeModule.takePendingEvents === 'function') {
+      const pending = NativeModule.takePendingEvents() || [];
+      pending.forEach((ev) => {
+        const keys = ev && EVENT_BODY_KEYS[ev.name];
+        if (keys) handleIncoming(keys[0], ev.body && ev.body[keys[1]]);
+      });
+    }
+  } catch (e) {
+    console.warn('[WatchConnectivity] takePendingEvents failed:', e);
+  }
+};
+
+if (Platform.OS === 'ios') {
+  setupGlobalListeners();
+}
 
 export const WatchConnectivity = {
   isSupported: () => {
@@ -216,30 +277,37 @@ export const WatchConnectivity = {
     return { messageResult, contextResult };
   },
 
+  // ★ Watchからの操作を受け取る（登録時に保留中の操作を古い順にまとめて渡す）
+  // 戻り値: 解除用の関数
+  subscribeActions: (callback) => {
+    setupGlobalListeners();
+    actionConsumers.add(callback);
+    const queued = actionQueue.splice(0, actionQueue.length);
+    updateDiagnostics({ queuedActions: 0 });
+    queued.forEach((payload) => {
+      try { callback(payload); } catch (e) { console.warn('[WatchConnectivity] action handler failed:', e); }
+    });
+    return () => {
+      actionConsumers.delete(callback);
+    };
+  },
+
+  // ※ 以下3つは個別イベントの直接購読用（受信回数の記録は上の一元リスナーで行う）
   addMessageListener: (callback) => {
     return safeAddListener('onMessageReceived', (event) => {
-      if (event && event.message) {
-        recordJsReceived('message', event.message);
-        callback(event.message);
-      }
+      if (event && event.message) callback(event.message);
     });
   },
 
   addApplicationContextListener: (callback) => {
     return safeAddListener('onApplicationContextReceived', (event) => {
-      if (event && event.context) {
-        recordJsReceived('context', event.context);
-        callback(event.context);
-      }
+      if (event && event.context) callback(event.context);
     });
   },
 
   addUserInfoListener: (callback) => {
     return safeAddListener('onUserInfoReceived', (event) => {
-      if (event && event.userInfo) {
-        recordJsReceived('userInfo', event.userInfo);
-        callback(event.userInfo);
-      }
+      if (event && event.userInfo) callback(event.userInfo);
     });
   },
 };
