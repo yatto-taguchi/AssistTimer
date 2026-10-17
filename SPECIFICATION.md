@@ -1569,5 +1569,10 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
       - `WKCompanionAppBundleIdentifier` は `@bacons/apple-targets` がビルド設定（`INFOPLIST_KEY_WKCompanionAppBundleIdentifier`）で自動付与するため、`targets/watch/Info.plist` への手動追加は不要。
       - 「リスナー二重処理ガード (`isSalonWorkScreenActive`)」は Build 33 で AppContext 側の Watch 処理を撤去したため現在は存在しない。Watchからの操作はサロン画面を一度でも開いている間のみ受信処理される（課題として残存）。
     - **ビルド番号の管理**: `eas.json` が `appVersionSource: remote` ＋ `autoIncrement` のため、実際のビルド番号は EAS サーバー側で採番される（`app.json` の `ios.buildNumber` は参考値で、ビルドには使われない）。
+  - **【真因】iPhone側ネイティブモジュールが未登録だった問題の修正 (Build 37)**:
+    - **症状（Build 36 の診断表示で判明）**: iPhone の通信状態カードに「ネイティブモジュール未読込」と表示。Watch 側は `REQUEST_SYNC` を送信しても返信がなく「即時送信中…」のまま、受信0回。
+    - **原因**: `ExpoWatchConnectivity.podspec` がモジュール直下（`modules/watch-connectivity/`）に置かれていた。Expo autolinking（`expo-modules-autolinking` 3.x）は podspec を「直下のサブフォルダ（例: `ios/`）」からしか探さないため、Expo モジュールとして解決されず `ExpoModulesProvider` に登録されていなかった。一方で React Native 側の autolinking がルートの podspec を拾ってビルドだけは行っていたため、ビルドは成功するが実行時に `requireNativeModule('ExpoWatchConnectivity')` が失敗し、JS 側の送受信がすべて無処理になっていた（Build 25 以降ずっと同じ状態だった可能性が高い）。
+    - **修正**: podspec を `modules/watch-connectivity/ios/ExpoWatchConnectivity.podspec` へ移動（Expo 公式モジュールテンプレートと同じ配置）し、`package.json` 参照を `..` 経由、`source_files` を `**/*.{h,m,mm,swift,hpp,cpp}` に変更。
+    - **検証**: `npx expo-modules-autolinking resolve --platform apple` で `watch-connectivity`（`modules: ["ExpoWatchConnectivityModule"]`）が解決されること、`react-native-config` 側からは外れて二重リンクにならないことを確認。
 
 
