@@ -5,12 +5,15 @@ import UserNotifications
 
 // MARK: - タイムアップのアラーム（止めるまで鳴り続ける）
 //
-// ・アプリ表示中: 1秒ごとに強い振動（.notification / .failure を交互）を「止める」まで繰り返す
-// ・バックグラウンド / 手首を下ろしている時:
-//     スマートアラーム（WKExtendedRuntimeSession の start(at:) ＋ notifyUser）で
-//     システムのアラーム画面を出し、ユーザーが止めるまで振動を繰り返す。
-//     ※ start(at:) はアプリ表示中にしか予約できず、同時に1件まで → 一番早い席の分だけ予約する
-// ・予備: ローカル通知（終了時刻＋20〜120秒後の繰り返し）
+// ・本命: スマートアラーム（WKExtendedRuntimeSession の start(at:) ＋ notifyUser）
+//     終了時刻になると、画面が暗くても・手首を下ろしていても、システムのアラーム画面を出して
+//     ユーザーが止めるまで振動を繰り返す。
+//     ※ start(at:) はアプリ表示中にしか予約できず、同時に1件まで → 一番早い予定を予約する
+//     ※ 鳴っている予定のセッションは絶対に取り消さない（Build 38 の不具合: 0秒到達時にアプリ表示中だと
+//        「未来の予定がない」と判断して開始直前のセッションを取り消していた → 画面が暗くなると振動が止まった）
+//     ※ アプリ表示中に鳴動中なのにセッションが無い場合は、その場で1秒後開始のセッションを予約して引き継ぐ
+// ・アプリ表示中: 上記に加えて、0.5秒ごとの強い振動（.notification / .failure / .retry）を重ねる
+// ・予備: ローカル通知（終了時刻＋0〜120秒の繰り返し）
 //
 // Watch 側で止めた時は iPhone へ STOP_ALARM を送り、iPhone 側で鳴っている同じ席のアラームも止める。
 
@@ -38,16 +41,21 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private var session: WKExtendedRuntimeSession?
     private var sessionKey: String?
     private var sessionStarted = false
+    private var lastSessionEnd: String = "-"
+    private var notificationAuth: String = "?"
 
     private var notificationSignature = ""
     private var authRequested = false
-    private var hapticToggle = false
+    private var hapticStep = 0
+    private var hapticTimer: Timer?
 
     private let armedStoreKey = "assisttimer.alarm.armed"
     private let ackStoreKey = "assisttimer.alarm.ack"
     private let notificationPrefix = "assisttimer.alarm."
-    private let repeatOffsets: [TimeInterval] = [0, 20, 40, 60, 90, 120]
+    private let repeatOffsets: [TimeInterval] = [0, 15, 30, 45, 60, 90, 120]
     private let maxNotifications = 60 // watchOS の保留通知上限（64件）未満に抑える
+    // 強めに感じる触覚を交互に鳴らす
+    private let strongHaptics: [WKHapticType] = [.notification, .failure, .retry]
 
     override init() {
         super.init()
@@ -85,26 +93,25 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         refresh()
     }
 
-    /// アプリ表示中に1秒ごとに呼ぶ（鳴動中なら強い振動）
+    /// アプリ表示中に1秒ごとに呼ぶ
     func tick() {
         refresh()
-        guard !ringing.isEmpty, isAppActive else { return }
-        hapticToggle.toggle()
-        WKInterfaceDevice.current().play(hapticToggle ? .notification : .failure)
     }
 
     /// 「止める」ボタン
     func stop() {
         acknowledgeRinging(sendToPhone: true)
-        if let s = session, sessionStarted {
+        if let s = session, sessionStarted || sessionKey == nil || isKeyDueOrDone(sessionKey) {
             clearSession()
             s.invalidate()
         }
         refresh()
     }
 
-    /// アプリが表示状態になった時（スマートアラームの予約はこの時しかできない）
+    /// アプリが表示状態になった時（スマートアラームの予約・通知の許可確認はこの時しかできない）
     func appBecameActive() {
+        requestAuthorizationIfNeeded()
+        refreshNotificationAuth()
         refresh()
     }
 
@@ -115,10 +122,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         sessionKey = nil
         sessionStarted = extendedRuntimeSession.state == .running
         if sessionStarted {
-            extendedRuntimeSession.notifyUser(hapticType: .notification) { next in
-                next.pointee = .notification
-                return 1.5
-            }
+            startNotifyUser(extendedRuntimeSession)
         }
         updateStatusText()
     }
@@ -131,6 +135,14 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
 
     private func currentRinging(_ now: Date) -> [WatchAlarmEvent] {
         return events.filter { $0.date <= now && armed[$0.key] != nil && acknowledged[$0.key] == nil }
+    }
+
+    // そのキーの予定が「時刻到達済み」または「止めた・消えた」か
+    private func isKeyDueOrDone(_ key: String?) -> Bool {
+        guard let key = key else { return true }
+        if acknowledged[key] != nil { return true }
+        guard let ev = events.first(where: { $0.key == key }) else { return true }
+        return ev.date <= Date()
     }
 
     private func refresh() {
@@ -147,7 +159,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         if newRinging != ringing { ringing = newRinging }
 
         // 鳴っている予定が iPhone 側で止められた・席が終了した → スマートアラームも止める
-        if sessionStarted, let s = session, let key = sessionKey {
+        if let s = session, let key = sessionKey, sessionStarted {
             let stillValid = events.contains { $0.key == key } && acknowledged[key] == nil
             if !stillValid {
                 clearSession()
@@ -156,6 +168,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
 
         scheduleSmartAlarmIfPossible(now)
+        updateForegroundHaptics()
         rescheduleNotifications(now)
         updateStatusText()
     }
@@ -210,12 +223,51 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         if sessionStarted {
             smart = "鳴動中"
         } else if let s = session, s.state == .scheduled || s.state == .notStarted {
-            smart = "予約あり"
+            if let key = sessionKey, let ev = events.first(where: { $0.key == key }) {
+                let f = DateFormatter()
+                f.dateFormat = "HH:mm:ss"
+                smart = "予約 \(f.string(from: ev.date))"
+            } else {
+                smart = "予約あり"
+            }
         } else {
             smart = "予約なし"
         }
-        let text = "スマートアラーム:\(smart) / 鳴動\(ringing.count)件 / 音:\(soundOn ? "ON" : "OFF")"
+        let text = "スマートアラーム:\(smart) / 鳴動\(ringing.count)件 / 通知:\(notificationAuth) / 音:\(soundOn ? "ON" : "OFF") / 前回終了:\(lastSessionEnd)"
         if text != statusText { statusText = text }
+    }
+
+    // MARK: - アプリ表示中の強い振動（0.5秒ごと）
+
+    private func updateForegroundHaptics() {
+        let shouldVibrate = !ringing.isEmpty && isAppActive
+        if shouldVibrate {
+            guard hapticTimer == nil else { return }
+            playNextHaptic()
+            let t = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+                if self.ringing.isEmpty || !self.isAppActive {
+                    self.stopForegroundHaptics()
+                    return
+                }
+                self.playNextHaptic()
+            }
+            RunLoop.main.add(t, forMode: .common)
+            hapticTimer = t
+        } else {
+            stopForegroundHaptics()
+        }
+    }
+
+    private func playNextHaptic() {
+        let type = strongHaptics[hapticStep % strongHaptics.count]
+        hapticStep += 1
+        WKInterfaceDevice.current().play(type)
+    }
+
+    private func stopForegroundHaptics() {
+        hapticTimer?.invalidate()
+        hapticTimer = nil
     }
 
     // MARK: - スマートアラーム（WKExtendedRuntimeSession）
@@ -224,39 +276,67 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         // 鳴動中のセッションには触らない
         if sessionStarted { return }
         if let s = session, s.state == .invalid { clearSession() }
+
+        // ★ 時刻到達済み（＝まもなく開始する／開始処理中）の予定のセッションは絶対に取り消さない
+        if session != nil, let key = sessionKey, acknowledged[key] == nil,
+           let ev = events.first(where: { $0.key == key }), ev.date <= now.addingTimeInterval(2) {
+            return
+        }
+
         // start(at:) はアプリ表示中にしか呼べない
         guard isAppActive else { return }
 
-        let next = events
-            .filter { $0.date > now.addingTimeInterval(2) && acknowledged[$0.key] == nil }
-            .min { $0.date < $1.date }
+        // 鳴動中なのにセッションが無い（アプリを開いた時点で過ぎていた等）→ 1秒後開始で予約し、
+        // 画面が暗くなっても止めるまで鳴り続けるようにする
+        let target: WatchAlarmEvent?
+        let startDate: Date
+        if let r = currentRinging(now).first {
+            target = r
+            startDate = now.addingTimeInterval(1)
+        } else if let n = events
+            .filter({ $0.date > now && acknowledged[$0.key] == nil })
+            .min(by: { $0.date < $1.date }) {
+            target = n
+            startDate = n.date
+        } else {
+            target = nil
+            startDate = now
+        }
 
-        if let s = session, let key = sessionKey, key == next?.key, s.state == .scheduled || s.state == .notStarted {
+        if let s = session, let key = sessionKey, key == target?.key, s.state == .scheduled || s.state == .notStarted {
             return // 予約済み
         }
         if let old = session {
             clearSession()
             old.invalidate()
         }
-        guard let target = next, target.date.timeIntervalSince(now) < 36 * 3600 else { return }
+        guard let t = target, startDate.timeIntervalSince(now) < 36 * 3600 else { return }
 
         let s = WKExtendedRuntimeSession()
         s.delegate = self
-        s.start(at: target.date)
+        s.start(at: startDate)
         session = s
-        sessionKey = target.key
+        sessionKey = t.key
         sessionStarted = false
     }
 
-    func extendedRuntimeSessionDidStart(_ extendedRuntimeSession: WKExtendedRuntimeSession) {
-        // 止めるまで最強クラスの振動を繰り返す（アプリ非表示時はシステムのアラーム画面になる）
-        extendedRuntimeSession.notifyUser(hapticType: .notification) { next in
-            next.pointee = .notification
-            return 1.5
+    // 止めるまで強い振動を繰り返す（アプリ非表示時はシステムのアラーム画面になる）
+    private func startNotifyUser(_ s: WKExtendedRuntimeSession) {
+        let types = strongHaptics
+        var step = 0
+        s.notifyUser(hapticType: .notification) { next in
+            step += 1
+            next.pointee = types[step % types.count]
+            return 0.8
         }
+    }
+
+    func extendedRuntimeSessionDidStart(_ extendedRuntimeSession: WKExtendedRuntimeSession) {
+        startNotifyUser(extendedRuntimeSession)
         DispatchQueue.main.async {
             guard extendedRuntimeSession === self.session else { return }
             self.sessionStarted = true
+            self.lastSessionEnd = "-"
             self.refresh()
         }
     }
@@ -272,6 +352,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             guard extendedRuntimeSession === self.session else { return }
             let wasStarted = self.sessionStarted
             self.clearSession()
+            self.lastSessionEnd = self.reasonText(reason, error: error)
             // システムのアラーム画面で「停止」が押された → 止めた扱いにして iPhone にも伝える
             if wasStarted && reason == WKExtendedRuntimeSessionInvalidationReason.none {
                 self.acknowledgeRinging(sendToPhone: true)
@@ -280,12 +361,47 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
     }
 
+    private func reasonText(_ reason: WKExtendedRuntimeSessionInvalidationReason, error: Error?) -> String {
+        let base: String
+        switch reason {
+        case .none: base = "停止"
+        case .sessionInProgress: base = "他セッション実行中"
+        case .expired: base = "時間切れ"
+        case .resignedFrontmost: base = "前面喪失"
+        case .error: base = "エラー"
+        case .suppressedBySystem: base = "システム抑制"
+        @unknown default: base = "不明"
+        }
+        if let e = error { return "\(base)(\(e.localizedDescription))" }
+        return base
+    }
+
     // MARK: - ローカル通知（予備）
 
     private func requestAuthorizationIfNeeded() {
         guard !authRequested else { return }
         authRequested = true
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] _, _ in
+            self?.refreshNotificationAuth()
+        }
+    }
+
+    private func refreshNotificationAuth() {
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+            let text: String
+            switch settings.authorizationStatus {
+            case .authorized: text = "許可"
+            case .denied: text = "拒否"
+            case .notDetermined: text = "未確認"
+            case .provisional: text = "仮許可"
+            case .ephemeral: text = "一時"
+            @unknown default: text = "不明"
+            }
+            DispatchQueue.main.async {
+                self?.notificationAuth = text
+                self?.updateStatusText()
+            }
+        }
     }
 
     private func rescheduleNotifications(_ now: Date) {
@@ -297,7 +413,6 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         let signature = targets.map { $0.key }.joined(separator: "|") + "#\(soundOn)"
         guard signature != notificationSignature else { return }
         notificationSignature = signature
-        if !targets.isEmpty { requestAuthorizationIfNeeded() }
 
         let soundOn = self.soundOn
         let offsets = repeatOffsets
