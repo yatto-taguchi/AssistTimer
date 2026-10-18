@@ -1612,7 +1612,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **原因②（Watch入力）**: 分・秒をまとめた1つの入力欄でリューズの刻み幅（`by:`）を切り替えていたが、切替が反映されなかった。分・秒を独立した入力欄（別々のフォーカス・リューズ値）にした共通部品 `CrownMinSecPicker` に置き換え（タイム再入力画面・新規席追加画面）。
     - **`START_TIMER`（Watchのタイム再入力）**: Watch の表示どおりチェックタイマーを解除し、前回のタイムアップ記録（`timeUpTimestamp` / `escalationLevel`）もリセット。
   - **Apple Watch 文字盤コンプリケーション (Build 40)**:
-    - **ターゲット**: `targets/watch-widget`（`@bacons/apple-targets` の `watch-widget`、WidgetKit、Bundle ID `com.assisttimer.watchkitapp.complication`）。Watch アプリに埋め込まれる。
+    - **ターゲット**: `targets/watch-widget`（`@bacons/apple-targets` の `watch-widget`、WidgetKit、Bundle ID `com.assisttimer.watchkitapp.widget`）。Watch アプリに埋め込まれる。
     - **データ共有**: Watch アプリと App Group `group.com.assisttimer` を共有。Watch アプリ（`targets/watch/widget_sync.swift` の `WidgetSync`）が席データ受信時（`processReceivedData`、バックグラウンド含む）と Watch 上の操作時（`ContentView` の `onChange(of: timers)`）に、席番号・終了時刻・稼働中・一時停止中の残り秒数・自分が関わる席か（`isRelated`）を JSON で書き込み、内容が変わった時だけ `WidgetCenter.reloadAllTimelines()`。
     - **表示する席（オプションB）**: 自分が関わる稼働中の席の中で終了が一番近い席（超過中を含む）。無ければ全稼働中の席で終了が一番近い席。稼働中が無ければ「待機中」。
     - **表示**: 大きい枠（`accessoryRectangular`、モジュラー文字盤の中央）に「◯番席」「自分」バッジ・残り時間（`Text(date, style: .timer)` でリアルタイム）・稼働中の席数。終了時刻を過ぎると赤字の「超過」と超過時間を表示（各席の終了時刻にタイムラインのエントリを用意）。他に円形・1行・コーナーにも対応。タップで Watch アプリを開く。

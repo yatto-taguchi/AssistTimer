@@ -5,7 +5,7 @@ module.exports = config => ({
   displayName: "AssistTimer",
   colors: { $accent: "#0A84FF" },
   deploymentTarget: "10.0",
-  bundleIdentifier: ".watchkitapp.complication",
+  bundleIdentifier: ".watchkitapp.widget",
   entitlements: {
     // Watch アプリと同じ App Group で席タイマーの要約を共有する
     "com.apple.security.application-groups": ["group.com.assisttimer"],
