@@ -196,13 +196,16 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             let seatIds = Set(targets.map { $0.seatId })
             for id in seatIds {
                 let isMain = mainSeatIds.contains(id)
-                if isMain {
+                var extra: [String: Any] = ["kind": isMain ? "main" : "check"]
+                if isMain, let mainEvent = targets.first(where: { $0.seatId == id && $0.key.contains("-main@") }) {
+                    // ★ 鳴っていたタイマーの終了時刻。iPhone は席の終了時刻と照合し、別のタイマーなら止めない
+                    extra["expectedEnd"] = mainEvent.date.timeIntervalSince1970 * 1000.0
                     WatchSessionManager.shared.applyLocalStop(seatId: id)
                 }
                 WatchSessionManager.shared.sendActionToPhone(
                     action: "STOP_ALARM",
                     seatId: id,
-                    extra: ["kind": isMain ? "main" : "check"]
+                    extra: extra
                 )
             }
         }

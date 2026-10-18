@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import AlarmKit from 'alarm-kit';
 
 // ★ iPhone の純正アラーム（AlarmKit）予約の一元管理
@@ -124,4 +124,71 @@ export const stopAlarm = (source, key) => enqueue(() => {
 export const isAlarmScheduled = (source, key) => {
   const info = scheduledBySource[source]?.get(String(key));
   return !!info && info.result === 'ok';
+};
+
+// ★ iPhone のアラーム画面（AlarmKit）でユーザーが「停止」したアラームの検出
+// AlarmKit には「停止が押された」通知が無いため、ネイティブ側で「鳴る時刻を過ぎたのに、こちらが取り消していないのに
+// AlarmKit の一覧から消えた」予約を調べる（takeUserStoppedAlarms）。アプリが前面に戻った時と、前面にいる間は数秒ごとに確認する。
+// ※ アプリを閉じている間に止めた場合は、次にアプリを開いた時に検出される。
+const USER_STOP_POLL_MS = 3000;
+const stopSubscribers = new Set();
+let stopPollTimer = null;
+let appStateSub = null;
+
+const pollUserStoppedAlarms = () => enqueue(() => {
+  if (stopSubscribers.size === 0) return;
+  const stopped = AlarmKit.takeUserStoppedAlarms();
+  if (!Array.isArray(stopped) || stopped.length === 0) return;
+  // 止められた予約はもう鳴らないので、こちらの予約記録からも外す（二重鳴動防止の判定を正しく保つ）
+  stopped.forEach((a) => {
+    Object.values(scheduledBySource).forEach((m) => {
+      const info = m.get(String(a.key));
+      if (info && Math.abs(info.timestamp - Number(a.timestamp)) <= 1000) {
+        m.set(String(a.key), { ...info, result: 'stopped' });
+      }
+    });
+  });
+  lastResult = `stopped by user (${stopped.map((a) => a.key).join(', ')})`;
+  notify();
+  stopSubscribers.forEach((cb) => { try { cb(stopped); } catch {} });
+});
+
+const startStopPolling = () => {
+  if (stopPollTimer || AppState.currentState !== 'active') return;
+  stopPollTimer = setInterval(pollUserStoppedAlarms, USER_STOP_POLL_MS);
+};
+
+const stopStopPolling = () => {
+  if (stopPollTimer) clearInterval(stopPollTimer);
+  stopPollTimer = null;
+};
+
+/**
+ * ユーザーが iPhone のアラーム画面で止めたアラームを受け取る
+ * @param {(stopped: Array<{key:string,timestamp:number}>) => void} cb
+ * @returns {() => void} 購読解除
+ */
+export const subscribeUserStoppedAlarms = (cb) => {
+  if (Platform.OS !== 'ios' || !AlarmKit.isAvailable()) return () => {};
+  stopSubscribers.add(cb);
+  if (!appStateSub) {
+    appStateSub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        pollUserStoppedAlarms();
+        startStopPolling();
+      } else {
+        stopStopPolling();
+      }
+    });
+  }
+  pollUserStoppedAlarms();
+  startStopPolling();
+  return () => {
+    stopSubscribers.delete(cb);
+    if (stopSubscribers.size === 0) {
+      stopStopPolling();
+      if (appStateSub) appStateSub.remove();
+      appStateSub = null;
+    }
+  };
 };

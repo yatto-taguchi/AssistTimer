@@ -1363,16 +1363,17 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
       - 超過中の席カードをタップすると、通常の延長シートではなく、現場最優先の3大ボタンが並ぶ専用の **「超過時アクションシート (`OvertimeActionSheet`)」** がダイレクト起動。
         1. **ボタン①: ヘルプ項目連動「シャンプー入る」（特大ブルーボタン）**:
            - 席のヘルプ指定（`item.helpProcess`）に完全連動（「シャンプー」なら `💧 シャンプー入る`、「コーミング」なら `🪮 コーミング入る`）。
-           - タップするとタイマーをその時点のタイム（例: `17:06`）で即座に停止。
+           - タップするとタイマーを即座に停止。超過中なので表示は **「00:00」**（Build 45: 押した直後から 0 で止める。赤い「超過」表示のままにしない）。チェックタイマーは解除しない。
            - 施術ステータスを即座に該当ステータス（`💧 流し中: あなた` 等）へ更新。
            - 自分以外の関係者全員へ `📤 【◯番席】◯◯さんがシャンプーに入りました` とリアルタイム通知を自動送信。
         2. **ボタン②: 「↺ タイムをリセット」（アンバーボタン）**:
            - タップするとタイマーが即座に **「00:00」** にリセット（停止）。
            - 連動してチェックタイマー情報も初期化し、関係者全員へ `⏱️ ◯番席: 00:00にリセットしました` を送信。
         3. **ボタン③: 「⏹ 計測終了」（レッドボタン・アコーディオン収納）**:
-           - タップするとタイマーを停止し、該当カードを自動で **アコーディオン収納（`isCollapsed = true`）**。
+           - タップするとタイマーを 00:00 で停止し（チェックタイマーも解除）、該当カードを自動で **アコーディオン収納（`isCollapsed = true`）**。
            - 高さの低いスマートなスリムバー（`⌚️ ◯番席 ⏹ 計測終了 開く ∨`）へと最小化し、リスト最下部へ自動配置。
            - スリムバーをタップするといつでも瞬時にフル展開カードへ復帰。
+           - 収納状態の保持（Build 45）: iPhone は計測終了時の終了時刻を `collapsedAtEnd` に保存し、そのまま停止している間だけ同期で `isCollapsed: true` を送る（スタート・タイム再入力・延長・リセットで解除）。Watch は自分で収納・展開した席を記録し（`collapseOverrides`）、停止中は iPhone の値より優先、稼働したら常に展開。
     - **② タイマー停止中・00:00時**:
       - カードをタップすると、途中の操作シートをスキップして直接 **「任意タイム設定（00:00 Crown無段階調整 ＋ クイックパネル統合）」** 画面へシームレスにジャンプ。手元のリューズ（Crown）を回して秒単位の任意タイムを設定することも、下のクイックパネルから定番タイムをワンタップで即時スタートすることも可能（「戻る」を押すとメイン画面へ戻る）。
     - **③ タイマー稼働中（通常カウントダウン中・残り時間あり）**:
@@ -1484,7 +1485,8 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 - **同期データ構造 (`SYNC_SEATS`)**:
   - `userName`: ログイン中のスタイリスト名（Watch側で自動反映され、「私が担当」などの操作と直結）
   - `members`: 登録スタッフメンバー一覧（`string[]`、初期値は空 `[]`）
-  - `seats`: 客席配列（`id`, `seatNumber`, `seatLabel`, `creatorName`, `totalSeconds`, `targetEndTimestamp`, `isRunning`, `pausedRemainingSeconds`, `helpProcess`, `shampooStaff`, `isRecruiting`, `status`, `checkTargetSeconds`, `checkEndTimestamp`, `checkStaffName`, `isCheckCompleted`, `isCollapsed`）
+  - `timestamp`: iPhone がデータを作った時刻（`Date.now()`、ミリ秒）。Watch は前に受け取ったものより古いデータを無視する（10分以上古い場合は iPhone の時計変更とみなして受け入れる）
+  - `seats`: 客席配列（`id`, `seatNumber`, `seatLabel`, `creatorName`, `totalSeconds`, `targetEndTimestamp`, `isRunning`, `pausedRemainingSeconds`, `helpProcess`, `shampooStaff`, `isRecruiting`, `status`, `checkTargetSeconds`, `checkEndTimestamp`, `checkStaffName`, `isCheckCompleted`, `isCollapsed`）。停止中の `pausedRemainingSeconds` は保存済みの残り秒数、`isCollapsed` は計測終了で収納した席がそのまま停止している間だけ true
   - **完全堅牢パース (Robust Parsing)**: Watch側 `SeatTimerItem.init?(dictionary:)` において、`isRunning` のBool優先判定、およびCocoaブリッジの `NSNumber` / `Double` / `Int` 型キャストのフォールバックを完備。
 - **スタッフメンバー管理機能 ＆ 動的スタッフ表示 (Build 30)**:
   - **初期状態「空」設計**: 架空のサンプルスタッフ（タグチ、佐藤等）を完全撤廃し、初期値は完全な空 `[]`。
@@ -1492,27 +1494,31 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
   - **Watch側動的スタッフ表示＆空状態案内**:
     - メンバーが0人の場合: 「📱 スマホアプリでメンバーを追加してください」「サロン画面の「メンバー」から追加するとここに自動でスタッフが表示されます」の案内カードを親切に常時表示。
     - メンバー登録時: スマホで登録した実際のスタッフ名を一覧表示し、ワンタップでヘルプ指名が可能。
-- **双方向アクション・イベント連動**:
+  - **Watch ➔ iPhone の操作メッセージ共通項目**: `action` / `seatId` / `userName` / `timestamp`（Watch の送信時刻、ミリ秒）。追加の値は `extra` に包まずメッセージ直下に入れる。iPhone は「`action`＋`seatId`＋`timestamp`」を直近100件記録し、即時ルートと予備ルートで同じ操作が2回届いても 1 回だけ反映する（`REQUEST_SYNC` は対象外）。
+  - **停止系操作の `expectedEnd`**: `STOP_TIMER` / `FINISH_MEASURE` / `ENTER_HELP` / `RESET_ZERO` / `STOP_ALARM`（main）には、Watch が操作した時に見ていた終了時刻（ミリ秒。停止中だった場合は 0）を付ける。iPhone は席が稼働中で、終了時刻が 5 秒より大きく違う（または `expectedEnd` が 0）場合は、遅れて届いた操作として無視する（再スタートした席を止めない）。値が無い場合は従来どおり反映。
   - **Watch ➔ iPhone 逆方向アクション連動**:
     - `REQUEST_SYNC`: Watch側アプリ起動時（`activationDidCompleteWith`）、画面表示時（`.onAppear`）、および手動再同期ボタンタップ時に自動送信。iPhone側から最新の座席・メンバーデータを即時返信（プル型同期）。
     - `ADD_SEAT`: Watch側の「席追加シート（`AddSeatSheet`）」でタイマースタートした際、iPhone側へ新席データを即座に送信し、iPhone側ステートとAsyncStorageへ自動保存。
     - `START_SHAMPOO` / `FINISH_SHAMPOO`: シャンプー状態の開始・完了
     - `UPDATE_STATUS`: コーミング中、チェック中、放置中などのステータス変更
-    - `ENTER_HELP`: 超過時の「シャンプー入る」ワンタップ確定
+    - `ENTER_HELP`: 超過時の「シャンプー入る」ワンタップ確定（停止。超過中なら残り 0。チェックは解除しない）
     - `ASSIGN_HELP`: ヘルプ担当スタッフの指名・決定
     - `RECRUIT_HELP`: 全員ヘルプ募集の発出
     - `CLAIM_CHECK`: チェック担当への立候補
     - `COMPLETE_CHECK` / `CANCEL_CHECK`: チェック完了および解除
-    - `ADJUST_TIME`: タイム変更（+5分、+1分など）の加算
-    - `STOP_TIMER` / `START_TIMER` / `RESET_ZERO`: タイマーの一時停止、再入力、および00:00リセット
+    - `ADJUST_TIME`: タイム変更（+5分、+1分など）の加算（`secondsToAdd`。値が無い時のみ +300 秒、0 は何もしない。停止中の席は停止のまま残り時間だけ変え、残りが 0 より大きければ「リセット済」を解除）
+    - `STOP_TIMER`: タイマーの停止（0:00。チェックタイマーも解除）
+    - `FINISH_MEASURE`: 計測終了（0:00 で停止・チェックタイマー解除・カード収納）
+    - `START_TIMER` / `RESET_ZERO`: タイム再入力、および00:00リセット
+    - `STOP_ALARM`: Watch でアラームを止めた（`kind: 'main' | 'check'`）。iPhone で鳴っている同じ席のアラームを止め、`main`（放置タイム終了）なら終了時刻を過ぎて稼働中の席を 0:00 で停止（チェックタイマーも解除）。`check` は音を止めるだけ
     - `CLEAR_STAFF`: 担当者の解除
 - **新規席追加シートUI (AddSeatSheet) ＆ 任意タイム設定 (TimeActionSheet)**:
   - **watchOS専用円形ステッパー**: 左に「客席番号:」、右に「マイナス丸ボタン（−）」「白太字の中央文字（◯番席）」「プラス丸ボタン（＋）」を配置した円形ステッパーUI（直径28px・触覚付き）。
-  - **トグル（Digital Crown）無段階時間調整（分デフォルト／秒タップ切替）**:
-    - 中央に「MM分 : SS秒」の特大デジタル数字を配置。
-    - **デフォルト（分モード）**: リューズ（Crown）を回すと1分刻み（0〜90分）でスムーズに無段階調整。
-    - **秒タップ切替**: 「秒（SS）」をタップするとグリーン枠でハイライトされ、Crownを回すと1秒刻み（0〜59秒）で精密微調整。分タップで即座に分モードへ復帰。
-    - 下段に定番ピル（10分、15分、20分など）も併設し、定番タイムのワンタップ即決と無段階微調整を両立。
+  - **トグル（Digital Crown）による時間調整（Build 40 以降: `CrownMinSecPicker`）**:
+    - 中央に「MM分 : SS秒」の特大デジタル数字を配置。分と秒は別々の入力欄（別々のフォーカス・リューズ値）。
+    - **分**: 分をタップしてリューズ（Crown）を回すと 1 分刻みで調整。
+    - **秒**: 秒をタップするとハイライトされ、リューズで 1 秒刻み（0〜59秒）に調整。分をタップすると分の調整に戻る。
+    - 下段に定番ピル（10分、15分、20分など）も併設し、定番タイムのワンタップ即決と微調整を両立。
 - **空状態（0席時）UI**:
   - iPhone側に席が1つもない場合、Watch側には「📱 iPhoneで席を追加してください」「サロンワーク画面の客席と自動でリアルタイム連動します」と親切なプレースホルダーカードを常時案内。
 - **初期客席・スタッフ構成方針（A案確定）**:
@@ -1587,14 +1593,15 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
   - **止めるまで鳴るアラーム（iPhone: AlarmKit / Watch: スマートアラーム）＋設定追加 (Build 38)**:
     - **iPhone (`modules/alarm-kit`, `src/utils/alarmScheduler.js`)**: iOS 26 の AlarmKit をローカル Expo モジュール `ExpoAlarmKit` で呼び出し、タイマー終了時刻に純正アラームを予約。画面ロック中・バックグラウンド・マナーモード中でも、ユーザーが「停止」するまで鳴り続ける。キー文字列から SHA256 で固定 UUID を生成し、`setAlarms(source, 予定一覧)` が前回との差分だけ予約・取り消しする（操作は直列化）。初回予約時に許可ダイアログを表示（`NSAlarmKitUsageDescription`）。
       - メインタイマー (`HomeScreen.js`): 動作中・準備カウント中は1秒ごとに終了時刻を渡し差分予約（キー `main-timer`）。一時停止・リセット・保存画面を開いた時は鳴動中のアラームも停止。0秒到達で状態が変わっても鳴動中のアラームは止めない。アプリ内の短いアラーム音（`playAlarm`）は従来どおり併用。
-      - サロン席 (`SalonWorkScreen.js`): 動作中の席の終了時刻（`<席ID>-main`）とチェック時刻（`<席ID>-check`）を予約。席の停止・リセット・チェック完了で一覧から消えると鳴動中のアラームも停止。Watch から `STOP_ALARM` を受けた席のアラームも停止。
+      - サロン席 (`SalonWorkScreen.js`): 動作中の席の終了時刻（`<席ID>-main`）とチェック時刻（`<席ID>-check`）を予約。席の停止・リセット・チェック完了で一覧から消えると鳴動中のアラームも停止。Watch から `STOP_ALARM` を受けた席のアラームも停止し、`kind: 'main'` なら席も 0:00 で停止。
+      - **iPhone のアラーム画面で「停止」→ 席も停止（Build 45）**: AlarmKit には停止の通知が無いため、ネイティブ側（`AlarmKitBridge`）が予約成功時に「キーと鳴る時刻」を UserDefaults（`assisttimer.alarmkit.scheduled`）に記録し、アプリからの取り消し・予約し直しで削除する。`takeUserStoppedAlarms()` は「鳴る時刻を過ぎたのに `AlarmManager.shared.alarms` に無い」記録を止められたものとして返す（一覧を取得できない時は判定しない）。`alarmScheduler.subscribeUserStoppedAlarms` がアプリが前面に戻った時と前面にいる間の3秒ごとに確認し、サロン画面は `<席ID>-main` の席が稼働中で終了時刻がアラームの時刻と同じ（±2秒）場合だけ 0:00 で停止（チェックも解除、履歴「アラーム停止（iPhone）」）。同期で Watch も停止。`-check` は何もしない。※ アプリを閉じている間に止めた場合は、次にサロン画面を開いた時に停止。「止めたアラームは一覧から消える」前提は実機未検証。
       - アラーム音 OFF 時は無音ファイル `assisttimer_silence.caf` を指定（AlarmKit に無音指定がないため）。**この場合に振動するかは実機未検証**。
     - **Watch連動時の鳴らし分け**: Watch がペアリング済みかつ Watch アプリ導入済みの場合、サロン席のアラームとタイムアップ振動（6箇所）は既定で Watch のみ（iPhone では予約・振動しない）。設定「Watch連動中もiPhoneで鳴らす」ON で iPhone も鳴らす。メインタイマーは常に iPhone で鳴らす。
     - **Watch (`targets/watch/alarm.swift` `WatchAlarmCoordinator`)**:
       - アプリ表示中: 全画面の赤いアラーム表示＋1秒ごとに `.notification` / `.failure` の振動を交互に繰り返し、「止める」まで継続。
       - バックグラウンド: スマートアラーム（`WKExtendedRuntimeSession.start(at:)`、`WKBackgroundModes: alarm`）で一番早い終了時刻を1件だけ予約し、開始時に `notifyUser(.notification)` を1.5秒間隔で繰り返す（アプリ非表示時はシステムのアラーム画面）。アプリ終了中に起動された場合は `WKApplicationDelegate.handle(_:)` で引き継ぐ。
       - 予備: ローカル通知（終了時刻＋0/20/40/60/90/120秒、最大60件）。
-      - 終了前に把握していた予定のみ鳴らし（起動時点で過ぎていた古い予定では鳴らさない）、止めた予定とともに UserDefaults に12時間保持。Watch で止めると iPhone に `STOP_ALARM`（席ID）を送信。iPhone 側で席が停止・終了すると Watch の鳴動も止まる。
+      - 終了前に把握していた予定のみ鳴らし（起動時点で過ぎていた古い予定では鳴らさない）、止めた予定とともに UserDefaults に12時間保持。Watch で止めると iPhone に `STOP_ALARM`（席ID、`kind`、main の場合は `expectedEnd`）を送信し、放置タイム終了のアラームなら Watch 上でも席を 0:00 で停止（チェックも解除）。iPhone 側で席が停止・終了すると Watch の鳴動も止まる。
       - `.backgroundTask(.watchConnectivity)` でバックグラウンド受信時も席データ・アラーム予定を更新。
     - **設定 (`SettingsScreen.js`「アラーム・Apple Watch」)**: iPhoneのアラーム音（既存 `isAlarmSoundEnabled`、既定 ON）／Apple Watchのアラーム音（`isWatchAlarmSoundEnabled`、既定 OFF、`SYNC_SEATS` の `watchAlarmSound` で Watch へ送信）／Watch連動中もiPhoneで鳴らす（`isPhoneAlarmForWatchSeats`、既定 OFF）。
     - **診断表示**: iPhone の通信状態カードに「⏰ iPhoneアラーム: 許可状態 / 予約件数 / 最終結果」、Watch の通信状態パネルに「⏰ スマートアラーム状態 / 鳴動件数 / 音」を追加。
@@ -1614,7 +1621,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
   - **Apple Watch 文字盤コンプリケーション (Build 40)**:
     - **ターゲット**: `targets/watch-widget`（`@bacons/apple-targets` の `watch-widget`、WidgetKit、Bundle ID `com.assisttimer.watchkitapp.widget`）。Watch アプリに埋め込まれる。
     - **データ共有**: Watch アプリと App Group `group.com.assisttimer` を共有。Watch アプリ（`targets/watch/widget_sync.swift` の `WidgetSync`）が席データ受信時（`processReceivedData`、バックグラウンド含む）と Watch 上の操作時（`ContentView` の `onChange(of: timers)`）に、席番号・終了時刻・稼働中・一時停止中の残り秒数・自分が関わる席か（`isRelated`）を JSON で書き込み、内容が変わった時だけ `WidgetCenter.reloadAllTimelines()`。
-    - **表示する席**: ①最後にスタート（再開含む）・時間変更・新規作成した稼働中の席（Watch・iPhone どちらの操作も対象。Watch の `WidgetSync` が前回の席状態と比べ、「稼働を始めた」「終了時刻が2秒以上変わった」「稼働中の席が増えた」を検出して `lastTouchedId` を記録。起動直後の空→全席の読み込みは操作とみなさない）。その席が停止・削除されたら ②自分が関わる稼働中の席の中で終了が一番近い席（超過中を含む）→ ③全稼働中の席で終了が一番近い席。稼働中が無ければ「待機中」。
+    - **表示する席**: ①最後にスタート（再開含む）・時間変更・新規作成した稼働中の席（Watch・iPhone どちらの操作も対象。Watch の `WidgetSync` が前回の席状態と比べ、「稼働を始めた」「終了時刻が2秒以上変わった」「稼働中の席が増えた」を検出して `lastTouchedId` を記録。起動直後の空→全席の読み込みは操作とみなさない）。その席が停止・削除されたら、②自分が関わるカウントダウン中の席 → ③カウントダウン中の席 → ④自分が関わる超過中の席 → ⑤超過中の席（それぞれ終了が近い順。Build 45 で変更。以前は終了が近い順だけだったため、放置された超過席がずっと表示されていた）。超過かどうかはタイムラインの各エントリーの時刻で判定するため、ある席が終わった瞬間に次のカウントダウン中の席へ切り替わる。稼働中が無ければ「待機中」。
     - **表示**: 大きい枠（`accessoryRectangular`、モジュラー文字盤の中央）に「◯番席」「自分」バッジ・残り時間（`Text(date, style: .timer)` でリアルタイム）・稼働中の席数。終了時刻を過ぎると赤字の「超過」と超過時間を表示（各席の終了時刻にタイムラインのエントリを用意）。他に円形・1行・コーナーにも対応。タップで Watch アプリを開く。
     - **制約**: Watch アプリが席データを受け取っていない間は更新されない。WidgetKit のバックグラウンド再読み込み回数には上限がある。
   - **Watchで止めても「超過」のままになる問題の修正 (Build 45)**:
@@ -1622,12 +1629,16 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **原因①（コード上で特定）**: iPhone の `handleWatchAction` が `FINISH_MEASURE` を処理しておらず、iPhone 側は稼働中のまま → 次の同期で Watch も稼働中（超過）に戻っていた。
     - **原因②（コード上で特定）**: Watch の「タイムリセット」（`RESET_ZERO`）で iPhone 側を `status: 'stopped'` にしていたが、iPhone の席カードは `'paused'` 以外を稼働中として扱うため、超過時間を数え続けていた。iPhone 自身のリセットと同じ状態（`paused` / `isReset` / 残り0）に統一。
     - **原因③（可能性）**: iPhone の同期は即時メッセージと保存データ（applicationContext）の2経路で届き、順番が前後すると古い「稼働中」データで上書きされうる。Watch は受信データの `timestamp` を見て、古いデータを無視するように変更。さらに Watch で止めた席は、iPhone が反映するまで（止める前と同じ終了時刻の稼働中データが届く間、最大60秒）停止のまま表示する（`markLocalStop` / `localStops`）。
-    - **Watch からの停止系操作（iPhone 側）**: `STOP_TIMER` / `FINISH_MEASURE` を共通の停止処理（`paused`・残り0・タイムアップ記録とエスカレーションのリセット・停止者・履歴）に統一。`ENTER_HELP` は止めた時点の残り秒数を記録。
-    - **アラームの「止める」で席も停止**: Watch で放置タイム終了のアラームを止めると、その席のタイマーも停止（0:00）にする（Watch の表示を即時更新し、iPhone へ `STOP_ALARM` に `kind: 'main'` を付けて送信。iPhone は終了時刻を過ぎて稼働中の席のみ停止）。チェック時間のアラームは音・振動を止めるだけ。※iPhone の AlarmKit 画面で止めた場合は、アプリに通知が来ないため席は止まらない（未対応）。
+    - **Watch からの停止系操作（iPhone 側）**: `STOP_TIMER` / `FINISH_MEASURE` / `STOP_ALARM`（main）を共通の停止処理 `buildStoppedSeat`（`paused`・残り0・タイムアップ記録とエスカレーションのリセット・チェックタイマー解除・停止者・履歴）に統一。`ENTER_HELP` は止めた時点の残り秒数（超過中は 0）を記録し、チェックは解除しない。
+    - **アラームの「止める」で席も停止**: Watch で放置タイム終了のアラームを止めると、その席のタイマーも停止（0:00）にする（Watch の表示を即時更新し、iPhone へ `STOP_ALARM` に `kind: 'main'` と `expectedEnd` を付けて送信。iPhone は終了時刻を過ぎて稼働中の席のみ停止）。チェック時間のアラームは音・振動を止めるだけ。iPhone の AlarmKit 画面で止めた場合も席を停止（上記「iPhone のアラーム画面で「停止」→ 席も停止」）。
+    - **決定事項（ユーザー回答）**: ①Watch の「タイマーを止める」は 0:00。②超過中の「シャンプー入る」は 0:00。③止める・計測終了・アラーム停止でチェックタイマーも解除（iPhone・Watch とも。シャンプー入るでは解除しない）。④コンプリケーションはカウントダウン中の席を優先。⑤iPhone のアラーム画面で止めても席を止める。
     - **その他の修正**:
       - 同期データの停止中の残り秒数を、終了時刻からの計算ではなく保存済みの `pausedRemainingSeconds` から送る（iPhone で一時停止した席の残りが Watch 側で減り続けていた）。
-      - Watch から停止中の席の時間を ± した時、iPhone 側で勝手に再開していたのを停止のまま残り時間だけ変えるように修正（Watch の表示と一致）。
+      - Watch から停止中の席の時間を ± した時、iPhone 側で勝手に再開していたのを停止のまま残り時間だけ変えるように修正（Watch の表示と一致）。残りが 0 より大きければ `isReset` を解除（「リセット済 (0:00)」のままにならない）。`secondsToAdd` が 0 の時に 5 分延長になっていたのを修正。
       - iPhone のタイムアップ記録（`timeUpTimestamp`）が再スタート後も残り、同じ席の2回目以降のタイムアップで振動・エスカレーションが起きなかった → 終了時刻が変わったら新しいタイムアップとして扱う。1分前ヘルプ未定通知・チェック時間通知も、終了時刻ごとに再通知できるように変更。
       - Watch からの `START_TIMER` で `isReset` / `isOver` / `stoppedBy` もリセット。
+      - 計測終了で収納したカードが次の同期で開いてしまう問題を修正（`collapsedAtEnd` / `collapseOverrides`。上記「計測終了」参照）。Watch の計測終了で古い残り秒数が表示されることがあったのを 0:00 に修正。
+      - Watch の操作が即時ルートと予備ルートで 2 回届いた時の二重適用を防止（`action`＋`seatId`＋`timestamp`）。遅れて届いた停止系操作は `expectedEnd` で照合して無視。
+      - 何も変わらない操作（例: 終了前の `STOP_ALARM`）では席の配列を入れ替えず、不要な保存・同期を起こさない。
 
 

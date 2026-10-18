@@ -20,7 +20,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import WatchConnectivity from 'watch-connectivity';
 import { AppContext } from '../utils/AppContext';
 import WatchDiagnosticsBar from '../components/WatchDiagnosticsBar';
-import { setAlarms, stopAlarm } from '../utils/alarmScheduler';
+import { setAlarms, stopAlarm, subscribeUserStoppedAlarms } from '../utils/alarmScheduler';
 
 // サロン施術ステータス定義（呼び出し、コーミング、チェック、シャンプー、その他）
 export const SALON_ACTION_STATUS_OPTIONS = [
@@ -154,7 +154,10 @@ export const syncSeatsToWatch = async (currentSeats, currentName, currentMembers
           checkEndTimestamp: s.checkEndTimestamp ? Number(s.checkEndTimestamp) : 0,
           checkStaffName: s.checkStaffName || '',
           isCheckCompleted: s.checkStatus === 'completed',
-          isCollapsed: false,
+          // ★ Watch の「計測終了」で収納したカード。その時の終了時刻のまま停止している間だけ収納を保つ
+          //   （以前は常に false を送っていたため、次の同期でカードが開いてしまっていた）
+          isCollapsed: !isRunning && !s.isReset && s.collapsedAtEnd != null
+            && Number(s.collapsedAtEnd) === Number(s.targetEndTimestamp || 0),
         };
       }),
     };
@@ -605,6 +608,37 @@ export default function SalonWorkScreen() {
     }
   };
 
+  // ★ 席を 0:00 の停止にする共通処理（Watch の「止める」系操作・アラームの「止める」で使用）
+  //   チェックタイマーも解除する（Q3）
+  const buildStoppedSeat = (s, staff, historyText) => ({
+    ...s,
+    status: 'paused',
+    pausedRemainingSeconds: 0,
+    timeUpTimestamp: null,
+    escalationLevel: 0,
+    mainStaffConfirmed: true,
+    assistantStaffConfirmed: true,
+    stoppedBy: staff,
+    checkTargetSeconds: null,
+    checkEndTimestamp: null,
+    checkPausedRemainingSeconds: null,
+    checkStaffName: '',
+    checkStatus: 'stopped',
+    collapsedAtEnd: null,
+    history: [
+      ...(s.history || []),
+      {
+        id: `h-${Date.now()}`,
+        time: getCurrentTimeFormatted(),
+        text: historyText,
+        type: 'status',
+      },
+    ],
+  });
+
+  // ★ 処理済みの Watch 操作（操作名＋席ID＋送信時刻）。即時ルートと予備ルートで同じ操作が2回届いても1回だけ反映する
+  const processedWatchActionsRef = useRef([]);
+
   // ★ Apple Watchからの操作受信ハンドラ
   const handleWatchAction = (message) => {
     if (!message || !message.action) return;
@@ -612,6 +646,15 @@ export default function SalonWorkScreen() {
     // ★ Watch は追加値（targetSeconds / totalSeconds / secondsToAdd など）を extra に包まずメッセージ直下に入れて送る。
     //   以前は message.extra だけを読んでいたため常に既定値（START_TIMER=10分 等）になっていた。
     const extra = (message.extra && typeof message.extra === 'object') ? message.extra : message;
+
+    // ★ 二重適用の防止（REQUEST_SYNC は何度来ても害がないので対象外）
+    if (action !== 'REQUEST_SYNC' && message.timestamp != null) {
+      const dedupeKey = `${action}|${seatId || ''}|${message.timestamp}`;
+      const processed = processedWatchActionsRef.current;
+      if (processed.includes(dedupeKey)) return;
+      processed.push(dedupeKey);
+      if (processed.length > 100) processed.shift();
+    }
 
     // ① 同期リクエスト (Watch側から「最新の客席データをちょうだい」と要求された時)
     if (action === 'REQUEST_SYNC') {
@@ -679,31 +722,31 @@ export default function SalonWorkScreen() {
     if (!seatId) return;
 
     // ★ Watch からの「止める」系操作で共通の停止状態（Watch の表示と同じ 0:00 の停止）
-    const stopSeat = (s, label) => ({
-      ...s,
-      status: 'paused',
-      pausedRemainingSeconds: 0,
-      checkPausedRemainingSeconds: null,
-      timeUpTimestamp: null,
-      escalationLevel: 0,
-      mainStaffConfirmed: true,
-      assistantStaffConfirmed: true,
-      stoppedBy: watchUser || userName || 'スタッフ',
-      history: [
-        ...(s.history || []),
-        {
-          id: `h-${Date.now()}`,
-          time: getCurrentTimeFormatted(),
-          text: `${watchUser || userName || 'スタッフ'} ${label}（Apple Watch）`,
-          type: 'status',
-        },
-      ],
-    });
+    const stopSeat = (s, label) => {
+      const staff = watchUser || userName || 'スタッフ';
+      return buildStoppedSeat(s, staff, `${staff} ${label}（Apple Watch）`);
+    };
+
+    // ★ 遅れて届いた停止系操作か（Watch が操作した時に見ていた終了時刻 expectedEnd と照合）
+    //   iPhone アプリが動いていない間に予備ルートで待たされ、その間に再スタートした席を止めないようにする。
+    //   expectedEnd: 稼働中だった時はその終了時刻(ms)、停止中だった時は 0。古い Watch アプリ（値なし）は従来どおり反映。
+    const STOP_ACTIONS = ['STOP_TIMER', 'FINISH_MEASURE', 'ENTER_HELP', 'RESET_ZERO', 'STOP_ALARM'];
+    const isStaleStop = (s) => {
+      if (!STOP_ACTIONS.includes(action)) return false;
+      if (extra?.expectedEnd === undefined || extra?.expectedEnd === null) return false;
+      const expected = Number(extra.expectedEnd);
+      if (!Number.isFinite(expected)) return false;
+      if (s.status !== 'running') return false; // すでに止まっている席はそのまま反映
+      if (expected <= 0) return true; // Watch では停止中だった席が、今は稼働中 → 後から再スタートされた
+      // Watch と iPhone の時計・通信のずれを考えて 5 秒まで同じ終了時刻とみなす
+      return Math.abs((Number(s.targetEndTimestamp) || 0) - expected) > 5000;
+    };
 
     setSeats((prevSeats) => {
       let hasChanged = false;
       const updated = prevSeats.map((s) => {
         if (s.id !== seatId) return s;
+        if (isStaleStop(s)) return s;
         hasChanged = true;
 
         switch (action) {
@@ -743,6 +786,7 @@ export default function SalonWorkScreen() {
                 : (s.pausedRemainingSeconds || 0),
               timeUpTimestamp: null,
               escalationLevel: 0,
+              collapsedAtEnd: null,
               assistantStaffName: watchUser || 'ヘルプ',
               isShampooing: isShampoo,
               actionStatus: isShampoo ? 'shampoo' : (s.actionStatus || process),
@@ -809,6 +853,7 @@ export default function SalonWorkScreen() {
               isShampooing: false,
               assistantStaffName: '',
               stoppedBy: watchUser || userName || 'スタッフ',
+              collapsedAtEnd: null,
             };
           }
           case 'STOP_TIMER': {
@@ -816,7 +861,8 @@ export default function SalonWorkScreen() {
           }
           case 'FINISH_MEASURE': {
             // ★ 以前は未対応だったため、Watch で計測終了しても次の同期で「超過」に戻っていた
-            return stopSeat(s, '計測終了');
+            // ★ カードの収納は、この終了時刻のまま停止している間だけ保つ（再スタートで自動的に解除）
+            return { ...stopSeat(s, '計測終了'), collapsedAtEnd: s.targetEndTimestamp || 0 };
           }
           case 'STOP_ALARM': {
             // 終了時刻を過ぎて稼働中の席だけ止める（すでに停止・タイム再入力済みなら何もしない）
@@ -845,16 +891,27 @@ export default function SalonWorkScreen() {
               isReset: false,
               isOver: false,
               stoppedBy: null,
+              collapsedAtEnd: null,
             };
           }
           case 'ADJUST_TIME': {
-            const secondsToAdd = Number(extra?.secondsToAdd) || 300;
+            // ★ 0 を 5 分に変えないよう、数値かどうかで判定する
+            const rawAdd = Number(extra?.secondsToAdd);
+            const secondsToAdd = Number.isFinite(rawAdd) ? rawAdd : 300;
+            if (secondsToAdd === 0) {
+              hasChanged = false;
+              return s;
+            }
             if (s.status !== 'running') {
               // ★ 停止中は残り時間だけ変えて停止のまま（Watch の表示と同じ。以前は勝手に再開していた）
+              const newRemaining = Math.max(0, (s.pausedRemainingSeconds || 0) + secondsToAdd);
               return {
                 ...s,
                 targetSeconds: Math.max(0, (s.targetSeconds || 0) + secondsToAdd),
-                pausedRemainingSeconds: Math.max(0, (s.pausedRemainingSeconds || 0) + secondsToAdd),
+                pausedRemainingSeconds: newRemaining,
+                // 残りが入ったら「リセット済 (0:00)」表示をやめる
+                isReset: newRemaining > 0 ? false : s.isReset,
+                collapsedAtEnd: null,
               };
             }
             const currentEnd = s.targetEndTimestamp || Date.now();
@@ -864,6 +921,7 @@ export default function SalonWorkScreen() {
               status: 'running',
               targetSeconds: (s.targetSeconds || 0) + secondsToAdd,
               targetEndTimestamp: newEnd,
+              collapsedAtEnd: null,
             };
           }
           case 'CLEAR_STAFF': {
@@ -875,16 +933,48 @@ export default function SalonWorkScreen() {
             };
           }
           default:
+            hasChanged = false;
             return s;
         }
       });
 
-      if (hasChanged) {
-        saveSeatsToStorage(updated);
-      }
+      // ★ 何も変わらなければ元の配列を返す（不要な保存・Watch への同期を起こさない）
+      if (!hasChanged) return prevSeats;
+      saveSeatsToStorage(updated);
       return updated;
     });
   };
+
+  // ★ iPhone のアラーム画面（AlarmKit）で「停止」が押された → 放置タイム終了のアラームなら席も 0:00 で停止（Q5）
+  //   key: "<席ID>-main" / "<席ID>-check"、timestamp: そのアラームの鳴る時刻(ms)
+  const handleUserStoppedAlarms = (stopped) => {
+    if (!Array.isArray(stopped) || stopped.length === 0) return;
+    const mainStops = new Map();
+    stopped.forEach((a) => {
+      const key = String(a?.key || '');
+      if (!key.endsWith('-main')) return; // チェック時間のアラームは音を止めるだけ
+      mainStops.set(key.slice(0, -'-main'.length), Number(a.timestamp));
+    });
+    if (mainStops.size === 0) return;
+    setSeats((prevSeats) => {
+      let hasChanged = false;
+      const staff = userName || 'スタッフ';
+      const updated = prevSeats.map((s) => {
+        if (!mainStops.has(String(s.id))) return s;
+        const alarmTime = mainStops.get(String(s.id));
+        // 同じタイマーのアラームだった時だけ止める（その後にタイム再入力・延長していたら何もしない）
+        if (s.status !== 'running' || !s.targetEndTimestamp || !Number.isFinite(alarmTime)) return s;
+        if (Math.abs(Number(s.targetEndTimestamp) - alarmTime) > 2000) return s;
+        hasChanged = true;
+        return buildStoppedSeat(s, staff, `${staff} アラーム停止（iPhone）`);
+      });
+      if (!hasChanged) return prevSeats;
+      saveSeatsToStorage(updated);
+      return updated;
+    });
+  };
+  const handleUserStoppedAlarmsRef = useRef(null);
+  handleUserStoppedAlarmsRef.current = handleUserStoppedAlarms;
 
   // ★ リスナーから常に「最新の」handleWatchAction を呼ぶための参照（stale closure 防止）
   const handleWatchActionRef = useRef(null);
@@ -928,6 +1018,14 @@ export default function SalonWorkScreen() {
       if (unsubscribeActions) unsubscribeActions();
       if (subStatus?.remove) subStatus.remove();
     };
+  }, [isDataLoaded]);
+
+  // ★ iPhone のアラーム画面で止められたアラームの検出（アプリが前面に戻った時と、前面にいる間の数秒ごと）
+  useEffect(() => {
+    if (Platform.OS !== 'ios' || !isDataLoaded) return undefined;
+    return subscribeUserStoppedAlarms((stopped) => {
+      if (handleUserStoppedAlarmsRef.current) handleUserStoppedAlarmsRef.current(stopped);
+    });
   }, [isDataLoaded]);
 
   // ★ seats または staffMembers が更新された際、Watch へ最新データを同期

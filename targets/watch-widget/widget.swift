@@ -4,7 +4,10 @@ import WidgetKit
 // MARK: - AssistTimer 文字盤コンプリケーション
 // Watch アプリ（targets/watch/widget_sync.swift）が App Group に書いた席タイマーの要約を読み、1席を表示する。
 // 優先順: ①最後にスタート・時間変更・新規作成した席（稼働中の場合）
-//         ②自分が関わる稼働中の席 → ③終了が一番近い稼働中の席
+//         ②自分が関わるカウントダウン中の席 → ③カウントダウン中の席
+//         → ④自分が関わる超過中の席 → ⑤超過中の席（それぞれ終了が近い順）
+//         超過かどうかは表示する時刻（タイムラインの各エントリーの時刻）で判定するため、
+//         ある席が終わった瞬間に次のカウントダウン中の席へ自動で切り替わる。
 // 残り時間は Text(date, style: .timer) でリアルタイムに進むため、毎秒の再読み込みは不要。
 
 private let appGroup = "group.com.assisttimer"
@@ -54,22 +57,32 @@ enum ComplicationData {
         return ComplicationSnapshot(seats: parsed, lastTouchedId: obj["lastTouchedId"] as? String)
     }
 
-    /// ①最後に操作された稼働中の席。無ければ ②自分が関わる稼働中の席の中で終了が一番近い（超過を含む）席、
-    /// それも無ければ ③稼働中の席で終了が一番近い席
-    static func pick(from snapshot: ComplicationSnapshot) -> ComplicationSeat? {
+    /// ①最後に操作された稼働中の席。無ければ、date の時点で
+    /// ②自分のカウントダウン中 → ③カウントダウン中 → ④自分の超過中 → ⑤超過中（それぞれ終了が近い順）
+    /// ※ 以前は終了が一番近い席を選んでいたため、放置された超過席がずっと表示されていた
+    static func pick(from snapshot: ComplicationSnapshot, at date: Date) -> ComplicationSeat? {
         let running = snapshot.seats.filter { $0.isRunning }
         if let id = snapshot.lastTouchedId, let touched = running.first(where: { $0.id == id }) {
             return touched
         }
-        let mine = running.filter { $0.related }
-        let pool = mine.isEmpty ? running : mine
-        return pool.min { $0.endDate < $1.endDate }
+        let countingDown = running.filter { $0.endDate > date }
+        let overtime = running.filter { $0.endDate <= date }
+        let groups: [[ComplicationSeat]] = [
+            countingDown.filter { $0.related },
+            countingDown,
+            overtime.filter { $0.related },
+            overtime
+        ]
+        for group in groups where !group.isEmpty {
+            return group.min { $0.endDate < $1.endDate }
+        }
+        return nil
     }
 
     static func entry(at date: Date, snapshot: ComplicationSnapshot) -> ComplicationEntry {
         ComplicationEntry(
             date: date,
-            seat: pick(from: snapshot),
+            seat: pick(from: snapshot, at: date),
             runningCount: snapshot.seats.filter { $0.isRunning }.count
         )
     }
@@ -247,7 +260,7 @@ struct AssistTimerComplication: Widget {
             ComplicationView(entry: entry)
         }
         .configurationDisplayName("AssistTimer")
-        .description("自分の席を優先して、終了が近いタイマーの残り時間を表示します。")
+        .description("最後に操作した席、またはカウントダウン中の席の残り時間を表示します。")
         .supportedFamilies([.accessoryRectangular, .accessoryCircular, .accessoryInline, .accessoryCorner])
     }
 }

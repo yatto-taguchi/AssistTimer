@@ -25,5 +25,10 @@ public class ExpoAlarmKitModule: Module {
     Function("cancel") { (key: String) -> Bool in
       return AlarmKitBridge.cancel(key: key)
     }
+
+    // ユーザーがアラーム画面で「停止」した予約を取り出す（[{ key, timestamp }]）
+    Function("takeUserStoppedAlarms") { () -> [[String: Any]] in
+      return AlarmKitBridge.takeUserStoppedAlarms()
+    }
   }
 }

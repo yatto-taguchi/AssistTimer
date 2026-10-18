@@ -61,6 +61,20 @@ struct SeatTimerItem: Identifiable, Equatable {
                shampooStaff == userName ||
                checkStaff == userName
     }
+    
+    // ★ iPhone へ送る停止系操作に付ける「操作した時に見ていた終了時刻」(ms)。停止中なら 0。
+    //   iPhone は席の終了時刻と照合し、遅れて届いた操作で再スタート後の席を止めないようにする
+    var expectedEndMs: Double {
+        return isRunning ? targetEndTime.timeIntervalSince1970 * 1000.0 : 0
+    }
+    
+    // ★ チェックタイマーの解除（止める・計測終了・アラーム停止・リセット・タイム再入力）
+    mutating func clearCheck() {
+        checkTotalSeconds = nil
+        checkTargetEndTime = nil
+        checkStaff = nil
+        isCheckCompleted = false
+    }
 }
 
 // MARK: - SeatTimerItem 辞書相互変換（iPhone連携用）
@@ -184,6 +198,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     private var localStops: [String: (at: Date, end: Double)] = [:]
     private let localStopHoldSeconds: TimeInterval = 60
     
+    // ★ Watch 上で収納（計測終了）・展開（スリムバーをタップ）した席。停止中は iPhone の値より優先し、
+    //   席が稼働したら消す（同期のたびにカードが勝手に開閉しないようにする）
+    private var collapseOverrides: [String: Bool] = [:]
+    
     override init() {
         super.init()
         if WCSession.isSupported() {
@@ -280,12 +298,18 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         localStops[seatId] = (at: Date(), end: endTime.timeIntervalSince1970)
     }
     
-    // ★ アラームの「止める」など、画面外から席を止める（Watch の表示をすぐ 0:00 の停止にする）
+    // ★ Watch 上で収納・展開したことを記録（nil = 記録を消す。メインスレッドで呼ぶ）
+    func setCollapseOverride(seatId: String, collapsed: Bool?) {
+        collapseOverrides[seatId] = collapsed
+    }
+    
+    // ★ アラームの「止める」など、画面外から席を止める（Watch の表示をすぐ 0:00 の停止にする。チェックも解除）
     func applyLocalStop(seatId: String) {
         guard let idx = timers.firstIndex(where: { $0.id == seatId }), timers[idx].isRunning else { return }
         markLocalStop(seatId: seatId, endTime: timers[idx].targetEndTime)
         timers[idx].isRunning = false
         timers[idx].pausedRemainingSeconds = 0
+        timers[idx].clearCheck()
         let snapshot = timers
         // アラーム処理の途中から呼ばれるため、予定の再計算は次のループで行う
         DispatchQueue.main.async {
@@ -349,6 +373,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     parsed[i].pausedRemainingSeconds = 0
                 } else {
                     localStops[id] = nil
+                }
+            }
+            // ★ カードの収納: 稼働中の席は常に展開。停止中は Watch 上での操作を優先し、無ければ iPhone の値
+            for i in parsed.indices {
+                let id = parsed[i].id
+                if parsed[i].isRunning {
+                    parsed[i].isCollapsed = false
+                    collapseOverrides[id] = nil
+                } else if let collapsed = collapseOverrides[id] {
+                    parsed[i].isCollapsed = collapsed
                 }
             }
             self.lastReceivedSeatCount = parsed.count
@@ -972,13 +1006,14 @@ struct ContentView: View {
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].isRunning = false
-                            timers[idx].pausedRemainingSeconds = item.remainingSeconds
+                            // ★ 超過中は 0:00 で止める（マイナスの値だと赤い「超過」表示のまま止まって見えていた）
+                            timers[idx].pausedRemainingSeconds = max(0, item.remainingSeconds)
                             let process = timers[idx].helpProcess
                             timers[idx].status = (process == "コーミング" ? .combing : .shampoo)
                             timers[idx].shampooStaff = currentUserName
                         }
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
-                        sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: item.id)
+                        sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         let process = item.helpProcess.isEmpty ? "シャンプー" : item.helpProcess
                         showNotification(
                             text: "📤 【\(item.seatNumber)番席】\(currentUserName)さんが\(process)に入りました",
@@ -994,16 +1029,15 @@ struct ContentView: View {
                             timers[idx].targetEndTime = Date()
                             timers[idx].isRunning = false
                             timers[idx].status = .normal
-                            timers[idx].checkTotalSeconds = nil
-                            timers[idx].checkTargetEndTime = nil
-                            timers[idx].checkStaff = nil
-                            timers[idx].isCheckCompleted = false
+                            timers[idx].clearCheck()
                             timers[idx].shampooStaff = nil
                             timers[idx].isRecruiting = false
                             timers[idx].isNoHelpNeeded = false
+                            timers[idx].isCollapsed = false
                         }
+                        sessionManager.setCollapseOverride(seatId: item.id, collapsed: false)
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
-                        sessionManager.sendActionToPhone(action: "RESET_ZERO", seatId: item.id)
+                        sessionManager.sendActionToPhone(action: "RESET_ZERO", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         showNotification(
                             text: "⏱️ \(item.seatNumber)番席: 00:00にリセットしました",
                             color: Color(hex: "#FFD60A")
@@ -1014,10 +1048,14 @@ struct ContentView: View {
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].isRunning = false
+                            // ★ 0:00 の停止（以前は古い残り秒数がそのまま表示されることがあった）
+                            timers[idx].pausedRemainingSeconds = 0
+                            timers[idx].clearCheck()
                             timers[idx].isCollapsed = true
                         }
+                        sessionManager.setCollapseOverride(seatId: item.id, collapsed: true)
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
-                        sessionManager.sendActionToPhone(action: "FINISH_MEASURE", seatId: item.id)
+                        sessionManager.sendActionToPhone(action: "FINISH_MEASURE", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         showNotification(
                             text: "🏁 \(item.seatNumber)番席: 計測を終了しました",
                             color: Color(hex: "#8E8E93")
@@ -1034,6 +1072,8 @@ struct ContentView: View {
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         timers[idx].targetEndTime = timers[idx].targetEndTime.addingTimeInterval(Double(deltaSec))
                         timers[idx].pausedRemainingSeconds += deltaSec
+                        timers[idx].isCollapsed = false
+                        sessionManager.setCollapseOverride(seatId: item.id, collapsed: false)
                         sessionManager.sendActionToPhone(action: "ADJUST_TIME", seatId: item.id, extra: ["secondsToAdd": deltaSec])
                         let deltaText = formatDeltaString(deltaSec)
                         showNotification(text: "⏱️ \(item.seatNumber)番席: \(deltaText)しました", color: Color(hex: "#0A84FF"))
@@ -1043,8 +1083,10 @@ struct ContentView: View {
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         timers[idx].isRunning = false
                         timers[idx].pausedRemainingSeconds = 0
+                        // ★ チェックタイマーも解除（Q3）
+                        timers[idx].clearCheck()
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
-                        sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id)
+                        sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         showNotification(text: "⏹️ \(item.seatNumber)番席のタイマーを止めました", color: Color(hex: "#30D158"))
                     }
                 },
@@ -1060,13 +1102,12 @@ struct ContentView: View {
                             timers[idx].pausedRemainingSeconds = sec
                             timers[idx].isRunning = true
                             timers[idx].status = .normal
+                            timers[idx].isCollapsed = false
                             
                             // ★ 連動してチェックも消える！
-                            timers[idx].checkTotalSeconds = nil
-                            timers[idx].checkTargetEndTime = nil
-                            timers[idx].checkStaff = nil
-                            timers[idx].isCheckCompleted = false
+                            timers[idx].clearCheck()
                         }
+                        sessionManager.setCollapseOverride(seatId: item.id, collapsed: nil)
                         sessionManager.sendActionToPhone(action: "START_TIMER", seatId: item.id, extra: ["targetSeconds": sec])
                         showNotification(
                             text: "⏱️ \(item.seatNumber)番席: \(timeStr)に再入力しました（チェック解除）",
@@ -1322,6 +1363,8 @@ struct SeatTimerCard: View {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                 item.isCollapsed = false
             }
+            // ★ 次の同期でまた収納されないように記録
+            WatchSessionManager.shared.setCollapseOverride(seatId: item.id, collapsed: false)
             WKInterfaceDevice.current().play(.click)
         }) {
             HStack(spacing: 6) {

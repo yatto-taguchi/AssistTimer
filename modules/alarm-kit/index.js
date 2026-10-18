@@ -47,6 +47,18 @@ export const AlarmKit = {
     if (!NativeModule) return false;
     try { return !!NativeModule.cancel(String(key)); } catch { return false; }
   },
+
+  // ユーザーがアラーム画面で「停止」した予約（鳴る時刻を過ぎて AlarmKit の一覧から消えたもの）を取り出す
+  // 戻り値: [{ key, timestamp(ms) }]。一度返したものは記録から消える
+  takeUserStoppedAlarms: () => {
+    if (!NativeModule || typeof NativeModule.takeUserStoppedAlarms !== 'function') return [];
+    try {
+      const list = NativeModule.takeUserStoppedAlarms();
+      return Array.isArray(list) ? list : [];
+    } catch {
+      return [];
+    }
+  },
 };
 
 export default AlarmKit;

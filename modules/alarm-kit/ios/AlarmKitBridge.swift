@@ -69,6 +69,8 @@ enum AlarmKitBridge {
 
   // 予約の取り消し＋鳴っている最中なら停止
   static func cancel(key: String) -> Bool {
+    // こちらから取り消した予約は「ユーザーが止めた」と判定しないよう、記録から先に消す
+    removeRecord(key: key)
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) {
       let id = uuid(for: key)
@@ -80,6 +82,66 @@ enum AlarmKitBridge {
     }
     #endif
     return false
+  }
+
+  // MARK: - ユーザーがアラーム画面で「停止」した予約の検出
+  // AlarmKit には「停止が押された」通知が無いため、予約したキーと鳴る時刻を端末内に記録しておき、
+  // 「鳴る時刻を過ぎたのに、こちらが取り消していないのに AlarmKit の一覧から消えた」ものを止められたと判断する。
+  static let scheduledRecordKey = "assisttimer.alarmkit.scheduled"
+  private static let recordLock = NSLock()
+
+  private static func loadRecords() -> [String: Double] {
+    return (UserDefaults.standard.dictionary(forKey: scheduledRecordKey) as? [String: Double]) ?? [:]
+  }
+
+  private static func saveRecords(_ records: [String: Double]) {
+    UserDefaults.standard.set(records, forKey: scheduledRecordKey)
+  }
+
+  static func addRecord(key: String, timestampMs: Double) {
+    recordLock.lock(); defer { recordLock.unlock() }
+    var records = loadRecords()
+    records[key] = timestampMs
+    saveRecords(records)
+  }
+
+  static func removeRecord(key: String) {
+    recordLock.lock(); defer { recordLock.unlock() }
+    var records = loadRecords()
+    guard records[key] != nil else { return }
+    records[key] = nil
+    saveRecords(records)
+  }
+
+  /// 止められた予約を [{ "key": String, "timestamp": Double(ms) }] で返し、記録から消す
+  static func takeUserStoppedAlarms() -> [[String: Any]] {
+    #if canImport(AlarmKit)
+    if #available(iOS 26.0, *) {
+      recordLock.lock(); defer { recordLock.unlock() }
+      var records = loadRecords()
+      guard !records.isEmpty else { return [] }
+      let nowMs = Date().timeIntervalSince1970 * 1000.0
+      // 鳴る時刻を過ぎた予約だけが対象（まだ鳴っていない予約は調べない）
+      let due = records.filter { $0.value <= nowMs - 1000 }
+      guard !due.isEmpty else { return [] }
+      // 一覧を取得できない時は判定しない（誤って席を止めない）
+      guard let alarms = try? AlarmManager.shared.alarms else { return [] }
+      let activeIds = Set(alarms.map { $0.id })
+      var stopped: [[String: Any]] = []
+      for (key, ts) in due {
+        if activeIds.contains(uuid(for: key)) {
+          // まだ鳴っている（または一覧に残っている）。ただし 12 時間以上前の記録は整理する
+          if ts < nowMs - 12 * 3600 * 1000 { records[key] = nil }
+          continue
+        }
+        stopped.append(["key": key, "timestamp": ts])
+        records[key] = nil
+      }
+      saveRecords(records)
+      return stopped
+    }
+    #endif
+    return []
   }
 
   #if canImport(AlarmKit)
@@ -103,6 +165,7 @@ enum AlarmKitBridge {
 
     let id = uuid(for: key)
     // 同じキーの古い予約は先に取り消す（時間変更時の二重予約防止）
+    removeRecord(key: key)
     try? manager.cancel(id: id)
 
     let fireDate = Date(timeIntervalSince1970: timestampMs / 1000.0)
@@ -123,6 +186,7 @@ enum AlarmKitBridge {
     )
     do {
       _ = try await manager.schedule(id: id, configuration: configuration)
+      addRecord(key: key, timestampMs: timestampMs)
       return "ok"
     } catch {
       return "error: \(error.localizedDescription)"
