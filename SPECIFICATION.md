@@ -1606,5 +1606,10 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
     - **振動強化**: アプリ表示中は0.5秒ごと、スマートアラームは0.8秒ごとに `.notification` / `.failure` / `.retry` を順に繰り返す。予備通知は終了時刻＋0/15/30/45/60/90/120秒。
     - **通知の許可**: バックグラウンドでは許可ダイアログが出ないため、アプリが前面になった時に要求するよう変更。
     - **診断**: Watch パネルに予約時刻・通知の許可状態・前回のセッション終了理由を表示。
+  - **Watchのタイム入力不具合の修正 (Build 40)**:
+    - **症状（Build 39 実機）**: Digital Crown で分を選んでも秒が変わる。Watch から何分を選んでも iPhone 側は10分のタイマーになる。
+    - **原因①（iPhone受信）**: Watch は追加値（`targetSeconds` / `totalSeconds` / `checkTotalSeconds` / `secondsToAdd` / `actionStatus` / `helpProcess` など）を `extra` に包まずメッセージ直下に入れて送るが、`SalonWorkScreen.handleWatchAction` は `message.extra` だけを読んでいたため常に既定値（`START_TIMER`=600秒、`ADD_SEAT`=900秒、`ADJUST_TIME`=+300秒）になっていた。`extra` が無い場合はメッセージ本体から読むよう修正。
+    - **原因②（Watch入力）**: 分・秒をまとめた1つの入力欄でリューズの刻み幅（`by:`）を切り替えていたが、切替が反映されなかった。分・秒を独立した入力欄（別々のフォーカス・リューズ値）にした共通部品 `CrownMinSecPicker` に置き換え（タイム再入力画面・新規席追加画面）。
+    - **`START_TIMER`（Watchのタイム再入力）**: Watch の表示どおりチェックタイマーを解除し、前回のタイムアップ記録（`timeUpTimestamp` / `escalationLevel`）もリセット。
 
 

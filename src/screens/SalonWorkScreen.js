@@ -597,7 +597,10 @@ export default function SalonWorkScreen() {
   // ★ Apple Watchからの操作受信ハンドラ
   const handleWatchAction = (message) => {
     if (!message || !message.action) return;
-    const { action, seatId, userName: watchUser, extra } = message;
+    const { action, seatId, userName: watchUser } = message;
+    // ★ Watch は追加値（targetSeconds / totalSeconds / secondsToAdd など）を extra に包まずメッセージ直下に入れて送る。
+    //   以前は message.extra だけを読んでいたため常に既定値（START_TIMER=10分 等）になっていた。
+    const extra = (message.extra && typeof message.extra === 'object') ? message.extra : message;
 
     // ① 同期リクエスト (Watch側から「最新の客席データをちょうだい」と要求された時)
     if (action === 'REQUEST_SYNC') {
@@ -765,13 +768,21 @@ export default function SalonWorkScreen() {
             };
           }
           case 'START_TIMER': {
-            const targetSec = extra?.targetSeconds || 600;
+            const targetSec = Number(extra?.targetSeconds) || 600;
             return {
               ...s,
               status: 'running',
               targetSeconds: targetSec,
               targetEndTimestamp: Date.now() + targetSec * 1000,
               colorStaffName: watchUser || s.colorStaffName,
+              // Watch 側の「タイム再入力（チェック解除）」と同じ状態にする
+              checkTargetSeconds: null,
+              checkEndTimestamp: null,
+              checkStaffName: '',
+              checkStatus: 'stopped',
+              // 前回のタイムアップ記録を消す（新しいタイマーとして扱う）
+              timeUpTimestamp: null,
+              escalationLevel: 0,
             };
           }
           case 'ADJUST_TIME': {

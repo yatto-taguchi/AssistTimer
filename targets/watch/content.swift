@@ -1956,8 +1956,6 @@ struct TimeActionSheet: View {
     
     // ★ リューズ(Crown)無段階調整用 (分・秒独立タップ切替)
     @State private var crownSeconds: Double = 0.0
-    @State private var editUnit: EditTimeUnit = .minute
-    @FocusState private var isCrownFocused: Bool
     
     // 1秒周期のカウントダウン更新
     @State private var now = Date()
@@ -2057,87 +2055,15 @@ struct TimeActionSheet: View {
                 }
                 .padding(.horizontal, 4)
                 
-                // ② ００:００の巨大デジタル表示エリア（分・秒タップ切替 ＆ Crown無段階調整）
-                VStack(spacing: 2) {
-                    HStack(spacing: 3) {
-                        // 分タップエリア (デフォルト選択)
-                        Button(action: {
-                            editUnit = .minute
-                            isCrownFocused = true
-                            WKInterfaceDevice.current().play(.click)
-                        }) {
-                            Text(String(format: "%02d", Int(crownSeconds) / 60))
-                                .font(.system(size: 30, weight: .black, design: .monospaced))
-                                .foregroundColor(editUnit == .minute ? Color(hex: "#FFD60A") : Color.white.opacity(0.85))
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(editUnit == .minute ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.06))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 6)
-                                                .stroke(editUnit == .minute ? Color(hex: "#FFD60A") : Color.clear, lineWidth: 1.2)
-                                        )
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        
-                        Text(":")
-                            .font(.system(size: 24, weight: .bold, design: .monospaced))
-                            .foregroundColor(.gray)
-                        
-                        // 秒タップエリア (秒のところをタップした場合はそこが変更可能に)
-                        Button(action: {
-                            editUnit = .second
-                            isCrownFocused = true
-                            WKInterfaceDevice.current().play(.click)
-                        }) {
-                            Text(String(format: "%02d", Int(crownSeconds) % 60))
-                                .font(.system(size: 30, weight: .black, design: .monospaced))
-                                .foregroundColor(editUnit == .second ? Color(hex: "#30D158") : Color.white.opacity(0.85))
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(editUnit == .second ? Color(hex: "#30D158").opacity(0.18) : Color.white.opacity(0.06))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 6)
-                                                .stroke(editUnit == .second ? Color(hex: "#30D158") : Color.clear, lineWidth: 1.2)
-                                        )
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 3)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(Color.white.opacity(0.08))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(editUnit == .minute ? Color(hex: "#FFD60A").opacity(0.6) : Color(hex: "#30D158").opacity(0.6), lineWidth: 1.2)
-                            )
-                    )
-                    .focusable()
-                    .focused($isCrownFocused)
-                    .digitalCrownRotation(
-                        $crownSeconds,
-                        from: 0.0,
-                        through: 5400.0,
-                        by: editUnit == .minute ? 60.0 : 1.0,
-                        sensitivity: .medium,
-                        isContinuous: false,
-                        isHapticFeedbackEnabled: true
-                    )
-                    
-                    HStack(spacing: 3) {
-                        Image(systemName: "digitalcrown.horizontal.press.fill")
-                            .font(.system(size: 8))
-                        Text(editUnit == .minute ? "Crownで【分】を無段階調整 (秒タップで秒切替)" : "Crownで【秒】を無段階調整 (分タップで分切替)")
-                            .font(.system(size: 8.5, weight: .medium))
-                    }
-                    .foregroundColor(editUnit == .minute ? Color(hex: "#FFD60A") : Color(hex: "#30D158"))
-                }
+                // ② ００:００の巨大デジタル表示エリア（分・秒をそれぞれタップしてリューズで入力）
+                CrownMinSecPicker(
+                    totalSeconds: Binding(
+                        get: { Int(crownSeconds) },
+                        set: { crownSeconds = Double(min(5400, max(0, $0))) }
+                    ),
+                    maxMinutes: 90,
+                    fontSize: 30
+                )
                 .padding(.horizontal, 2)
                 
                 // ③ 補助ボタン（リセット / -1分 / +1分 / +30秒）
@@ -2278,9 +2204,6 @@ struct TimeActionSheet: View {
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 2)
-        }
-        .onAppear {
-            isCrownFocused = true
         }
     }
     
@@ -2557,6 +2480,123 @@ enum EditTimeUnit {
     case second
 }
 
+// MARK: - 分・秒をリューズで入力する部品（Build 40）
+// 以前は「分・秒をまとめた1つの入力欄」でリューズの刻み幅を切り替えていたが、
+// 切替が反映されず「分を選んでも秒が変わる」不具合があった。
+// 分・秒それぞれを独立した入力欄（別々のフォーカス・別々のリューズ値）にし、タップした方だけが変わるようにした。
+struct CrownMinSecPicker: View {
+    @Binding var totalSeconds: Int
+    let maxMinutes: Int
+    let fontSize: CGFloat
+
+    @FocusState private var focusedUnit: EditTimeUnit?
+    @State private var minuteValue: Double = 0
+    @State private var secondValue: Double = 0
+
+    private let minuteColor = Color(hex: "#FFD60A")
+    private let secondColor = Color(hex: "#30D158")
+
+    var body: some View {
+        VStack(spacing: 2) {
+            HStack(spacing: 3) {
+                unitField(.minute, value: totalSeconds / 60, color: minuteColor, label: "分")
+                    .focusable()
+                    .focused($focusedUnit, equals: .minute)
+                    .digitalCrownRotation(
+                        $minuteValue,
+                        from: 0.0,
+                        through: Double(maxMinutes),
+                        by: 1.0,
+                        sensitivity: .medium,
+                        isContinuous: false,
+                        isHapticFeedbackEnabled: true
+                    )
+                    .onTapGesture {
+                        focusedUnit = .minute
+                        WKInterfaceDevice.current().play(.click)
+                    }
+
+                Text(":")
+                    .font(.system(size: fontSize * 0.8, weight: .bold, design: .monospaced))
+                    .foregroundColor(.gray)
+
+                unitField(.second, value: totalSeconds % 60, color: secondColor, label: "秒")
+                    .focusable()
+                    .focused($focusedUnit, equals: .second)
+                    .digitalCrownRotation(
+                        $secondValue,
+                        from: 0.0,
+                        through: 59.0,
+                        by: 1.0,
+                        sensitivity: .medium,
+                        isContinuous: false,
+                        isHapticFeedbackEnabled: true
+                    )
+                    .onTapGesture {
+                        focusedUnit = .second
+                        WKInterfaceDevice.current().play(.click)
+                    }
+            }
+            .frame(maxWidth: .infinity)
+
+            HStack(spacing: 3) {
+                Image(systemName: "digitalcrown.horizontal.press.fill")
+                    .font(.system(size: 8))
+                Text(focusedUnit == .second ? "Crownで【秒】を調整（分をタップで切替）" : "Crownで【分】を調整（秒をタップで切替）")
+                    .font(.system(size: 8.5, weight: .medium))
+            }
+            .foregroundColor(focusedUnit == .second ? secondColor : minuteColor)
+        }
+        .onAppear {
+            syncFromTotal(totalSeconds)
+            focusedUnit = .minute
+        }
+        .onChange(of: minuteValue) { _, newValue in
+            let m = min(maxMinutes, max(0, Int(newValue.rounded())))
+            let next = m * 60 + totalSeconds % 60
+            if next != totalSeconds { totalSeconds = next }
+        }
+        .onChange(of: secondValue) { _, newValue in
+            let s = min(59, max(0, Int(newValue.rounded())))
+            let next = (totalSeconds / 60) * 60 + s
+            if next != totalSeconds { totalSeconds = next }
+        }
+        .onChange(of: totalSeconds) { _, newValue in
+            // ピル・＋－ボタンなど外から変わった時にリューズ値を合わせる
+            syncFromTotal(newValue)
+        }
+    }
+
+    private func syncFromTotal(_ total: Int) {
+        let m = Double(total / 60)
+        let s = Double(total % 60)
+        if minuteValue != m { minuteValue = m }
+        if secondValue != s { secondValue = s }
+    }
+
+    private func unitField(_ unit: EditTimeUnit, value: Int, color: Color, label: String) -> some View {
+        let selected = focusedUnit == unit
+        return HStack(alignment: .lastTextBaseline, spacing: 1) {
+            Text(String(format: "%02d", value))
+                .font(.system(size: fontSize, weight: .black, design: .monospaced))
+                .foregroundColor(selected ? color : Color.white.opacity(0.85))
+            Text(label)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(selected ? color : .gray)
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(selected ? color.opacity(0.18) : Color.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(selected ? color : Color.clear, lineWidth: 1.2)
+                )
+        )
+    }
+}
+
 // MARK: - 新規席追加シート
 struct AddSeatSheet: View {
     @Environment(\.dismiss) var dismiss
@@ -2565,9 +2605,6 @@ struct AddSeatSheet: View {
     @State private var selectedMinutes: Int = 15
     @State private var selectedSeconds: Int = 0
     @State private var checkMinutes: Int = 0
-    @State private var editUnit: EditTimeUnit = .minute
-    @FocusState private var isCrownFocused: Bool
-    @State private var crownDouble: Double = 15.0
     let onAdd: (SeatTimerItem) -> Void
     
     init(currentUserName: String, suggestedSeatNumber: Int, onAdd: @escaping (SeatTimerItem) -> Void) {
@@ -2629,106 +2666,26 @@ struct AddSeatSheet: View {
                 
                 Divider()
                 
-                // ★ 全体タイム表示（分・秒タップ切替 ＆ Crown無段階トグル調整エリア）
-                VStack(spacing: 2) {
-                    HStack(alignment: .center, spacing: 3) {
-                        Text("全体タイム:")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(.gray)
-                        Spacer()
-                        
-                        // 分タップエリア (デフォルト選択)
-                        Button(action: {
-                            editUnit = .minute
-                            crownDouble = Double(selectedMinutes)
-                            isCrownFocused = true
-                            WKInterfaceDevice.current().play(.click)
-                        }) {
-                            Text(String(format: "%02d", selectedMinutes))
-                                .font(.system(size: 22, weight: .black, design: .rounded))
-                                .foregroundColor(editUnit == .minute ? Color(hex: "#FFD60A") : Color(hex: "#64D2FF"))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(editUnit == .minute ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.06))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 6)
-                                                .stroke(editUnit == .minute ? Color(hex: "#FFD60A") : Color.clear, lineWidth: 1.2)
-                                        )
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        
-                        Text("分")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(editUnit == .minute ? Color(hex: "#FFD60A") : .gray)
-                        
-                        Text(":")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundColor(.gray)
-                        
-                        // 秒タップエリア (秒のところをタップした場合はそこが変更可能に)
-                        Button(action: {
-                            editUnit = .second
-                            crownDouble = Double(selectedSeconds)
-                            isCrownFocused = true
-                            WKInterfaceDevice.current().play(.click)
-                        }) {
-                            Text(String(format: "%02d", selectedSeconds))
-                                .font(.system(size: 22, weight: .black, design: .rounded))
-                                .foregroundColor(editUnit == .second ? Color(hex: "#30D158") : Color(hex: "#64D2FF"))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(editUnit == .second ? Color(hex: "#30D158").opacity(0.18) : Color.white.opacity(0.06))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 6)
-                                                .stroke(editUnit == .second ? Color(hex: "#30D158") : Color.clear, lineWidth: 1.2)
-                                        )
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        
-                        Text("秒")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(editUnit == .second ? Color(hex: "#30D158") : .gray)
-                    }
-                    .padding(.horizontal, 4)
-                    .focusable()
-                    .focused($isCrownFocused)
-                    .digitalCrownRotation(
-                        $crownDouble,
-                        from: 0.0,
-                        through: editUnit == .minute ? 90.0 : 59.0,
-                        by: 1.0,
-                        sensitivity: .medium,
-                        isContinuous: false,
-                        isHapticFeedbackEnabled: true
-                    )
-                    .onChange(of: crownDouble) { oldVal, newVal in
-                        if editUnit == .minute {
-                            selectedMinutes = Int(newVal)
-                        } else {
-                            selectedSeconds = Int(newVal)
-                        }
-                    }
-                    
-                    // Crown操作ガイダンス
-                    HStack(spacing: 3) {
-                        Image(systemName: "digitalcrown.horizontal.press.fill")
-                            .font(.system(size: 8))
-                        Text(editUnit == .minute ? "Crownで【分】を無段階調整 (秒タップで秒切替)" : "Crownで【秒】を無段階調整 (分タップで分切替)")
-                            .font(.system(size: 8.5, weight: .medium))
-                    }
-                    .foregroundColor(editUnit == .minute ? Color(hex: "#FFD60A") : Color(hex: "#30D158"))
-                    .padding(.top, 1)
+                // ★ 全体タイム（分・秒をそれぞれタップしてリューズで入力）
+                HStack(alignment: .center, spacing: 3) {
+                    Text("全体タイム:")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.gray)
+                    Spacer()
                 }
-                .onAppear {
-                    crownDouble = Double(selectedMinutes)
-                    isCrownFocused = true
-                }
+                .padding(.horizontal, 4)
+                CrownMinSecPicker(
+                    totalSeconds: Binding(
+                        get: { selectedMinutes * 60 + selectedSeconds },
+                        set: { newValue in
+                            selectedMinutes = newValue / 60
+                            selectedSeconds = newValue % 60
+                        }
+                    ),
+                    maxMinutes: 90,
+                    fontSize: 24
+                )
+                .padding(.horizontal, 4)
                 
                 // 定番ピル群 (タップで即座にその分数にセット)
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 5) {
@@ -2736,9 +2693,6 @@ struct AddSeatSheet: View {
                         Button(action: {
                             selectedMinutes = min
                             selectedSeconds = 0
-                            crownDouble = Double(min)
-                            editUnit = .minute
-                            isCrownFocused = true
                             WKInterfaceDevice.current().play(.click)
                         }) {
                             Text("\(min)分")
