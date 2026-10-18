@@ -2,14 +2,16 @@ import SwiftUI
 import WidgetKit
 
 // MARK: - AssistTimer 文字盤コンプリケーション
-// Watch アプリ（targets/watch/widget_sync.swift）が App Group に書いた席タイマーの要約を読み、
-// 「自分が関わる稼働中の席」→「終了が一番近い稼働中の席」の順で1席を表示する。
+// Watch アプリ（targets/watch/widget_sync.swift）が App Group に書いた席タイマーの要約を読み、1席を表示する。
+// 優先順: ①最後にスタート・時間変更・新規作成した席（稼働中の場合）
+//         ②自分が関わる稼働中の席 → ③終了が一番近い稼働中の席
 // 残り時間は Text(date, style: .timer) でリアルタイムに進むため、毎秒の再読み込みは不要。
 
 private let appGroup = "group.com.assisttimer"
 private let snapshotKey = "assisttimer.widget.snapshot"
 
 struct ComplicationSeat {
+    let id: String
     let seatNumber: Int
     let endDate: Date
     let isRunning: Bool
@@ -25,17 +27,23 @@ struct ComplicationEntry: TimelineEntry {
     let runningCount: Int
 }
 
-// MARK: - データ読み込みと席の選択（オプションB）
+// MARK: - データ読み込みと席の選択
+struct ComplicationSnapshot {
+    var seats: [ComplicationSeat] = []
+    var lastTouchedId: String?
+}
+
 enum ComplicationData {
-    static func loadSeats() -> [ComplicationSeat] {
+    static func load() -> ComplicationSnapshot {
         guard let defaults = UserDefaults(suiteName: appGroup),
               let data = defaults.data(forKey: snapshotKey),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let seats = obj["seats"] as? [[String: Any]] else { return [] }
-        return seats.compactMap { d in
+              let seats = obj["seats"] as? [[String: Any]] else { return ComplicationSnapshot() }
+        let parsed: [ComplicationSeat] = seats.compactMap { d in
             guard let num = (d["seatNumber"] as? NSNumber)?.intValue,
                   let end = (d["endEpoch"] as? NSNumber)?.doubleValue else { return nil }
             return ComplicationSeat(
+                id: (d["id"] as? String) ?? "",
                 seatNumber: num,
                 endDate: Date(timeIntervalSince1970: end),
                 isRunning: (d["isRunning"] as? NSNumber)?.boolValue ?? false,
@@ -43,21 +51,26 @@ enum ComplicationData {
                 related: (d["related"] as? NSNumber)?.boolValue ?? false
             )
         }
+        return ComplicationSnapshot(seats: parsed, lastTouchedId: obj["lastTouchedId"] as? String)
     }
 
-    /// 自分が関わる稼働中の席を優先し、その中で終了が一番近い（超過を含む）席を選ぶ
-    static func pick(from seats: [ComplicationSeat]) -> ComplicationSeat? {
-        let running = seats.filter { $0.isRunning }
+    /// ①最後に操作された稼働中の席。無ければ ②自分が関わる稼働中の席の中で終了が一番近い（超過を含む）席、
+    /// それも無ければ ③稼働中の席で終了が一番近い席
+    static func pick(from snapshot: ComplicationSnapshot) -> ComplicationSeat? {
+        let running = snapshot.seats.filter { $0.isRunning }
+        if let id = snapshot.lastTouchedId, let touched = running.first(where: { $0.id == id }) {
+            return touched
+        }
         let mine = running.filter { $0.related }
         let pool = mine.isEmpty ? running : mine
         return pool.min { $0.endDate < $1.endDate }
     }
 
-    static func entry(at date: Date, seats: [ComplicationSeat]) -> ComplicationEntry {
+    static func entry(at date: Date, snapshot: ComplicationSnapshot) -> ComplicationEntry {
         ComplicationEntry(
             date: date,
-            seat: pick(from: seats),
-            runningCount: seats.filter { $0.isRunning }.count
+            seat: pick(from: snapshot),
+            runningCount: snapshot.seats.filter { $0.isRunning }.count
         )
     }
 }
@@ -67,7 +80,7 @@ struct ComplicationProvider: TimelineProvider {
     func placeholder(in context: Context) -> ComplicationEntry {
         ComplicationEntry(
             date: Date(),
-            seat: ComplicationSeat(seatNumber: 3, endDate: Date().addingTimeInterval(15 * 60), isRunning: true, pausedRemaining: 0, related: true),
+            seat: ComplicationSeat(id: "preview", seatNumber: 3, endDate: Date().addingTimeInterval(15 * 60), isRunning: true, pausedRemaining: 0, related: true),
             runningCount: 2
         )
     }
@@ -77,17 +90,18 @@ struct ComplicationProvider: TimelineProvider {
             completion(placeholder(in: context))
             return
         }
-        completion(ComplicationData.entry(at: Date(), seats: ComplicationData.loadSeats()))
+        completion(ComplicationData.entry(at: Date(), snapshot: ComplicationData.load()))
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<ComplicationEntry>) -> Void) {
         let now = Date()
-        let seats = ComplicationData.loadSeats()
-        var entries = [ComplicationData.entry(at: now, seats: seats)]
+        let snapshot = ComplicationData.load()
+        let seats = snapshot.seats
+        var entries = [ComplicationData.entry(at: now, snapshot: snapshot)]
         // 各席の終了時刻にも1件ずつ入れて、「超過」表示へ自動で切り替える
         let upcomingEnds = Set(seats.filter { $0.isRunning && $0.endDate > now }.map { $0.endDate }).sorted()
         for end in upcomingEnds.prefix(20) {
-            entries.append(ComplicationData.entry(at: end, seats: seats))
+            entries.append(ComplicationData.entry(at: end, snapshot: snapshot))
         }
         // 席の追加・変更時は Watch アプリ側から reloadAllTimelines() される
         completion(Timeline(entries: entries, policy: .never))
