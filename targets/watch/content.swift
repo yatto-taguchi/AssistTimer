@@ -176,6 +176,14 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     // ★ 有効化前に行われた操作の保留キュー（有効化完了時に自動送信。メインスレッドでのみ操作）
     private var pendingPayloads: [[String: Any]] = []
     
+    // ★ 受信済みの最新データの作成時刻（iPhone の Date.now()、ミリ秒）。
+    //   即時メッセージと保存データ（applicationContext）は届く順番が前後することがあるため、古いデータで上書きしない
+    private var lastPayloadTimestamp: Double = 0
+    
+    // ★ Watch で止めた席（iPhone が反映するまでの間、古い「稼働中」データで超過表示に戻らないようにする）
+    private var localStops: [String: (at: Date, end: Double)] = [:]
+    private let localStopHoldSeconds: TimeInterval = 60
+    
     override init() {
         super.init()
         if WCSession.isSupported() {
@@ -267,7 +275,36 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
     
+    // ★ Watch 上で席を止めたことを記録（止める前の終了時刻も保存。メインスレッドで呼ぶ）
+    func markLocalStop(seatId: String, endTime: Date) {
+        localStops[seatId] = (at: Date(), end: endTime.timeIntervalSince1970)
+    }
+    
+    // ★ アラームの「止める」など、画面外から席を止める（Watch の表示をすぐ 0:00 の停止にする）
+    func applyLocalStop(seatId: String) {
+        guard let idx = timers.firstIndex(where: { $0.id == seatId }), timers[idx].isRunning else { return }
+        markLocalStop(seatId: seatId, endTime: timers[idx].targetEndTime)
+        timers[idx].isRunning = false
+        timers[idx].pausedRemainingSeconds = 0
+        let snapshot = timers
+        // アラーム処理の途中から呼ばれるため、予定の再計算は次のループで行う
+        DispatchQueue.main.async {
+            WatchAlarmCoordinator.shared.update(timers: snapshot, soundOn: self.alarmSoundEnabled)
+            WidgetSync.save(timers: snapshot, userName: self.currentUserName)
+        }
+    }
+    
     func processReceivedData(_ data: [String: Any], kind: String = "-") {
+        // ★ 古いデータ（後から届いた保存データなど）は無視。
+        //   10分以上古い場合は iPhone の時計が変わった可能性があるため受け入れる
+        if let ts = (data["timestamp"] as? NSNumber)?.doubleValue, data["seats"] != nil {
+            if ts < lastPayloadTimestamp && lastPayloadTimestamp - ts < 600_000 {
+                self.lastReceivedKind = "\(kind)(古いデータのため無視)"
+                return
+            }
+            lastPayloadTimestamp = ts
+        }
+        
         // ★ 診断用: 受信記録
         self.receivedCount += 1
         self.lastReceivedAt = Date()
@@ -294,11 +331,25 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         // 座席リスト同期（型ゆらぎを許容して1席ずつ確実にパース）
         let rawSeats = (data["seats"] as? [Any]) ?? (data["seats"] as? [[String: Any]])
         if let rawSeats = rawSeats {
-            let parsed = rawSeats.compactMap { elem -> SeatTimerItem? in
+            var parsed = rawSeats.compactMap { elem -> SeatTimerItem? in
                 if let dict = elem as? [String: Any] {
                     return SeatTimerItem(dictionary: dict)
                 }
                 return nil
+            }
+            // ★ Watch で止めたのに、まだ「止める前と同じ終了時刻で稼働中」のデータが届いた場合は、
+            //   iPhone がまだ反映していないだけなので停止のままにする（最大60秒）
+            let nowDate = Date()
+            for i in parsed.indices {
+                let id = parsed[i].id
+                guard let stop = localStops[id] else { continue }
+                let sameEnd = abs(parsed[i].targetEndTime.timeIntervalSince1970 - stop.end) < 2
+                if parsed[i].isRunning && sameEnd && nowDate.timeIntervalSince(stop.at) < localStopHoldSeconds {
+                    parsed[i].isRunning = false
+                    parsed[i].pausedRemainingSeconds = 0
+                } else {
+                    localStops[id] = nil
+                }
             }
             self.lastReceivedSeatCount = parsed.count
             self.timers = parsed
@@ -926,6 +977,7 @@ struct ContentView: View {
                             timers[idx].status = (process == "コーミング" ? .combing : .shampoo)
                             timers[idx].shampooStaff = currentUserName
                         }
+                        sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
                         sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: item.id)
                         let process = item.helpProcess.isEmpty ? "シャンプー" : item.helpProcess
                         showNotification(
@@ -950,6 +1002,7 @@ struct ContentView: View {
                             timers[idx].isRecruiting = false
                             timers[idx].isNoHelpNeeded = false
                         }
+                        sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
                         sessionManager.sendActionToPhone(action: "RESET_ZERO", seatId: item.id)
                         showNotification(
                             text: "⏱️ \(item.seatNumber)番席: 00:00にリセットしました",
@@ -963,6 +1016,7 @@ struct ContentView: View {
                             timers[idx].isRunning = false
                             timers[idx].isCollapsed = true
                         }
+                        sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
                         sessionManager.sendActionToPhone(action: "FINISH_MEASURE", seatId: item.id)
                         showNotification(
                             text: "🏁 \(item.seatNumber)番席: 計測を終了しました",
@@ -989,6 +1043,7 @@ struct ContentView: View {
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         timers[idx].isRunning = false
                         timers[idx].pausedRemainingSeconds = 0
+                        sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
                         sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id)
                         showNotification(text: "⏹️ \(item.seatNumber)番席のタイマーを止めました", color: Color(hex: "#30D158"))
                     }

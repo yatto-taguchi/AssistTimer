@@ -132,7 +132,10 @@ export const syncSeatsToWatch = async (currentSeats, currentName, currentMembers
 
         const isRunning = s.status === 'running';
         const targetEnd = s.targetEndTimestamp || Date.now();
-        const pausedRem = Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
+        // ★ 停止中は保存済みの残り秒数を送る（終了時刻から計算すると、止めた後も Watch 側で残りが減っていった）
+        const pausedRem = !isRunning && typeof s.pausedRemainingSeconds === 'number'
+          ? Math.max(0, Math.floor(s.pausedRemainingSeconds))
+          : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
         return {
           id: String(s.id),
@@ -420,8 +423,9 @@ export default function SalonWorkScreen() {
           const isHelpUndecided = !s.assistantStaffName || s.assistantStaffName.trim() === '';
 
           if (!isOver && remainingSec <= 60 && remainingSec > 0 && isHelpUndecided && !isNoHelp) {
-            if (!oneMinuteHelpAlertRef.current[s.id]) {
-              oneMinuteHelpAlertRef.current[s.id] = true;
+            // ★ どの終了時刻に対する通知かを記録（Watch からの再スタート後も自動で再び通知できるように）
+            if (oneMinuteHelpAlertRef.current[s.id] !== s.targetEndTimestamp) {
+              oneMinuteHelpAlertRef.current[s.id] = s.targetEndTimestamp;
               if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
                 Vibration.vibrate([0, 500, 150, 500, 150, 500]);
               }
@@ -455,8 +459,8 @@ export default function SalonWorkScreen() {
               newCheckStatus = 'timeup';
               checkStatusChanged = true;
               hasChanges = true;
-              if (!checkAlertedRef.current[s.id]) {
-                checkAlertedRef.current[s.id] = true;
+              if (checkAlertedRef.current[s.id] !== s.checkEndTimestamp) {
+                checkAlertedRef.current[s.id] = s.checkEndTimestamp;
                 if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
                   Vibration.vibrate([0, 500, 150, 500]);
                 }
@@ -491,6 +495,14 @@ export default function SalonWorkScreen() {
 
           // タイムアップ時刻の記録
           let timeUpTs = s.timeUpTimestamp;
+          let escLevel = s.escalationLevel || 0;
+          // ★ 終了時刻が変わっていれば（再スタート・時間変更後の）新しいタイムアップとして扱う。
+          //   以前は記録が残ったままで、同じ席の2回目以降のタイムアップで振動・エスカレーションが起きなかった
+          if (timeUpTs && timeUpTs !== s.targetEndTimestamp) {
+            timeUpTs = null;
+            escLevel = 0;
+            escalatedAlertRef.current[s.id] = false;
+          }
           if (!timeUpTs) {
             timeUpTs = s.targetEndTimestamp;
             hasChanges = true;
@@ -501,7 +513,6 @@ export default function SalonWorkScreen() {
           }
 
           const elapsedOverSec = Math.floor((currentNow - timeUpTs) / 1000);
-          let escLevel = s.escalationLevel || 0;
 
           // ヘルプ確認（またはヘルプなし確認）に達していない場合の段階的エスカレーション
           const isConfirmed = isNoHelp || !s.assistantStaffName || s.assistantStaffConfirmed;
@@ -656,15 +667,38 @@ export default function SalonWorkScreen() {
     }
 
     // ★ Watch でアラームを止めた → iPhone 側で鳴っている同じ席のアラームも止める
+    // 放置タイム終了のアラーム（kind: 'main'）なら、その席のタイマーも停止（0:00）にする
     if (action === 'STOP_ALARM') {
       if (seatId) {
         stopAlarm('salon', `${seatId}-main`);
         stopAlarm('salon', `${seatId}-check`);
       }
-      return;
+      if (!seatId || extra?.kind !== 'main') return;
     }
 
     if (!seatId) return;
+
+    // ★ Watch からの「止める」系操作で共通の停止状態（Watch の表示と同じ 0:00 の停止）
+    const stopSeat = (s, label) => ({
+      ...s,
+      status: 'paused',
+      pausedRemainingSeconds: 0,
+      checkPausedRemainingSeconds: null,
+      timeUpTimestamp: null,
+      escalationLevel: 0,
+      mainStaffConfirmed: true,
+      assistantStaffConfirmed: true,
+      stoppedBy: watchUser || userName || 'スタッフ',
+      history: [
+        ...(s.history || []),
+        {
+          id: `h-${Date.now()}`,
+          time: getCurrentTimeFormatted(),
+          text: `${watchUser || userName || 'スタッフ'} ${label}（Apple Watch）`,
+          type: 'status',
+        },
+      ],
+    });
 
     setSeats((prevSeats) => {
       let hasChanged = false;
@@ -703,6 +737,12 @@ export default function SalonWorkScreen() {
             return {
               ...s,
               status: 'paused',
+              // iPhone 自身の一時停止と同じく、止めた時点の残り秒数を記録（超過中なら 0）
+              pausedRemainingSeconds: s.status === 'running' && s.targetEndTimestamp
+                ? Math.max(0, Math.floor((s.targetEndTimestamp - Date.now()) / 1000))
+                : (s.pausedRemainingSeconds || 0),
+              timeUpTimestamp: null,
+              escalationLevel: 0,
               assistantStaffName: watchUser || 'ヘルプ',
               isShampooing: isShampoo,
               actionStatus: isShampoo ? 'shampoo' : (s.actionStatus || process),
@@ -747,25 +787,44 @@ export default function SalonWorkScreen() {
             };
           }
           case 'RESET_ZERO': {
+            // ★ iPhone 自身のリセットと同じ状態にする。以前は status: 'stopped' にしていたため、
+            //   iPhone の席カードが「稼働中」扱いで超過時間を数え続けていた
             return {
               ...s,
-              status: 'stopped',
+              status: 'paused',
+              isReset: true,
               targetSeconds: 0,
-              targetEndTimestamp: Date.now(),
+              initialMinutes: 0,
+              targetEndTimestamp: null,
+              pausedRemainingSeconds: 0,
+              isOver: false,
+              timeUpTimestamp: null,
+              escalationLevel: 0,
               checkTargetSeconds: null,
               checkEndTimestamp: null,
+              checkPausedRemainingSeconds: null,
               checkStaffName: '',
               checkStatus: 'stopped',
               actionStatus: null,
               isShampooing: false,
               assistantStaffName: '',
+              stoppedBy: watchUser || userName || 'スタッフ',
             };
           }
           case 'STOP_TIMER': {
-            return {
-              ...s,
-              status: 'paused',
-            };
+            return stopSeat(s, 'タイマー停止');
+          }
+          case 'FINISH_MEASURE': {
+            // ★ 以前は未対応だったため、Watch で計測終了しても次の同期で「超過」に戻っていた
+            return stopSeat(s, '計測終了');
+          }
+          case 'STOP_ALARM': {
+            // 終了時刻を過ぎて稼働中の席だけ止める（すでに停止・タイム再入力済みなら何もしない）
+            if (s.status !== 'running' || !s.targetEndTimestamp || Date.now() < s.targetEndTimestamp) {
+              hasChanged = false;
+              return s;
+            }
+            return stopSeat(s, 'アラーム停止');
           }
           case 'START_TIMER': {
             const targetSec = Number(extra?.targetSeconds) || 600;
@@ -783,10 +842,21 @@ export default function SalonWorkScreen() {
               // 前回のタイムアップ記録を消す（新しいタイマーとして扱う）
               timeUpTimestamp: null,
               escalationLevel: 0,
+              isReset: false,
+              isOver: false,
+              stoppedBy: null,
             };
           }
           case 'ADJUST_TIME': {
-            const secondsToAdd = extra?.secondsToAdd || 300;
+            const secondsToAdd = Number(extra?.secondsToAdd) || 300;
+            if (s.status !== 'running') {
+              // ★ 停止中は残り時間だけ変えて停止のまま（Watch の表示と同じ。以前は勝手に再開していた）
+              return {
+                ...s,
+                targetSeconds: Math.max(0, (s.targetSeconds || 0) + secondsToAdd),
+                pausedRemainingSeconds: Math.max(0, (s.pausedRemainingSeconds || 0) + secondsToAdd),
+              };
+            }
             const currentEnd = s.targetEndTimestamp || Date.now();
             const newEnd = Math.max(Date.now(), currentEnd) + secondsToAdd * 1000;
             return {

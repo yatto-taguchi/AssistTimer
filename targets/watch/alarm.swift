@@ -190,9 +190,20 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         center.removeDeliveredNotifications(withIdentifiers: ids)
         ringing = []
         if sendToPhone {
+            // ★ 放置タイム終了のアラーム（main）を止めたら、その席のタイマーも停止（0:00）にする。
+            //   チェック時間のアラームは音・振動を止めるだけ（全体タイマーは続行）。
+            let mainSeatIds = Set(targets.filter { $0.key.contains("-main@") }.map { $0.seatId })
             let seatIds = Set(targets.map { $0.seatId })
             for id in seatIds {
-                WatchSessionManager.shared.sendActionToPhone(action: "STOP_ALARM", seatId: id)
+                let isMain = mainSeatIds.contains(id)
+                if isMain {
+                    WatchSessionManager.shared.applyLocalStop(seatId: id)
+                }
+                WatchSessionManager.shared.sendActionToPhone(
+                    action: "STOP_ALARM",
+                    seatId: id,
+                    extra: ["kind": isMain ? "main" : "check"]
+                )
             }
         }
     }
