@@ -304,6 +304,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             self.timers = parsed
             // ★ バックグラウンド受信でもアラーム予定（通知・スマートアラーム）を更新
             WatchAlarmCoordinator.shared.update(timers: parsed, soundOn: self.alarmSoundEnabled)
+            // ★ 文字盤コンプリケーションへ共有
+            WidgetSync.save(timers: parsed, userName: self.currentUserName)
         }
     }
     
@@ -564,6 +566,7 @@ struct ContentView: View {
             }
             .onChange(of: timers) { _, newTimers in
                 alarm.update(timers: newTimers, soundOn: sessionManager.alarmSoundEnabled)
+                WidgetSync.save(timers: newTimers, userName: currentUserName)
             }
             .navigationTitle("共有タイマー")
             .navigationBarTitleDisplayMode(.inline)
