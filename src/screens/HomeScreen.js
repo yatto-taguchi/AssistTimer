@@ -240,6 +240,14 @@ export default function HomeScreen({ navigation }) {
   const lastIdleCheerTimeRef = useRef(0);
   const idleCheerTimeoutRef = useRef(null);
 
+  // ★ Watch主導タイマー操作によるiPhone消音管理（Watchから開始時はデフォルト消音、ウォッチ振動のみ）
+  const [isWatchMuted, setIsWatchMuted] = useState(false);
+  const isWatchMutedRef = useRef(false);
+  const setWatchMutedState = useCallback((muted) => {
+    isWatchMutedRef.current = muted;
+    setIsWatchMuted(muted);
+  }, []);
+
   // 待機中（Idle）やまいもウォーキング演出のトリガーヘルパー
   const triggerIdleCheer = useCallback((chance = 0.85, delayMs = 1500) => {
     if (idleCheerTimeoutRef.current) {
@@ -258,6 +266,7 @@ export default function HomeScreen({ navigation }) {
 
   // バイブレーション制御ヘルパー（強度およびタイミング個別設定対応）
   const triggerVibration = (type) => {
+    if (isWatchMutedRef.current) return;
     if (!isVibrationEnabled) return;
     try {
       if (type === 'finish') {
@@ -400,6 +409,10 @@ export default function HomeScreen({ navigation }) {
 
   // 初回起動時のサウンドロード等と再生用関数
   const playAlarm = async () => {
+    if (isWatchMutedRef.current) {
+      console.log('[HomeScreen] Alarm sound suppressed (Watch muted)');
+      return;
+    }
     triggerVibration('finish');
     if (!isAlarmSoundEnabled || alarmSoundType === 'none') {
       console.log('Alarm sound is muted or set to none (silent)');
@@ -431,6 +444,10 @@ export default function HomeScreen({ navigation }) {
   };
 
   const playVoice = async (key) => {
+    if (isWatchMutedRef.current) {
+      console.log('[HomeScreen] Voice announcement suppressed (Watch muted)');
+      return;
+    }
     if (!isVoiceMasterEnabled) {
       console.log('Voice announcement is muted by master switch');
       return;
@@ -897,7 +914,7 @@ export default function HomeScreen({ navigation }) {
   // 終了時刻は複数箇所（開始・再開・準備カウント終了・復帰時など）で ref が更新されるため、
   // 動作中は1秒ごとに現在値を渡し、alarmScheduler 側で差分がある時だけ予約し直す。
   useEffect(() => {
-    const soundOn = isAlarmSoundEnabled;
+    const soundOn = isAlarmSoundEnabled && !isWatchMuted;
     const buildDesired = () => {
       let ts = null;
       if (isPreCountingDown && prepEndTimeRef.current) {
@@ -915,7 +932,7 @@ export default function HomeScreen({ navigation }) {
     if (!isRunning && !isPreCountingDown) return undefined;
     const id = setInterval(apply, 1000);
     return () => clearInterval(id);
-  }, [isRunning, isCountUp, isPreCountingDown, isAlarmSoundEnabled, targetTime]);
+  }, [isRunning, isCountUp, isPreCountingDown, isAlarmSoundEnabled, targetTime, isWatchMuted]);
 
   const formatTime = (timeInSeconds) => {
     const isNegative = timeInSeconds < 0;
@@ -953,7 +970,10 @@ export default function HomeScreen({ navigation }) {
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
-  const toggleTimer = () => {
+  const toggleTimer = (isFromWatch = false) => {
+    if (!isFromWatch) {
+      setWatchMutedState(false);
+    }
     if (!isRunning && !isPreCountingDown && remainingTime === targetTime && isCountdownEnabled && countdownSeconds > 0) {
       // 初期状態からのスタートでカウントダウン有効の場合、準備カウントダウンを開始
       prepEndTimeRef.current = Date.now() + countdownSeconds * 1000;
@@ -1025,6 +1045,7 @@ export default function HomeScreen({ navigation }) {
   };
 
   const resetTimer = (isFromSave = false) => {
+    setWatchMutedState(false);
     // タイマーが10秒以上進行した状態での直接リセットは「途中終了（中断）」として自動カウント
     if (!isFromSave) {
       const elapsedSeconds = isCountUp 
@@ -1120,6 +1141,8 @@ export default function HomeScreen({ navigation }) {
   toggleTimerRef.current = toggleTimer;
   const resetTimerRef = useRef(resetTimer);
   resetTimerRef.current = resetTimer;
+  const applyTimeInSecondsRef = useRef(applyTimeInSeconds);
+  applyTimeInSecondsRef.current = applyTimeInSeconds;
 
   useEffect(() => {
     if (Platform.OS !== 'ios') return undefined;
@@ -1127,27 +1150,56 @@ export default function HomeScreen({ navigation }) {
       if (!payload || !payload.action) return;
       const { action } = payload;
       if (action === 'MAIN_TIMER_START') {
+        // Watchから音を出す指定が明示的に true でない限り、携帯からは音を出さない（デフォルト消音・ウォッチ振動のみ）
+        const playPhoneSound = payload.playSoundOnPhone === true;
+        setWatchMutedState(!playPhoneSound);
+        console.log('[HomeScreen] MAIN_TIMER_START received. playSoundOnPhone:', playPhoneSound, 'isMuted:', !playPhoneSound);
         if (!isRunningRef.current && !isPreCountingDownRef.current && toggleTimerRef.current) {
-          toggleTimerRef.current();
+          toggleTimerRef.current(true);
         }
       } else if (action === 'MAIN_TIMER_PAUSE') {
         if ((isRunningRef.current || isPreCountingDownRef.current) && toggleTimerRef.current) {
-          toggleTimerRef.current();
+          toggleTimerRef.current(true);
         }
       } else if (action === 'MAIN_TIMER_TOGGLE') {
         if (toggleTimerRef.current) {
-          toggleTimerRef.current();
+          toggleTimerRef.current(true);
         }
       } else if (action === 'MAIN_TIMER_RESET') {
+        setWatchMutedState(false);
         if (resetTimerRef.current) {
           resetTimerRef.current();
+        }
+      } else if (action === 'MAIN_TIMER_SET_TIME') {
+        const sec = Number(payload.totalSeconds);
+        if (sec > 0 && !isRunningRef.current && !isPreCountingDownRef.current && applyTimeInSecondsRef.current) {
+          console.log('[HomeScreen] MAIN_TIMER_SET_TIME received:', sec);
+          applyTimeInSecondsRef.current(sec);
+        }
+      } else if (action === 'MAIN_TIMER_ADJUST') {
+        const delta = Number(payload.secondsToAdd);
+        if (delta) {
+          console.log('[HomeScreen] MAIN_TIMER_ADJUST received:', delta);
+          if (isRunningRef.current) {
+            if (targetEndTimeRef.current) {
+              targetEndTimeRef.current += delta * 1000;
+              const nextRem = Math.max(0, Math.floor((targetEndTimeRef.current - Date.now()) / 1000));
+              remainingTimeRef.current = nextRem;
+              setRemainingTime(nextRem);
+            }
+          } else {
+            const nextRem = Math.max(10, remainingTimeRef.current + delta);
+            remainingTimeRef.current = nextRem;
+            setRemainingTime(nextRem);
+            setTargetTime(nextRem);
+          }
         }
       }
     });
     return () => {
       if (unsubscribe) unsubscribe();
     };
-  }, []);
+  }, [setWatchMutedState]);
 
   // サロン画面等からの操作リクエスト（一時停止/再開/リセット）の実行
   const lastMainActionTimestampRef = useRef(0);
@@ -3582,7 +3634,7 @@ export default function HomeScreen({ navigation }) {
         ref={cheerOverlayRef}
         isCheerModeEnabled={isCheerModeEnabled}
         isCheerInEcoEnabled={isCheerInEcoEnabled}
-        isCheerSoundEnabled={isCheerSoundEnabled}
+        isCheerSoundEnabled={isCheerSoundEnabled && !isWatchMuted}
         playsInSilentMode={playsInSilentMode}
         isEcoMode={isEcoMode}
       />

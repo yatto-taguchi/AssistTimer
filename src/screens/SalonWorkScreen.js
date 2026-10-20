@@ -849,21 +849,24 @@ export default function SalonWorkScreen() {
             };
           }
           case 'ENTER_HELP': {
-            const process = s.helpProcess || s.actionStatus || 'シャンプー';
-            const isShampoo = process === 'シャンプー';
+            const process = s.helpProcess || s.actionStatus || '';
+            const isCheck = process === 'チェック';
             return {
               ...s,
               status: 'paused',
-              // iPhone 自身の一時停止と同じく、止めた時点の残り秒数を記録（超過中なら 0）
+              // 止めた時点の残り秒数を記録（超過中なら 0）
               pausedRemainingSeconds: s.status === 'running' && s.targetEndTimestamp
                 ? Math.max(0, Math.floor((s.targetEndTimestamp - Date.now()) / 1000))
-                : (s.pausedRemainingSeconds || 0),
+                : 0,
               timeUpTimestamp: null,
               escalationLevel: 0,
               collapsedAtEnd: null,
-              assistantStaffName: watchUser || 'ヘルプ',
-              isShampooing: isShampoo,
-              actionStatus: isShampoo ? 'shampoo' : (s.actionStatus || process),
+              assistantStaffName: null,
+              isShampooing: false,
+              actionStatus: null,
+              helpProcess: null,
+              isRecruiting: false,
+              ...(isCheck ? { isCheckCompleted: true, checkStaffName: watchUser || 'スタッフ' } : {}),
             };
           }
           case 'ASSIGN_HELP': {

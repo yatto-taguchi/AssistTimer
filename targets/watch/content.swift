@@ -418,9 +418,23 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
     
-    // ★ メインタイマー専用の操作送信
-    func sendMainTimerAction(action: String) {
-        sendActionToPhone(action: action, seatId: "main-timer")
+    // ★ メインタイマー専用の操作送信（携帯の音出力フラグを付与）
+    func sendMainTimerAction(action: String, extra: [String: Any] = [:]) {
+        var fullExtra = extra
+        if fullExtra["playSoundOnPhone"] == nil {
+            fullExtra["playSoundOnPhone"] = UserDefaults.standard.bool(forKey: "assisttimer.mainTimerPhoneSound")
+        }
+        sendActionToPhone(action: action, seatId: "main-timer", extra: fullExtra)
+    }
+    
+    // ★ メインタイマーの設定時間変更を送信
+    func sendMainTimerSetTime(seconds: Int) {
+        sendMainTimerAction(action: "MAIN_TIMER_SET_TIME", extra: ["totalSeconds": seconds])
+    }
+    
+    // ★ メインタイマーの秒数増減を送信
+    func sendMainTimerAdjust(seconds: Int) {
+        sendMainTimerAction(action: "MAIN_TIMER_ADJUST", extra: ["secondsToAdd": seconds])
     }
     
     // ★ 送信結果をメインスレッドで記録
@@ -574,11 +588,21 @@ struct ContentView: View {
     
     // 客席サムネイル・バードビューシートフラグ（画面長押しまたは右上⊞アイコンでオープン）
     @State private var showingThumbnailMap = false
+    @State private var showingMainTimerSheet = false
     @State private var hasInitialOpenedMap = false
     @State private var pendingSelectedSeatId: String? = nil
     
     // 客席タイマー一覧（iPhone同期受信データ、初期値は空）
     @State private var timers: [SeatTimerItem] = []
+    
+    // ★ タイム確定時などの自動スクロール用ステート
+    @State private var scrollToSeatId: String? = nil
+    @State private var scrollTrigger: Int = 0
+    
+    private func triggerScroll(to seatId: String) {
+        scrollToSeatId = seatId
+        scrollTrigger += 1
+    }
     
     // 1秒周期の画面再描画トリガー
     @State private var now = Date()
@@ -739,6 +763,7 @@ struct ContentView: View {
                     now: now,
                     onSelectSeat: { selectedSeat in
                         pendingSelectedSeatId = selectedSeat.id
+                        triggerScroll(to: selectedSeat.id)
                         showingThumbnailMap = false
                     },
                     onToggleMainTimer: {
@@ -763,15 +788,117 @@ struct ContentView: View {
                         main.pausedRemainingSeconds = main.totalSeconds
                         sessionManager.mainTimer = main
                         sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
+                    },
+                    onSetMainTimerTime: { totalSec in
+                        playHaptic(.click)
+                        guard var main = sessionManager.mainTimer else { return }
+                        main.totalSeconds = totalSec
+                        main.pausedRemainingSeconds = totalSec
+                        if main.isRunning {
+                            main.targetEndTime = Date().addingTimeInterval(TimeInterval(totalSec))
+                        }
+                        sessionManager.mainTimer = main
+                        sessionManager.sendMainTimerSetTime(seconds: totalSec)
+                    },
+                    onAdjustMainTimer: { deltaSec in
+                        playHaptic(.click)
+                        guard var main = sessionManager.mainTimer else { return }
+                        if main.isRunning {
+                            main.targetEndTime = main.targetEndTime.addingTimeInterval(Double(deltaSec))
+                        } else {
+                            main.pausedRemainingSeconds = max(0, main.pausedRemainingSeconds + deltaSec)
+                        }
+                        sessionManager.mainTimer = main
+                        sessionManager.sendMainTimerAdjust(seconds: deltaSec)
+                    },
+                    onStartMainTimer: {
+                        playHaptic(.click)
+                        guard var main = sessionManager.mainTimer else { return }
+                        main.isRunning = true
+                        let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
+                        main.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
+                        sessionManager.mainTimer = main
+                        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START")
+                    },
+                    onPauseMainTimer: {
+                        playHaptic(.click)
+                        guard var main = sessionManager.mainTimer else { return }
+                        main.isRunning = false
+                        main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(Date())))
+                        sessionManager.mainTimer = main
+                        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_PAUSE")
                     }
                 )
             }
+            // ★ メインタイマー専用操作・時間設定シート（メイン画面のカードタップ用）
+            .sheet(isPresented: $showingMainTimerSheet) {
+                if let main = sessionManager.mainTimer {
+                    MainTimerActionSheet(
+                        item: main,
+                        onStart: {
+                            playHaptic(.click)
+                            guard var main = sessionManager.mainTimer else { return }
+                            main.isRunning = true
+                            let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
+                            main.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
+                            sessionManager.mainTimer = main
+                            sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START")
+                        },
+                        onPause: {
+                            playHaptic(.click)
+                            guard var main = sessionManager.mainTimer else { return }
+                            main.isRunning = false
+                            main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(Date())))
+                            sessionManager.mainTimer = main
+                            sessionManager.sendMainTimerAction(action: "MAIN_TIMER_PAUSE")
+                        },
+                        onReset: {
+                            playHaptic(.click)
+                            guard var main = sessionManager.mainTimer else { return }
+                            main.isRunning = false
+                            main.pausedRemainingSeconds = main.totalSeconds
+                            sessionManager.mainTimer = main
+                            sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
+                        },
+                        onSetTime: { totalSec in
+                            playHaptic(.click)
+                            guard var main = sessionManager.mainTimer else { return }
+                            main.totalSeconds = totalSec
+                            main.pausedRemainingSeconds = totalSec
+                            if main.isRunning {
+                                main.targetEndTime = Date().addingTimeInterval(TimeInterval(totalSec))
+                            }
+                            sessionManager.mainTimer = main
+                            sessionManager.sendMainTimerSetTime(seconds: totalSec)
+                        },
+                        onAdjust: { deltaSec in
+                            playHaptic(.click)
+                            guard var main = sessionManager.mainTimer else { return }
+                            if main.isRunning {
+                                main.targetEndTime = main.targetEndTime.addingTimeInterval(Double(deltaSec))
+                            } else {
+                                main.pausedRemainingSeconds = max(0, main.pausedRemainingSeconds + deltaSec)
+                            }
+                            sessionManager.mainTimer = main
+                            sessionManager.sendMainTimerAdjust(seconds: deltaSec)
+                        }
+                    )
+                }
+            }
             // 新規席追加シート
-            .sheet(isPresented: $showingAddSeatSheet) {
+            .sheet(isPresented: $showingAddSeatSheet, onDismiss: {
+                if let targetId = scrollToSeatId {
+                    triggerScroll(to: targetId)
+                }
+            }) {
                 addSeatSheetView
             }
             // タイム操作シート
-            .sheet(item: bindingTimeAction) { item in
+            .sheet(item: bindingTimeAction, onDismiss: {
+                if let targetId = scrollToSeatId {
+                    triggerScroll(to: targetId)
+                }
+            }) { item in
                 timeActionSheetView(item: item)
             }
             // チェック操作シート
@@ -990,116 +1117,134 @@ struct ContentView: View {
 
     @ViewBuilder
     private var cardsScrollView: some View {
-        ScrollView {
-            VStack(spacing: 12) {
-                // ★ メインタイマーカード（HomeScreen連動・エメラルドグリーン）
-                if let main = sessionManager.mainTimer {
-                    MainTimerCard(
-                        item: main,
-                        now: now,
-                        onToggle: {
-                            playHaptic(.click)
-                            let willPause = main.isRunning
-                            if var m = sessionManager.mainTimer {
-                                if willPause {
-                                    m.isRunning = false
-                                    m.pausedRemainingSeconds = max(0, Int(m.targetEndTime.timeIntervalSince(now)))
-                                } else {
-                                    m.isRunning = true
-                                    let rem = m.pausedRemainingSeconds > 0 ? m.pausedRemainingSeconds : m.totalSeconds
-                                    m.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
-                                }
-                                sessionManager.mainTimer = m
-                            }
-                            sessionManager.sendMainTimerAction(action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START")
-                        },
-                        onReset: {
-                            playHaptic(.click)
-                            if var m = sessionManager.mainTimer {
-                                m.isRunning = false
-                                m.pausedRemainingSeconds = m.totalSeconds
-                                sessionManager.mainTimer = m
-                            }
-                            sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
-                        }
-                    )
-                }
-                
-                if timers.isEmpty && sessionManager.mainTimer == nil {
-                    // ★ 席もメインタイマーも0件の時のプレースホルダー表示
-                    emptySeatsPlaceholderView
-                } else {
-                    // ① 客席タイマーカード一覧
-                    ForEach(sortedTimers) { item in
-                        SeatTimerCard(
-                            item: binding(for: item.id),
-                            currentUserName: currentUserName,
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 12) {
+                    // ★ メインタイマーカード（HomeScreen連動・エメラルドグリーン）
+                    if let main = sessionManager.mainTimer {
+                        MainTimerCard(
+                            item: main,
                             now: now,
-                            onOpenTimeAction: {
-                                timeActionTargetId = item.id
+                            onToggle: {
                                 playHaptic(.click)
-                            },
-                            onOpenSelectHelpStaff: {
-                                selectHelpStaffTargetId = item.id
-                                playHaptic(.click)
-                            },
-                            onOpenShampooAction: {
-                                shampooActionTargetId = item.id
-                                playHaptic(.click)
-                            },
-                            onOpenCheckAction: {
-                                checkActionTargetId = item.id
-                                playHaptic(.click)
-                            },
-                            onClaimCheck: {
-                                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
-                                        timers[idx].checkStaff = currentUserName
+                                let willPause = main.isRunning
+                                if var m = sessionManager.mainTimer {
+                                    if willPause {
+                                        m.isRunning = false
+                                        m.pausedRemainingSeconds = max(0, Int(m.targetEndTime.timeIntervalSince(now)))
+                                    } else {
+                                        m.isRunning = true
+                                        let rem = m.pausedRemainingSeconds > 0 ? m.pausedRemainingSeconds : m.totalSeconds
+                                        m.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
                                     }
+                                    sessionManager.mainTimer = m
                                 }
-                                sessionManager.sendActionToPhone(action: "CLAIM_CHECK", seatId: item.id)
-                                WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                                showNotification(text: "📤 チェック担当に立候補しました", color: Color(hex: "#30D158"))
+                                sessionManager.sendMainTimerAction(action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START")
+                            },
+                            onReset: {
+                                playHaptic(.click)
+                                if var m = sessionManager.mainTimer {
+                                    m.isRunning = false
+                                    m.pausedRemainingSeconds = m.totalSeconds
+                                    sessionManager.mainTimer = m
+                                }
+                                sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
+                            },
+                            onOpenAction: {
+                                showingMainTimerSheet = true
                             }
                         )
+                        .id("main_timer")
                     }
-                }
-                
-                // ② 一番下に「新しい席を追加」ボタンを配置
-                Button(action: {
-                    showingAddSeatSheet = true
-                    playHaptic(.click)
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 15, weight: .bold))
-                        Text("新しい席を追加")
-                            .font(.system(size: 13, weight: .bold))
+                    
+                    if timers.isEmpty && sessionManager.mainTimer == nil {
+                        // ★ 席もメインタイマーも0件の時のプレースホルダー表示
+                        emptySeatsPlaceholderView
+                    } else {
+                        // ① 客席タイマーカード一覧
+                        ForEach(sortedTimers) { item in
+                            SeatTimerCard(
+                                item: binding(for: item.id),
+                                currentUserName: currentUserName,
+                                now: now,
+                                onOpenTimeAction: {
+                                    timeActionTargetId = item.id
+                                    playHaptic(.click)
+                                },
+                                onOpenSelectHelpStaff: {
+                                    selectHelpStaffTargetId = item.id
+                                    playHaptic(.click)
+                                },
+                                onOpenShampooAction: {
+                                    shampooActionTargetId = item.id
+                                    playHaptic(.click)
+                                },
+                                onOpenCheckAction: {
+                                    checkActionTargetId = item.id
+                                    playHaptic(.click)
+                                },
+                                onClaimCheck: {
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                        if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                                            timers[idx].checkStaff = currentUserName
+                                        }
+                                    }
+                                    sessionManager.sendActionToPhone(action: "CLAIM_CHECK", seatId: item.id)
+                                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                                    showNotification(text: "📤 チェック担当に立候補しました", color: Color(hex: "#30D158"))
+                                }
+                            )
+                            .id(item.id)
+                        }
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Color(hex: "#0A84FF").opacity(0.18))
-                    .foregroundColor(Color(hex: "#0A84FF"))
-                    .cornerRadius(10)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color(hex: "#0A84FF").opacity(0.4), lineWidth: 1)
-                    )
+                    
+                    // ② 一番下に「新しい席を追加」ボタンを配置
+                    Button(action: {
+                        showingAddSeatSheet = true
+                        playHaptic(.click)
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 15, weight: .bold))
+                            Text("新しい席を追加")
+                                .font(.system(size: 13, weight: .bold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color(hex: "#0A84FF").opacity(0.18))
+                        .foregroundColor(Color(hex: "#0A84FF"))
+                        .cornerRadius(10)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color(hex: "#0A84FF").opacity(0.4), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 4)
+                    .id("add_seat_button")
                 }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 4)
-                .padding(.top, 4)
+                .padding(.horizontal, 2)
+                .padding(.bottom, 20)
             }
-            .padding(.horizontal, 2)
-            .padding(.bottom, 20)
-        }
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.45)
-                .onEnded { _ in
-                    playHaptic(.start)
-                    showingThumbnailMap = true
+            .onChange(of: scrollTrigger) { _, _ in
+                if let targetId = scrollToSeatId {
+                    // シート消滅・レイアウト更新完了を待ってスムーズにスクロール
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            proxy.scrollTo(targetId, anchor: .center)
+                        }
+                    }
                 }
-        )
+            }
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.45)
+                    .onEnded { _ in
+                        playHaptic(.start)
+                        showingThumbnailMap = true
+                    }
+            )
+        }
     }
     
     private func bannerView(_ banner: String) -> some View {
@@ -1134,6 +1279,7 @@ struct ContentView: View {
             currentUserName: currentUserName,
             suggestedSeatNumber: (timers.map { $0.seatNumber }.max() ?? 0) + 1,
             onAdd: { newSeat in
+                triggerScroll(to: newSeat.id)
                 withAnimation {
                     timers.append(newSeat)
                 }
@@ -1158,30 +1304,35 @@ struct ContentView: View {
                 item: item,
                 currentUserName: currentUserName,
                 onEnterHelp: {
+                    triggerScroll(to: item.id)
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        let rawProcess = timers[idx].helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let process = rawProcess.isEmpty ? "シャンプー" : rawProcess
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].isRunning = false
-                            // ★ 超過中は 0:00 で止める（マイナスの値だと赤い「超過」表示のまま止まって見えていた）
-                            timers[idx].pausedRemainingSeconds = max(0, item.remainingSeconds)
-                            let process = timers[idx].helpProcess
-                            timers[idx].status = (process == "コーミング" ? .combing : .shampoo)
-                            timers[idx].shampooStaff = currentUserName
+                            // ★ 0:00 で停止
+                            timers[idx].pausedRemainingSeconds = 0
+                            // ★ 入る＝やったことになってる＝即座に完了（通常へ）！
+                            timers[idx].status = .normal
+                            timers[idx].shampooStaff = nil
+                            timers[idx].helpProcess = ""
+                            timers[idx].isRecruiting = false
                             if process == "チェック" {
                                 timers[idx].checkStaff = currentUserName
+                                timers[idx].isCheckCompleted = true
                             }
-                            timers[idx].isRecruiting = false
                         }
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
-                        sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
+                        sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs, "isCompleted": true])
                         WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                        let process = item.helpProcess.isEmpty ? "シャンプー" : item.helpProcess
                         showNotification(
-                            text: "📤 【\(item.displaySeatName)】\(currentUserName)さんが\(process)に入りました",
-                            color: Color(hex: "#0A84FF")
+                            text: "✅ 【\(item.displaySeatName)】\(currentUserName)さんが\(process)を完了しました",
+                            color: Color(hex: "#30D158")
                         )
                     }
                 },
                 onResetZero: {
+                    triggerScroll(to: item.id)
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].totalSeconds = 0
@@ -1205,6 +1356,7 @@ struct ContentView: View {
                     }
                 },
                 onFinishMeasure: {
+                    triggerScroll(to: item.id)
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].isRunning = false
@@ -1229,6 +1381,7 @@ struct ContentView: View {
                 item: item,
                 initialReinputMode: item.isZero,
                 onAdjust: { deltaSec in
+                    triggerScroll(to: item.id)
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         timers[idx].targetEndTime = timers[idx].targetEndTime.addingTimeInterval(Double(deltaSec))
                         timers[idx].pausedRemainingSeconds += deltaSec
@@ -1240,6 +1393,7 @@ struct ContentView: View {
                     }
                 },
                 onStop: {
+                    triggerScroll(to: item.id)
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         timers[idx].isRunning = false
                         timers[idx].pausedRemainingSeconds = 0
@@ -1251,6 +1405,7 @@ struct ContentView: View {
                     }
                 },
                 onReinputTime: { totalSec, checkSec in
+                    triggerScroll(to: item.id)
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         let sec = max(10, totalSec)
                         // ★ 全体タイムより短いチェック時間のみ有効
@@ -1326,55 +1481,71 @@ struct ContentView: View {
             item: item,
             onStartShampoo: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
-                    timers[idx].status = .shampoo
-                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "shampoo", "isShampooing": true])
+                    timers[idx].status = .normal
+                    timers[idx].shampooStaff = nil
+                    timers[idx].helpProcess = ""
+                    timers[idx].isRecruiting = false
+                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
-                        text: "📤 【\(item.displaySeatName)】シャンプー開始を全員へ通知しました",
-                        color: Color(hex: "#0A84FF")
+                        text: "✅ 【\(item.displaySeatName)】シャンプー完了を全員へ通知しました",
+                        color: Color(hex: "#30D158")
                     )
                 }
             },
             onFinishShampoo: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .normal
+                    timers[idx].shampooStaff = nil
+                    timers[idx].helpProcess = ""
+                    timers[idx].isRecruiting = false
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
-                        text: "📤 【\(item.displaySeatName)】シャンプー完了を全員へ通知しました",
+                        text: "✅ 【\(item.displaySeatName)】シャンプー完了を全員へ通知しました",
                         color: Color(hex: "#30D158")
                     )
                 }
             },
             onStartCombing: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
-                    timers[idx].status = .combing
-                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "combing", "isShampooing": false])
+                    timers[idx].status = .normal
+                    timers[idx].shampooStaff = nil
+                    timers[idx].helpProcess = ""
+                    timers[idx].isRecruiting = false
+                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
-                        text: "📤 【\(item.displaySeatName)】コーミング開始を全員へ通知しました",
-                        color: Color(hex: "#0A84FF")
+                        text: "✅ 【\(item.displaySeatName)】コーミング完了を全員へ通知しました",
+                        color: Color(hex: "#30D158")
                     )
                 }
             },
             onFinishCombing: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .normal
+                    timers[idx].shampooStaff = nil
+                    timers[idx].helpProcess = ""
+                    timers[idx].isRecruiting = false
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
-                        text: "📤 【\(item.displaySeatName)】コーミング完了を全員へ通知しました",
+                        text: "✅ 【\(item.displaySeatName)】コーミング完了を全員へ通知しました",
                         color: Color(hex: "#30D158")
                     )
                 }
             },
             onStartCheck: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
-                    timers[idx].status = .check
-                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "check", "isShampooing": false])
+                    timers[idx].status = .normal
+                    timers[idx].isCheckCompleted = true
+                    timers[idx].checkStaff = currentUserName
+                    timers[idx].helpProcess = ""
+                    timers[idx].isRecruiting = false
+                    sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
-                        text: "📤 【\(item.displaySeatName)】チェック開始を全員へ通知しました",
+                        text: "✅ 【\(item.displaySeatName)】チェック完了を全員へ通知しました",
                         color: Color(hex: "#30D158")
                     )
                 }
@@ -1382,10 +1553,14 @@ struct ContentView: View {
             onFinishCheck: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .normal
-                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
+                    timers[idx].isCheckCompleted = true
+                    timers[idx].checkStaff = currentUserName
+                    timers[idx].helpProcess = ""
+                    timers[idx].isRecruiting = false
+                    sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
-                        text: "📤 【\(item.displaySeatName)】チェック完了を全員へ通知しました",
+                        text: "✅ 【\(item.displaySeatName)】チェック完了を全員へ通知しました",
                         color: Color(hex: "#30D158")
                     )
                 }
@@ -1510,6 +1685,7 @@ struct MainTimerCard: View {
     let now: Date
     let onToggle: () -> Void
     let onReset: () -> Void
+    var onOpenAction: (() -> Void)? = nil
     
     private var progressRatio: Double {
         let total = max(1, item.totalSeconds)
@@ -1659,35 +1835,46 @@ struct MainTimerCard: View {
                 .cornerRadius(4)
             }
             
-            // ② タイム数字 ＆ プログレスバー
-            VStack(alignment: .center, spacing: 3) {
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    if item.isOvertime {
-                        Text("超過")
-                            .font(.system(size: 12, weight: .heavy))
-                            .foregroundColor(Color(hex: "#FF453A"))
-                    }
-                    Text(formatSeconds(abs(item.remainingSeconds)))
-                        .font(.system(size: 32, weight: .black, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundColor(item.isOvertime ? Color(hex: "#FF453A") : Color(hex: "#30D158"))
+            // ② タイム数字 ＆ プログレスバー（タップで時間設定・操作シート表示）
+            Button(action: {
+                if let open = onOpenAction {
+                    WKInterfaceDevice.current().play(.click)
+                    open()
                 }
-                .frame(maxWidth: .infinity, alignment: .center)
-                
-                HStack(spacing: 4) {
-                    Image(systemName: "timer")
-                        .font(.system(size: 9))
-                    Text("\(item.totalSeconds / 60)分設定")
-                        .font(.system(size: 10, weight: .semibold))
-                    if !item.isRunning {
-                        Text("• ⏸️ 停止中")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(Color(hex: "#FF9F0A"))
+            }) {
+                VStack(alignment: .center, spacing: 3) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        if item.isOvertime {
+                            Text("超過")
+                                .font(.system(size: 12, weight: .heavy))
+                                .foregroundColor(Color(hex: "#FF453A"))
+                        }
+                        Text(formatSeconds(abs(item.remainingSeconds)))
+                            .font(.system(size: 32, weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(item.isOvertime ? Color(hex: "#FF453A") : Color(hex: "#30D158"))
                     }
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    
+                    HStack(spacing: 4) {
+                        Image(systemName: "timer")
+                            .font(.system(size: 9))
+                        Text("\(item.totalSeconds / 60)分設定")
+                            .font(.system(size: 10, weight: .semibold))
+                        if !item.isRunning {
+                            Text("• ⏸️ 停止中")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(Color(hex: "#FF9F0A"))
+                        }
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8))
+                            .foregroundColor(Color(hex: "#8E8E93"))
+                    }
+                    .foregroundColor(item.isOvertime ? Color(hex: "#FF857D") : Color(hex: "#A0E0B0"))
+                    .frame(maxWidth: .infinity, alignment: .center)
                 }
-                .foregroundColor(item.isOvertime ? Color(hex: "#FF857D") : Color(hex: "#A0E0B0"))
-                .frame(maxWidth: .infinity, alignment: .center)
-                
+            }
+            .buttonStyle(.plain)    
                 // 棒状インジケーター
                 GeometryReader { geo in
                     let totalW = geo.size.width
@@ -2363,31 +2550,39 @@ struct OvertimeActionSheet: View {
         ScrollView {
             VStack(spacing: 8) {
                 // ① ヘッダー部（席番号 ＆ 超過タイムリアルタイム表示）
-                HStack(alignment: .center, spacing: 6) {
+                HStack(alignment: .center, spacing: 5) {
                     HStack(spacing: 3) {
                         Image(systemName: "applewatch")
                             .font(.system(size: 11, weight: .bold))
                         Text(item.displaySeatName)
                             .font(.system(size: 13, weight: .heavy))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .truncationMode(.tail)
                     }
                     .foregroundColor(.white)
                     
-                    Spacer()
+                    Spacer(minLength: 4)
                     
-                    // 超過バッジ ＆ タイム
-                    HStack(spacing: 4) {
+                    // 超過バッジ ＆ タイム（幅固定・改行絶対防止）
+                    HStack(spacing: 3) {
                         Text("超過")
-                            .font(.system(size: 10, weight: .heavy))
+                            .font(.system(size: 9.5, weight: .heavy))
                             .foregroundColor(Color(hex: "#FF453A"))
+                            .lineLimit(1)
+                            .fixedSize()
                         Text(overtimeFormatted)
-                            .font(.system(size: 16, weight: .black, design: .rounded))
+                            .font(.system(size: 14.5, weight: .black, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(Color(hex: "#FF453A"))
+                            .lineLimit(1)
+                            .fixedSize()
                     }
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, 5)
                     .padding(.vertical, 2.5)
                     .background(Color(hex: "#FF453A").opacity(0.18))
                     .cornerRadius(6)
+                    .fixedSize(horizontal: true, vertical: false)
                 }
                 .padding(.horizontal, 4)
                 .padding(.top, 2)
@@ -2492,6 +2687,287 @@ struct OvertimeActionSheet: View {
     
     private func playHaptic(_ type: WKHapticType) {
         WKInterfaceDevice.current().play(type)
+    }
+}
+
+// MARK: - メインタイマー専用操作・時間選択シート
+struct MainTimerActionSheet: View {
+    @Environment(\.dismiss) var dismiss
+    @ObservedObject private var sessionManager = WatchSessionManager.shared
+    let item: SeatTimerItem
+    let onStart: () -> Void
+    let onPause: () -> Void
+    let onReset: () -> Void
+    let onSetTime: (Int) -> Void
+    let onAdjust: (Int) -> Void
+    
+    // ★ セッションマネージャーの最新状態を最優先（0ミリ秒リアルタイム同期）
+    var currentItem: SeatTimerItem {
+        sessionManager.mainTimer ?? item
+    }
+    
+    @State private var phoneSoundEnabled: Bool = UserDefaults.standard.bool(forKey: "assisttimer.mainTimerPhoneSound")
+    @State private var now = Date()
+    let ticker = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
+    
+    // クイック分数選択ボタン（1分, 3分, 5分, 10分, 15分, 20分, 25分, 30分）
+    let quickMinutes = [1, 3, 5, 10, 15, 20, 25, 30]
+    
+    var isRunning: Bool { currentItem.isRunning && currentItem.remainingSeconds > 0 }
+    var isOvertime: Bool { currentItem.isOvertime }
+    
+    var currentSeconds: Int {
+        if isRunning {
+            return max(0, Int(currentItem.targetEndTime.timeIntervalSince(now)))
+        } else if isOvertime {
+            return abs(min(0, Int(currentItem.targetEndTime.timeIntervalSince(now))))
+        } else {
+            return currentItem.pausedRemainingSeconds > 0 ? currentItem.pausedRemainingSeconds : currentItem.totalSeconds
+        }
+    }
+    
+    private func formatSeconds(_ seconds: Int) -> String {
+        let m = max(0, seconds) / 60
+        let s = max(0, seconds) % 60
+        return String(format: "%02d:%02d", m, s)
+    }
+    
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 8) {
+                // ① ナビゲーションバー
+                HStack {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stopwatch.fill")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(Color(hex: "#30D158"))
+                        Text("メインタイマー")
+                            .font(.system(size: 13, weight: .heavy))
+                            .foregroundColor(.white)
+                    }
+                    Spacer()
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        dismiss()
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 16))
+                            .foregroundColor(Color(hex: "#8E8E93"))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 4)
+                
+                // ② 共有タイマーではない旨の注意書き
+                Text("※こちらは共有タイマーではありません")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(Color(hex: "#FFD60A").opacity(0.85))
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 3)
+                    .padding(.horizontal, 6)
+                    .background(Color.white.opacity(0.06))
+                    .cornerRadius(4)
+                
+                // ③ 巨大タイマー表示 ＆ 状態
+                VStack(spacing: 2) {
+                    if isOvertime {
+                        Text("超過")
+                            .font(.system(size: 11, weight: .heavy))
+                            .foregroundColor(Color(hex: "#FF453A"))
+                        Text("+\(formatSeconds(currentSeconds))")
+                            .font(.system(size: 32, weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(Color(hex: "#FF453A"))
+                    } else if isRunning {
+                        Text(formatSeconds(currentSeconds))
+                            .font(.system(size: 32, weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(Color(hex: "#30D158"))
+                    } else {
+                        Text(formatSeconds(currentSeconds))
+                            .font(.system(size: 32, weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(.white)
+                        Text("⏸ 停止中（\(max(1, currentItem.totalSeconds / 60))分設定）")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundColor(Color(hex: "#8E8E93"))
+                    }
+                }
+                .padding(.vertical, 2)
+                
+                // ④ メイン操作ボタン（スタート / 一時停止 / リセット）
+                if isOvertime {
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        onReset()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "stop.circle.fill")
+                                .font(.system(size: 14, weight: .bold))
+                            Text("計測終了 / リセット")
+                                .font(.system(size: 13, weight: .bold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(Color(hex: "#FF453A"))
+                        .foregroundColor(.white)
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                } else if isRunning {
+                    HStack(spacing: 6) {
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            onPause()
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "pause.fill")
+                                    .font(.system(size: 12, weight: .bold))
+                                Text("一時停止")
+                                    .font(.system(size: 12, weight: .bold))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color(hex: "#FF9F0A"))
+                            .foregroundColor(.black)
+                            .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                        
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            onReset()
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.counterclockwise")
+                                    .font(.system(size: 12, weight: .bold))
+                                Text("リセット")
+                                    .font(.system(size: 12, weight: .bold))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.15))
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } else {
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        onStart()
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 14, weight: .bold))
+                            Text("スタート")
+                                .font(.system(size: 14, weight: .heavy))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(Color(hex: "#30D158"))
+                        .foregroundColor(.black)
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                // ⑤ 時間微調整ボタン（+1分, +3分, +5分, -1分）
+                HStack(spacing: 5) {
+                    ForEach([("+1分", 60), ("+3分", 180), ("+5分", 300), ("-1分", -60)], id: \.0) { label, delta in
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            onAdjust(delta)
+                        }) {
+                            Text(label)
+                                .font(.system(size: 10, weight: .bold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
+                                .background(Color.white.opacity(0.12))
+                                .foregroundColor(delta < 0 ? Color(hex: "#FF453A") : Color(hex: "#64D2FF"))
+                                .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                
+                // ⑥ クイック時間選択（停止中または変更時）
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("設定時間を選択")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Color(hex: "#8E8E93"))
+                        .padding(.leading, 2)
+                    
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 5), count: 4), spacing: 5) {
+                        ForEach(quickMinutes, id: \.self) { m in
+                            let isSelected = (currentItem.totalSeconds == m * 60)
+                            Button(action: {
+                                WKInterfaceDevice.current().play(.click)
+                                onSetTime(m * 60)
+                            }) {
+                                Text("\(m)分")
+                                    .font(.system(size: 11, weight: isSelected ? .heavy : .bold))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 6)
+                                    .background(isSelected ? Color(hex: "#30D158").opacity(0.3) : Color.white.opacity(0.08))
+                                    .foregroundColor(isSelected ? Color(hex: "#30D158") : .white)
+                                    .cornerRadius(6)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .stroke(isSelected ? Color(hex: "#30D158") : Color.clear, lineWidth: 1)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                
+                Divider()
+                    .padding(.vertical, 2)
+                
+                // ⑦ 携帯の音出力トグル（重要要件）
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    phoneSoundEnabled.toggle()
+                    UserDefaults.standard.set(phoneSoundEnabled, forKey: "assisttimer.mainTimerPhoneSound")
+                }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: phoneSoundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(phoneSoundEnabled ? Color(hex: "#30D158") : Color(hex: "#8E8E93"))
+                        
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack {
+                                Text("携帯の音")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(.white)
+                                Spacer()
+                                Text(phoneSoundEnabled ? "ON" : "OFF")
+                                    .font(.system(size: 11, weight: .heavy))
+                                    .foregroundColor(phoneSoundEnabled ? Color(hex: "#30D158") : Color(hex: "#8E8E93"))
+                            }
+                            Text(phoneSoundEnabled ? "iPhoneからも音・音声アナウンスが鳴ります" : "携帯は消音、ウォッチの振動のみでお知らせ")
+                                .font(.system(size: 8))
+                                .foregroundColor(Color(hex: "#8E8E93"))
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(8)
+                    .background(Color.white.opacity(0.08))
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(phoneSoundEnabled ? Color(hex: "#30D158").opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 6)
+        }
+        .onReceive(ticker) { input in
+            now = input
+        }
     }
 }
 
@@ -3801,6 +4277,12 @@ struct SeatThumbnailMapSheet: View {
     let onSelectSeat: (SeatTimerItem) -> Void
     let onToggleMainTimer: () -> Void
     let onResetMainTimer: () -> Void
+    let onSetMainTimerTime: (Int) -> Void
+    let onAdjustMainTimer: (Int) -> Void
+    let onStartMainTimer: () -> Void
+    let onPauseMainTimer: () -> Void
+    
+    @State private var showingMainTimerSheet: Bool = false
     
     // 席番号順（1番席、2番席、3番席...）に整列して物理レイアウトと連動
     var physicalSortedTimers: [SeatTimerItem] {
@@ -3883,13 +4365,14 @@ struct SeatThumbnailMapSheet: View {
                 }
                 .padding(.horizontal, 4)
                 
-                // ★ メインタイマー専用カード（サマリー直下に全幅配置・エメラルドグリーン/警告色連動）
+                // ★ メインタイマー専用カード（上段にフルタイトル・下段に特大タイマー時間・タップで詳細シート）
                 if let main = mainTimer {
                     ThumbnailMainTimerCard(
                         item: main,
                         now: now,
-                        onToggle: onToggleMainTimer,
-                        onReset: onResetMainTimer
+                        onTap: {
+                            showingMainTimerSheet = true
+                        }
                     )
                 }
                 
@@ -3921,15 +4404,26 @@ struct SeatThumbnailMapSheet: View {
             .padding(.horizontal, 4)
             .padding(.vertical, 4)
         }
+        .sheet(isPresented: $showingMainTimerSheet) {
+            if let main = mainTimer {
+                MainTimerActionSheet(
+                    item: main,
+                    onStart: onStartMainTimer,
+                    onPause: onPauseMainTimer,
+                    onReset: onResetMainTimer,
+                    onSetTime: onSetMainTimerTime,
+                    onAdjust: onAdjustMainTimer
+                )
+            }
+        }
     }
 }
 
-// MARK: - メインタイマー用サムネイルカード（マップ上部全幅）
+// MARK: - メインタイマー用サムネイルカード（マップ上部全幅・文字崩れ完全解消＆上下2段レイアウト）
 struct ThumbnailMainTimerCard: View {
     let item: SeatTimerItem
     let now: Date
-    let onToggle: () -> Void
-    let onReset: () -> Void
+    let onTap: () -> Void
     
     @State private var isPulsing = false
     
@@ -3970,84 +4464,102 @@ struct ThumbnailMainTimerCard: View {
     }
     
     var body: some View {
-        HStack(spacing: 8) {
-            // 左側・中央: アイコン ＆ ラベル ＆ タイマー数字（タップで再生/一時停止）
-            Button(action: onToggle) {
-                HStack(spacing: 6) {
-                    // 左側: アイコン ＆ ラベル
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 3) {
-                            Image(systemName: "stopwatch.fill")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(stateColor.text)
-                            Text("メインタイマー")
-                                .font(.system(size: 11, weight: .heavy))
-                                .foregroundColor(.white)
-                                .lineLimit(1)
-                        }
-                        if let genre = item.genre, !genre.isEmpty {
-                            Text(genre)
-                                .font(.system(size: 8.5, weight: .bold))
-                                .foregroundColor(stateColor.text)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(stateColor.text.opacity(0.2))
-                                .cornerRadius(4)
-                                .lineLimit(1)
-                        }
-                    }
+        Button(action: {
+            WKInterfaceDevice.current().play(.click)
+            onTap()
+        }) {
+            VStack(alignment: .leading, spacing: 3) {
+                // 上段: ヘッダー（「メインタイマー」フル表示 + 状態バッジ + 遷移矢印）
+                HStack(spacing: 4) {
+                    Image(systemName: "stopwatch.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(stateColor.text)
+                    Text("メインタイマー")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .fixedSize()
                     
-                    Spacer(minLength: 4)
-                    
-                    // 中央: タイマー数字
-                    if isRunning {
-                        Text(formatSeconds(rem))
-                            .font(.system(size: 17, weight: .black, design: .rounded))
-                            .monospacedDigit()
+                    if let genre = item.genre, !genre.isEmpty {
+                        Text(genre)
+                            .font(.system(size: 8.5, weight: .bold))
                             .foregroundColor(stateColor.text)
-                    } else if isOvertime {
-                        Text("+\(formatSeconds(abs(rem)))")
-                            .font(.system(size: 16, weight: .black, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundColor(Color(hex: "#FF453A"))
-                    } else {
-                        Text(formatSeconds(item.totalSeconds))
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
-                            .monospacedDigit()
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(stateColor.text.opacity(0.2))
+                            .cornerRadius(4)
+                            .lineLimit(1)
+                    }
+                    
+                    Spacer()
+                    
+                    // 稼働状態インジケータ（タップで設定へ進めることが直感的にわかる）
+                    HStack(spacing: 2) {
+                        if isOvertime {
+                            Text("超過")
+                                .font(.system(size: 9.5, weight: .heavy))
+                                .foregroundColor(Color(hex: "#FF453A"))
+                        } else if isRunning {
+                            Circle()
+                                .fill(stateColor.text)
+                                .frame(width: 5, height: 5)
+                            Text("稼働中")
+                                .font(.system(size: 9.5, weight: .bold))
+                                .foregroundColor(stateColor.text)
+                        } else {
+                            Text("⏸ 停止")
+                                .font(.system(size: 9.5, weight: .medium))
+                                .foregroundColor(Color(hex: "#8E8E93"))
+                        }
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8.5, weight: .bold))
                             .foregroundColor(Color(hex: "#8E8E93"))
                     }
-                }
-            }
-            .buttonStyle(.plain)
-            
-            // 右側: 操作ボタン群（停止中/超過時はリセットボタンも併記）
-            HStack(spacing: 6) {
-                if !isRunning || isOvertime {
-                    Button(action: onReset) {
-                        Image(systemName: "arrow.counterclockwise.circle.fill")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundColor(Color(hex: "#8E8E93"))
-                    }
-                    .buttonStyle(.plain)
                 }
                 
-                Button(action: onToggle) {
-                    Image(systemName: isRunning ? "pause.circle.fill" : (isOvertime ? "exclamationmark.circle.fill" : "play.circle.fill"))
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundColor(stateColor.text)
+                // 下段: 大きなタイマー数字 ＆ 全体設定分数（改行せず1行で綺麗に収まる）
+                HStack(alignment: .firstTextBaseline) {
+                    if isRunning {
+                        Text(formatSeconds(rem))
+                            .font(.system(size: 20, weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(stateColor.text)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                    } else if isOvertime {
+                        Text("+\(formatSeconds(abs(rem)))")
+                            .font(.system(size: 20, weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(Color(hex: "#FF453A"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                    } else {
+                        Text(formatSeconds(item.totalSeconds))
+                            .font(.system(size: 20, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(Color(hex: "#8E8E93"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                    }
+                    
+                    Spacer()
+                    
+                    Text("\(max(1, item.totalSeconds / 60))分設定")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(Color(hex: "#8E8E93"))
                 }
-                .buttonStyle(.plain)
             }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(stateColor.bg)
+            .cornerRadius(9)
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(stateColor.border, lineWidth: isOvertime && isPulsing ? 1.5 : 1)
+            )
+            .shadow(color: isOvertime && isPulsing ? Color(hex: "#FF453A").opacity(0.85) : Color.clear, radius: 4)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
-        .background(stateColor.bg)
-        .cornerRadius(9)
-        .overlay(
-            RoundedRectangle(cornerRadius: 9)
-                .stroke(stateColor.border, lineWidth: isOvertime && isPulsing ? 1.5 : 1)
-        )
-        .shadow(color: isOvertime && isPulsing ? Color(hex: "#FF453A").opacity(0.85) : Color.clear, radius: 4)
+        .buttonStyle(.plain)
         .onAppear {
             withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
                 isPulsing = true
@@ -4170,16 +4682,22 @@ struct ThumbnailSeatCard: View {
                     .font(.system(size: 15, weight: .black, design: .rounded))
                     .monospacedDigit()
                     .foregroundColor(stateColor.text)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             } else if isOvertime {
                 Text("+\(formatSeconds(abs(rem)))")
                     .font(.system(size: 14.5, weight: .black, design: .rounded))
                     .monospacedDigit()
                     .foregroundColor(Color(hex: "#FF453A"))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             } else {
                 Text("00:00")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundColor(Color(hex: "#636366"))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
             
             // ★ チェック体制（途中チェックタイマー稼働中のみ中段下部に表示）
