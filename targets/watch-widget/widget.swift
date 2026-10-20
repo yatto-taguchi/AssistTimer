@@ -352,6 +352,7 @@ struct ComplicationView: View {
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
+                        .fixedSize(horizontal: true, vertical: false)
                 } else {
                     Image(systemName: "timer")
                         .font(.system(size: 11, weight: .bold))
@@ -365,6 +366,7 @@ struct ComplicationView: View {
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
             

@@ -575,6 +575,7 @@ struct ContentView: View {
     // 客席サムネイル・バードビューシートフラグ（画面長押しまたは右上⊞アイコンでオープン）
     @State private var showingThumbnailMap = false
     @State private var hasInitialOpenedMap = false
+    @State private var pendingSelectedSeatId: String? = nil
     
     // 客席タイマー一覧（iPhone同期受信データ、初期値は空）
     @State private var timers: [SeatTimerItem] = []
@@ -725,17 +726,20 @@ struct ContentView: View {
                 }
             }
             // ★ 客席サムネイル・バードビューシート（全タイマー・メインタイマー一覧）
-            .sheet(isPresented: $showingThumbnailMap) {
+            .sheet(isPresented: $showingThumbnailMap, onDismiss: {
+                if let targetId = pendingSelectedSeatId {
+                    pendingSelectedSeatId = nil
+                    timeActionTargetId = targetId
+                }
+            }) {
                 SeatThumbnailMapSheet(
                     timers: timers,
                     mainTimer: sessionManager.mainTimer,
                     currentUserName: currentUserName,
                     now: now,
                     onSelectSeat: { selectedSeat in
+                        pendingSelectedSeatId = selectedSeat.id
                         showingThumbnailMap = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                            timeActionTargetId = selectedSeat.id
-                        }
                     },
                     onToggleMainTimer: {
                         playHaptic(.click)
@@ -808,6 +812,11 @@ struct ContentView: View {
             .onOpenURL { url in
                 if url.host == "open-map" || url.scheme == "assisttimer" {
                     if alarm.ringing.isEmpty {
+                        showingAddSeatSheet = false
+                        timeActionTargetId = nil
+                        checkActionTargetId = nil
+                        shampooActionTargetId = nil
+                        selectHelpStaffTargetId = nil
                         showingThumbnailMap = true
                     }
                 }
@@ -3892,7 +3901,6 @@ struct SeatThumbnailMapSheet: View {
                         Button(action: {
                             WKInterfaceDevice.current().play(.click)
                             onSelectSeat(item)
-                            dismiss()
                         }) {
                             ThumbnailSeatCard(
                                 item: item,
