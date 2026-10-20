@@ -1746,4 +1746,12 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
         1. `widget_sync.swift`: 席データ辞書 `d` に `shampooStaff`, `checkStaff`, `isRecruiting` を無条件で格納。
         2. `widget.swift`: `ComplicationSeat` に `shampooStaff: String?`, `isRecruiting: Bool` を追加し、`ComplicationData.load()` および `placeholder` でパース。`staffText` において工程（`proc`）がチェックか施術（シャンプー等）かに応じて `seat.checkStaff` と `seat.shampooStaff` の双方を適切にフォールバック参照し、指名済みの場合は `"\(proc) \(staff)"`（例: "シャンプー 田中"）、未指名の場合は `"\(proc) 募集中"` を正確に表示。
         3. `content.swift`: ヘルプ担当指名・解除・募集・超過ヘルプ参加の各操作時に `WidgetSync.save` を即座に明示呼び出し。
+    - **Apple Watch 全画面アラーム画面のマイルド化とレイアウト改善**:
+      - **背景・事象**:
+        - タイムアップ時に表示される全画面アラーム（`alarmOverlay`）が純粋な警告赤（`#FF3B30`）のベタ塗りで眩しすぎ、かつナビゲーションバー（時計「13:33」や「共有タイマー」の青文字、同期ボタン）が赤背景の上に重なって透けて見えていた。
+      - **対策・実装**:
+        1. **マイルドな深紅グラデーション**: ベタ塗り原色赤（`#FF3B30`）を廃止し、深みと落ち着きのあるマイルドなカーディナルレッド〜ディープワイングラデーション（`#8E1E23` 〜 `#440A0D`）へ刷新。OLEDの刺激を大幅に抑えつつアラームとしての視認性を維持。
+        2. **ボタンとテキストの調和**: 「止める」ボタン内の文字色を同トーンの深紅（`#8E1E23`）に統一。席名（例: `2番席 放置タイム終了`）に半透明の黒バッジ（`Color.black.opacity(0.3)`）を敷き、どの席が終了したのかが一目でくっきり読めるよう視認性を向上。
+        3. **ナビゲーションバーの重なり根絶**: `alarmOverlay` を `NavigationStack` の外側最前面（親 `ZStack`）へ移動し、`.toolbar(alarm.ringing.isEmpty ? .visible : .hidden, for: .navigationBar)` を付与。アラーム鳴動時はナビゲーションバーを完全に隠し、システム時計や青いヘッダー文字が重なってチラつく現象を根絶。
+
 

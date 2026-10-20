@@ -653,30 +653,27 @@ struct ContentView: View {
     }
     
     var body: some View {
-        NavigationStack {
-            ZStack(alignment: .top) {
-                cardsScrollView
-                
-                if let banner = notificationBannerText {
-                    bannerView(banner)
+        ZStack {
+            NavigationStack {
+                ZStack(alignment: .top) {
+                    cardsScrollView
+                    
+                    if let banner = notificationBannerText {
+                        bannerView(banner)
+                    }
                 }
-                
-                if !alarm.ringing.isEmpty {
-                    alarmOverlay
-                        .zIndex(10)
+                .onChange(of: timers) { _, newTimers in
+                    alarm.update(timers: newTimers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled)
+                    WidgetSync.save(timers: newTimers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                 }
-            }
-            .onChange(of: timers) { _, newTimers in
-                alarm.update(timers: newTimers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled)
-                WidgetSync.save(timers: newTimers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-            }
-            .onChange(of: sessionManager.mainTimer) { _, newMain in
-                alarm.update(timers: timers, mainTimer: newMain, soundOn: sessionManager.alarmSoundEnabled)
-                WidgetSync.save(timers: timers, mainTimer: newMain, userName: currentUserName)
-            }
-            .navigationTitle("共有タイマー")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
+                .onChange(of: sessionManager.mainTimer) { _, newMain in
+                    alarm.update(timers: timers, mainTimer: newMain, soundOn: sessionManager.alarmSoundEnabled)
+                    WidgetSync.save(timers: timers, mainTimer: newMain, userName: currentUserName)
+                }
+                .navigationTitle("共有タイマー")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar(alarm.ringing.isEmpty ? .visible : .hidden, for: .navigationBar)
+                .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button(action: {
                         playHaptic(.click)
@@ -755,7 +752,15 @@ struct ContentView: View {
                 alarm.update(timers: timers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled)
             }
         }
+        
+        // ★ アラーム鳴動時はナビゲーションバーも含めて画面全体をマイルド深紅オーバーレイで覆う
+        if !alarm.ringing.isEmpty {
+            alarmOverlay
+                .zIndex(10)
+                .transition(.opacity)
+        }
     }
+}
     
     // ★ 席が0件のときのプレースホルダー（iPhone同期案内）
     @ViewBuilder
@@ -846,43 +851,74 @@ struct ContentView: View {
         .padding(.horizontal, 4)
     }
 
-    // ★ タイムアップ時の全画面アラーム表示（「止める」を押すまで振動を繰り返す）
+    // ★ タイムアップ時の全画面アラーム表示（マイルドな深紅グラデーションで「止める」を押すまで鳴動）
     @ViewBuilder
     private var alarmOverlay: some View {
         VStack(spacing: 8) {
-            Text("⏰ タイムアップ")
-                .font(.system(size: 17, weight: .heavy))
-                .foregroundColor(.white)
-            ForEach(alarm.ringing.prefix(3), id: \.key) { e in
-                Text(e.title)
-                    .font(.system(size: 12, weight: .bold))
+            Spacer(minLength: 4)
+            
+            // アイコン ＋ タイムアップ
+            HStack(spacing: 6) {
+                Image(systemName: "bell.badge.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.white.opacity(0.95))
+                Text("タイムアップ")
+                    .font(.system(size: 17, weight: .black, design: .rounded))
                     .foregroundColor(.white)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
             }
-            if alarm.ringing.count > 3 {
-                Text("ほか \(alarm.ringing.count - 3) 件")
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.85))
+            
+            // 席名・アラーム対象（すっきり読みやすい半透明黒バッジ）
+            VStack(spacing: 4) {
+                ForEach(alarm.ringing.prefix(3), id: \.key) { e in
+                    Text(e.title)
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.3))
+                        .cornerRadius(8)
+                }
+                if alarm.ringing.count > 3 {
+                    Text("ほか \(alarm.ringing.count - 3) 件")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white.opacity(0.8))
+                }
             }
+            
+            Spacer(minLength: 6)
+            
+            // 止めるボタン（押しやすい白背景＋上品な深紅テキスト＆影）
             Button(action: {
                 alarm.stop()
                 WKInterfaceDevice.current().play(.success)
             }) {
                 Text("止める")
-                    .font(.system(size: 20, weight: .heavy))
+                    .font(.system(size: 20, weight: .heavy, design: .rounded))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
+                    .padding(.vertical, 13)
                     .background(Color.white)
-                    .foregroundColor(Color(hex: "#FF3B30"))
-                    .cornerRadius(14)
+                    .foregroundColor(Color(hex: "#8E1E23"))
+                    .cornerRadius(13)
+                    .shadow(color: Color.black.opacity(0.25), radius: 4, x: 0, y: 2)
             }
             .buttonStyle(.plain)
-            .padding(.top, 4)
+            .padding(.horizontal, 6)
+            .padding(.bottom, 6)
         }
-        .padding(10)
+        .padding(.horizontal, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(hex: "#FF3B30"))
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(hex: "#8E1E23"), // 落ち着いたマイルドな深紅（カーディナルレッド）
+                    Color(hex: "#440A0D")  // 深みのあるディープワインレッド
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
         .ignoresSafeArea()
     }
 
