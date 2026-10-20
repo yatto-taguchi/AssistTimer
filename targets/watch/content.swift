@@ -6,6 +6,7 @@ import WatchConnectivity
 struct SeatTimerItem: Identifiable, Equatable {
     let id: String
     var seatNumber: Int
+    var seatLabel: String? = nil // ★ ユーザー登録表示名（例: "1番席 (個室)"）
     var creatorName: String
     var totalSeconds: Int // 全体初期設定秒数 (例: 900秒 = 15分)
     var targetEndTime: Date // 終了目標時刻（画面消灯・スリープでもずれない絶対時刻）
@@ -16,6 +17,14 @@ struct SeatTimerItem: Identifiable, Equatable {
     var isRecruiting: Bool = false // 全員に募集中フラグ
     var isNoHelpNeeded: Bool = false
     var status: TreatmentStatus = .normal
+    
+    // 表示用の席名（登録名があればそれを優先、なければ "◯番席"）
+    var displaySeatName: String {
+        if let label = seatLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
+            return label
+        }
+        return isMainTimer ? "メインタイマー" : "\(seatNumber)番席"
+    }
     
     // 途中チェックタイマー
     var checkTotalSeconds: Int?
@@ -162,6 +171,7 @@ extension SeatTimerItem {
         self.isCollapsed = (dictionary["isCollapsed"] as? NSNumber)?.boolValue ?? (dictionary["isCollapsed"] as? Bool) ?? false
         self.isMainTimer = (dictionary["isMainTimer"] as? NSNumber)?.boolValue ?? (dictionary["isMainTimer"] as? Bool) ?? (id == "main-timer")
         self.genre = dictionary["genre"] as? String
+        self.seatLabel = dictionary["seatLabel"] as? String
     }
 }
 
@@ -669,6 +679,16 @@ struct ContentView: View {
                 .onChange(of: sessionManager.mainTimer) { _, newMain in
                     alarm.update(timers: timers, mainTimer: newMain, soundOn: sessionManager.alarmSoundEnabled)
                     WidgetSync.save(timers: timers, mainTimer: newMain, userName: currentUserName)
+                }
+                .onChange(of: alarm.ringing.isEmpty) { _, isEmpty in
+                    if !isEmpty {
+                        showingAddSeatSheet = false
+                        timeActionTargetId = nil
+                        checkActionTargetId = nil
+                        shampooActionTargetId = nil
+                        selectHelpStaffTargetId = nil
+                        showingThumbnailMap = false
+                    }
                 }
                 .navigationTitle("共有タイマー")
                 .navigationBarTitleDisplayMode(.inline)
@@ -1674,7 +1694,7 @@ struct SeatTimerCard: View {
                 HStack(spacing: 3) {
                     Image(systemName: "applewatch")
                         .font(.system(size: 11, weight: .bold))
-                    Text("\(item.seatNumber)番席")
+                    Text(item.displaySeatName)
                         .font(.system(size: 13, weight: .heavy))
                 }
                 .foregroundColor(.white)
@@ -1741,7 +1761,7 @@ struct SeatTimerCard: View {
             HStack(spacing: 3) {
                 Image(systemName: "applewatch")
                     .font(.system(size: 11, weight: .bold))
-                Text("\(item.seatNumber)番席")
+                Text(item.displaySeatName)
                     .font(.system(size: 14, weight: .heavy))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -2214,7 +2234,7 @@ struct OvertimeActionSheet: View {
                     HStack(spacing: 3) {
                         Image(systemName: "applewatch")
                             .font(.system(size: 11, weight: .bold))
-                        Text("\(item.seatNumber)番席")
+                        Text(item.displaySeatName)
                             .font(.system(size: 13, weight: .heavy))
                     }
                     .foregroundColor(.white)

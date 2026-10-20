@@ -85,7 +85,7 @@ enum WidgetSync {
             var d: [String: Any] = [
                 "id": t.id,
                 "seatNumber": t.seatNumber,
-                "seatLabel": "\(t.seatNumber)番席",
+                "seatLabel": t.displaySeatName,
                 "isMainTimer": false,
                 // 秒単位に丸めて、同じ内容での無駄な再読み込みを防ぐ（停止中の席は終了時刻を使わないので0）
                 "endEpoch": t.isRunning ? t.targetEndTime.timeIntervalSince1970.rounded() : 0,

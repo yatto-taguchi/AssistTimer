@@ -80,13 +80,13 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             ))
         }
         for t in timers where t.isRunning {
-            let label = "\(t.seatNumber)番席"
+            let label = t.displaySeatName
             let mainEpoch = Int(t.targetEndTime.timeIntervalSince1970)
             list.append(WatchAlarmEvent(
                 key: "\(t.id)-main@\(mainEpoch)",
                 seatId: t.id,
                 date: t.targetEndTime,
-                title: "\(label) 放置タイム終了"
+                title: "\(label) タイム終了"
             ))
             if !t.isCheckCompleted, let checkEnd = t.checkTargetEndTime, (t.checkTotalSeconds ?? 0) > 0 {
                 let checkEpoch = Int(checkEnd.timeIntervalSince1970)

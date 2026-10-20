@@ -1753,5 +1753,17 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
         1. **マイルドな深紅グラデーション**: ベタ塗り原色赤（`#FF3B30`）を廃止し、深みと落ち着きのあるマイルドなカーディナルレッド〜ディープワイングラデーション（`#8E1E23` 〜 `#440A0D`）へ刷新。OLEDの刺激を大幅に抑えつつアラームとしての視認性を維持。
         2. **ボタンとテキストの調和**: 「止める」ボタン内の文字色を同トーンの深紅（`#8E1E23`）に統一。席名（例: `2番席 放置タイム終了`）に半透明の黒バッジ（`Color.black.opacity(0.3)`）を敷き、どの席が終了したのかが一目でくっきり読めるよう視認性を向上。
         3. **ナビゲーションバーの重なり根絶**: `alarmOverlay` を `NavigationStack` の外側最前面（親 `ZStack`）へ移動し、`.toolbar(alarm.ringing.isEmpty ? .visible : .hidden, for: .navigationBar)` を付与。アラーム鳴動時はナビゲーションバーを完全に隠し、システム時計や青いヘッダー文字が重なってチラつく現象を根絶。
+    - **Apple Watch アラーム鳴動時シート自動クローズ ＆ 登録表示名（seatLabel）連動**:
+      - **背景・要望**:
+        - ユーザーから「登録した表示名にできる？例えば1番がタイム終了しましたとか」との要望。
+        - また、Watch上でシート（モーダル）を開いたまま放置した状態でタイマーが鳴動した場合、シートが前面に残ってアラーム画面の「止める」ボタンが押しにくくなる潜在リスクを特定。
+      - **対策・実装**:
+        1. **シート自動クローズ**: `content.swift` の `body` に `.onChange(of: alarm.ringing.isEmpty)` を追加。タイムアップ発生時に開いていたシート（新規席追加、スタッフ指名、タイム操作等）を瞬時に自動クローズし、全画面アラームを画面最前面に確定表示。
+        2. **登録席名（seatLabel）の保持・連動**: `SeatTimerItem` に `var seatLabel: String?` および `displaySeatName` ゲッターを追加し、iPhoneからの受信データ（`dictionary["seatLabel"]`）を保持。
+        3. **アラーム・通知・文字盤への反映**: 
+           - `alarm.swift`: タイマー終了時の `title` を `「\(t.displaySeatName) タイム終了」`（例: `1番席 (個室) タイム終了`）に設定。全画面アラームおよびローカル通知に登録名がそのまま反映。
+           - `widget_sync.swift`: 文字盤Widgetへ送信する `seatLabel` を `t.displaySeatName` に更新。文字盤の最上段ヘッダーにも登録名が反映。
+           - `content.swift`: 各種カードヘッダーの表示も `item.displaySeatName` に統一。
+
 
 
