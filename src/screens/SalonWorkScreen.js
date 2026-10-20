@@ -88,17 +88,47 @@ export const getDefaultInitialSeats = (staffName = 'スタイリスト') => [
   },
 ];
 
-// キャッシュされた最新スタッフメンバー一覧（引数省略時の自動フォールバック用）
+// キャッシュされた最新スタッフメンバー・座席・ユーザー名・メインタイマー一覧
 let _cachedStaffMembers = [];
+let _cachedCurrentSeats = [];
+let _cachedUserName = 'スタイリスト';
+let _cachedMainTimerState = null;
 let _syncDebounceTimer = null;
 let _pendingWatchPayload = null;
 // Watch 側アラーム音の設定（設定画面の値を SYNC_SEATS に含めて Watch へ届ける）
 let _watchAlarmSound = false;
 
-// ★ Apple Watchへの客席・スタッフ名リアルタイム同期ヘルパー（即時送信対応＆デバウンス両立）
-export const syncSeatsToWatch = async (currentSeats, currentName, currentMembers = null, options = {}) => {
+export const updateCachedMainTimerState = (state) => {
+  _cachedMainTimerState = state;
+};
+
+// ★ Apple Watchへの客席・メインタイマー・スタッフ名リアルタイム同期ヘルパー（即時送信対応＆デバウンス両立）
+export const syncSeatsToWatch = async (currentSeats = null, currentName = null, currentMembers = null, options = {}) => {
   if (Platform.OS !== 'ios') return;
   try {
+    if (Array.isArray(currentSeats)) {
+      _cachedCurrentSeats = currentSeats;
+    } else if (_cachedCurrentSeats.length > 0) {
+      currentSeats = _cachedCurrentSeats;
+    } else {
+      try {
+        const saved = await AsyncStorage.getItem('@salon_saved_seats');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            currentSeats = parsed;
+            _cachedCurrentSeats = parsed;
+          }
+        }
+      } catch {}
+    }
+
+    if (currentName) {
+      _cachedUserName = currentName;
+    } else {
+      currentName = _cachedUserName;
+    }
+
     let finalMembers = currentMembers;
     if (Array.isArray(finalMembers)) {
       _cachedStaffMembers = finalMembers;
@@ -117,12 +147,42 @@ export const syncSeatsToWatch = async (currentSeats, currentName, currentMembers
       } catch {}
     }
 
+    let mainTimerPayload = null;
+    if (_cachedMainTimerState) {
+      const isRunning = !!_cachedMainTimerState.isRunning;
+      const isCountUp = !!_cachedMainTimerState.isCountUp;
+      const targetEnd = _cachedMainTimerState.targetEndTimestamp || (
+        isRunning 
+          ? (isCountUp ? Date.now() - (_cachedMainTimerState.remainingTime || 0) * 1000 : Date.now() + (_cachedMainTimerState.remainingTime || 0) * 1000)
+          : 0
+      );
+      
+      const pausedRem = !isRunning
+        ? (isCountUp ? -Math.max(0, _cachedMainTimerState.remainingTime || 0) : Math.max(0, _cachedMainTimerState.remainingTime || 0))
+        : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
+
+      mainTimerPayload = {
+        id: 'main-timer',
+        seatNumber: 0,
+        seatLabel: 'メインタイマー',
+        isMainTimer: true,
+        creatorName: (currentName || 'スタイリスト').trim(),
+        totalSeconds: _cachedMainTimerState.targetTime || 600,
+        targetEndTimestamp: targetEnd,
+        isRunning: isRunning,
+        pausedRemainingSeconds: pausedRem,
+        isCountUp: isCountUp,
+        genre: _cachedMainTimerState.genre || '',
+      };
+    }
+
     const watchPayload = {
       type: 'SYNC_SEATS',
       userName: (currentName || 'スタイリスト').trim(),
       members: Array.isArray(finalMembers) ? finalMembers : [],
       watchAlarmSound: _watchAlarmSound,
       timestamp: Date.now(),
+      mainTimer: mainTimerPayload,
       seats: (currentSeats || []).map((s, index) => {
         let seatNum = index + 1;
         if (s.seatLabel) {
@@ -1063,13 +1123,14 @@ export default function SalonWorkScreen() {
     });
   }, [isDataLoaded]);
 
-  // ★ seats または staffMembers が更新された際、Watch へ最新データを同期
+  // ★ seats または staffMembers または mainTimerState が更新された際、Watch へ最新データを同期
   useEffect(() => {
+    updateCachedMainTimerState(mainTimerState);
     _watchAlarmSound = !!isWatchAlarmSoundEnabled;
-    if (Platform.OS === 'ios' && Array.isArray(seats) && seats.length > 0) {
+    if (Platform.OS === 'ios') {
       syncSeatsToWatch(seats, userName, staffMembers);
     }
-  }, [seats, userName, staffMembers, isWatchAlarmSoundEnabled]);
+  }, [seats, userName, staffMembers, isWatchAlarmSoundEnabled, mainTimerState]);
 
   // ★ サロン席の終了時刻を iPhone 純正アラーム（AlarmKit）に予約
   // 画面ロック中・バックグラウンドでも、止めるまで鳴り続ける。

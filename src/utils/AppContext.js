@@ -789,6 +789,7 @@ export const AppProvider = ({ children }) => {
   const [mainTimerState, setMainTimerState] = useState({
     remainingTime: 180,
     targetTime: 180,
+    targetEndTimestamp: null,
     isRunning: false,
     isPaused: false,
     isCountUp: false,

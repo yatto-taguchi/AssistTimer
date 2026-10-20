@@ -1692,3 +1692,46 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
       - `progressBar(for:)` 実装：
         - カウントダウン時: `ProgressView(timerInterval: startDate...seat.endDate, countsDown: true)` により右から左へ消費。エントリー時刻に基づく残り割合（>30%: 青、<=30%: 黄、<=10%: 赤）で `.tint()` を動的適用。浮動小数点（`Double`）の丸め誤差による切り替えすり抜けを防止する安全マージン（`ratio <= 0.3001` / `ratio <= 0.1001`）を完備。
         - 超過時: `ProgressView(timerInterval: seat.endDate...seat.endDate.addingTimeInterval(180), countsDown: false)` により左から右へ赤ゲージ（`#FF453A`）が伸長（タイマー本体の `RingProgress` と整合する3分満タン仕様）。
+  - **Apple Watch メインタイマー反映 ＆ モジュラーコンプリケーション刷新・動的自動拡大・エッジケース対応 (Build 48)**:
+    - **背景・ユーザー要望**:
+      1. Apple Watch アプリ内に iPhone の「メインタイマー（HomeScreen）」が一覧に出てこないため、客席タイマー（ブルー基調）と区別できる専用配色（エメラルドグリーン基調）で一覧トップに表示し、Watch側からスタート/一時停止/リセットを行えるようにしたい。
+      2. Apple Watch のモジュラー文字盤（`accessoryRectangular`、WidgetKit 長方形コンプリケーション）において、プログレスバーに鮮やかな色付け（通常ブルー／メイン時グリーン／30%以下イエロー／10%以下および超過レッド）を施し、バーを細く、残り時間の数字を大きくしたい。
+      3. プログレスバーの左下に重複して表示されていた余計な時刻数字（9:38）を完全消去したい。
+      4. モジュラー文字盤の最下段に「チェック用タイマー行」（左: チェック残り時間、中央: 担当名・工程、右: オレンジ／残り1分未満で赤になる極細インジケーター）を新設したい。
+      5. チェックタイマーがない場合（またはチェック終了後）は、メインの残り時間文字とバーを自動で特大サイズ（28pt / 5.5pt）へ太く・大きく拡大したい。
+    - **Apple Watch アプリ本体 (`targets/watch`)**:
+      - `content.swift`:
+        - `SeatTimerItem` に `isMainTimer: Bool`, `genre: String?` を追加。
+        - `WatchSessionManager` に `@Published var mainTimer: SeatTimerItem?`, `sendMainTimerAction(action:)` を新設。
+        - `MainTimerCard` コンポーネント新設（エメラルドグリーン `#30D158`、⏱️メインタイマー、あなたバッジ、ジャンル名、特大時間、プログレスバー、スタート/一時停止、リセットボタン、内部に `formatSeconds` 関数を完備）。
+        - `cardsScrollView` の先頭にメインタイマーカードを常時配置。
+        - **楽観的UI更新（Optimistic UI Update）**: ボタンタップ時にローカル表示を即時更新（スタート ⇄ 一時停止、リセット）してから通信を送信し、Bluetooth遅延による二重押しを根絶しゼロラグレスポンスを実現。
+      - `widget_sync.swift`:
+        - `WidgetSync.save` に `mainTimer: SeatTimerItem?` 引数を追加。スナップショットにメインタイマー（`isMainTimer: true`, `seatNumber: 0`, `seatLabel: "メインタイマー"`）およびチェックタイマー情報を格納。
+      - `alarm.swift`:
+        - `WatchAlarmCoordinator.shared.update` に `mainTimer` 引数を追加し、メインタイマー終了時も Watch の全画面アラーム・スマートアラーム・通知が鳴動するよう連携。
+    - **Apple Watch 文字盤コンプリケーション (`targets/watch-widget`)**:
+      - `widget.swift`:
+        - `ComplicationSeat` にチェック情報（`checkEndDate`, `checkTotalSeconds`, `checkStaff`, `helpProcess`, `isCheckCompleted`）および `isMainTimer` を追加。
+        - `progressBar` に `.labelsHidden()` を適用して左下の重複時刻（9:38）を完全消去。`.clipped()` を付与して上下干渉を防止。
+        - 最下段に `checkTimerRow` を新設（チェック残り時間、担当スタッフ名・工程、通常オレンジ/残り1分未満で赤の極細プログレスバー、`.clipped()` 付与）。
+        - **動的自動サイズ最適化**:
+          - チェックあり時: 4段構成（ヘッダー・メイン時間23pt・細バー3.5pt・チェック行）。
+          - チェックなし時: 3段構成となり、メイン時間が28pt、バーが5.5ptへと自動で特大拡大。
+        - **チェック終了後の自動特大拡大復帰**:
+          - `hasActiveCheck` でチェック終了後60秒経過判定を追加。
+          - `getTimeline` にチェック終了後60秒後の切り替えエントリーを追加。手動操作がなくても終了1分後に自動で特大表示へ拡大復帰。
+        - 円形（`circular`）、インライン（`inline`）、コーナー（`corner`）でもメインタイマー表示に対応。
+    - **iPhone側連携 (`src/screens` & `src/utils`)**:
+      - `HomeScreen.js`:
+        - `targetEndTimestamp`（ms）を保持し、`isCountUp`（超過中）の稼働時は `overStartTimeRef.current`（0秒到達の過去時刻）を送信。
+        - スタート/一時停止/設定変更/停止中リセットの全状態変化で Watch へ即時同期（`syncSeatsToWatch`）を発動。
+        - `WatchConnectivity` のインポートを標準パッケージ名（`import WatchConnectivity from 'watch-connectivity';`）に統一。
+        - `WatchConnectivity.subscribeActions` を直接購読し、サロン画面を開いていなくても Watch からのメインタイマー操作を即座に受付。
+        - `MAIN_TIMER_START`（停止中かつ準備カウント中でない場合のみ）、`MAIN_TIMER_PAUSE`（稼働中または準備カウント中の場合のみ）の状態ガードを実装し、誤キャンセルや二重スタートを防止。
+      - `SalonWorkScreen.js`:
+        - `syncSeatsToWatch` で `mainTimer` ペイロードを含めて一括送信。停止中の超過秒数を負数として同期。
+        - `handleWatchAction` 内の重複していたメインタイマー操作コードを削除し、二重発火（ダブルトグルで即停止するバグ）を解消。
+      - `AppContext.js`:
+        - `mainTimerState` 初期値に `targetEndTimestamp: null` を追加。
+

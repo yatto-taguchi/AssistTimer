@@ -67,9 +67,18 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     // MARK: - 外部から呼ぶ
 
     /// 席データが変わった時（iPhoneからの受信・Watchでの操作）に呼ぶ。バックグラウンドでも可。
-    func update(timers: [SeatTimerItem], soundOn: Bool) {
+    func update(timers: [SeatTimerItem], mainTimer: SeatTimerItem? = nil, soundOn: Bool) {
         self.soundOn = soundOn
         var list: [WatchAlarmEvent] = []
+        if let m = mainTimer, m.isRunning {
+            let mainEpoch = Int(m.targetEndTime.timeIntervalSince1970)
+            list.append(WatchAlarmEvent(
+                key: "\(m.id)-main@\(mainEpoch)",
+                seatId: m.id,
+                date: m.targetEndTime,
+                title: "⏱️ メインタイマー 終了"
+            ))
+        }
         for t in timers where t.isRunning {
             let label = "\(t.seatNumber)番席"
             let mainEpoch = Int(t.targetEndTime.timeIntervalSince1970)

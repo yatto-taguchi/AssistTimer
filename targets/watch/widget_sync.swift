@@ -19,15 +19,21 @@ enum WidgetSync {
 
     private static var lastPayload: Data?
 
-    static func save(timers: [SeatTimerItem], userName: String) {
+    static func save(timers: [SeatTimerItem], mainTimer: SeatTimerItem? = nil, userName: String) {
         guard let defaults = UserDefaults(suiteName: appGroup) else { return }
+
+        // メインタイマーも含めた全アイテムリスト
+        var allItems = timers
+        if let m = mainTimer {
+            allItems.insert(m, at: 0)
+        }
 
         // ── 最後に操作された席の判定 ──
         var lastTouchedId = defaults.string(forKey: lastTouchedKey)
         let prevStates = defaults.dictionary(forKey: prevStatesKey) as? [String: [Double]] // id: [isRunning(0/1), endEpoch]
         if let prev = prevStates {
             var touched: String?
-            for t in timers where t.isRunning {
+            for t in allItems where t.isRunning {
                 let end = t.targetEndTime.timeIntervalSince1970.rounded()
                 if let p = prev[t.id], p.count == 2 {
                     let wasRunning = p[0] > 0.5
@@ -44,11 +50,11 @@ enum WidgetSync {
             }
         }
         // 削除された席の ID は忘れる
-        if let id = lastTouchedId, !timers.contains(where: { $0.id == id }), !timers.isEmpty {
+        if let id = lastTouchedId, !allItems.contains(where: { $0.id == id }), !allItems.isEmpty {
             lastTouchedId = nil
         }
         var newStates: [String: [Double]] = [:]
-        for t in timers {
+        for t in allItems {
             newStates[t.id] = [t.isRunning ? 1 : 0, t.targetEndTime.timeIntervalSince1970.rounded()]
         }
         defaults.set(newStates, forKey: prevStatesKey)
@@ -59,18 +65,47 @@ enum WidgetSync {
         }
 
         // ── コンプリケーション用の要約 ──
-        let seats: [[String: Any]] = timers.map { t in
-            [
+        var seats: [[String: Any]] = []
+        if let m = mainTimer {
+            seats.append([
+                "id": m.id,
+                "seatNumber": 0,
+                "seatLabel": "メインタイマー",
+                "isMainTimer": true,
+                "endEpoch": m.isRunning ? m.targetEndTime.timeIntervalSince1970.rounded() : 0,
+                "isRunning": m.isRunning,
+                "pausedRemaining": m.pausedRemainingSeconds,
+                "related": true,
+                "totalSeconds": m.totalSeconds,
+                "isCheckCompleted": true
+            ])
+        }
+
+        for t in timers {
+            var d: [String: Any] = [
                 "id": t.id,
                 "seatNumber": t.seatNumber,
+                "seatLabel": "\(t.seatNumber)番席",
+                "isMainTimer": false,
                 // 秒単位に丸めて、同じ内容での無駄な再読み込みを防ぐ（停止中の席は終了時刻を使わないので0）
                 "endEpoch": t.isRunning ? t.targetEndTime.timeIntervalSince1970.rounded() : 0,
                 "isRunning": t.isRunning,
                 "pausedRemaining": t.pausedRemainingSeconds,
                 "related": t.isRelated(to: userName),
-                "totalSeconds": t.totalSeconds
+                "totalSeconds": t.totalSeconds,
+                "isCheckCompleted": t.isCheckCompleted,
+                "helpProcess": t.helpProcess
             ]
+            if let checkEnd = t.checkTargetEndTime, let checkTot = t.checkTotalSeconds {
+                d["checkEndEpoch"] = checkEnd.timeIntervalSince1970.rounded()
+                d["checkTotalSeconds"] = checkTot
+                if let staff = t.checkStaff {
+                    d["checkStaff"] = staff
+                }
+            }
+            seats.append(d)
         }
+
         var payload: [String: Any] = ["seats": seats, "userName": userName]
         if let id = lastTouchedId {
             payload["lastTouchedId"] = id

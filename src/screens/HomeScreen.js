@@ -21,6 +21,8 @@ import NewsBadge from '../components/NewsBadge';
 import NewsModal from '../components/NewsModal';
 import { getUnreadNewsCount } from '../data/newsData';
 import { setAlarms, stopAllAlarms } from '../utils/alarmScheduler';
+import WatchConnectivity from 'watch-connectivity';
+import { syncSeatsToWatch, updateCachedMainTimerState } from './SalonWorkScreen';
 
 const MAIN_ALARM_KEY = 'main-timer';
 
@@ -1066,19 +1068,86 @@ export default function HomeScreen({ navigation }) {
     }
   };
 
-  // サロン画面等へのメインタイマー状態のリアルタイム同期
+  // サロン画面等へのメインタイマー状態のリアルタイム同期 ＆ Apple Watchへの即時同期
+  const prevIsRunningForWatchRef = useRef(isRunning);
+  const prevTargetTimeForWatchRef = useRef(targetTime);
+  const prevRemainingTimeForWatchRef = useRef(remainingTime);
+
   useEffect(() => {
+    let endMs = null;
+    if (isRunning) {
+      if (isCountUp) {
+        endMs = overStartTimeRef.current || (Date.now() - remainingTime * 1000);
+      } else {
+        endMs = targetEndTimeRef.current || (Date.now() + remainingTime * 1000);
+      }
+    }
+
+    const newState = {
+      remainingTime,
+      targetTime,
+      targetEndTimestamp: endMs,
+      isRunning,
+      isPaused: !isRunning && remainingTime !== targetTime && !isCountUp,
+      isCountUp,
+      genre: selectedCategory || '',
+    };
+
     if (setMainTimerState) {
-      setMainTimerState({
-        remainingTime,
-        targetTime,
-        isRunning,
-        isPaused: !isRunning && remainingTime !== targetTime && !isCountUp,
-        isCountUp,
-        genre: selectedCategory || '',
-      });
+      setMainTimerState(newState);
+    }
+    updateCachedMainTimerState(newState);
+
+    // ★ Watchへの即時同期: スタート/ストップの切り替わり、設定時間変更、または停止中の秒数変化（リセット等）時に送信
+    const isStateToggled = prevIsRunningForWatchRef.current !== isRunning;
+    const isTargetChanged = prevTargetTimeForWatchRef.current !== targetTime;
+    const isRemainingChangedWhileStopped = !isRunning && prevRemainingTimeForWatchRef.current !== remainingTime;
+
+    if (isStateToggled || isTargetChanged || isRemainingChangedWhileStopped) {
+      prevIsRunningForWatchRef.current = isRunning;
+      prevTargetTimeForWatchRef.current = targetTime;
+      prevRemainingTimeForWatchRef.current = remainingTime;
+      if (Platform.OS === 'ios') {
+        syncSeatsToWatch(null, null, null, { immediate: true });
+      }
+    } else {
+      prevRemainingTimeForWatchRef.current = remainingTime;
     }
   }, [remainingTime, targetTime, isRunning, isCountUp, selectedCategory]);
+
+  // ★ Watchからのメインタイマー操作の直接受信（サロン画面を開いていなくても即座に操作を受け付ける）
+  const toggleTimerRef = useRef(toggleTimer);
+  toggleTimerRef.current = toggleTimer;
+  const resetTimerRef = useRef(resetTimer);
+  resetTimerRef.current = resetTimer;
+
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return undefined;
+    const unsubscribe = WatchConnectivity.subscribeActions((payload) => {
+      if (!payload || !payload.action) return;
+      const { action } = payload;
+      if (action === 'MAIN_TIMER_START') {
+        if (!isRunningRef.current && !isPreCountingDownRef.current && toggleTimerRef.current) {
+          toggleTimerRef.current();
+        }
+      } else if (action === 'MAIN_TIMER_PAUSE') {
+        if ((isRunningRef.current || isPreCountingDownRef.current) && toggleTimerRef.current) {
+          toggleTimerRef.current();
+        }
+      } else if (action === 'MAIN_TIMER_TOGGLE') {
+        if (toggleTimerRef.current) {
+          toggleTimerRef.current();
+        }
+      } else if (action === 'MAIN_TIMER_RESET') {
+        if (resetTimerRef.current) {
+          resetTimerRef.current();
+        }
+      }
+    });
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, []);
 
   // サロン画面等からの操作リクエスト（一時停止/再開/リセット）の実行
   const lastMainActionTimestampRef = useRef(0);

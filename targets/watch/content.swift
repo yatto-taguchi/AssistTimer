@@ -29,6 +29,10 @@ struct SeatTimerItem: Identifiable, Equatable {
     // ★ アコーディオン折りたたみフラグ（計測終了時など）
     var isCollapsed: Bool = false
     
+    // ★ メインタイマーフラグ ＆ ジャンル
+    var isMainTimer: Bool = false
+    var genre: String? = nil
+    
     // 現在の残り秒数（動的計算）
     var remainingSeconds: Int {
         if !isRunning {
@@ -156,6 +160,8 @@ extension SeatTimerItem {
         self.checkStaff = (rawCheckStaff?.isEmpty == false) ? rawCheckStaff : nil
         self.isCheckCompleted = (dictionary["isCheckCompleted"] as? NSNumber)?.boolValue ?? (dictionary["isCheckCompleted"] as? Bool) ?? false
         self.isCollapsed = (dictionary["isCollapsed"] as? NSNumber)?.boolValue ?? (dictionary["isCollapsed"] as? Bool) ?? false
+        self.isMainTimer = (dictionary["isMainTimer"] as? NSNumber)?.boolValue ?? (dictionary["isMainTimer"] as? Bool) ?? (id == "main-timer")
+        self.genre = dictionary["genre"] as? String
     }
 }
 
@@ -166,6 +172,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     static let shared = WatchSessionManager()
     
     @Published var timers: [SeatTimerItem] = []
+    @Published var mainTimer: SeatTimerItem? = nil
     @Published var members: [String] = []
     @Published var currentUserName: String = "スタイリスト"
     // ★ 「iPhoneと即時通信できる状態（isReachable）」のみ true。有効化だけでは true にしない
@@ -313,8 +320,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         let snapshot = timers
         // アラーム処理の途中から呼ばれるため、予定の再計算は次のループで行う
         DispatchQueue.main.async {
-            WatchAlarmCoordinator.shared.update(timers: snapshot, soundOn: self.alarmSoundEnabled)
-            WidgetSync.save(timers: snapshot, userName: self.currentUserName)
+            WatchAlarmCoordinator.shared.update(timers: snapshot, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled)
+            WidgetSync.save(timers: snapshot, mainTimer: self.mainTimer, userName: self.currentUserName)
         }
     }
     
@@ -352,6 +359,11 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
         }
         
+        // メインタイマー同期
+        if let rawMain = data["mainTimer"] as? [String: Any], let parsedMain = SeatTimerItem(dictionary: rawMain) {
+            self.mainTimer = parsedMain
+        }
+
         // 座席リスト同期（型ゆらぎを許容して1席ずつ確実にパース）
         let rawSeats = (data["seats"] as? [Any]) ?? (data["seats"] as? [[String: Any]])
         if let rawSeats = rawSeats {
@@ -388,10 +400,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             self.lastReceivedSeatCount = parsed.count
             self.timers = parsed
             // ★ バックグラウンド受信でもアラーム予定（通知・スマートアラーム）を更新
-            WatchAlarmCoordinator.shared.update(timers: parsed, soundOn: self.alarmSoundEnabled)
+            WatchAlarmCoordinator.shared.update(timers: parsed, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled)
             // ★ 文字盤コンプリケーションへ共有
-            WidgetSync.save(timers: parsed, userName: self.currentUserName)
+            WidgetSync.save(timers: parsed, mainTimer: self.mainTimer, userName: self.currentUserName)
         }
+    }
+    
+    // ★ メインタイマー専用の操作送信
+    func sendMainTimerAction(action: String) {
+        sendActionToPhone(action: action, seatId: "main-timer")
     }
     
     // ★ 送信結果をメインスレッドで記録
@@ -650,8 +667,12 @@ struct ContentView: View {
                 }
             }
             .onChange(of: timers) { _, newTimers in
-                alarm.update(timers: newTimers, soundOn: sessionManager.alarmSoundEnabled)
-                WidgetSync.save(timers: newTimers, userName: currentUserName)
+                alarm.update(timers: newTimers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled)
+                WidgetSync.save(timers: newTimers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+            }
+            .onChange(of: sessionManager.mainTimer) { _, newMain in
+                alarm.update(timers: timers, mainTimer: newMain, soundOn: sessionManager.alarmSoundEnabled)
+                WidgetSync.save(timers: timers, mainTimer: newMain, userName: currentUserName)
             }
             .navigationTitle("共有タイマー")
             .navigationBarTitleDisplayMode(.inline)
@@ -731,7 +752,7 @@ struct ContentView: View {
             }
             .onAppear {
                 sessionManager.requestSyncFromPhone()
-                alarm.update(timers: timers, soundOn: sessionManager.alarmSoundEnabled)
+                alarm.update(timers: timers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled)
             }
         }
     }
@@ -871,8 +892,41 @@ struct ContentView: View {
             VStack(spacing: 12) {
                 diagnosticPanel
                 
-                if timers.isEmpty {
-                    // ★ 席が0件の時のプレースホルダー表示
+                // ★ メインタイマーカード（HomeScreen連動・エメラルドグリーン）
+                if let main = sessionManager.mainTimer {
+                    MainTimerCard(
+                        item: main,
+                        now: now,
+                        onToggle: {
+                            playHaptic(.click)
+                            let willPause = main.isRunning
+                            if var m = sessionManager.mainTimer {
+                                if willPause {
+                                    m.isRunning = false
+                                    m.pausedRemainingSeconds = max(0, Int(m.targetEndTime.timeIntervalSince(now)))
+                                } else {
+                                    m.isRunning = true
+                                    let rem = m.pausedRemainingSeconds > 0 ? m.pausedRemainingSeconds : m.totalSeconds
+                                    m.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
+                                }
+                                sessionManager.mainTimer = m
+                            }
+                            sessionManager.sendMainTimerAction(action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START")
+                        },
+                        onReset: {
+                            playHaptic(.click)
+                            if var m = sessionManager.mainTimer {
+                                m.isRunning = false
+                                m.pausedRemainingSeconds = m.totalSeconds
+                                sessionManager.mainTimer = m
+                            }
+                            sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
+                        }
+                    )
+                }
+                
+                if timers.isEmpty && sessionManager.mainTimer == nil {
+                    // ★ 席もメインタイマーも0件の時のプレースホルダー表示
                     emptySeatsPlaceholderView
                 } else {
                     // ① 客席タイマーカード一覧
@@ -1322,6 +1376,187 @@ struct ContentView: View {
     
     private func playHaptic(_ type: WKHapticType) {
         WKInterfaceDevice.current().play(type)
+    }
+}
+
+// MARK: - メインタイマー専用カードコンポーネント (エメラルドグリーン基調)
+struct MainTimerCard: View {
+    let item: SeatTimerItem
+    let now: Date
+    let onToggle: () -> Void
+    let onReset: () -> Void
+    
+    private var progressRatio: Double {
+        let total = max(1, item.totalSeconds)
+        let rem = max(0, item.remainingSeconds)
+        return min(1.0, Double(rem) / Double(total))
+    }
+    
+    private var cardBorderColor: Color {
+        if item.isOvertime {
+            return Color(hex: "#FF453A").opacity(0.6)
+        } else if item.isRunning {
+            return Color(hex: "#30D158").opacity(0.55)
+        } else {
+            return Color(hex: "#30D158").opacity(0.28)
+        }
+    }
+    
+    private var cardBackgroundColor: Color {
+        if item.isOvertime {
+            return Color(hex: "#FF453A").opacity(0.18)
+        } else if item.isRunning {
+            return Color(hex: "#30D158").opacity(0.14)
+        } else {
+            return Color(hex: "#1C1C1E")
+        }
+    }
+    
+    private var progressGradient: LinearGradient {
+        if item.isOvertime {
+            return LinearGradient(colors: [Color(hex: "#FF453A"), Color(hex: "#FF6961")], startPoint: .leading, endPoint: .trailing)
+        } else {
+            return LinearGradient(colors: [Color(hex: "#30D158"), Color(hex: "#63E6E2")], startPoint: .leading, endPoint: .trailing)
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            // ① ヘッダー
+            HStack(spacing: 4) {
+                Image(systemName: "stopwatch.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(Color(hex: "#30D158"))
+                Text("メインタイマー")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(Color(hex: "#30D158"))
+                    .lineLimit(1)
+                
+                if let genre = item.genre, !genre.isEmpty {
+                    Text(genre)
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundColor(Color(hex: "#A0E0B0"))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1.5)
+                        .background(Color(hex: "#30D158").opacity(0.2))
+                        .cornerRadius(4)
+                        .lineLimit(1)
+                }
+                
+                Spacer()
+                
+                // あなたバッジ
+                HStack(spacing: 2) {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 7))
+                    Text("あなた")
+                        .font(.system(size: 9.5, weight: .heavy))
+                }
+                .foregroundColor(Color(hex: "#FFD60A"))
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1.5)
+                .background(Color(hex: "#FFD60A").opacity(0.18))
+                .cornerRadius(4)
+            }
+            
+            // ② タイム数字 ＆ プログレスバー
+            VStack(alignment: .center, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    if item.isOvertime {
+                        Text("超過")
+                            .font(.system(size: 12, weight: .heavy))
+                            .foregroundColor(Color(hex: "#FF453A"))
+                    }
+                    Text(formatSeconds(abs(item.remainingSeconds)))
+                        .font(.system(size: 32, weight: .black, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(item.isOvertime ? Color(hex: "#FF453A") : Color(hex: "#30D158"))
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                
+                HStack(spacing: 4) {
+                    Image(systemName: "timer")
+                        .font(.system(size: 9))
+                    Text("\(item.totalSeconds / 60)分設定")
+                        .font(.system(size: 10, weight: .semibold))
+                    if !item.isRunning {
+                        Text("• ⏸️ 停止中")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(Color(hex: "#FF9F0A"))
+                    }
+                }
+                .foregroundColor(item.isOvertime ? Color(hex: "#FF857D") : Color(hex: "#A0E0B0"))
+                .frame(maxWidth: .infinity, alignment: .center)
+                
+                // 棒状インジケーター
+                GeometryReader { geo in
+                    let totalW = geo.size.width
+                    let barW = totalW * CGFloat(progressRatio)
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.white.opacity(0.12))
+                            .frame(height: 4)
+                        Capsule()
+                            .fill(progressGradient)
+                            .frame(width: max(4, barW), height: 4)
+                    }
+                }
+                .frame(height: 4)
+                .padding(.horizontal, 4)
+                .padding(.top, 4)
+                .padding(.bottom, 2)
+            }
+            
+            // ③ 下部ボタン群（スタート/一時停止 ＆ リセット）
+            HStack(spacing: 8) {
+                Button(action: onToggle) {
+                    HStack(spacing: 4) {
+                        Image(systemName: item.isRunning ? "pause.fill" : "play.fill")
+                            .font(.system(size: 11, weight: .bold))
+                        Text(item.isRunning ? "一時停止" : "スタート")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .background(item.isRunning ? Color(hex: "#FF9F0A").opacity(0.25) : Color(hex: "#30D158").opacity(0.25))
+                    .foregroundColor(item.isRunning ? Color(hex: "#FF9F0A") : Color(hex: "#30D158"))
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                
+                Button(action: onReset) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("リセット")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.1))
+                    .foregroundColor(Color(hex: "#8E8E93"))
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 2)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(cardBackgroundColor)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(cardBorderColor, lineWidth: 1.5)
+        )
+        .padding(.horizontal, 4)
+    }
+
+    private func formatSeconds(_ seconds: Int) -> String {
+        let m = seconds / 60
+        let s = seconds % 60
+        return String(format: "%02d:%02d", m, s)
     }
 }
 
