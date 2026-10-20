@@ -1763,7 +1763,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
         3. **アラーム・通知・文字盤への反映**: 
            - `alarm.swift`: タイマー終了時の `title` を `「\(t.displaySeatName) タイム終了」`（例: `1番席 (個室) タイム終了`）に設定。全画面アラームおよびローカル通知に登録名がそのまま反映。
            - `widget_sync.swift`: 文字盤Widgetへ送信する `seatLabel` を `t.displaySeatName` に更新。文字盤の最上段ヘッダーにも登録名が反映。
-           - `content.swift`: 各種カードヘッダーの表示も `item.displaySeatName` に統一。
+           - `content.swift`: 各種カードヘッダー、全操作シートヘッダー（タイム操作、チェック操作、シャンプー操作、工程選択）、および操作完了時の全トースト通知文（`showNotification`）の席名表示も `displaySeatName` に完全統一。どの操作を行っても登録席名が一貫して美しく表示される設計を実現。
 
 
 

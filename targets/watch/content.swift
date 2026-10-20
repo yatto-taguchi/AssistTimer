@@ -1100,7 +1100,7 @@ struct ContentView: View {
                     extra["checkTotalSeconds"] = checkSec
                 }
                 sessionManager.sendActionToPhone(action: "ADD_SEAT", seatId: newSeat.id, extra: extra)
-                showNotification(text: "📤 \(newSeat.seatNumber)番席を新規作成しました", color: Color(hex: "#0A84FF"))
+                showNotification(text: "📤 \(newSeat.displaySeatName)を新規作成しました", color: Color(hex: "#0A84FF"))
             }
         )
     }
@@ -1131,7 +1131,7 @@ struct ContentView: View {
                         WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                         let process = item.helpProcess.isEmpty ? "シャンプー" : item.helpProcess
                         showNotification(
-                            text: "📤 【\(item.seatNumber)番席】\(currentUserName)さんが\(process)に入りました",
+                            text: "📤 【\(item.displaySeatName)】\(currentUserName)さんが\(process)に入りました",
                             color: Color(hex: "#0A84FF")
                         )
                     }
@@ -1154,7 +1154,7 @@ struct ContentView: View {
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
                         sessionManager.sendActionToPhone(action: "RESET_ZERO", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         showNotification(
-                            text: "⏱️ \(item.seatNumber)番席: 00:00にリセットしました",
+                            text: "⏱️ \(item.displaySeatName): 00:00にリセットしました",
                             color: Color(hex: "#FFD60A")
                         )
                     }
@@ -1172,7 +1172,7 @@ struct ContentView: View {
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
                         sessionManager.sendActionToPhone(action: "FINISH_MEASURE", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         showNotification(
-                            text: "🏁 \(item.seatNumber)番席: 計測を終了しました",
+                            text: "🏁 \(item.displaySeatName): 計測を終了しました",
                             color: Color(hex: "#8E8E93")
                         )
                     }
@@ -1191,7 +1191,7 @@ struct ContentView: View {
                         sessionManager.setCollapseOverride(seatId: item.id, collapsed: false)
                         sessionManager.sendActionToPhone(action: "ADJUST_TIME", seatId: item.id, extra: ["secondsToAdd": deltaSec])
                         let deltaText = formatDeltaString(deltaSec)
-                        showNotification(text: "⏱️ \(item.seatNumber)番席: \(deltaText)しました", color: Color(hex: "#0A84FF"))
+                        showNotification(text: "⏱️ \(item.displaySeatName): \(deltaText)しました", color: Color(hex: "#0A84FF"))
                     }
                 },
                 onStop: {
@@ -1202,7 +1202,7 @@ struct ContentView: View {
                         timers[idx].clearCheck()
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
                         sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
-                        showNotification(text: "⏹️ \(item.seatNumber)番席のタイマーを止めました", color: Color(hex: "#30D158"))
+                        showNotification(text: "⏹️ \(item.displaySeatName)のタイマーを止めました", color: Color(hex: "#30D158"))
                     }
                 },
                 onReinputTime: { totalSec, checkSec in
@@ -1240,7 +1240,7 @@ struct ContentView: View {
                         
                         let checkText = (validCheckSec ?? 0) > 0 ? "（チェック\(validCheckSec! / 60)分）" : ""
                         showNotification(
-                            text: "⏱️ \(item.seatNumber)番席: \(timeStr)に開始しました\(checkText)",
+                            text: "⏱️ \(item.displaySeatName): \(timeStr)に開始しました\(checkText)",
                             color: Color(hex: "#FFD60A")
                         )
                     }
@@ -1282,7 +1282,7 @@ struct ContentView: View {
                     timers[idx].status = .shampoo
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "shampoo", "isShampooing": true])
                     showNotification(
-                        text: "📤 【\(item.seatNumber)番席】シャンプー開始を全員へ通知しました",
+                        text: "📤 【\(item.displaySeatName)】シャンプー開始を全員へ通知しました",
                         color: Color(hex: "#0A84FF")
                     )
                 }
@@ -1292,7 +1292,7 @@ struct ContentView: View {
                     timers[idx].status = .normal
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
                     showNotification(
-                        text: "📤 【\(item.seatNumber)番席】シャンプー完了を全員へ通知しました",
+                        text: "📤 【\(item.displaySeatName)】シャンプー完了を全員へ通知しました",
                         color: Color(hex: "#30D158")
                     )
                 }
@@ -1302,7 +1302,7 @@ struct ContentView: View {
                     timers[idx].status = .combing
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "combing", "isShampooing": false])
                     showNotification(
-                        text: "📤 【\(item.seatNumber)番席】コーミング開始を全員へ通知しました",
+                        text: "📤 【\(item.displaySeatName)】コーミング開始を全員へ通知しました",
                         color: Color(hex: "#0A84FF")
                     )
                 }
@@ -1312,7 +1312,7 @@ struct ContentView: View {
                     timers[idx].status = .normal
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
                     showNotification(
-                        text: "📤 【\(item.seatNumber)番席】コーミング完了を全員へ通知しました",
+                        text: "📤 【\(item.displaySeatName)】コーミング完了を全員へ通知しました",
                         color: Color(hex: "#30D158")
                     )
                 }
@@ -1322,7 +1322,7 @@ struct ContentView: View {
                     timers[idx].status = .check
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "check", "isShampooing": false])
                     showNotification(
-                        text: "📤 【\(item.seatNumber)番席】チェック開始を全員へ通知しました",
+                        text: "📤 【\(item.displaySeatName)】チェック開始を全員へ通知しました",
                         color: Color(hex: "#30D158")
                     )
                 }
@@ -1332,7 +1332,7 @@ struct ContentView: View {
                     timers[idx].status = .normal
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
                     showNotification(
-                        text: "📤 【\(item.seatNumber)番席】チェック完了を全員へ通知しました",
+                        text: "📤 【\(item.displaySeatName)】チェック完了を全員へ通知しました",
                         color: Color(hex: "#30D158")
                     )
                 }
@@ -1398,7 +1398,7 @@ struct ContentView: View {
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     // 募集するの場合は全員に通知する！
                     showNotification(
-                        text: "📢 【\(item.seatNumber)番席】\(process)担当を全員に募集通知しました！",
+                        text: "📢 【\(item.displaySeatName)】\(process)担当を全員に募集通知しました！",
                         color: Color(hex: "#FF9F0A")
                     )
                 }
@@ -1412,7 +1412,7 @@ struct ContentView: View {
             if timers[idx].isRunning && rem <= 180 && rem > 0 && timers[idx].shampooStaff == nil && !timers[idx].isNoHelpNeeded && !timers[idx].hasAlertedHelpUnassigned {
                 timers[idx].hasAlertedHelpUnassigned = true
                 showNotification(
-                    text: "🚨 【\(timers[idx].seatNumber)番席】ヘルプ未定！全員へ通知しました",
+                    text: "🚨 【\(timers[idx].displaySeatName)】ヘルプ未定！全員へ通知しました",
                     color: Color(hex: "#FF453A")
                 )
             }
@@ -2693,7 +2693,7 @@ struct TimeActionSheet: View {
             VStack(spacing: 6) {
                 // 通常操作モード
                 HStack {
-                    Text("\(item.seatNumber)番席のタイマー操作")
+                    Text("\(item.displaySeatName)のタイマー操作")
                         .font(.system(size: 12, weight: .heavy))
                     Spacer()
                     Text("全体: \(item.totalSeconds / 60)分")
@@ -2906,7 +2906,7 @@ struct CheckActionSheet: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 10) {
-                Text("\(item.seatNumber)番席のチェックタイマー")
+                Text("\(item.displaySeatName)のチェックタイマー")
                     .font(.system(size: 12, weight: .heavy))
                     .foregroundColor(.white)
                 
@@ -3274,7 +3274,7 @@ struct ShampooActionSheet: View {
         ScrollView {
             VStack(spacing: 8) {
                 VStack(spacing: 2) {
-                    Text("\(item.seatNumber)番席の\(item.helpProcess)操作")
+                    Text("\(item.displaySeatName)の\(item.helpProcess)操作")
                         .font(.system(size: 13, weight: .heavy))
                         .foregroundColor(.white)
                     
@@ -3486,7 +3486,7 @@ struct SelectHelpWorkflowSheet: View {
                 if currentStep == 0 {
                     // ===== ステップ1: 工程を選択 =====
                     VStack(spacing: 2) {
-                        Text("\(item.seatNumber)番席のヘルプ工程")
+                        Text("\(item.displaySeatName)のヘルプ工程")
                             .font(.system(size: 13, weight: .heavy))
                             .foregroundColor(.white)
                         Text("依頼する工程を選択してください")
