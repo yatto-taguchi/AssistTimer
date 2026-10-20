@@ -1892,7 +1892,6 @@ struct MainTimerCard: View {
                 .padding(.horizontal, 4)
                 .padding(.top, 4)
                 .padding(.bottom, 2)
-            }
             
             // ③ 下部ボタン群（スタート/一時停止 ＆ リセット）
             HStack(spacing: 8) {
