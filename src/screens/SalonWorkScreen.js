@@ -197,6 +197,8 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
           ? Math.max(0, Math.floor(s.pausedRemainingSeconds))
           : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
+        const isNoHelp = s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none';
+
         return {
           id: String(s.id),
           seatNumber: seatNum,
@@ -207,8 +209,9 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
           isRunning: isRunning,
           pausedRemainingSeconds: pausedRem,
           helpProcess: s.actionStatus === 'shampoo' || s.isShampooing ? 'シャンプー' : (s.actionStatus || 'シャンプー'),
-          shampooStaff: s.assistantStaffName || '',
-          isRecruiting: !s.assistantStaffName && isRunning,
+          shampooStaff: isNoHelp ? '' : (s.assistantStaffName || ''),
+          isRecruiting: !isNoHelp && !s.assistantStaffName && isRunning,
+          isNoHelpNeeded: isNoHelp,
           status: s.isShampooing || s.actionStatus === 'shampoo' ? 'shampoo' : (s.actionStatus || 'normal'),
           checkTargetSeconds: s.checkTargetSeconds ? Number(s.checkTargetSeconds) : 0,
           checkEndTimestamp: s.checkEndTimestamp ? Number(s.checkEndTimestamp) : 0,

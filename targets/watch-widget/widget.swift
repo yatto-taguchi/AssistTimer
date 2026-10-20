@@ -13,6 +13,12 @@ import WidgetKit
 private let appGroup = "group.com.assisttimer"
 private let snapshotKey = "assisttimer.widget.snapshot"
 
+struct StaffFlowInfo {
+    let creator: String
+    let target: String
+    let isRecruiting: Bool
+}
+
 struct ComplicationSeat {
     let id: String
     let seatNumber: Int
@@ -23,6 +29,9 @@ struct ComplicationSeat {
     let pausedRemaining: Int
     let related: Bool
     let totalSeconds: Int
+    let creatorName: String?
+    let isNoHelpNeeded: Bool
+    let currentUserName: String?
     
     // チェック・ヘルプタイマー情報
     let checkEndDate: Date?
@@ -32,6 +41,48 @@ struct ComplicationSeat {
     let helpProcess: String?
     let isRecruiting: Bool
     let isCheckCompleted: Bool
+    
+    // 担当フロー（作成者 → 最終担当者）の表示情報
+    var staffFlow: StaffFlowInfo {
+        let me = (currentUserName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let creatorRaw = (creatorName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // 作成者（左側）: 自分が作成したなら「自分」、他人ならその名前
+        let isCreatorMe: Bool = {
+            if !me.isEmpty && !creatorRaw.isEmpty {
+                return creatorRaw.caseInsensitiveCompare(me) == .orderedSame
+            }
+            return related || creatorRaw.isEmpty
+        }()
+        let creatorDisplay = isCreatorMe ? "自分" : (creatorRaw.isEmpty ? "スタイリスト" : creatorRaw)
+        
+        // 最終担当（右側 / シャンプー・コーミング等）
+        let shampooRaw = (shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetDisplay: String
+        let recruiting: Bool
+        
+        if isNoHelpNeeded {
+            // ヘルプ不要（一人施術）: 作成者と同じ名前で統一表示（「自分 → 自分」または「佐藤 → 佐藤」）
+            targetDisplay = creatorDisplay
+            recruiting = false
+        } else if !shampooRaw.isEmpty {
+            // 最終担当決定済み
+            let isTargetMe: Bool = {
+                if !me.isEmpty {
+                    return shampooRaw.caseInsensitiveCompare(me) == .orderedSame
+                }
+                return false
+            }()
+            targetDisplay = isTargetMe ? "自分" : shampooRaw
+            recruiting = false
+        } else {
+            // 担当者未定（募集中）
+            targetDisplay = "募集"
+            recruiting = true
+        }
+        
+        return StaffFlowInfo(creator: creatorDisplay, target: targetDisplay, isRecruiting: recruiting)
+    }
 }
 
 struct ComplicationEntry: TimelineEntry {
@@ -54,6 +105,7 @@ enum ComplicationData {
               let data = defaults.data(forKey: snapshotKey),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let seats = obj["seats"] as? [[String: Any]] else { return ComplicationSnapshot() }
+        let currentUserName = obj["userName"] as? String
         let parsed: [ComplicationSeat] = seats.compactMap { d in
             guard let end = (d["endEpoch"] as? NSNumber)?.doubleValue else { return nil }
             let num = (d["seatNumber"] as? NSNumber)?.intValue ?? 0
@@ -71,6 +123,8 @@ enum ComplicationData {
             let helpProc = d["helpProcess"] as? String
             let isRecruiting = (d["isRecruiting"] as? NSNumber)?.boolValue ?? (d["isRecruiting"] as? Bool) ?? false
             let isCheckComp = (d["isCheckCompleted"] as? NSNumber)?.boolValue ?? (d["isCheckCompleted"] as? Bool) ?? false
+            let creator = d["creatorName"] as? String
+            let isNoHelp = (d["isNoHelpNeeded"] as? NSNumber)?.boolValue ?? (d["isNoHelpNeeded"] as? Bool) ?? false
             
             return ComplicationSeat(
                 id: id,
@@ -82,6 +136,9 @@ enum ComplicationData {
                 pausedRemaining: (d["pausedRemaining"] as? NSNumber)?.intValue ?? 0,
                 related: (d["related"] as? NSNumber)?.boolValue ?? false,
                 totalSeconds: (d["totalSeconds"] as? NSNumber)?.intValue ?? (d["totalSeconds"] as? Int) ?? 600,
+                creatorName: creator,
+                isNoHelpNeeded: isNoHelp,
+                currentUserName: currentUserName,
                 checkEndDate: checkEnd,
                 checkTotalSeconds: checkTot,
                 checkStaff: checkStaff,
@@ -140,6 +197,9 @@ struct ComplicationProvider: TimelineProvider {
                 pausedRemaining: 0,
                 related: true,
                 totalSeconds: 15 * 60,
+                creatorName: "スタイリスト",
+                isNoHelpNeeded: false,
+                currentUserName: "スタイリスト",
                 checkEndDate: Date().addingTimeInterval(3 * 60),
                 checkTotalSeconds: 5 * 60,
                 checkStaff: "田中",
@@ -265,14 +325,26 @@ struct ComplicationView: View {
                             .font(.system(size: 13, weight: .bold))
                             .widgetAccentable()
                             .lineLimit(1)
-                        if seat.related {
-                            Text("自分")
-                                .font(.system(size: 9, weight: .bold))
-                                .padding(.horizontal, 3)
-                                .padding(.vertical, 1)
-                                .background(Capsule().fill(Color.white.opacity(0.2)))
+                            .minimumScaleFactor(0.8)
+                        
+                        // ★ 担当フローバッジ（作成者 → 最終担当者）
+                        let flow = seat.staffFlow
+                        HStack(spacing: 2) {
+                            Text(flow.creator)
+                                .lineLimit(1)
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 6.5, weight: .bold))
+                                .foregroundColor(flow.isRecruiting ? Color(red: 1.0, green: 0.62, blue: 0.04) : .secondary)
+                            Text(flow.target)
+                                .foregroundColor(flow.isRecruiting ? Color(red: 1.0, green: 0.62, blue: 0.04) : .primary)
                                 .lineLimit(1)
                         }
+                        .font(.system(size: 8.5, weight: .bold))
+                        .padding(.horizontal, 3.5)
+                        .padding(.vertical, 1.5)
+                        .background(Capsule().fill(flow.isRecruiting ? Color.orange.opacity(0.2) : Color.white.opacity(0.18)))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                     }
                     Spacer(minLength: 2)
                     Text(entry.runningCount > 1 ? "稼働中\(entry.runningCount)席" : "稼働中1席")

@@ -93,6 +93,8 @@ enum WidgetSync {
                 "pausedRemaining": t.pausedRemainingSeconds,
                 "related": t.isRelated(to: userName),
                 "totalSeconds": t.totalSeconds,
+                "creatorName": t.creatorName,
+                "isNoHelpNeeded": t.isNoHelpNeeded,
                 "isCheckCompleted": t.isCheckCompleted,
                 "helpProcess": t.helpProcess,
                 "isRecruiting": t.isRecruiting
