@@ -669,7 +669,11 @@ export default function SalonWorkScreen() {
     if (action === 'ADD_SEAT') {
       const seatNum = extra?.seatNumber || 1;
       const totalSec = extra?.totalSeconds || 900;
-      const checkSec = extra?.checkTotalSeconds || null;
+      const rawCheckSec = extra?.checkTotalSeconds && Number(extra.checkTotalSeconds) > 0
+        ? Number(extra.checkTotalSeconds)
+        : null;
+      // ★ 安全ガード: チェック時間は全体タイムより短い場合のみ有効
+      const checkSec = (rawCheckSec && rawCheckSec < totalSec) ? rawCheckSec : null;
       const targetEnd = Date.now() + totalSec * 1000;
       const checkEnd = checkSec ? Date.now() + checkSec * 1000 : null;
 
@@ -680,11 +684,16 @@ export default function SalonWorkScreen() {
         status: 'running',
         colorStaffName: watchUser || userName || 'スタイリスト',
         targetSeconds: totalSec,
+        initialMinutes: Math.round(totalSec / 60),
         targetEndTimestamp: targetEnd,
+        pausedRemainingSeconds: null,
         checkTargetSeconds: checkSec,
+        checkInitialMinutes: checkSec ? Math.round(checkSec / 60) : null,
         checkEndTimestamp: checkEnd,
+        checkPausedRemainingSeconds: null,
         checkStaffName: '',
         checkStatus: checkSec ? 'running' : 'stopped',
+        checkAlerted: false,
         actionStatus: null,
         isShampooing: false,
         assistantStaffName: '',
@@ -692,7 +701,9 @@ export default function SalonWorkScreen() {
           {
             id: String(Date.now()),
             type: 'start',
-            text: `Apple Watchからタイマー開始 (${Math.round(totalSec / 60)}分)`,
+            text: checkSec
+              ? `Apple Watchからタイマー開始 (${Math.round(totalSec / 60)}分 / チェック${Math.round(checkSec / 60)}分)`
+              : `Apple Watchからタイマー開始 (${Math.round(totalSec / 60)}分)`,
             time: getCurrentTimeFormatted(),
             staff: watchUser || userName || 'スタイリスト',
           },
@@ -874,17 +885,40 @@ export default function SalonWorkScreen() {
           }
           case 'START_TIMER': {
             const targetSec = Number(extra?.targetSeconds) || 600;
+            const rawCheckSec = extra?.checkTotalSeconds && Number(extra.checkTotalSeconds) > 0
+              ? Number(extra.checkTotalSeconds)
+              : null;
+            // ★ 安全ガード: チェック時間は全体タイムより短い場合のみ有効
+            const checkSec = (rawCheckSec && rawCheckSec < targetSec) ? rawCheckSec : null;
+            const checkEnd = checkSec ? Date.now() + checkSec * 1000 : null;
+            const prevHistory = s.history || [];
+            const historyText = checkSec
+              ? `Apple Watchからタイマー開始 (${Math.round(targetSec / 60)}分 / チェック${Math.round(checkSec / 60)}分)`
+              : `Apple Watchからタイマー開始 (${Math.round(targetSec / 60)}分)`;
+            const newHistoryItem = {
+              id: `h-${Date.now()}`,
+              time: getCurrentTimeFormatted(),
+              text: historyText,
+              type: 'timer',
+              staff: watchUser || userName || 'スタイリスト',
+            };
+
             return {
               ...s,
               status: 'running',
               targetSeconds: targetSec,
+              initialMinutes: Math.round(targetSec / 60),
               targetEndTimestamp: Date.now() + targetSec * 1000,
+              pausedRemainingSeconds: null,
               colorStaffName: watchUser || s.colorStaffName,
-              // Watch 側の「タイム再入力（チェック解除）」と同じ状態にする
-              checkTargetSeconds: null,
-              checkEndTimestamp: null,
+              // ★ Watch から指定された途中チェック（サブタイマー）を反映
+              checkTargetSeconds: checkSec,
+              checkInitialMinutes: checkSec ? Math.round(checkSec / 60) : null,
+              checkEndTimestamp: checkEnd,
+              checkPausedRemainingSeconds: null,
               checkStaffName: '',
-              checkStatus: 'stopped',
+              checkStatus: checkSec ? 'running' : 'stopped',
+              checkAlerted: false,
               // 前回のタイムアップ記録を消す（新しいタイマーとして扱う）
               timeUpTimestamp: null,
               escalationLevel: 0,
@@ -892,6 +926,7 @@ export default function SalonWorkScreen() {
               isOver: false,
               stoppedBy: null,
               collapsedAtEnd: null,
+              history: [...prevHistory, newHistoryItem],
             };
           }
           case 'ADJUST_TIME': {

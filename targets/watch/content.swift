@@ -1090,9 +1090,11 @@ struct ContentView: View {
                         showNotification(text: "⏹️ \(item.seatNumber)番席のタイマーを止めました", color: Color(hex: "#30D158"))
                     }
                 },
-                onReinputTime: { totalSec in
+                onReinputTime: { totalSec, checkSec in
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         let sec = max(10, totalSec)
+                        // ★ 全体タイムより短いチェック時間のみ有効
+                        let validCheckSec = (checkSec != nil && checkSec! < sec) ? checkSec : nil
                         let m = sec / 60
                         let s = sec % 60
                         let timeStr = s > 0 ? "\(m)分\(s)秒" : "\(m)分"
@@ -1104,13 +1106,26 @@ struct ContentView: View {
                             timers[idx].status = .normal
                             timers[idx].isCollapsed = false
                             
-                            // ★ 連動してチェックも消える！
-                            timers[idx].clearCheck()
+                            // ★ 途中チェックタイマーの設定または解除
+                            if let chk = validCheckSec, chk > 0 {
+                                timers[idx].checkTotalSeconds = chk
+                                timers[idx].checkTargetEndTime = Date().addingTimeInterval(Double(chk))
+                                timers[idx].checkStaff = nil
+                                timers[idx].isCheckCompleted = false
+                            } else {
+                                timers[idx].clearCheck()
+                            }
                         }
                         sessionManager.setCollapseOverride(seatId: item.id, collapsed: nil)
-                        sessionManager.sendActionToPhone(action: "START_TIMER", seatId: item.id, extra: ["targetSeconds": sec])
+                        var extraPayload: [String: Any] = ["targetSeconds": sec]
+                        if let chk = validCheckSec, chk > 0 {
+                            extraPayload["checkTotalSeconds"] = chk
+                        }
+                        sessionManager.sendActionToPhone(action: "START_TIMER", seatId: item.id, extra: extraPayload)
+                        
+                        let checkText = (validCheckSec ?? 0) > 0 ? "（チェック\(validCheckSec! / 60)分）" : ""
                         showNotification(
-                            text: "⏱️ \(item.seatNumber)番席: \(timeStr)に再入力しました（チェック解除）",
+                            text: "⏱️ \(item.seatNumber)番席: \(timeStr)に開始しました\(checkText)",
                             color: Color(hex: "#FFD60A")
                         )
                     }
@@ -2047,13 +2062,16 @@ struct TimeActionSheet: View {
     let initialReinputMode: Bool
     let onAdjust: (Int) -> Void
     let onStop: () -> Void
-    let onReinputTime: (Int) -> Void
+    let onReinputTime: (Int, Int?) -> Void
     
     // 累積追加秒数（何回もタップ可能！）
     @State private var accumulatedDelta: Int = 0
     
     // タイム再入力モードフラグ
     @State private var isReinputMode: Bool
+    
+    // ★ 途中チェック（サブタイマー）分数 (0 = なし)
+    @State private var checkMinutes: Int = 0
     
     // ★ リューズ(Crown)無段階調整用 (分・秒独立タップ切替)
     @State private var crownSeconds: Double = 0.0
@@ -2063,13 +2081,14 @@ struct TimeActionSheet: View {
     let ticker = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
     
     let reinputMinutes = [5, 10, 15, 20, 25, 30, 35, 40, 45]
+    let checkPills = [0, 3, 5, 7, 10]
     
     init(
         item: SeatTimerItem,
         initialReinputMode: Bool = false,
         onAdjust: @escaping (Int) -> Void,
         onStop: @escaping () -> Void,
-        onReinputTime: @escaping (Int) -> Void
+        onReinputTime: @escaping (Int, Int?) -> Void
     ) {
         self.item = item
         self.initialReinputMode = initialReinputMode
@@ -2077,6 +2096,8 @@ struct TimeActionSheet: View {
         self.onAdjust = onAdjust
         self.onStop = onStop
         self.onReinputTime = onReinputTime
+        let initialCheckMin = (item.checkTotalSeconds ?? 0) / 60
+        self._checkMinutes = State(initialValue: initialCheckMin)
     }
     
     // 現在の残り秒数 ＋ 累積追加秒数（リアルタイム反映）
@@ -2227,21 +2248,68 @@ struct TimeActionSheet: View {
                 }
                 .padding(.horizontal, 2)
                 
+                // ★ 途中チェック（サブタイマー）設定セクション
+                VStack(spacing: 3) {
+                    HStack(alignment: .firstTextBaseline) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(Color(hex: "#30D158"))
+                            Text("途中チェック:")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.gray)
+                        }
+                        Spacer()
+                        Text(checkMinutes == 0 ? "なし" : "\(checkMinutes)分")
+                            .font(.system(size: 13, weight: .heavy, design: .rounded))
+                            .foregroundColor(checkMinutes == 0 ? .gray : Color(hex: "#30D158"))
+                    }
+                    .padding(.horizontal, 4)
+                    
+                    HStack(spacing: 3) {
+                        ForEach(checkPills, id: \.self) { cmin in
+                            Button(action: {
+                                checkMinutes = cmin
+                                WKInterfaceDevice.current().play(.click)
+                            }) {
+                                Text(cmin == 0 ? "なし" : "\(cmin)分")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 5)
+                                    .background(checkMinutes == cmin ? Color(hex: "#30D158") : Color.white.opacity(0.12))
+                                    .foregroundColor(checkMinutes == cmin ? .black : Color(hex: "#E0E0E5"))
+                                    .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                }
+                .padding(.top, 2)
+                
                 // ④ 決定ボタン（★時間が1秒以上設定された時だけスッと出現！）
                 if Int(crownSeconds) > 0 {
                     Button(action: {
                         let sec = Int(crownSeconds)
                         if sec > 0 {
                             WKInterfaceDevice.current().play(.click)
-                            onReinputTime(sec)
+                            let chkSec = (checkMinutes > 0 && (checkMinutes * 60) < sec) ? checkMinutes * 60 : nil
+                            onReinputTime(sec, chkSec)
                             dismiss()
                         }
                     }) {
                         HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
                                 .font(.system(size: 12, weight: .heavy))
-                            Text("決定 (\(formatSeconds(Int(crownSeconds))))")
-                                .font(.system(size: 12, weight: .black))
+                            if checkMinutes > 0 && (checkMinutes * 60) < Int(crownSeconds) {
+                                Text("決定 (\(formatSeconds(Int(crownSeconds)))) 【\(checkMinutes)分CHK】")
+                                    .font(.system(size: 10.5, weight: .black))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
+                            } else {
+                                Text("決定 (\(formatSeconds(Int(crownSeconds))))")
+                                    .font(.system(size: 12, weight: .black))
+                            }
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 7)
@@ -2283,7 +2351,10 @@ struct TimeActionSheet: View {
                     ForEach(reinputMinutes, id: \.self) { min in
                         Button(action: {
                             WKInterfaceDevice.current().play(.click)
-                            onReinputTime(min * 60)
+                            let totalSec = min * 60
+                            // ★ 安全ガード: チェック時間は全体タイムより短い場合のみ有効
+                            let chkSec = (checkMinutes > 0 && (checkMinutes * 60) < totalSec) ? checkMinutes * 60 : nil
+                            onReinputTime(totalSec, chkSec)
                             dismiss()
                         }) {
                             Text("\(min)分")
@@ -2853,7 +2924,7 @@ struct AddSeatSheet: View {
                         shampooStaff: nil,
                         status: .normal
                     )
-                    if checkMinutes > 0 {
+                    if checkMinutes > 0 && (checkMinutes * 60) < totalSec {
                         newItem.checkTotalSeconds = checkMinutes * 60
                         newItem.checkTargetEndTime = Date().addingTimeInterval(Double(checkMinutes * 60))
                         newItem.checkStaff = nil
