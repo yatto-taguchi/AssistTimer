@@ -1014,6 +1014,7 @@ struct ContentView: View {
                                     }
                                 }
                                 sessionManager.sendActionToPhone(action: "CLAIM_CHECK", seatId: item.id)
+                                WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                                 showNotification(text: "📤 チェック担当に立候補しました", color: Color(hex: "#30D158"))
                             }
                         )
@@ -1259,6 +1260,7 @@ struct ContentView: View {
                     timers[idx].isCheckCompleted = true
                     timers[idx].checkStaff = currentUserName
                     sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(text: "✅ チェック完了を全員へ通知しました", color: Color(hex: "#30D158"))
                 }
             },
@@ -1267,6 +1269,7 @@ struct ContentView: View {
                     timers[idx].checkTargetEndTime = nil
                     timers[idx].checkTotalSeconds = nil
                     sessionManager.sendActionToPhone(action: "CANCEL_CHECK", seatId: item.id)
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     playHaptic(.click)
                 }
             }
@@ -1281,6 +1284,7 @@ struct ContentView: View {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .shampoo
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "shampoo", "isShampooing": true])
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
                         text: "📤 【\(item.displaySeatName)】シャンプー開始を全員へ通知しました",
                         color: Color(hex: "#0A84FF")
@@ -1291,6 +1295,7 @@ struct ContentView: View {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .normal
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
                         text: "📤 【\(item.displaySeatName)】シャンプー完了を全員へ通知しました",
                         color: Color(hex: "#30D158")
@@ -1301,6 +1306,7 @@ struct ContentView: View {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .combing
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "combing", "isShampooing": false])
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
                         text: "📤 【\(item.displaySeatName)】コーミング開始を全員へ通知しました",
                         color: Color(hex: "#0A84FF")
@@ -1311,6 +1317,7 @@ struct ContentView: View {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .normal
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
                         text: "📤 【\(item.displaySeatName)】コーミング完了を全員へ通知しました",
                         color: Color(hex: "#30D158")
@@ -1321,6 +1328,7 @@ struct ContentView: View {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .check
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "check", "isShampooing": false])
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
                         text: "📤 【\(item.displaySeatName)】チェック開始を全員へ通知しました",
                         color: Color(hex: "#30D158")
@@ -1331,6 +1339,7 @@ struct ContentView: View {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].status = .normal
                     sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
                         text: "📤 【\(item.displaySeatName)】チェック完了を全員へ通知しました",
                         color: Color(hex: "#30D158")

@@ -866,17 +866,22 @@ export default function SalonWorkScreen() {
           case 'ASSIGN_HELP': {
             const staff = extra?.assistantStaffName || watchUser || '';
             const process = extra?.helpProcess || 'シャンプー';
+            const isCheck = process === 'チェック';
             return {
               ...s,
               assistantStaffName: staff,
               actionStatus: process === 'シャンプー' ? 'shampoo' : process,
               isShampooing: process === 'シャンプー',
+              ...(isCheck ? { checkStaffName: staff } : {}),
             };
           }
           case 'RECRUIT_HELP': {
+            const process = extra?.helpProcess || s.helpProcess || s.actionStatus;
+            const isCheck = process === 'チェック';
             return {
               ...s,
               assistantStaffName: '',
+              ...(isCheck ? { checkStaffName: '' } : {}),
             };
           }
           case 'CLAIM_CHECK': {
@@ -1023,6 +1028,7 @@ export default function SalonWorkScreen() {
             return {
               ...s,
               assistantStaffName: '',
+              checkStaffName: '',
               isShampooing: false,
               actionStatus: null,
             };

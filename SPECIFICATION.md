@@ -1767,3 +1767,17 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 
 
 
+
+    - **iPhone ↔ Apple Watch 間のチェック担当（checkStaffName）同期および文字盤即時反映の強化**:
+      - **背景・潜在課題**:
+        - Apple Watch上でヘルプ工程「チェック」を選択してスタッフ指名・担当解除・募集を行った際、iPhone側ハンドラ（`SalonWorkScreen.js`）で全体の `assistantStaffName` のみ更新され、チェックタイマー専用の `checkStaffName` が更新・クリアされていなかったため、iPhoneからWatchへの逆同期（`syncSeatsToWatch`）時に古いチェック担当者名が復活する潜在リスクがあった。
+        - また、Watchカード上の「チェック担当に立候補」タップ時やチェック完了・解除、施術ステータス変更時に `WidgetSync.save` が呼ばれていなかったため、文字盤（モジュラーWidget）への反映が遅延していた。
+      - **対策・実装**:
+        1. **iPhone側ハンドラの完全連動（`SalonWorkScreen.js`）**:
+           - `ASSIGN_HELP`: `helpProcess === 'チェック'` の場合に `checkStaffName: staff` も同時に保存。
+           - `CLEAR_STAFF`: 担当解除時に `checkStaffName: ''` も確実にクリア。
+           - `RECRUIT_HELP`: 工程が「チェック」の場合に `checkStaffName: ''` もクリア。
+        2. **Watch側の文字盤即時同期（`content.swift`）**:
+           - `onClaimCheck`: 立候補時に即座に `WidgetSync.save(...)` を実行し、モジュラー文字盤に担当者名を即時反映。
+           - `checkActionSheetView`: チェック完了（`onCompleteCheck`）および解除（`onCancelCheck`）時に `WidgetSync.save(...)` を実行。
+           - `shampooActionSheetView`: 施術開始・完了ステータス更新時にも `WidgetSync.save(...)` を実行し、文字盤を常に最新状態に維持。
