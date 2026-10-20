@@ -397,7 +397,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     localStops[id] = nil
                 }
             }
-            // ★ カードの収納: 稼働中の席は常に展開。停止中は Watch 上での操作を優先し、無ければ iPhone の値
+            // ★ カードの収納: 稼働中の席は常に展開。停止中は Watch 上での操作を優先し、00:00で何も入っていない席は初期状態で閉じる
             for i in parsed.indices {
                 let id = parsed[i].id
                 if parsed[i].isRunning {
@@ -405,6 +405,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     collapseOverrides[id] = nil
                 } else if let collapsed = collapseOverrides[id] {
                     parsed[i].isCollapsed = collapsed
+                } else if parsed[i].isZero {
+                    parsed[i].isCollapsed = true
                 }
             }
             self.lastReceivedSeatCount = parsed.count
@@ -871,57 +873,62 @@ struct ContentView: View {
         .padding(.horizontal, 4)
     }
 
-    // ★ タイムアップ時の全画面アラーム表示（マイルドな深紅グラデーションで「止める」を押すまで鳴動）
+    // ★ タイムアップ時の全画面アラーム表示（watchOS純正準拠・漆黒ピュアブラック ＆ 鮮烈アクセントUI）
     @ViewBuilder
     private var alarmOverlay: some View {
         VStack(spacing: 8) {
-            Spacer(minLength: 4)
+            Spacer(minLength: 18)
             
             // アイコン ＋ タイムアップ
-            HStack(spacing: 6) {
+            VStack(spacing: 4) {
                 Image(systemName: "bell.badge.fill")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundColor(.white.opacity(0.95))
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(Color(hex: "#FF453A"))
+                
                 Text("タイムアップ")
-                    .font(.system(size: 17, weight: .black, design: .rounded))
+                    .font(.system(size: 18, weight: .black, design: .rounded))
                     .foregroundColor(.white)
             }
             
-            // 席名・アラーム対象（すっきり読みやすい半透明黒バッジ）
-            VStack(spacing: 4) {
+            // 席名・アラーム対象（黒背景に美しく映える赤枠バッジ）
+            VStack(spacing: 5) {
                 ForEach(alarm.ringing.prefix(3), id: \.key) { e in
                     Text(e.title)
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .font(.system(size: 15, weight: .heavy, design: .rounded))
                         .foregroundColor(.white)
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 4)
-                        .background(Color.black.opacity(0.3))
-                        .cornerRadius(8)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(Color(hex: "#FF453A").opacity(0.22))
+                        .cornerRadius(9)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9)
+                                .stroke(Color(hex: "#FF453A").opacity(0.45), lineWidth: 1)
+                        )
                 }
                 if alarm.ringing.count > 3 {
                     Text("ほか \(alarm.ringing.count - 3) 件")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.8))
+                        .foregroundColor(.white.opacity(0.75))
                 }
             }
             
-            Spacer(minLength: 6)
+            Spacer(minLength: 8)
             
-            // 止めるボタン（押しやすい白背景＋上品な深紅テキスト＆影）
+            // 止めるボタン（watchOS標準アラームと同じ、押しやすい特大レッドピルボタン）
             Button(action: {
                 alarm.stop()
                 WKInterfaceDevice.current().play(.success)
             }) {
                 Text("止める")
-                    .font(.system(size: 20, weight: .heavy, design: .rounded))
+                    .font(.system(size: 21, weight: .heavy, design: .rounded))
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 13)
-                    .background(Color.white)
-                    .foregroundColor(Color(hex: "#8E1E23"))
-                    .cornerRadius(13)
-                    .shadow(color: Color.black.opacity(0.25), radius: 4, x: 0, y: 2)
+                    .padding(.vertical, 14)
+                    .background(Color(hex: "#FF453A"))
+                    .foregroundColor(.white)
+                    .cornerRadius(14)
+                    .shadow(color: Color(hex: "#FF453A").opacity(0.35), radius: 5, x: 0, y: 2)
             }
             .buttonStyle(.plain)
             .padding(.horizontal, 6)
@@ -929,16 +936,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            LinearGradient(
-                colors: [
-                    Color(hex: "#8E1E23"), // 落ち着いたマイルドな深紅（カーディナルレッド）
-                    Color(hex: "#440A0D")  // 深みのあるディープワインレッド
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
+        .background(Color.black)
         .ignoresSafeArea()
     }
 
@@ -946,8 +944,6 @@ struct ContentView: View {
     private var cardsScrollView: some View {
         ScrollView {
             VStack(spacing: 12) {
-                diagnosticPanel
-                
                 // ★ メインタイマーカード（HomeScreen連動・エメラルドグリーン）
                 if let main = sessionManager.mainTimer {
                     MainTimerCard(
@@ -1149,9 +1145,9 @@ struct ContentView: View {
                             timers[idx].shampooStaff = nil
                             timers[idx].isRecruiting = false
                             timers[idx].isNoHelpNeeded = false
-                            timers[idx].isCollapsed = false
+                            timers[idx].isCollapsed = true
                         }
-                        sessionManager.setCollapseOverride(seatId: item.id, collapsed: false)
+                        sessionManager.setCollapseOverride(seatId: item.id, collapsed: true)
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
                         sessionManager.sendActionToPhone(action: "RESET_ZERO", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         showNotification(
@@ -1501,7 +1497,82 @@ struct MainTimerCard: View {
         }
     }
 
+    // ★ 手動展開ステート
+    @State private var isManuallyExpanded: Bool = false
+    
+    // 折りたたみ判定: 稼働中なら常に開く。00:00（停止中かつ残り<=0）で手動展開されていない場合は閉じる
+    private var isCollapsed: Bool {
+        if item.isRunning { return false }
+        if item.isZero { return !isManuallyExpanded }
+        return false
+    }
+
     var body: some View {
+        if isCollapsed {
+            collapsedMainCardView
+        } else {
+            expandedMainCardView
+        }
+    }
+    
+    // ★ アコーディオン折りたたみ時（コンパクトなスリムバー表示）
+    @ViewBuilder
+    private var collapsedMainCardView: some View {
+        Button(action: {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                isManuallyExpanded = true
+            }
+            WKInterfaceDevice.current().play(.click)
+        }) {
+            HStack(spacing: 6) {
+                // 左側: タイトル
+                HStack(spacing: 3) {
+                    Image(systemName: "stopwatch.fill")
+                        .font(.system(size: 11, weight: .bold))
+                    Text("メインタイマー")
+                        .font(.system(size: 13, weight: .bold))
+                }
+                .foregroundColor(Color(hex: "#30D158"))
+                
+                // 待機中バッジ
+                HStack(spacing: 3) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 8))
+                    Text("待機中 (00:00)")
+                        .font(.system(size: 9.5, weight: .bold))
+                }
+                .foregroundColor(Color(hex: "#8E8E93"))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Color.white.opacity(0.1))
+                .cornerRadius(4)
+                
+                Spacer()
+                
+                // 右側: 開く
+                HStack(spacing: 3) {
+                    Text("開く")
+                        .font(.system(size: 10, weight: .bold))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .foregroundColor(Color(hex: "#30D158"))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(Color(hex: "#1C1C1E"))
+            .cornerRadius(10)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color(hex: "#30D158").opacity(0.35), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // ★ フル展開カード
+    @ViewBuilder
+    private var expandedMainCardView: some View {
         VStack(spacing: 6) {
             // ① ヘッダー
             HStack(spacing: 4) {
@@ -1605,7 +1676,12 @@ struct MainTimerCard: View {
                 }
                 .buttonStyle(.plain)
                 
-                Button(action: onReset) {
+                Button(action: {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        isManuallyExpanded = false
+                    }
+                    onReset()
+                }) {
                     HStack(spacing: 4) {
                         Image(systemName: "arrow.counterclockwise")
                             .font(.system(size: 11, weight: .bold))
@@ -1708,11 +1784,11 @@ struct SeatTimerCard: View {
                 }
                 .foregroundColor(.white)
                 
-                // 終了バッジ
+                // 状態バッジ (00:00なら「待機中 (00:00)」、それ以外は「計測終了」)
                 HStack(spacing: 3) {
-                    Image(systemName: "stop.circle.fill")
+                    Image(systemName: item.isZero ? "clock" : "stop.circle.fill")
                         .font(.system(size: 8))
-                    Text("計測終了")
+                    Text(item.isZero ? "待機中 (00:00)" : "計測終了")
                         .font(.system(size: 9.5, weight: .bold))
                 }
                 .foregroundColor(Color(hex: "#8E8E93"))
