@@ -1781,3 +1781,45 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
            - `onClaimCheck`: 立候補時に即座に `WidgetSync.save(...)` を実行し、モジュラー文字盤に担当者名を即時反映。
            - `checkActionSheetView`: チェック完了（`onCompleteCheck`）および解除（`onCancelCheck`）時に `WidgetSync.save(...)` を実行。
            - `shampooActionSheetView`: 施術開始・完了ステータス更新時にも `WidgetSync.save(...)` を実行し、文字盤を常に最新状態に維持。
+
+---
+
+## 25. Apple Watch & サロンワーク連携 総合改修仕様まとめ (Build 48 / 2026年10月)
+
+### 概要
+Apple Watchのモジュラー文字盤、全画面アラームUI、登録席名の全画面連動、およびiPhone ↔ Watch ↔ 文字盤（WidgetKit）間のリアルタイム同期について、多角的なコード監査と現場運用テストに基づく網羅的な改修を実施。
+
+### 主要改修一覧
+
+| 改修項目 | 主な影響コンポーネント | 解決された課題・仕様 |
+| :--- | :--- | :--- |
+| **モジュラー文字盤スタッフ同期** | `widget_sync.swift`<br>`widget.swift`<br>`content.swift` | 「シャンプー 募集中」からスタッフを指名しても文字盤が更新されないバグを修正。工程に応じた担当者判定（チェック／シャンプー等）を実装。 |
+| **全画面アラームUIマイルド化** | `content.swift` (`alarmOverlay`) | 眩しすぎるベタ塗り赤（`#FF3B30`）を上品な深紅グラデーション（`#8E1E23`〜`#440A0D`）へ刷新。ナビゲーションバーを自動非表示化し、青文字や時計の被りを根絶。 |
+| **アラーム鳴動時シート自動破棄** | `content.swift` (`onChange(of: alarm.ringing.isEmpty)`) | スタッフ指名や操作シートを開いたまま放置していても、タイムアップの瞬間にシートを即座に自動破棄し、「止める」ボタンを確実に最前面表示。 |
+| **登録席名の全箇所一貫表示** | `content.swift`<br>`alarm.swift`<br>`widget_sync.swift`<br>`widget.swift` | iPhoneで設定された登録名（例: `1番席 (個室)`）をWatch側で保持。全画面アラーム、ローカル通知、文字盤ヘッダー、カード、全操作シート、トースト通知の全箇所で `displaySeatName` に統一。 |
+| **チェック担当(checkStaffName)同期** | `SalonWorkScreen.js`<br>`content.swift` | Watchからの `ASSIGN_HELP` / `CLEAR_STAFF` / `RECRUIT_HELP` 受信時にiPhone側の `checkStaffName` も完全連動更新。逆同期時の古い担当名復活バグを未然防止。 |
+| **文字盤(Widget)即時同期の網羅** | `content.swift` | カード上の「立候補」タップ時、チェック完了・解除時、各施術ステータス変更時に `WidgetSync.save` を即時実行。文字盤がタイムラグなしで即座に切り替わるように強化。 |
+
+### データ同期フロー
+
+```text
+【Apple Watch アプリ】
+   │
+   ├─► [ユーザー操作: スタッフ指名/立候補/ステータス変更]
+   │     │
+   │     ├─► ① ローカル即時更新 (楽観的UI)
+   │     ├─► ② WidgetSync.save(...) ──► AppGroup共有 ──► WidgetCenter.reloadAllTimelines()
+   │     │                                                 └─► モジュラー文字盤が即座に切り替え表示
+   │     └─► ③ WCSession.sendMessage / transferUserInfo
+   │           │
+   │           ▼
+【iPhone アプリ (SalonWorkScreen)】
+   │     │
+   │     ├─► handleWatchAction:
+   │     │     ├─ ASSIGN_HELP: assistantStaffName 更新 ＋ (チェックなら checkStaffName も更新)
+   │     │     ├─ CLEAR_STAFF: assistantStaffName クリア ＋ checkStaffName クリア
+   │     │     └─ RECRUIT_HELP: assistantStaffName クリア ＋ (チェックなら checkStaffName もクリア)
+   │     │
+   │     ├─► Supabase リアルタイム同期 (サロン内全端末へブロードキャスト)
+   │     └─► syncSeatsToWatch(...) ──► Watch側へ最新確定状態を逆同期 (不整合なし)
+```
