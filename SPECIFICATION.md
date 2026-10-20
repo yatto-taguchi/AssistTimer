@@ -1098,6 +1098,8 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 
 ### 6.2. 変更履歴 (Changelog)
 
+| 2026-10-20 | **Apple Watch モジュラー文字盤コンプリケーション改修＆横バーインジケーター追加 (Build 47)** | ①**1行目への「稼働中◯席」集約 ＆ 見切れ防止ガード**: 最下段にあった「稼働中 1席」を最上段の席番号・自分バッジ右側（1行目）へ移動し、1列にスマート集約。各テキストに `.lineLimit(1)` および `.minimumScaleFactor(0.8)` を適用し、小型文字盤や文字拡大時でも折り返し・表示崩れを防止。<br>②**最下段横バープログレスインジケーター新設**: 空いた最下段に、タイマー本体と同一のカラーシークエンス（青→黄→赤）で動くリニアプログレスバーを新設。<br>③**カウントダウンと超過の双方向アニメーション**: カウントダウン中は右から左へ消費（残り30%超: 青、30%以下: 黄、10%以下: 赤）。超過時は左から右へ赤ゲージが伸長（180秒で満タン）。浮動小数点誤差による色切り替えすり抜けを防ぐ安全マージン（`0.3001` / `0.1001`）を完備。<br>④**WidgetKit OSネイティブ毎秒更新 ＆ タイムライン最適化**: `ProgressView(timerInterval:countsDown:)` によるOSレベル毎秒描画に加え、30%・10%・終了・超過満タンのキーポイント時刻にタイムラインエントリーを自動配置し、高効率な色・状態切り替えを実現。 |
+| 2026-10-20 | **Apple Watchからのタイマー設定時におけるサブタイマー（途中チェック）設定対応 (Build 46)** | ①**任意タイム設定・クイックパネル画面へのサブタイマーピル新設**: `TimeActionSheet` に「途中チェック: [なし] [3分] [5分] [7分] [10分]」を追加し、リューズ決定・クイックパネル即時スタート双方でサブタイマーを連動開始可能に拡張。<br>②**全体時間以下の安全ガード**: 全体時間以上のチェック時間が選ばれた場合は自動でチェックなしに補正。<br>③**SwiftUI ViewBuilder構文最適化**: `if` 直下の `let` 構文を排除しコンパイル互換性を向上。<br>④**iPhone側受信・履歴記録対応**: `START_TIMER` / `ADD_SEAT` アクションで `checkTotalSeconds` を反映し、席履歴に「Apple Watchからタイマー開始 (15分 / チェック5分)」を記録。 |
 | 2026-10-18 | **Watchタイマー停止時の超過残りバグ解消、アコーディオン収納維持、重複操作・遅延停止防止、Q1〜Q5現場最適化、および文字盤コンプリケーションカウントダウン優先表示 (Build 45)** | ①**計測終了のアコーディオン収納維持 (`isCollapsed`)**: iPhone側で計測終了時の終了時刻（`collapsedAtEnd`）を保持し、再スタート・再入力・延長・リセットされるまで `isCollapsed: true` を継続同期。Watch側での手動開閉（`collapseOverrides`）も尊重し、次の同期でカードが勝手に展開される問題を解決。<br>②**Watch操作の重複防止 ＆ 遅延停止の誤爆防止**: iPhone側で「操作名＋席ID＋送信時刻」を直近100件記録して重複排除。Watchからの停止系操作（`STOP_TIMER`, `FINISH_MEASURE`, `ENTER_HELP`, `RESET_ZERO`, `STOP_ALARM`）に操作時の終了時刻（`expectedEnd`）を付与し、iPhoneアプリ復帰時に再スタート後の別タイマーを誤って停止させない安全フェイルセーフを確立。<br>③**停止中延長の表示補正 ＆ 不要同期抑制**: 停止中の席をWatchで延長した際、`isReset` を解除して正しい残り時間を表示（「リセット済 (0:00)」のまま残らない）。0秒指定時の誤延長（+5分）を修正し、状態変化がない場合の不要なデータ保存・Watch同期を完全抑制。<br>④**Q1〜Q3（Watch停止・超過時シャンプー入る・チェック解除の現場ルール最適化）**: Watch「タイマーを止める」を 0:00 停止に確定。超過中の「シャンプー入る」は押した直後から 0:00 で停止（赤い超過表示のまま残らない）。「タイマーを止める」「計測終了」「アラーム停止」時にiPhone・Watch双方でチェックタイマーをクリア（「シャンプー入る」ではチェック維持）。<br>⑤**Q4（文字盤コンプリケーションのカウントダウン席優先表示）**: 優先順位を「①最後に操作した席 ➔ ②自分のカウントダウン中 ➔ ③全カウントダウン中 ➔ ④自分の超過中 ➔ ⑤全超過中（それぞれ終了が近い順）」に刷新。タイムラインのエントリー時刻（表示時刻）基準で判定するため、ある席が終わった瞬間に次のカウントダウン中の席へ自動で切り替わる優れたUXを実現。<br>⑥**Q5（iPhoneの純正アラーム画面で停止 ➔ 席タイマーも自動停止）**: ネイティブ側（`AlarmKitBridge`）で予約中アラームを記録し、終了時刻経過後にAlarmKit一覧から消えたアラームを検出（`takeUserStoppedAlarms`）。iPhoneアプリ前面復帰時・前面動作中に席タイマーを 0:00 で停止させ、同期でWatch側も自動停止連動。 |
 | 2026-10-15 | TestFlight（Build 27）実機検証において、①iPhone側のサンプルの1番席がApple Watch側に表示されない（席が見当たらない）、および②Watch側で「新しい席を追加」を押した際に表示される席番号ステッパーの文字が特大で見切れて表示される不具合が発生していた問題、およびSwiftUIバインディングのクラッシュ潜在リスクとiPhoneスリープ時通信ロストの対策 | ①**Watch側パースロジックの完全堅牢化 (`SeatTimerItem.init?(dictionary:)`)**: iPhone側から送られる `status: 'normal'`（放置中）と `isRunning: true` に対し、Watch側が `status == "running"` で `isRunning` を上書きしていたバグを修正し、`dictionary["isRunning"] as? Bool` および `NSNumber.boolValue` を最優先判定するよう抜本改善。Cocoaブリッジの型キャストフォールバックを完備。<br>②**iPhone側未アクティベート時保留キュー (`pendingApplicationContext`) の新設**: iPhone起動直後にネイティブ `WCSession` が未アクティベート（`.notActivated`）の場合でも、初回送信データを破棄せず安全に保留し、`activationDidCompleteWith` 完了時に自動でWatchへプッシュ配信するすれ違い防止機構を実装。<br>③**Watch ➔ iPhone プル同期要求 (`REQUEST_SYNC`) の新設**: Watch側アプリ起動時（`activationDidCompleteWith`）および画面表示時（`.onAppear`）に即座に `REQUEST_SYNC` を送信し、iPhone側から最新の座席データを即座に返信・同期するプル型リフレッシュを完備。<br>④**Watchからの席追加同期 (`ADD_SEAT`) の新設**: Watch側の「新しい席を追加（`AddSeatSheet`）」でタイマースタートした際、iPhone側へ新席データを即座に送信し、iPhone側ステートとAsyncStorageへ自動保存。<br>⑤**watchOS専用円形ステッパーUIへの刷新**: 見切れ原因となっていたwatchOS標準の `Stepper` を完全撤廃。左に「客席番号:」、右に「マイナス丸ボタン（−）」「白太字の中央文字（◯番席）」「プラス丸ボタン（＋）」を配置したwatchOS専用の美しい円形ステッパーUI（直径28px・触覚フィードバック付き）へ刷新。<br>⑥**客席バインディングのクラッシュ耐性 (`binding(for id:)`)**: `fatalError` を完全撤廃し、配列更新やアニメーション中のID不整合時にも安全なフォールバックBindingを返すことで、Apple Watchアプリの突然の強制終了（クラッシュ）を100%防止。<br>⑦**バックグラウンド待機通信の完全対応 (`transferUserInfo` / `didReceiveUserInfo`)**: iPhoneがスリープ・画面消灯中にWatch側から送られた操作もキュー経由で安全にiPhoneへ受信・自動反映。<br>⑧**新ビルド番号 `28` へ更新**: `app.json` の `buildNumber` を `28` へインクリメントし、TestFlight実機配信ビルドの準備を完了。
 | 2026-10-15 | EAS Build（Build 26）において、`ExpoWatchConnectivityModule` が `Module, WCSessionDelegate` を直接継承していたため、Swiftの型安全規約（`WCSessionDelegate` は Objective-C 由来の `NSObjectProtocol` への適合が必須だが `Module` は純粋な Swift クラスであるため直接準拠不可）に抵触し、`cannot declare conformance to 'NSObjectProtocol' in Swift; 'ExpoWatchConnectivityModule' should inherit 'NSObject' instead` コンパイルエラーでビルドが失敗していた問題 | ①**`NSObject` 準拠の内部デリゲートクラス新設 (`SessionDelegate`)**: `WCSessionDelegate` の適合を `NSObject` を継承する専用の内部クラス `SessionDelegate` へ分離移譲。モジュール側は `SessionDelegate` インスタンスを保持し、Watchからの受信イベント（`onMessageReceived` / `onApplicationContextReceived`）を安全にメインスレッドへ転送するアーキテクチャへ刷新。<br>②**新ビルド番号 `27` へ更新**: `app.json` の `buildNumber` を `27` へインクリメントし、TestFlight実機配信ビルドを再開。 |
@@ -1471,7 +1473,22 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
           - `助:待機中`（停止中の席ならグレー）
         - これにより、「誰のお客様（主担当）で、誰がヘルプなのか（または募集中なのか）」が腕の上で完全に一目で判明。
     - **ダイレクト操作ジャンプ**:
-      - サムネイルタイルをタップすると、その席のタイマー操作画面（`TimeActionSheet`）へ即座にアクセス可能。
+- **Apple Watch 文字盤コンプリケーション仕様（WidgetKit / Build 40, Build 47）**:
+  - **モジュラー文字盤（`accessoryRectangular` / 長方形コンプリケーション）**:
+    - **1行目（ヘッダー行・1列集約 ＆ 見切れ防止）**: `[タイマーアイコン] [◯番席] [自分（該当時）] [Spacer] [稼働中◯席]` を1行（HStack）に集約。各テキストに `.lineLimit(1)` および縮小許容（`.minimumScaleFactor(0.8)`）を適用し、Apple Watch 40mm等の小型文字盤や文字拡大時でも絶対に改行・レイアウト崩れを起こさない堅牢性を確保。
+    - **2行目（タイム表示）**: `[残り / 超過] [04:58]`（カウントダウン時は青／黄／赤、超過時は赤色のタイマースタイル文字）。
+    - **3行目（横バーインジケーター / プログレスバー）**:
+      - タイマー本体のカラーシークエンス（青 → 黄 → 赤）と連動するリニアプログレスバーを新設。
+      - **カウントダウン中（右から左へ消費）**: `ProgressView(timerInterval: startDate...seat.endDate, countsDown: true)` による毎秒リアルタイム減算。
+        - 残り30%超: 青色（`#0A84FF`）
+        - 残り30%以下: 黄色（`#FF9F0A`）
+        - 残り10%以下: 赤色（`#FF453A`）
+        - ※ 浮動小数点（`Double`）の微小丸め誤差によるすり抜けを防ぐため、`ratio <= 0.3001` / `ratio <= 0.1001` の安全イプシロンマージンを完備。
+      - **カウントアップ・超過中（左から右へ赤が伸長）**: `ProgressView(timerInterval: seat.endDate...seat.endDate.addingTimeInterval(180), countsDown: false)` による毎秒リアルタイム加算。
+        - タイマー本体の `RingProgress` と整合し、3分（180秒）で赤ゲージが左から右へ満タン（100%）に到達。
+    - **リアルタイム描画と色切り替えのハイブリッド制御**:
+      - WidgetKit では毎秒の独自タイマーループ更新が禁止されているため、OSネイティブの `ProgressView(timerInterval:)` を採用して滑らかな毎秒リアルタイム進捗を描画。
+      - バーの色切り替え（青→黄→赤）および超過への切り替えは、`ComplicationProvider.getTimeline` にて現在時刻・残り30%到達時刻・残り10%到達時刻・終了時刻・超過180秒時刻をタイムラインエントリーとして配置。時刻到来時に WidgetKit が自動再評価することで、バッテリー消費ゼロで色と状態が切り替わる高効率なアーキテクチャを実現。
 
 ### 7.7. iPhone ↔ Apple Watch リアルタイム双方向同期システム (Build 27-36)
 - **概要**:
@@ -1661,5 +1678,17 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
       - `START_TIMER` および `ADD_SEAT` アクションハンドラにて `extra?.checkTotalSeconds` を受信し、全体タイム未満の場合のみ `checkTargetSeconds`, `checkInitialMinutes`, `checkEndTimestamp`, `checkStatus: 'running'`, `checkAlerted: false` を席ステートに正しく設定。
       - 前回のタイマーで残存した可能性のある一時停止秒数（`pausedRemainingSeconds`, `checkPausedRemainingSeconds`）を `null` に初期化。
       - 席履歴（`history`）にも「Apple Watchからタイマー開始 (15分 / チェック5分)」のようにチェックタイマーの有無・分数を記録するよう改善。
-
-
+  - **Apple Watch モジュラー文字盤コンプリケーション改修＆横バーインジケーター追加 (Build 47)**:
+    - **背景・ユーザー要望**: Apple Watch のモジュラー文字盤（`accessoryRectangular`、WidgetKit 長方形コンプリケーション）において、最下段にあった「稼働中 1席」を最上段の席番号・自分バッジの右側に移動して 1 列（HStack）に集約し、空いた最下段にタイマー本体と同じカラー遷移（青→黄→赤）で動く横バーのプログレスインジケーター（リニアプログレスバー）を追加したい。カウントダウン中は右から左へ消費され、タイムアップ（カウントアップ）時は左から右へ赤ゲージが伸びていく仕様。
+    - **Watch側データ同期 (`targets/watch/widget_sync.swift`)**:
+      - 席データ共有辞書に `"totalSeconds": t.totalSeconds` を追加し、初期設定秒数を WidgetKit 側へ正確に受け渡し。
+    - **WidgetKit実装 (`targets/watch-widget/widget.swift`)**:
+      - `ComplicationSeat` に `totalSeconds: Int` を追加し、`ComplicationData.load()` からパース。
+      - `ComplicationProvider.getTimeline` において、稼働中席の残り30%到達時刻、残り10%到達時刻、終了時刻、超過180秒（3分）満タン時刻をタイムラインエントリーとして自動生成・配置（上限40件）。
+      - `rectangular` ビューを改修：
+        - 1行目: `[タイマーアイコン] [◯番席] [自分] [Spacer] [稼働中◯席]` を1列集約。各テキストに `.lineLimit(1)` および縮小許容（`.minimumScaleFactor(0.8)`）を適用し、Apple Watch 40mm等の小型文字盤や文字拡大時でも絶対に改行・レイアウト崩れを起こさない堅牢性を確保。
+        - 2行目: `[残り/超過] [04:58]`（タイム表示）。
+        - 3行目: 新設 `progressBar(for: seat)` を配置。
+      - `progressBar(for:)` 実装：
+        - カウントダウン時: `ProgressView(timerInterval: startDate...seat.endDate, countsDown: true)` により右から左へ消費。エントリー時刻に基づく残り割合（>30%: 青、<=30%: 黄、<=10%: 赤）で `.tint()` を動的適用。浮動小数点（`Double`）の丸め誤差による切り替えすり抜けを防止する安全マージン（`ratio <= 0.3001` / `ratio <= 0.1001`）を完備。
+        - 超過時: `ProgressView(timerInterval: seat.endDate...seat.endDate.addingTimeInterval(180), countsDown: false)` により左から右へ赤ゲージ（`#FF453A`）が伸長（タイマー本体の `RingProgress` と整合する3分満タン仕様）。

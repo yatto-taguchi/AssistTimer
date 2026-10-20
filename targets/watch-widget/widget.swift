@@ -20,6 +20,7 @@ struct ComplicationSeat {
     let isRunning: Bool
     let pausedRemaining: Int
     let related: Bool
+    let totalSeconds: Int
 }
 
 struct ComplicationEntry: TimelineEntry {
@@ -51,7 +52,8 @@ enum ComplicationData {
                 endDate: Date(timeIntervalSince1970: end),
                 isRunning: (d["isRunning"] as? NSNumber)?.boolValue ?? false,
                 pausedRemaining: (d["pausedRemaining"] as? NSNumber)?.intValue ?? 0,
-                related: (d["related"] as? NSNumber)?.boolValue ?? false
+                related: (d["related"] as? NSNumber)?.boolValue ?? false,
+                totalSeconds: (d["totalSeconds"] as? NSNumber)?.intValue ?? (d["totalSeconds"] as? Int) ?? 600
             )
         }
         return ComplicationSnapshot(seats: parsed, lastTouchedId: obj["lastTouchedId"] as? String)
@@ -93,7 +95,7 @@ struct ComplicationProvider: TimelineProvider {
     func placeholder(in context: Context) -> ComplicationEntry {
         ComplicationEntry(
             date: Date(),
-            seat: ComplicationSeat(id: "preview", seatNumber: 3, endDate: Date().addingTimeInterval(15 * 60), isRunning: true, pausedRemaining: 0, related: true),
+            seat: ComplicationSeat(id: "preview", seatNumber: 3, endDate: Date().addingTimeInterval(15 * 60), isRunning: true, pausedRemaining: 0, related: true, totalSeconds: 15 * 60),
             runningCount: 2
         )
     }
@@ -110,12 +112,29 @@ struct ComplicationProvider: TimelineProvider {
         let now = Date()
         let snapshot = ComplicationData.load()
         let seats = snapshot.seats
-        var entries = [ComplicationData.entry(at: now, snapshot: snapshot)]
-        // 各席の終了時刻にも1件ずつ入れて、「超過」表示へ自動で切り替える
-        let upcomingEnds = Set(seats.filter { $0.isRunning && $0.endDate > now }.map { $0.endDate }).sorted()
-        for end in upcomingEnds.prefix(20) {
-            entries.append(ComplicationData.entry(at: end, snapshot: snapshot))
+        var entryDates = Set<Date>()
+        entryDates.insert(now)
+        
+        // 各席のキーポイント時刻にエントリーを入れて、色変化（青→黄→赤）および超過切り替えを自動で行う
+        for seat in seats where seat.isRunning {
+            let total = max(10, Double(seat.totalSeconds))
+            let end = seat.endDate
+            if end > now {
+                entryDates.insert(end)
+                // 残り30%（黄に切り替え）
+                let t30 = end.addingTimeInterval(-total * 0.30)
+                if t30 > now { entryDates.insert(t30) }
+                // 残り10%（赤に切り替え）
+                let t10 = end.addingTimeInterval(-total * 0.10)
+                if t10 > now { entryDates.insert(t10) }
+            }
+            // 超過バー満タン（終了＋180秒）
+            let tOverMax = end.addingTimeInterval(180)
+            if tOverMax > now { entryDates.insert(tOverMax) }
         }
+        
+        let sortedDates = entryDates.sorted()
+        let entries = sortedDates.prefix(40).map { ComplicationData.entry(at: $0, snapshot: snapshot) }
         // 席の追加・変更時は Watch アプリ側から reloadAllTimelines() される
         completion(Timeline(entries: entries, policy: .never))
     }
@@ -150,53 +169,109 @@ struct ComplicationView: View {
 
     // モジュラー文字盤の大きい枠
     private var rectangular: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 4) {
+        VStack(alignment: .leading, spacing: 2) {
+            // ── 1行目: アイコン・席番号・自分バッジ・稼働中◯席（1列に集約） ──
+            HStack(spacing: 3) {
                 Image(systemName: "timer")
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
                     .widgetAccentable()
                 if let seat = entry.seat {
                     Text("\(seat.seatNumber)番席")
-                        .font(.system(size: 14, weight: .bold))
+                        .font(.system(size: 13, weight: .bold))
                         .widgetAccentable()
+                        .lineLimit(1)
                     if seat.related {
                         Text("自分")
-                            .font(.system(size: 10, weight: .bold))
-                            .padding(.horizontal, 4)
+                            .font(.system(size: 9, weight: .bold))
+                            .padding(.horizontal, 3)
+                            .padding(.vertical, 1)
                             .background(Capsule().fill(Color.white.opacity(0.2)))
+                            .lineLimit(1)
                     }
+                    Spacer(minLength: 2)
+                    Text(entry.runningCount > 1 ? "稼働中\(entry.runningCount)席" : "稼働中1席")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 } else {
                     Text("AssistTimer")
-                        .font(.system(size: 14, weight: .bold))
+                        .font(.system(size: 13, weight: .bold))
                         .widgetAccentable()
+                        .lineLimit(1)
+                    Spacer(minLength: 2)
+                    Text("稼働中0席")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
                 }
-                Spacer(minLength: 0)
             }
             if let seat = entry.seat {
+                // ── 2行目: タイム表示 ──
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(isOver ? "超過" : "残り")
-                        .font(.system(size: 12, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundColor(timeColor)
                     Text(seat.endDate, style: .timer)
-                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .font(.system(size: 21, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(timeColor)
                         .lineLimit(1)
                         .minimumScaleFactor(0.6)
                 }
-                Text(entry.runningCount > 1 ? "稼働中 \(entry.runningCount)席" : "稼働中 1席")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                
+                // ── 3行目: 横バーのインジケーター（新設！） ──
+                progressBar(for: seat)
             } else {
                 Text("待機中")
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
                 Text("稼働中のタイマーなし")
-                    .font(.system(size: 11))
+                    .font(.system(size: 10))
                     .foregroundColor(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .containerBackground(for: .widget) { Color.clear }
+    }
+
+    @ViewBuilder
+    private func progressBar(for seat: ComplicationSeat) -> some View {
+        let total = max(10, seat.totalSeconds)
+        let startDate = seat.endDate.addingTimeInterval(-Double(total))
+        let isOvertime = entry.date >= seat.endDate
+        
+        if isOvertime {
+            // ★ カウントアップ・超過中: 3分（180秒）で左から右へ赤が伸びていく
+            let overtimeMax: TimeInterval = 180
+            ProgressView(
+                timerInterval: seat.endDate...seat.endDate.addingTimeInterval(overtimeMax),
+                countsDown: false
+            )
+            .progressViewStyle(.linear)
+            .tint(Color(red: 1.0, green: 0.27, blue: 0.23))
+        } else {
+            // ★ カウントダウン中: 右から左へ消費される
+            let remaining = seat.endDate.timeIntervalSince(entry.date)
+            let ratio = max(0.0, min(1.0, remaining / Double(total)))
+            
+            let barColor: Color = {
+                // 浮動小数点（Double）の丸め誤差を考慮し、0.0001の安全マージンを設ける
+                if ratio <= 0.1001 {
+                    return Color(red: 1.0, green: 0.27, blue: 0.23) // 赤（残り10%以下）
+                } else if ratio <= 0.3001 {
+                    return Color(red: 1.0, green: 0.62, blue: 0.04) // 黄（残り30%以下）
+                } else {
+                    return Color(red: 0.04, green: 0.52, blue: 1.0)  // 青（残り30%超）
+                }
+            }()
+            
+            ProgressView(
+                timerInterval: startDate...seat.endDate,
+                countsDown: true
+            )
+            .progressViewStyle(.linear)
+            .tint(barColor)
+        }
     }
 
     private var circular: some View {

@@ -67,7 +67,8 @@ enum WidgetSync {
                 "endEpoch": t.isRunning ? t.targetEndTime.timeIntervalSince1970.rounded() : 0,
                 "isRunning": t.isRunning,
                 "pausedRemaining": t.pausedRemainingSeconds,
-                "related": t.isRelated(to: userName)
+                "related": t.isRelated(to: userName),
+                "totalSeconds": t.totalSeconds
             ]
         }
         var payload: [String: Any] = ["seats": seats, "userName": userName]
