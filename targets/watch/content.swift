@@ -723,14 +723,38 @@ struct ContentView: View {
                     }
                 }
             }
-            // ★ 客席サムネイル・バードビューシート（長押しまたは右上グリッドタップで表示）
+            // ★ 客席サムネイル・バードビューシート（全タイマー・メインタイマー一覧）
             .sheet(isPresented: $showingThumbnailMap) {
                 SeatThumbnailMapSheet(
                     timers: timers,
+                    mainTimer: sessionManager.mainTimer,
                     currentUserName: currentUserName,
                     now: now,
                     onSelectSeat: { selectedSeat in
                         timeActionTargetId = selectedSeat.id
+                    },
+                    onToggleMainTimer: {
+                        playHaptic(.click)
+                        guard var main = sessionManager.mainTimer else { return }
+                        let willPause = main.isRunning
+                        if willPause {
+                            main.isRunning = false
+                            main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(now)))
+                        } else {
+                            main.isRunning = true
+                            let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
+                            main.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
+                        }
+                        sessionManager.mainTimer = main
+                        sessionManager.sendMainTimerAction(action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START")
+                    },
+                    onResetMainTimer: {
+                        playHaptic(.click)
+                        guard var main = sessionManager.mainTimer else { return }
+                        main.isRunning = false
+                        main.pausedRemainingSeconds = main.totalSeconds
+                        sessionManager.mainTimer = main
+                        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
                     }
                 )
             }
@@ -772,6 +796,16 @@ struct ContentView: View {
             .onAppear {
                 sessionManager.requestSyncFromPhone()
                 alarm.update(timers: timers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled)
+                if alarm.ringing.isEmpty {
+                    showingThumbnailMap = true
+                }
+            }
+            .onOpenURL { url in
+                if url.host == "open-map" || url.scheme == "assisttimer" {
+                    if alarm.ringing.isEmpty {
+                        showingThumbnailMap = true
+                    }
+                }
             }
         }
         
@@ -3743,27 +3777,35 @@ struct SelectHelpWorkflowSheet: View {
     }
 }
 
-// MARK: - 客席サムネイル・バードビューシート（長押しで全席の稼働状況を一目俯瞰）
+// MARK: - 客席サムネイル・バードビューシート（全席・メインタイマーの稼働状況を一目俯瞰）
 struct SeatThumbnailMapSheet: View {
     @Environment(\.dismiss) var dismiss
     let timers: [SeatTimerItem]
+    let mainTimer: SeatTimerItem?
     let currentUserName: String
     let now: Date
     let onSelectSeat: (SeatTimerItem) -> Void
+    let onToggleMainTimer: () -> Void
+    let onResetMainTimer: () -> Void
     
     // 席番号順（1番席、2番席、3番席...）に整列して物理レイアウトと連動
     var physicalSortedTimers: [SeatTimerItem] {
         timers.sorted { $0.seatNumber < $1.seatNumber }
     }
     
-    // サマリー集計
-    var runningCount: Int { timers.filter { $0.isRunning && $0.remainingSeconds > 0 }.count }
+    // サマリー集計（メインタイマーも稼働数に算入）
+    var isMainRunning: Bool { (mainTimer?.isRunning == true) && (mainTimer?.remainingSeconds ?? 0) > 0 }
+    var runningCount: Int {
+        timers.filter { $0.isRunning && $0.remainingSeconds > 0 }.count + (isMainRunning ? 1 : 0)
+    }
     var recruitingCount: Int { timers.filter { $0.isRecruiting }.count }
-    var pausedCount: Int { timers.filter { !$0.isRunning }.count }
+    var pausedCount: Int {
+        timers.filter { !$0.isRunning }.count + ((mainTimer != nil && !isMainRunning) ? 1 : 0)
+    }
     
     var body: some View {
         ScrollView {
-            VStack(spacing: 8) {
+            VStack(spacing: 7) {
                 // ① ヘッダー＆サマリーピルバー
                 VStack(spacing: 4) {
                     HStack {
@@ -3774,6 +3816,12 @@ struct SeatThumbnailMapSheet: View {
                             .font(.system(size: 13, weight: .heavy))
                             .foregroundColor(.white)
                         Spacer()
+                        Button(action: { dismiss() }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 15))
+                                .foregroundColor(Color(hex: "#8E8E93"))
+                        }
+                        .buttonStyle(.plain)
                     }
                     
                     // 稼働サマリーピル（一目で状況把握）
@@ -3821,9 +3869,19 @@ struct SeatThumbnailMapSheet: View {
                 }
                 .padding(.horizontal, 4)
                 
+                // ★ メインタイマー専用カード（サマリー直下に全幅配置・エメラルドグリーン/警告色連動）
+                if let main = mainTimer {
+                    ThumbnailMainTimerCard(
+                        item: main,
+                        now: now,
+                        onToggle: onToggleMainTimer,
+                        onReset: onResetMainTimer
+                    )
+                }
+                
                 Divider()
                 
-                // ② 2列サムネイルグリッド
+                // ② 2列サムネイルグリッド（客席タイマー群）
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
                     ForEach(physicalSortedTimers) { item in
                         Button(action: {
@@ -3853,42 +3911,164 @@ struct SeatThumbnailMapSheet: View {
     }
 }
 
+// MARK: - メインタイマー用サムネイルカード（マップ上部全幅）
+struct ThumbnailMainTimerCard: View {
+    let item: SeatTimerItem
+    let now: Date
+    let onToggle: () -> Void
+    let onReset: () -> Void
+    
+    @State private var isPulsing = false
+    
+    var isRunning: Bool { item.isRunning && item.remainingSeconds > 0 }
+    var isOvertime: Bool { item.isOvertime }
+    var rem: Int { item.remainingSeconds }
+    
+    // 時間連動カラー判定
+    var stateColor: (border: Color, bg: Color, text: Color) {
+        if isOvertime {
+            // 超過時: 赤 ＆ パルス発光
+            let c = Color(hex: "#FF453A")
+            return (c, c.opacity(isPulsing ? 0.38 : 0.18), c)
+        } else if isRunning {
+            if rem <= 60 {
+                // 残り1分以内: 赤
+                let c = Color(hex: "#FF453A")
+                return (c, c.opacity(0.24), c)
+            } else if rem <= 180 {
+                // 残り3分以内: 黄
+                let c = Color(hex: "#FFD60A")
+                return (c, c.opacity(0.20), c)
+            } else {
+                // 通常稼働: エメラルドグリーン
+                let c = Color(hex: "#30D158")
+                return (c, c.opacity(0.18), Color(hex: "#30D158"))
+            }
+        } else {
+            // 停止中
+            return (Color(hex: "#30D158").opacity(0.3), Color(hex: "#30D158").opacity(0.06), Color(hex: "#8E8E93"))
+        }
+    }
+    
+    private func formatSeconds(_ seconds: Int) -> String {
+        let m = max(0, seconds) / 60
+        let s = max(0, seconds) % 60
+        return String(format: "%02d:%02d", m, s)
+    }
+    
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(spacing: 8) {
+                // 左側: アイコン ＆ ラベル
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "stopwatch.fill")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(stateColor.text)
+                        Text("メインタイマー")
+                            .font(.system(size: 11, weight: .heavy))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                    }
+                    if let genre = item.genre, !genre.isEmpty {
+                        Text(genre)
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundColor(stateColor.text)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(stateColor.text.opacity(0.2))
+                            .cornerRadius(4)
+                            .lineLimit(1)
+                    }
+                }
+                
+                Spacer()
+                
+                // 中央: タイマー数字
+                if isRunning {
+                    Text(formatSeconds(rem))
+                        .font(.system(size: 17, weight: .black, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(stateColor.text)
+                } else if isOvertime {
+                    Text("+\(formatSeconds(abs(rem)))")
+                        .font(.system(size: 16, weight: .black, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(Color(hex: "#FF453A"))
+                } else {
+                    Text(formatSeconds(item.totalSeconds))
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(Color(hex: "#8E8E93"))
+                }
+                
+                // 右側: 状態バッジ（タップで再生/一時停止）
+                Image(systemName: isRunning ? "pause.circle.fill" : (isOvertime ? "exclamationmark.circle.fill" : "play.circle.fill"))
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundColor(stateColor.text)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(stateColor.bg)
+            .cornerRadius(9)
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(stateColor.border, lineWidth: isOvertime && isPulsing ? 1.5 : 1)
+            )
+            .shadow(color: isOvertime && isPulsing ? Color(hex: "#FF453A").opacity(0.85) : Color.clear, radius: 4)
+        }
+        .buttonStyle(.plain)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                isPulsing = true
+            }
+        }
+    }
+}
+
 // MARK: - サムネイル席カード
 struct ThumbnailSeatCard: View {
     let item: SeatTimerItem
     let currentUserName: String
     let now: Date
     
+    @State private var isPulsing = false
+    
     var isRunning: Bool { item.isRunning && item.remainingSeconds > 0 }
     var isOvertime: Bool { item.isOvertime }
     var isMe: Bool { item.isRelated(to: currentUserName) }
+    var rem: Int { item.remainingSeconds }
     
-    // 背景＆枠線の色
-    var borderColor: Color {
+    // 時間連動カラー判定（青 ➔ 残り3分: 黄 ➔ 残り1分: 赤 ➔ 超過: 全赤＆パルス発光）
+    var stateColor: (border: Color, bg: Color, text: Color) {
         if isOvertime {
-            return Color(hex: "#FF453A")
-        } else if item.isRecruiting {
-            return Color(hex: "#FF9F0A")
-        } else if item.shampooStaff == currentUserName || item.creatorName == currentUserName {
-            return Color(hex: "#FFD60A")
+            let red = Color(hex: "#FF453A")
+            return (red, red.opacity(isPulsing ? 0.38 : 0.18), red)
         } else if isRunning {
-            return Color(hex: "#0A84FF")
+            if rem <= 60 {
+                // 残り1分以内: 赤警告
+                let red = Color(hex: "#FF453A")
+                return (red, red.opacity(0.24), red)
+            } else if rem <= 180 {
+                // 残り3分以内: 黄色注意
+                let yellow = Color(hex: "#FFD60A")
+                return (yellow, yellow.opacity(0.20), yellow)
+            } else if item.isRecruiting {
+                // 募集中
+                let orange = Color(hex: "#FF9F0A")
+                return (orange, orange.opacity(0.18), orange)
+            } else if item.shampooStaff == currentUserName || item.creatorName == currentUserName {
+                // 自分関連
+                let gold = Color(hex: "#FFD60A")
+                return (gold, gold.opacity(0.15), Color(hex: "#64D2FF"))
+            } else {
+                // 通常カウント中: 青
+                let blue = Color(hex: "#0A84FF")
+                return (blue, blue.opacity(0.15), Color(hex: "#64D2FF"))
+            }
         } else {
-            return Color.white.opacity(0.18)
-        }
-    }
-    
-    var backgroundColor: Color {
-        if isOvertime {
-            return Color(hex: "#FF453A").opacity(0.22)
-        } else if item.isRecruiting {
-            return Color(hex: "#FF9F0A").opacity(0.2)
-        } else if item.shampooStaff == currentUserName || item.creatorName == currentUserName {
-            return Color(hex: "#FFD60A").opacity(0.16)
-        } else if isRunning {
-            return Color(hex: "#0A84FF").opacity(0.18)
-        } else {
-            return Color.white.opacity(0.06)
+            // 停止中
+            return (Color.white.opacity(0.16), Color.white.opacity(0.05), Color(hex: "#8E8E93"))
         }
     }
     
@@ -3900,15 +4080,16 @@ struct ThumbnailSeatCard: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            // 上段: 席番号 ＋ 状態インジケーターランプ
+            // 上段: 席名 ＋ 状態インジケーターランプ
             HStack(spacing: 2) {
-                Text("\(item.seatNumber)番")
-                    .font(.system(size: 13, weight: .heavy))
+                Text(item.displaySeatName)
+                    .font(.system(size: 11.5, weight: .heavy))
                     .foregroundColor(.white)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .minimumScaleFactor(0.8)
                 
-                Spacer(minLength: 4)
+                Spacer(minLength: 2)
                 
                 if isOvertime {
                     Text("超過")
@@ -3918,17 +4099,33 @@ struct ThumbnailSeatCard: View {
                         .padding(.vertical, 1)
                         .background(Color(hex: "#FF453A"))
                         .cornerRadius(3)
+                } else if isRunning && rem <= 60 {
+                    Text("まもなく")
+                        .font(.system(size: 7.5, weight: .heavy))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 1)
+                        .background(Color(hex: "#FF453A"))
+                        .cornerRadius(3)
+                } else if isRunning && rem <= 180 {
+                    Text("残3分")
+                        .font(.system(size: 7.5, weight: .heavy))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 1)
+                        .background(Color(hex: "#FFD60A"))
+                        .cornerRadius(3)
                 } else if item.isRecruiting {
                     Image(systemName: "megaphone.fill")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 8.5, weight: .bold))
                         .foregroundColor(Color(hex: "#FF9F0A"))
                 } else if isRunning {
                     Circle()
                         .fill(Color(hex: "#30D158"))
-                        .frame(width: 7, height: 7)
+                        .frame(width: 6.5, height: 6.5)
                 } else {
                     Text("停止")
-                        .font(.system(size: 8, weight: .medium))
+                        .font(.system(size: 7.5, weight: .medium))
                         .foregroundColor(Color(hex: "#8E8E93"))
                         .padding(.horizontal, 3)
                         .padding(.vertical, 1)
@@ -3937,15 +4134,15 @@ struct ThumbnailSeatCard: View {
                 }
             }
             
-            // 中段: 時間数字（稼働中は大きく、停止中は薄く）
+            // 中段: 時間数字（稼働中は大きく、超過時は赤、停止中は薄く）
             if isRunning {
-                Text(formatSeconds(item.remainingSeconds))
+                Text(formatSeconds(rem))
                     .font(.system(size: 15, weight: .black, design: .rounded))
                     .monospacedDigit()
-                    .foregroundColor(Color(hex: "#64D2FF"))
+                    .foregroundColor(stateColor.text)
             } else if isOvertime {
-                Text("+\(formatSeconds(abs(item.remainingSeconds)))")
-                    .font(.system(size: 14, weight: .black, design: .rounded))
+                Text("+\(formatSeconds(abs(rem)))")
+                    .font(.system(size: 14.5, weight: .black, design: .rounded))
                     .monospacedDigit()
                     .foregroundColor(Color(hex: "#FF453A"))
             } else {
@@ -3955,62 +4152,102 @@ struct ThumbnailSeatCard: View {
                     .foregroundColor(Color(hex: "#636366"))
             }
             
+            // ★ チェック体制（途中チェックタイマー稼働中のみ中段下部に表示）
+            if let checkRem = item.checkRemainingSeconds, !item.isCheckCompleted {
+                let checkStaff = item.checkStaff ?? "募集中"
+                let isCheckOver = checkRem <= 0
+                let isCheckUnder1Min = checkRem <= 60
+                let checkColor: Color = (isCheckOver || isCheckUnder1Min) ? Color(hex: "#FF453A") : Color(hex: "#FF9F0A")
+                
+                HStack(spacing: 2) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 6.5, weight: .bold))
+                    Text("検:\(formatSeconds(checkRem))")
+                        .font(.system(size: 7.5, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                    Text(checkStaff == currentUserName ? "あなた" : checkStaff)
+                        .font(.system(size: 7, weight: .bold))
+                        .lineLimit(1)
+                }
+                .foregroundColor(checkColor)
+                .padding(.horizontal, 2.5)
+                .padding(.vertical, 1)
+                .background(checkColor.opacity(0.15))
+                .cornerRadius(3)
+            }
+            
             // 下段: 【作成者（主担当）】＆【ヘルプ担当】の2人表示
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 1.5) {
                 // ① タイマー作成者（主担当スタイリスト）
                 HStack(spacing: 2) {
                     Image(systemName: "pencil")
-                        .font(.system(size: 7, weight: .bold))
+                        .font(.system(size: 6.5, weight: .bold))
                         .foregroundColor(item.creatorName == currentUserName ? Color(hex: "#FFD60A") : Color(hex: "#8E8E93"))
-                    Text("主:\(item.creatorName == currentUserName ? "あなた" : item.creatorName)")
-                        .font(.system(size: 8.5, weight: item.creatorName == currentUserName ? .heavy : .bold))
+                    Text("主:\(item.creatorName == currentUserName ? "あなた" : (item.creatorName.isEmpty ? "主担当" : item.creatorName))")
+                        .font(.system(size: 8, weight: item.creatorName == currentUserName ? .heavy : .bold))
                         .foregroundColor(item.creatorName == currentUserName ? Color(hex: "#FFD60A") : Color(hex: "#E5E5EA"))
                         .lineLimit(1)
                 }
                 
-                // ② ヘルプ担当（アシスタント / 募集中）
+                // ② ヘルプ担当（アシスタント / 一人施術 / 募集中）
                 HStack(spacing: 2) {
-                    if item.isRecruiting {
+                    if item.isNoHelpNeeded {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 6.5))
+                            .foregroundColor(Color(hex: "#8E8E93"))
+                        Text("助:なし (一人)")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundColor(Color(hex: "#8E8E93"))
+                            .lineLimit(1)
+                    } else if item.isRecruiting {
                         Image(systemName: "megaphone.fill")
-                            .font(.system(size: 7))
+                            .font(.system(size: 6.5))
                             .foregroundColor(Color(hex: "#FF9F0A"))
                         Text("助:募集中")
-                            .font(.system(size: 8.5, weight: .heavy))
+                            .font(.system(size: 8, weight: .heavy))
                             .foregroundColor(Color(hex: "#FFD60A"))
                             .lineLimit(1)
-                    } else if let staff = item.shampooStaff {
+                    } else if let staff = item.shampooStaff, !staff.isEmpty {
                         Image(systemName: "hands.sparkles.fill")
-                            .font(.system(size: 7))
+                            .font(.system(size: 6.5))
                             .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
                         Text("助:\(staff == currentUserName ? "あなた" : staff)")
-                            .font(.system(size: 8.5, weight: staff == currentUserName ? .heavy : .bold))
+                            .font(.system(size: 8, weight: staff == currentUserName ? .heavy : .bold))
                             .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : Color(hex: "#64D2FF"))
                             .lineLimit(1)
                     } else if isRunning {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 7))
+                            .font(.system(size: 6.5))
                             .foregroundColor(Color(hex: "#FF453A"))
                         Text("助:未定")
-                            .font(.system(size: 8.5, weight: .bold))
+                            .font(.system(size: 8, weight: .bold))
                             .foregroundColor(Color(hex: "#FF453A"))
+                            .lineLimit(1)
                     } else {
                         Text("助:待機中")
-                            .font(.system(size: 8.5, weight: .medium))
+                            .font(.system(size: 8, weight: .medium))
                             .foregroundColor(Color(hex: "#8E8E93"))
+                            .lineLimit(1)
                     }
                 }
             }
             .padding(.top, 1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 6)
-        .background(backgroundColor)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
+        .background(stateColor.bg)
         .cornerRadius(9)
         .overlay(
             RoundedRectangle(cornerRadius: 9)
-                .stroke(borderColor, lineWidth: 1)
+                .stroke(stateColor.border, lineWidth: isOvertime && isPulsing ? 1.5 : 1)
         )
+        .shadow(color: isOvertime && isPulsing ? Color(hex: "#FF453A").opacity(0.85) : Color.clear, radius: 4)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                isPulsing = true
+            }
+        }
     }
 }
 

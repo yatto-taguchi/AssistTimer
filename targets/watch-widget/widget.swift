@@ -402,6 +402,7 @@ struct ComplicationView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .widgetURL(URL(string: "assisttimer://open-map")!)
         .containerBackground(for: .widget) { Color.clear }
     }
 
