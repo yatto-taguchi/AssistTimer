@@ -1734,4 +1734,16 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
         - `handleWatchAction` 内の重複していたメインタイマー操作コードを削除し、二重発火（ダブルトグルで即停止するバグ）を解消。
       - `AppContext.js`:
         - `mainTimerState` 初期値に `targetEndTimestamp: null` を追加。
+    - **Apple Watch モジュラー文字盤のヘルプ工程・スタッフ指名同期バグ修正**:
+      - **背景・事象**:
+        - モジュラー文字盤の最下段に「シャンプー 募集中」と表示されている状態から、コンプリケーションをタップしてWatchアプリを開き、席のヘルプ担当者を指名（または募集・解除・入る）しても、文字盤に戻った際に「シャンプー 募集中」のまま変わらない問題が発生。
+        - 課金（Proサロンプラン）とは無関係であり、文字盤Widgetへのデータ送信漏れおよびプロパティ参照先の不一致によるバグであることを特定。
+      - **根本原因**:
+        1. `targets/watch/widget_sync.swift`: 席データ辞書 `d` に `shampooStaff` および `isRecruiting` が保存されておらず、文字盤側へ施術スタッフ情報が渡っていなかった。また `checkStaff` も `checkTargetEndTime` の if 文内に包含されていたため、チェック終了時刻が nil の場合にスタッフ名が保存されなかった。
+        2. `targets/watch-widget/widget.swift`: `ComplicationSeat` に `shampooStaff`, `isRecruiting` が定義されておらず、文字盤最下段 `checkTimerRow` 内の `staffText` が `seat.checkStaff`（チェック専用）しか参照していなかったため、シャンプー等の工程で担当者を指名しても常に `else { return "\(proc) 募集中" }` と判定されていた。
+        3. `targets/watch/content.swift`: Watch側でヘルプスタッフ指名（`onAssignStaff`）や解除（`onClearStaff`）、全員募集（`onRecruitAll`）、超過時ヘルプ参加（`onEnterHelp`）を行った直後に `WidgetSync.save` が即時明示実行されていなかった。
+      - **対策・実装**:
+        1. `widget_sync.swift`: 席データ辞書 `d` に `shampooStaff`, `checkStaff`, `isRecruiting` を無条件で格納。
+        2. `widget.swift`: `ComplicationSeat` に `shampooStaff: String?`, `isRecruiting: Bool` を追加し、`ComplicationData.load()` および `placeholder` でパース。`staffText` において工程（`proc`）がチェックか施術（シャンプー等）かに応じて `seat.checkStaff` と `seat.shampooStaff` の双方を適切にフォールバック参照し、指名済みの場合は `"\(proc) \(staff)"`（例: "シャンプー 田中"）、未指名の場合は `"\(proc) 募集中"` を正確に表示。
+        3. `content.swift`: ヘルプ担当指名・解除・募集・超過ヘルプ参加の各操作時に `WidgetSync.save` を即座に明示呼び出し。
 

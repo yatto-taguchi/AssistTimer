@@ -24,11 +24,13 @@ struct ComplicationSeat {
     let related: Bool
     let totalSeconds: Int
     
-    // チェックタイマー情報
+    // チェック・ヘルプタイマー情報
     let checkEndDate: Date?
     let checkTotalSeconds: Int?
     let checkStaff: String?
+    let shampooStaff: String?
     let helpProcess: String?
+    let isRecruiting: Bool
     let isCheckCompleted: Bool
 }
 
@@ -65,7 +67,9 @@ enum ComplicationData {
             }
             let checkTot = (d["checkTotalSeconds"] as? NSNumber)?.intValue
             let checkStaff = d["checkStaff"] as? String
+            let shampooStaff = d["shampooStaff"] as? String
             let helpProc = d["helpProcess"] as? String
+            let isRecruiting = (d["isRecruiting"] as? NSNumber)?.boolValue ?? (d["isRecruiting"] as? Bool) ?? false
             let isCheckComp = (d["isCheckCompleted"] as? NSNumber)?.boolValue ?? (d["isCheckCompleted"] as? Bool) ?? false
             
             return ComplicationSeat(
@@ -81,7 +85,9 @@ enum ComplicationData {
                 checkEndDate: checkEnd,
                 checkTotalSeconds: checkTot,
                 checkStaff: checkStaff,
+                shampooStaff: shampooStaff,
                 helpProcess: helpProc,
+                isRecruiting: isRecruiting,
                 isCheckCompleted: isCheckComp
             )
         }
@@ -137,7 +143,9 @@ struct ComplicationProvider: TimelineProvider {
                 checkEndDate: Date().addingTimeInterval(3 * 60),
                 checkTotalSeconds: 5 * 60,
                 checkStaff: "田中",
+                shampooStaff: "田中",
                 helpProcess: "チェック",
+                isRecruiting: false,
                 isCheckCompleted: false
             ),
             runningCount: 1
@@ -396,10 +404,21 @@ struct ComplicationView: View {
             
             Spacer(minLength: 2)
             
-            // 真ん中: チェック/コーミング等の担当の名前
+            // 真ん中: チェック/シャンプー/コーミング等の担当の名前
             let staffText: String = {
                 let proc = seat.helpProcess ?? "チェック"
-                if let staff = seat.checkStaff, !staff.isEmpty {
+                let assignedStaff: String? = {
+                    if proc == "チェック" {
+                        if let c = seat.checkStaff, !c.isEmpty { return c }
+                        if let s = seat.shampooStaff, !s.isEmpty { return s }
+                        return nil
+                    } else {
+                        if let s = seat.shampooStaff, !s.isEmpty { return s }
+                        if let c = seat.checkStaff, !c.isEmpty { return c }
+                        return nil
+                    }
+                }()
+                if let staff = assignedStaff, !staff.isEmpty {
                     return "\(proc) \(staff)"
                 } else {
                     return "\(proc) 募集中"

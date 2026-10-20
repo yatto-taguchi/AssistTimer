@@ -1065,9 +1065,14 @@ struct ContentView: View {
                             let process = timers[idx].helpProcess
                             timers[idx].status = (process == "コーミング" ? .combing : .shampoo)
                             timers[idx].shampooStaff = currentUserName
+                            if process == "チェック" {
+                                timers[idx].checkStaff = currentUserName
+                            }
+                            timers[idx].isRecruiting = false
                         }
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
                         sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                         let process = item.helpProcess.isEmpty ? "シャンプー" : item.helpProcess
                         showNotification(
                             text: "📤 【\(item.seatNumber)番席】\(currentUserName)さんが\(process)に入りました",
@@ -1283,10 +1288,13 @@ struct ContentView: View {
             },
             onClearStaff: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
-                    let oldStaff = timers[idx].shampooStaff ?? "担当者"
+                    let oldStaff = timers[idx].shampooStaff ?? timers[idx].checkStaff ?? "担当者"
                     timers[idx].shampooStaff = nil
+                    timers[idx].checkStaff = nil
                     timers[idx].status = .normal
+                    timers[idx].isRecruiting = false
                     sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
                         text: "📤 \(oldStaff)さんに担当解除を通知しました",
                         color: Color(hex: "#8E8E93")
@@ -1307,9 +1315,13 @@ struct ContentView: View {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         timers[idx].helpProcess = process
                         timers[idx].shampooStaff = staff
+                        if process == "チェック" {
+                            timers[idx].checkStaff = staff
+                        }
                         timers[idx].isRecruiting = false
                     }
                     sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": process, "assistantStaffName": staff])
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
                         text: "📤 \(staff)さんに【\(process)】を通知しました",
                         color: Color(hex: "#0A84FF")
@@ -1321,9 +1333,13 @@ struct ContentView: View {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         timers[idx].helpProcess = process
                         timers[idx].shampooStaff = nil
+                        if process == "チェック" {
+                            timers[idx].checkStaff = nil
+                        }
                         timers[idx].isRecruiting = true
                     }
                     sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": process])
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     // 募集するの場合は全員に通知する！
                     showNotification(
                         text: "📢 【\(item.seatNumber)番席】\(process)担当を全員に募集通知しました！",

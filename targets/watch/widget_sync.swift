@@ -94,14 +94,18 @@ enum WidgetSync {
                 "related": t.isRelated(to: userName),
                 "totalSeconds": t.totalSeconds,
                 "isCheckCompleted": t.isCheckCompleted,
-                "helpProcess": t.helpProcess
+                "helpProcess": t.helpProcess,
+                "isRecruiting": t.isRecruiting
             ]
+            if let shampoo = t.shampooStaff, !shampoo.isEmpty {
+                d["shampooStaff"] = shampoo
+            }
+            if let staff = t.checkStaff, !staff.isEmpty {
+                d["checkStaff"] = staff
+            }
             if let checkEnd = t.checkTargetEndTime, let checkTot = t.checkTotalSeconds {
                 d["checkEndEpoch"] = checkEnd.timeIntervalSince1970.rounded()
                 d["checkTotalSeconds"] = checkTot
-                if let staff = t.checkStaff {
-                    d["checkStaff"] = staff
-                }
             }
             seats.append(d)
         }
