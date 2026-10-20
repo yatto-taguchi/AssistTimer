@@ -67,7 +67,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     // MARK: - 外部から呼ぶ
 
     /// 席データが変わった時（iPhoneからの受信・Watchでの操作）に呼ぶ。バックグラウンドでも可。
-    func update(timers: [SeatTimerItem], mainTimer: SeatTimerItem? = nil, soundOn: Bool) {
+    func update(timers: [SeatTimerItem], mainTimer: SeatTimerItem? = nil, soundOn: Bool, currentUserName: String? = nil) {
         self.soundOn = soundOn
         var list: [WatchAlarmEvent] = []
         if let m = mainTimer, m.isRunning {
@@ -80,6 +80,11 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             ))
         }
         for t in timers where t.isRunning {
+            // ★ 関係者判定: ユーザー名がある場合、自分に関係する席（作成者・ヘルプ予定・チェック担当・募集中）のみ鳴らす
+            if let user = currentUserName, !user.isEmpty {
+                guard t.isRelated(to: user) else { continue }
+            }
+            
             let label = t.displaySeatName
             let mainEpoch = Int(t.targetEndTime.timeIntervalSince1970)
             list.append(WatchAlarmEvent(
@@ -165,12 +170,22 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         if changed { persist() }
 
         let newRinging = currentRinging(now)
-        if newRinging != ringing { ringing = newRinging }
+        if newRinging != ringing {
+            // 鳴っていたのに消えた予定（相手が止めた・完了した）があれば保留・配信通知も即座に消火
+            let removedKeys = ringing.filter { r in !newRinging.contains(where: { $0.key == r.key }) }.map { $0.key }
+            if !removedKeys.isEmpty {
+                let ids = removedKeys.flatMap { k in repeatOffsets.indices.map { "\(notificationPrefix)\(k).\($0)" } }
+                UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ids)
+                UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
+            }
+            ringing = newRinging
+        }
 
-        // 鳴っている予定が iPhone 側で止められた・席が終了した → スマートアラームも止める
-        if let s = session, let key = sessionKey, sessionStarted {
-            let stillValid = events.contains { $0.key == key } && acknowledged[key] == nil
-            if !stillValid {
+        // 鳴っている予定または予約中の予定が相手によって止められた・席が終了した → アラームを即時消火
+        if let s = session {
+            let keyInvalid = (sessionKey != nil && (!events.contains { $0.key == sessionKey } || acknowledged[sessionKey!] != nil))
+            let noEventsAtAll = events.isEmpty && ringing.isEmpty
+            if keyInvalid || noEventsAtAll {
                 clearSession()
                 s.invalidate()
             }
@@ -200,7 +215,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         ringing = []
         if sendToPhone {
             // ★ 放置タイム終了のアラーム（main）を止めたら、その席のタイマーも停止（0:00）にする。
-            //   チェック時間のアラームは音・振動を止めるだけ（全体タイマーは続行）。
+            //   チェック時間のアラームはチェック完了（completed）にして音・振動を止める（全体タイマーは続行）。
             let mainSeatIds = Set(targets.filter { $0.key.contains("-main@") }.map { $0.seatId })
             let seatIds = Set(targets.map { $0.seatId })
             for id in seatIds {
@@ -210,6 +225,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     // ★ 鳴っていたタイマーの終了時刻。iPhone は席の終了時刻と照合し、別のタイマーなら止めない
                     extra["expectedEnd"] = mainEvent.date.timeIntervalSince1970 * 1000.0
                     WatchSessionManager.shared.applyLocalStop(seatId: id)
+                } else if !isMain {
+                    // ★ チェック時間アラームの停止: Watch側でも即座にチェック完了を反映
+                    WatchSessionManager.shared.applyLocalCheckComplete(seatId: id)
                 }
                 WatchSessionManager.shared.sendActionToPhone(
                     action: "STOP_ALARM",

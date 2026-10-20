@@ -43,11 +43,13 @@ struct SeatTimerItem: Identifiable, Equatable {
     var genre: String? = nil
     
     // 現在の残り秒数（動的計算）
+    // ★ iPhone(HomeScreen)の Math.ceil((targetEndTime - now)/1000) と一致させて1秒の表示ズレを完全解消
     var remainingSeconds: Int {
         if !isRunning {
             return pausedRemainingSeconds
         }
-        return Int(targetEndTime.timeIntervalSince(Date()))
+        let diff = targetEndTime.timeIntervalSince(Date())
+        return diff > 0 ? Int(ceil(diff)) : Int(diff)
     }
     
     // チェックタイマー残り秒数
@@ -68,11 +70,19 @@ struct SeatTimerItem: Identifiable, Equatable {
         return !isRunning && remainingSeconds <= 0
     }
     
-    // 自分に関係している席か判定（作成者 or シャンプー担当 or チェック担当）
+    // 自分に関係している席か判定（作成者 or シャンプー・コーミング等ヘルプ担当 or サブタイマー・チェック担当 or 全員募集中）
     func isRelated(to userName: String) -> Bool {
-        return creatorName == userName ||
-               shampooStaff == userName ||
-               checkStaff == userName
+        let cleanUser = userName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if cleanUser.isEmpty { return true }
+        
+        let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let sStaff = (shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let chkStaff = (checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        
+        return cName == cleanUser ||
+               (!sStaff.isEmpty && sStaff == cleanUser) ||
+               (!chkStaff.isEmpty && chkStaff == cleanUser) ||
+               isRecruiting
     }
     
     // ★ iPhone へ送る停止系操作に付ける「操作した時に見ていた終了時刻」(ms)。停止中なら 0。
@@ -141,6 +151,13 @@ extension SeatTimerItem {
         self.isRecruiting = (dictionary["isRecruiting"] as? NSNumber)?.boolValue ?? (dictionary["isRecruiting"] as? Bool) ?? false
         self.isNoHelpNeeded = (dictionary["isNoHelpNeeded"] as? NSNumber)?.boolValue ?? (dictionary["isNoHelpNeeded"] as? Bool) ?? false
         
+        // ★ 00:00（停止中・待機中・リセット後）の席はヘルプ・助手を完全クリア（固定残り防止）
+        if !self.isRunning && self.pausedRemainingSeconds <= 0 {
+            self.shampooStaff = nil
+            self.isRecruiting = false
+            self.isNoHelpNeeded = false
+        }
+        
         // 施術ステータス (normal, shampoo, combing, check)
         let actionStatus = dictionary["actionStatus"] as? String
         let statusStr = dictionary["status"] as? String
@@ -172,6 +189,13 @@ extension SeatTimerItem {
         self.isMainTimer = (dictionary["isMainTimer"] as? NSNumber)?.boolValue ?? (dictionary["isMainTimer"] as? Bool) ?? (id == "main-timer")
         self.genre = dictionary["genre"] as? String
         self.seatLabel = dictionary["seatLabel"] as? String
+        
+        // ★ 00:00席またはアコーディオン収納席はヘルプ・助手を完全クリア（固定残り防止）
+        if !self.isRunning && (self.pausedRemainingSeconds <= 0 || self.isCollapsed) {
+            self.shampooStaff = nil
+            self.isRecruiting = false
+            self.isNoHelpNeeded = false
+        }
     }
 }
 
@@ -185,6 +209,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     @Published var mainTimer: SeatTimerItem? = nil
     @Published var members: [String] = []
     @Published var currentUserName: String = "スタイリスト"
+    // ★ 相手からのリアルタイム操作通知（タイマー停止、チェック完了、シャンプー開始等）
+    @Published var incomingNotification: (text: String, color: String)? = nil
     // ★ 「iPhoneと即時通信できる状態（isReachable）」のみ true。有効化だけでは true にしない
     @Published var isConnectedToPhone: Bool = false
     
@@ -218,6 +244,14 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     // ★ Watch 上で収納（計測終了）・展開（スリムバーをタップ）した席。停止中は iPhone の値より優先し、
     //   席が稼働したら消す（同期のたびにカードが勝手に開閉しないようにする）
     private var collapseOverrides: [String: Bool] = [:]
+    
+    // ★ メインタイマーの直近ローカル操作保護（Watchで操作後、iPhoneからの古いスナップショットによる巻き戻しを防止）
+    private var lastMainTimerLocalActionTime: Date = Date.distantPast
+    private let mainTimerLocalHoldSeconds: TimeInterval = 5.0
+    
+    func recordMainTimerLocalAction() {
+        self.lastMainTimerLocalActionTime = Date()
+    }
     
     override init() {
         super.init()
@@ -320,17 +354,33 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         collapseOverrides[seatId] = collapsed
     }
     
-    // ★ アラームの「止める」など、画面外から席を止める（Watch の表示をすぐ 0:00 の停止にする。チェックも解除）
+    // ★ アラームの「止める」など、画面外から席を止める（Watch の表示をすぐ 0:00 の停止にする。チェック＆ヘルプも完全解除）
     func applyLocalStop(seatId: String) {
         guard let idx = timers.firstIndex(where: { $0.id == seatId }), timers[idx].isRunning else { return }
         markLocalStop(seatId: seatId, endTime: timers[idx].targetEndTime)
         timers[idx].isRunning = false
         timers[idx].pausedRemainingSeconds = 0
         timers[idx].clearCheck()
+        timers[idx].shampooStaff = nil
+        timers[idx].helpProcess = "シャンプー"
+        timers[idx].isRecruiting = false
+        timers[idx].isNoHelpNeeded = false
         let snapshot = timers
         // アラーム処理の途中から呼ばれるため、予定の再計算は次のループで行う
         DispatchQueue.main.async {
-            WatchAlarmCoordinator.shared.update(timers: snapshot, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled)
+            WatchAlarmCoordinator.shared.update(timers: snapshot, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled, currentUserName: self.currentUserName)
+            WidgetSync.save(timers: snapshot, mainTimer: self.mainTimer, userName: self.currentUserName)
+        }
+    }
+    
+    // ★ チェックタイマーのアラーム「止める」などで、Watch の表示を即座にチェック完了にする
+    func applyLocalCheckComplete(seatId: String) {
+        guard let idx = timers.firstIndex(where: { $0.id == seatId }) else { return }
+        timers[idx].isCheckCompleted = true
+        timers[idx].checkStaff = self.currentUserName
+        let snapshot = timers
+        DispatchQueue.main.async {
+            WatchAlarmCoordinator.shared.update(timers: snapshot, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled, currentUserName: self.currentUserName)
             WidgetSync.save(timers: snapshot, mainTimer: self.mainTimer, userName: self.currentUserName)
         }
     }
@@ -361,6 +411,17 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             self.members = membersArray
         }
         
+        // ★ 相手からのリアルタイム操作通知（タイマー停止、チェック完了、シャンプー開始等）
+        if let notif = data["notification"] as? [String: Any], let text = notif["text"] as? String, !text.isEmpty {
+            let colorHex = notif["color"] as? String ?? "#30D158"
+            let sourceUser = notif["sourceUser"] as? String ?? ""
+            if sourceUser.isEmpty || sourceUser != self.currentUserName {
+                DispatchQueue.main.async {
+                    self.incomingNotification = (text: text, color: colorHex)
+                }
+            }
+        }
+        
         // ★ Watch 側アラーム音の設定
         if let sound = (data["watchAlarmSound"] as? NSNumber)?.boolValue ?? (data["watchAlarmSound"] as? Bool) {
             if sound != self.alarmSoundEnabled {
@@ -369,9 +430,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
         }
         
-        // メインタイマー同期
+        // メインタイマー同期（直近Watchローカル操作中は古いデータによる上書きをブロック）
         if let rawMain = data["mainTimer"] as? [String: Any], let parsedMain = SeatTimerItem(dictionary: rawMain) {
-            self.mainTimer = parsedMain
+            let isRecentlyModifiedOnWatch = Date().timeIntervalSince(self.lastMainTimerLocalActionTime) < self.mainTimerLocalHoldSeconds
+            if !isRecentlyModifiedOnWatch {
+                self.mainTimer = parsedMain
+            }
         }
 
         // 座席リスト同期（型ゆらぎを許容して1席ずつ確実にパース）
@@ -383,44 +447,57 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
                 return nil
             }
-            // ★ Watch で止めたのに、まだ「止める前と同じ終了時刻で稼働中」のデータが届いた場合は、
-            //   iPhone がまだ反映していないだけなので停止のままにする（最大60秒）
-            let nowDate = Date()
-            for i in parsed.indices {
-                let id = parsed[i].id
-                guard let stop = localStops[id] else { continue }
-                let sameEnd = abs(parsed[i].targetEndTime.timeIntervalSince1970 - stop.end) < 2
-                if parsed[i].isRunning && sameEnd && nowDate.timeIntervalSince(stop.at) < localStopHoldSeconds {
-                    parsed[i].isRunning = false
-                    parsed[i].pausedRemainingSeconds = 0
-                } else {
-                    localStops[id] = nil
+            // ★ 安全防御: すでに客席があり、稼働中のタイマーが存在する場合、空配列による全消滅・強制停止を防ぐ
+            if parsed.isEmpty && !self.timers.isEmpty && self.timers.contains(where: { $0.isRunning }) {
+                // 稼働中タイマーがある時は空データでの上書きをブロック
+            } else {
+                // ★ Watch で止めたのに、まだ「止める前と同じ終了時刻で稼働中」のデータが届いた場合は、
+                //   iPhone がまだ反映していないだけなので停止のままにする（最大60秒）
+                let nowDate = Date()
+                for i in parsed.indices {
+                    let id = parsed[i].id
+                    guard let stop = localStops[id] else { continue }
+                    let sameEnd = abs(parsed[i].targetEndTime.timeIntervalSince1970 - stop.end) < 2
+                    if parsed[i].isRunning && sameEnd && nowDate.timeIntervalSince(stop.at) < localStopHoldSeconds {
+                        parsed[i].isRunning = false
+                        parsed[i].pausedRemainingSeconds = 0
+                    } else {
+                        localStops[id] = nil
+                    }
                 }
-            }
-            // ★ カードの収納: 稼働中の席は常に展開。停止中は Watch 上での操作を優先し、00:00で何も入っていない席は初期状態で閉じる
-            for i in parsed.indices {
-                let id = parsed[i].id
-                if parsed[i].isRunning {
-                    parsed[i].isCollapsed = false
-                    collapseOverrides[id] = nil
-                } else if let collapsed = collapseOverrides[id] {
-                    parsed[i].isCollapsed = collapsed
-                } else if parsed[i].isZero {
-                    parsed[i].isCollapsed = true
+                // ★ カードの収納: 稼働中の席は常に展開。停止中は Watch 上での操作を優先し、00:00で何も入っていない席は初期状態で閉じる
+                for i in parsed.indices {
+                    let id = parsed[i].id
+                    if parsed[i].isRunning {
+                        parsed[i].isCollapsed = false
+                        collapseOverrides[id] = nil
+                    } else if let collapsed = collapseOverrides[id] {
+                        parsed[i].isCollapsed = collapsed
+                    } else if parsed[i].isZero {
+                        parsed[i].isCollapsed = true
+                    }
                 }
+                self.lastReceivedSeatCount = parsed.count
+                self.timers = parsed
+                // ★ バックグラウンド受信でもアラーム予定（通知・スマートアラーム）を更新（関係者判定付き）
+                WatchAlarmCoordinator.shared.update(timers: parsed, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled, currentUserName: self.currentUserName)
+                // ★ 文字盤コンプリケーションへ共有
+                WidgetSync.save(timers: parsed, mainTimer: self.mainTimer, userName: self.currentUserName)
             }
-            self.lastReceivedSeatCount = parsed.count
-            self.timers = parsed
-            // ★ バックグラウンド受信でもアラーム予定（通知・スマートアラーム）を更新
-            WatchAlarmCoordinator.shared.update(timers: parsed, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled)
-            // ★ 文字盤コンプリケーションへ共有
-            WidgetSync.save(timers: parsed, mainTimer: self.mainTimer, userName: self.currentUserName)
+        } else if data["mainTimer"] != nil {
+            // ★ メインタイマーのみの更新時（seatsキーなし）も文字盤・アラームを同期
+            WatchAlarmCoordinator.shared.update(timers: self.timers, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled, currentUserName: self.currentUserName)
+            WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer, userName: self.currentUserName)
         }
     }
     
-    // ★ メインタイマー専用の操作送信（携帯の音出力フラグを付与）
+    // ★ メインタイマー専用の操作送信（携帯の音出力フラグおよび一意なactionIdを付与）
     func sendMainTimerAction(action: String, extra: [String: Any] = [:]) {
+        recordMainTimerLocalAction()
         var fullExtra = extra
+        if fullExtra["actionId"] == nil {
+            fullExtra["actionId"] = "\(action)_\(Int(Date().timeIntervalSince1970 * 1000))"
+        }
         if fullExtra["playSoundOnPhone"] == nil {
             fullExtra["playSoundOnPhone"] = UserDefaults.standard.bool(forKey: "assisttimer.mainTimerPhoneSound")
         }
@@ -582,6 +659,9 @@ struct ContentView: View {
     // ヘルプスタッフ選択シート対象席（未指定時またはスタッフ変更時）
     @State private var selectHelpStaffTargetId: String? = nil
     
+    // チェック担当スタッフ選択シート対象席（未指定時または担当変更時）
+    @State private var selectCheckStaffTargetId: String? = nil
+    
     // 共有通知バナー（トースト表示）
     @State private var notificationBannerText: String? = nil
     @State private var notificationBannerColor: Color = Color(hex: "#0A84FF")
@@ -690,6 +770,13 @@ struct ContentView: View {
         )
     }
     
+    private var bindingSelectCheckStaff: Binding<SeatTimerItem?> {
+        Binding(
+            get: { timers.first { $0.id == selectCheckStaffTargetId } },
+            set: { _ in selectCheckStaffTargetId = nil }
+        )
+    }
+    
     var body: some View {
         ZStack {
             NavigationStack {
@@ -701,11 +788,11 @@ struct ContentView: View {
                     }
                 }
                 .onChange(of: timers) { _, newTimers in
-                    alarm.update(timers: newTimers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled)
+                    alarm.update(timers: newTimers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                     WidgetSync.save(timers: newTimers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                 }
                 .onChange(of: sessionManager.mainTimer) { _, newMain in
-                    alarm.update(timers: timers, mainTimer: newMain, soundOn: sessionManager.alarmSoundEnabled)
+                    alarm.update(timers: timers, mainTimer: newMain, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                     WidgetSync.save(timers: timers, mainTimer: newMain, userName: currentUserName)
                 }
                 .onChange(of: alarm.ringing.isEmpty) { _, isEmpty in
@@ -858,6 +945,8 @@ struct ContentView: View {
                             main.isRunning = false
                             main.pausedRemainingSeconds = main.totalSeconds
                             sessionManager.mainTimer = main
+                            WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+                            WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                             sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
                         },
                         onSetTime: { totalSec in
@@ -913,6 +1002,10 @@ struct ContentView: View {
             .sheet(item: bindingSelectHelpStaff) { item in
                 selectHelpWorkflowSheetView(item: item)
             }
+            // ★ チェック担当スタッフ指定・募集シート
+            .sheet(item: bindingSelectCheckStaff) { item in
+                selectCheckStaffSheetView(item: item)
+            }
             .onReceive(ticker) { input in
                 now = input
                 checkUnassignedHelpAlerts()
@@ -928,9 +1021,15 @@ struct ContentView: View {
                     self.currentUserName = receivedName
                 }
             }
+            .onReceive(sessionManager.$incomingNotification) { notif in
+                if let notif = notif {
+                    showNotification(text: notif.text, color: Color(hex: notif.color))
+                    sessionManager.incomingNotification = nil
+                }
+            }
             .onAppear {
                 sessionManager.requestSyncFromPhone()
-                alarm.update(timers: timers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled)
+                alarm.update(timers: timers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                 if !hasInitialOpenedMap && alarm.ringing.isEmpty {
                     hasInitialOpenedMap = true
                     showingThumbnailMap = true
@@ -1147,6 +1246,8 @@ struct ContentView: View {
                                     m.isRunning = false
                                     m.pausedRemainingSeconds = m.totalSeconds
                                     sessionManager.mainTimer = m
+                                    WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
+                                    WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                                 }
                                 sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
                             },
@@ -1181,6 +1282,10 @@ struct ContentView: View {
                                 },
                                 onOpenCheckAction: {
                                     checkActionTargetId = item.id
+                                    playHaptic(.click)
+                                },
+                                onOpenSelectCheckStaff: {
+                                    selectCheckStaffTargetId = item.id
                                     playHaptic(.click)
                                 },
                                 onClaimCheck: {
@@ -1454,6 +1559,11 @@ struct ContentView: View {
         CheckActionSheet(
             item: item,
             currentUserName: currentUserName,
+            onOpenSelectStaff: {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    selectCheckStaffTargetId = item.id
+                }
+            },
             onCompleteCheck: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     timers[idx].isCheckCompleted = true
@@ -1470,6 +1580,60 @@ struct ContentView: View {
                     sessionManager.sendActionToPhone(action: "CANCEL_CHECK", seatId: item.id)
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     playHaptic(.click)
+                }
+            }
+        )
+    }
+    
+    // ★ チェック担当スタッフ指定・募集シートビュー
+    @ViewBuilder
+    private func selectCheckStaffSheetView(item: SeatTimerItem) -> some View {
+        SelectCheckStaffSheet(
+            item: item,
+            currentUserName: currentUserName,
+            staffCandidates: sessionManager.members,
+            onAssignStaff: { staff in
+                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        timers[idx].checkStaff = staff
+                        timers[idx].helpProcess = "チェック"
+                        timers[idx].isRecruiting = false
+                    }
+                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": "チェック", "assistantStaffName": staff, "checkStaffName": staff])
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    showNotification(
+                        text: "📤 \(staff)さんをチェック担当に指定しました",
+                        color: Color(hex: "#30D158")
+                    )
+                }
+            },
+            onRecruitAll: {
+                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        timers[idx].checkStaff = nil
+                        timers[idx].helpProcess = "チェック"
+                        timers[idx].isRecruiting = true
+                    }
+                    sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": "チェック"])
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    showNotification(
+                        text: "📢 【\(item.displaySeatName)】チェック担当を全員に募集通知しました！",
+                        color: Color(hex: "#FF9F0A")
+                    )
+                }
+            },
+            onClearStaff: {
+                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        timers[idx].checkStaff = nil
+                        timers[idx].isRecruiting = false
+                    }
+                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": "チェック", "assistantStaffName": "", "checkStaffName": ""])
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    showNotification(
+                        text: "👤 チェック担当を未定に戻しました",
+                        color: Color(hex: "#8E8E93")
+                    )
                 }
             }
         )
@@ -1960,6 +2124,7 @@ struct SeatTimerCard: View {
     let onOpenSelectHelpStaff: () -> Void
     let onOpenShampooAction: () -> Void
     let onOpenCheckAction: () -> Void
+    let onOpenSelectCheckStaff: () -> Void
     let onClaimCheck: () -> Void
     
     // 自分に関係している席か判定
@@ -2337,7 +2502,10 @@ struct SeatTimerCard: View {
     
     @ViewBuilder
     private var helpStaffSection: some View {
-        if let staff = item.shampooStaff {
+        // ★ 00:00席およびアコーディオン収納席はヘルプを完全解除・非表示
+        if item.isZero || item.isCollapsed {
+            EmptyView()
+        } else if let staff = item.shampooStaff {
             staffAssignedButton(staff: staff)
         } else if item.isRecruiting {
             // ★ 全員に募集中！
@@ -2416,8 +2584,9 @@ struct SeatTimerCard: View {
     @ViewBuilder
     private var checkTimerSection: some View {
         if let checkSec = item.checkRemainingSeconds {
-            Button(action: onOpenCheckAction) {
-                HStack(alignment: .center) {
+            HStack(alignment: .center) {
+                // 左側: タイマー詳細操作（タップで完了・解除などのシート）
+                Button(action: onOpenCheckAction) {
                     HStack(spacing: 4) {
                         Image(systemName: "magnifyingglass")
                             .font(.system(size: 11, weight: .bold))
@@ -2431,10 +2600,14 @@ struct SeatTimerCard: View {
                                 .foregroundColor(Color(hex: "#30D158"))
                         }
                     }
-                    
-                    Spacer()
-                    
-                    if let cStaff = item.checkStaff {
+                }
+                .buttonStyle(.plain)
+                
+                Spacer()
+                
+                // 右側: 担当スタッフ指定・変更（最初は未定で、タップで担当者を指定可能）
+                if let cStaff = item.checkStaff {
+                    Button(action: onOpenSelectCheckStaff) {
                         HStack(spacing: 3) {
                             Image(systemName: "person.fill.checkmark")
                                 .font(.system(size: 9))
@@ -2446,29 +2619,56 @@ struct SeatTimerCard: View {
                         .padding(.vertical, 5)
                         .background(Color(hex: "#30D158").opacity(0.2))
                         .cornerRadius(6)
-                    } else {
-                        Button(action: onClaimCheck) {
-                            Text("私がチェック")
-                                .font(.system(size: 10, weight: .heavy))
-                                .foregroundColor(.black)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 5)
-                                .background(Color(hex: "#30D158"))
-                                .cornerRadius(6)
-                        }
-                        .buttonStyle(.plain)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color(hex: "#30D158").opacity(0.4), lineWidth: 1)
+                        )
                     }
+                    .buttonStyle(.plain)
+                } else if item.isRecruiting {
+                    Button(action: onOpenSelectCheckStaff) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "megaphone.fill")
+                                .font(.system(size: 9))
+                            Text("募集中 >")
+                                .font(.system(size: 10, weight: .heavy))
+                        }
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 5)
+                        .background(Color(hex: "#FF9F0A"))
+                        .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button(action: onOpenSelectCheckStaff) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "person.badge.plus")
+                                .font(.system(size: 9))
+                            Text("未定 >")
+                                .font(.system(size: 10, weight: .heavy))
+                        }
+                        .foregroundColor(Color(hex: "#FFD60A"))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 5)
+                        .background(Color(hex: "#FF9F0A").opacity(0.25))
+                        .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color(hex: "#FF9F0A").opacity(0.6), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(Color(hex: "#30D158").opacity(0.14))
-                .cornerRadius(10)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color(hex: "#30D158").opacity(0.4), lineWidth: 1)
-                )
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(hex: "#30D158").opacity(0.14))
+            .cornerRadius(10)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color(hex: "#30D158").opacity(0.4), lineWidth: 1)
+            )
         } else if item.isCheckCompleted {
             HStack(spacing: 4) {
                 Image(systemName: "checkmark.seal.fill")
@@ -2871,15 +3071,15 @@ struct MainTimerActionSheet: View {
                     .buttonStyle(.plain)
                 }
                 
-                // ⑤ 時間微調整ボタン（+1分, +3分, +5分, -1分）
-                HStack(spacing: 5) {
-                    ForEach([("+1分", 60), ("+3分", 180), ("+5分", 300), ("-1分", -60)], id: \.0) { label, delta in
+                // ⑤ 時間微調整ボタン（+30秒, +1分, -30秒, -1分）
+                HStack(spacing: 4) {
+                    ForEach([("+30秒", 30), ("+1分", 60), ("-30秒", -30), ("-1分", -60)], id: \.0) { label, delta in
                         Button(action: {
                             WKInterfaceDevice.current().play(.click)
                             onAdjust(delta)
                         }) {
                             Text(label)
-                                .font(.system(size: 10, weight: .bold))
+                                .font(.system(size: 9.5, weight: .bold))
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 6)
                                 .background(Color.white.opacity(0.12))
@@ -3508,6 +3708,7 @@ struct CheckActionSheet: View {
     @Environment(\.dismiss) var dismiss
     let item: SeatTimerItem
     let currentUserName: String
+    let onOpenSelectStaff: () -> Void
     let onCompleteCheck: () -> Void
     let onCancelCheck: () -> Void
     
@@ -3522,7 +3723,34 @@ struct CheckActionSheet: View {
                     Text("担当: \(staff)")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(Color(hex: "#30D158"))
+                } else if item.isRecruiting {
+                    Text("担当: 募集中")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(Color(hex: "#FF9F0A"))
+                } else {
+                    Text("担当: 未定")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(Color(hex: "#FFD60A"))
                 }
+                
+                // ★ 担当者を指定/変更ボタン（タップでスタッフ選択シートを開く）
+                Button(action: {
+                    dismiss()
+                    onOpenSelectStaff()
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "person.badge.plus")
+                            .font(.system(size: 12, weight: .bold))
+                        Text(item.checkStaff == nil ? "担当者を指定する" : "担当者を変更する")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "#0A84FF"))
+                    .foregroundColor(.white)
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
                 
                 Button(action: {
                     onCompleteCheck()
@@ -3554,6 +3782,159 @@ struct CheckActionSheet: View {
                         .cornerRadius(8)
                 }
                 .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+        }
+    }
+}
+
+// MARK: - チェック担当スタッフ指定・募集シート
+struct SelectCheckStaffSheet: View {
+    @Environment(\.dismiss) var dismiss
+    let item: SeatTimerItem
+    let currentUserName: String
+    let staffCandidates: [String]
+    let onAssignStaff: (String) -> Void
+    let onRecruitAll: () -> Void
+    let onClearStaff: () -> Void
+    
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 8) {
+                // ヘッダー部
+                VStack(spacing: 2) {
+                    Text("\(item.displaySeatName) チェック担当")
+                        .font(.system(size: 13, weight: .heavy))
+                        .foregroundColor(.white)
+                    
+                    Text("チェック担当の指定または全員に募集")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.gray)
+                }
+                
+                Divider()
+                
+                // ① 全員に募集する（アンバー）
+                Button(action: {
+                    onRecruitAll()
+                    dismiss()
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "megaphone.fill")
+                            .font(.system(size: 12, weight: .heavy))
+                        Text("全員に募集する")
+                            .font(.system(size: 13, weight: .black))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(
+                        LinearGradient(colors: [Color(hex: "#FF9F0A"), Color(hex: "#FF8000")], startPoint: .leading, endPoint: .trailing)
+                    )
+                    .foregroundColor(.black)
+                    .cornerRadius(8)
+                    .shadow(color: Color(hex: "#FF9F0A").opacity(0.4), radius: 2, x: 0, y: 1)
+                }
+                .buttonStyle(.plain)
+                
+                // ② あなた（自分）が担当する（緑）
+                Button(action: {
+                    onAssignStaff(currentUserName)
+                    dismiss()
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.fill.checkmark")
+                            .font(.system(size: 12, weight: .heavy))
+                        Text("自分がチェックする")
+                            .font(.system(size: 13, weight: .heavy))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "#30D158"))
+                    .foregroundColor(.black)
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                
+                // ③ 個別スタッフを指定
+                Text("スタッフを指名（相手に通知）")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(Color(hex: "#A0A0A5"))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 2)
+                
+                if staffCandidates.isEmpty {
+                    VStack(spacing: 4) {
+                        Image(systemName: "person.crop.circle.badge.plus")
+                            .font(.system(size: 20))
+                            .foregroundColor(Color(hex: "#0A84FF"))
+                        Text("📱 スマホの共有コードでメンバーを連携してください")
+                            .font(.system(size: 9.5, weight: .bold))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 6)
+                    .background(Color.white.opacity(0.06))
+                    .cornerRadius(8)
+                } else {
+                    ForEach(staffCandidates, id: \.self) { staff in
+                        let isMe = (staff == currentUserName)
+                        let isSelected = (item.checkStaff == staff)
+                        
+                        Button(action: {
+                            onAssignStaff(staff)
+                            dismiss()
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: isMe ? "star.fill" : "person.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
+                                
+                                Text(isMe ? "\(staff)（あなた）" : staff)
+                                    .font(.system(size: 12, weight: isMe ? .heavy : .bold))
+                                
+                                Spacer()
+                                
+                                if isSelected {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundColor(Color(hex: "#30D158"))
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(isSelected ? Color(hex: "#30D158").opacity(0.2) : (isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12)))
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(isSelected ? Color(hex: "#30D158").opacity(0.6) : (isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1)), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                
+                // ④ 既に担当者がいる場合、未定に戻すボタン
+                if item.checkStaff != nil || item.isRecruiting {
+                    Button(action: {
+                        onClearStaff()
+                        dismiss()
+                    }) {
+                        Text("担当を未定に戻す")
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(0.08))
+                            .foregroundColor(.gray)
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 2)
+                }
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
@@ -4204,11 +4585,11 @@ struct SelectHelpWorkflowSheet: View {
                                 .font(.system(size: 24))
                                 .foregroundColor(Color(hex: "#0A84FF"))
                                 .padding(.top, 2)
-                            Text("📱 スマホアプリでメンバーを追加してください")
+                            Text("📱 スマホの共有コードでメンバーを連携してください")
                                 .font(.system(size: 10, weight: .bold))
                                 .foregroundColor(.white)
                                 .multilineTextAlignment(.center)
-                            Text("サロン画面の「メンバー」から追加すると\nここに自動でスタッフが表示されます")
+                            Text("サロン画面の「メンバー」から共有コードで連携すると\nここに自動でスタッフが表示されます")
                                 .font(.system(size: 8.5))
                                 .foregroundColor(Color(hex: "#8E8E93"))
                                 .multilineTextAlignment(.center)
@@ -4701,7 +5082,7 @@ struct ThumbnailSeatCard: View {
             
             // ★ チェック体制（途中チェックタイマー稼働中のみ中段下部に表示）
             if let checkRem = item.checkRemainingSeconds, !item.isCheckCompleted {
-                let checkStaff = item.checkStaff ?? "募集中"
+                let checkStaff = item.checkStaff ?? (item.isRecruiting ? "募集中" : "未定")
                 let isCheckOver = checkRem <= 0
                 let isCheckUnder1Min = checkRem <= 60
                 let checkColor: Color = (isCheckOver || isCheckUnder1Min) ? Color(hex: "#FF453A") : Color(hex: "#FF9F0A")
@@ -4743,6 +5124,11 @@ struct ThumbnailSeatCard: View {
                             .font(.system(size: 6.5))
                             .foregroundColor(Color(hex: "#8E8E93"))
                         Text("助:なし (一人)")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundColor(Color(hex: "#8E8E93"))
+                            .lineLimit(1)
+                    } else if (!isRunning && rem <= 0) || item.isZero || item.isCollapsed {
+                        Text("助:待機中")
                             .font(.system(size: 8, weight: .medium))
                             .foregroundColor(Color(hex: "#8E8E93"))
                             .lineLimit(1)

@@ -799,9 +799,9 @@ export const AppProvider = ({ children }) => {
   // サロン画面等からのメインタイマー操作リクエスト（タイムスタンプ＋アクション名）
   const [mainTimerActionRequest, setMainTimerActionRequest] = useState(null);
 
-  const requestMainTimerAction = (action, payload = null) => {
-    // action: 'start' | 'pause' | 'reset' | 'set_time'
-    setMainTimerActionRequest({ action, payload, timestamp: Date.now() });
+  const requestMainTimerAction = (action, payload = null, actionId = null) => {
+    // action: 'start' | 'pause' | 'reset' | 'set_time' | 'adjust'
+    setMainTimerActionRequest({ action, payload, actionId, timestamp: Date.now() });
   };
 
   return (

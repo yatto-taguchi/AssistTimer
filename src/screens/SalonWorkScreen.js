@@ -88,6 +88,35 @@ export const getDefaultInitialSeats = (staffName = 'スタイリスト') => [
   },
 ];
 
+// ★ スタッフメンバーの正規化ヘルパー（一意のID管理・相手ニックネーム・任意設定の呼び名を両立）
+export const normalizeStaffMembers = (list) => {
+  if (!Array.isArray(list)) return [];
+  return list.map((m, idx) => {
+    if (!m) return null;
+    if (typeof m === 'string') {
+      return {
+        id: `mem_legacy_${idx}_${m}`,
+        originalNickname: m,
+        customNickname: m,
+        joinedAt: Date.now(),
+      };
+    }
+    return {
+      id: m.id || `mem_${Date.now()}_${idx}`,
+      originalNickname: m.originalNickname || m.name || m.nickname || 'スタッフ',
+      customNickname: m.customNickname || m.originalNickname || m.name || m.nickname || 'スタッフ',
+      inviteCode: m.inviteCode || '',
+      joinedAt: m.joinedAt || Date.now(),
+    };
+  }).filter(Boolean);
+};
+
+export const getMemberDisplayName = (m) => {
+  if (!m) return '';
+  if (typeof m === 'string') return m;
+  return m.customNickname || m.originalNickname || m.name || 'スタッフ';
+};
+
 // キャッシュされた最新スタッフメンバー・座席・ユーザー名・メインタイマー一覧
 let _cachedStaffMembers = [];
 let _cachedCurrentSeats = [];
@@ -102,25 +131,65 @@ export const updateCachedMainTimerState = (state) => {
   _cachedMainTimerState = state;
 };
 
+// ★ Apple Watchへのメインタイマー専用同期ヘルパー（客席seatsを絶対に含めず、各タイマーの完全独立を保証）
+export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
+  if (Platform.OS !== 'ios') return;
+  try {
+    const state = mainState || _cachedMainTimerState;
+    if (!state) return;
+
+    const isRunning = !!state.isRunning;
+    const isCountUp = !!state.isCountUp;
+    const targetEnd = state.targetEndTimestamp || (
+      isRunning 
+        ? (isCountUp ? Date.now() - (state.remainingTime || 0) * 1000 : Date.now() + (state.remainingTime || 0) * 1000)
+        : 0
+    );
+    
+    const pausedRem = !isRunning
+      ? (isCountUp ? -Math.max(0, state.remainingTime || 0) : Math.max(0, state.remainingTime || 0))
+      : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
+
+    const mainTimerPayload = {
+      id: 'main-timer',
+      seatNumber: 0,
+      seatLabel: 'メインタイマー',
+      isMainTimer: true,
+      creatorName: (_cachedUserName || 'スタイリスト').trim(),
+      totalSeconds: state.targetTime || 600,
+      targetEndTimestamp: targetEnd,
+      isRunning: isRunning,
+      pausedRemainingSeconds: pausedRem,
+      isCountUp: isCountUp,
+      genre: state.genre || '',
+    };
+
+    // ★ seats キーは絶対に含めない。Watch 側の timers 配列に1ミリも触れさせない！
+    const watchPayload = {
+      type: 'SYNC_MAIN_TIMER',
+      timestamp: Date.now(),
+      mainTimer: mainTimerPayload,
+    };
+
+    WatchConnectivity.syncData(watchPayload).catch(() => {});
+  } catch (e) {
+    console.warn('[WatchConnectivity] syncMainTimerToWatch failed:', e);
+  }
+};
+
 // ★ Apple Watchへの客席・メインタイマー・スタッフ名リアルタイム同期ヘルパー（即時送信対応＆デバウンス両立）
 export const syncSeatsToWatch = async (currentSeats = null, currentName = null, currentMembers = null, options = {}) => {
   if (Platform.OS !== 'ios') return;
   try {
-    if (Array.isArray(currentSeats)) {
+    let validSeats = null;
+    if (Array.isArray(currentSeats) && currentSeats.length > 0) {
       _cachedCurrentSeats = currentSeats;
-    } else if (_cachedCurrentSeats.length > 0) {
-      currentSeats = _cachedCurrentSeats;
-    } else {
-      try {
-        const saved = await AsyncStorage.getItem('@salon_saved_seats');
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed)) {
-            currentSeats = parsed;
-            _cachedCurrentSeats = parsed;
-          }
-        }
-      } catch {}
+      validSeats = currentSeats;
+    } else if (Array.isArray(_cachedCurrentSeats) && _cachedCurrentSeats.length > 0) {
+      validSeats = _cachedCurrentSeats;
+    } else if (currentSeats !== null && Array.isArray(currentSeats)) {
+      validSeats = [];
+      _cachedCurrentSeats = [];
     }
 
     if (currentName) {
@@ -176,14 +245,31 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
       };
     }
 
+    const flatMembers = Array.isArray(finalMembers)
+      ? finalMembers.map((m) => (typeof m === 'string' ? m : (m.customNickname || m.originalNickname || m.name || 'スタッフ')))
+      : [];
+
     const watchPayload = {
       type: 'SYNC_SEATS',
       userName: (currentName || 'スタイリスト').trim(),
-      members: Array.isArray(finalMembers) ? finalMembers : [],
+      members: flatMembers,
       watchAlarmSound: _watchAlarmSound,
       timestamp: Date.now(),
       mainTimer: mainTimerPayload,
-      seats: (currentSeats || []).map((s, index) => {
+    };
+
+    // ★ 相手へのリアルタイム通知（タイマー停止、チェック完了、アラーム停止等）
+    if (options.notification && typeof options.notification === 'object') {
+      watchPayload.notification = {
+        text: String(options.notification.text || ''),
+        color: String(options.notification.color || '#30D158'),
+        sourceUser: String(options.notification.sourceUser || currentName || 'スタイリスト').trim(),
+      };
+    }
+
+    // ★ 客席データが有効な場合のみ seats を追加。未指定（null）の時は seats を含めず客席タイマーを保護
+    if (validSeats !== null) {
+      watchPayload.seats = validSeats.map((s, index) => {
         let seatNum = index + 1;
         if (s.seatLabel) {
           const match = s.seatLabel.match(/\d+/);
@@ -197,7 +283,10 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
           ? Math.max(0, Math.floor(s.pausedRemainingSeconds))
           : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
-        const isNoHelp = s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none';
+        const isZero = !isRunning && pausedRem <= 0;
+        const isCollapsedSeat = !isRunning && !s.isReset && s.collapsedAtEnd != null
+          && Number(s.collapsedAtEnd) === Number(s.targetEndTimestamp || 0);
+        const isNoHelp = !isZero && !isCollapsedSeat && (s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none');
 
         return {
           id: String(s.id),
@@ -208,24 +297,23 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
           targetEndTimestamp: targetEnd,
           isRunning: isRunning,
           pausedRemainingSeconds: pausedRem,
-          helpProcess: s.actionStatus === 'shampoo' || s.isShampooing ? 'シャンプー' : (s.actionStatus || 'シャンプー'),
-          shampooStaff: isNoHelp ? '' : (s.assistantStaffName || ''),
-          isRecruiting: !isNoHelp && !s.assistantStaffName && isRunning,
+          helpProcess: (isZero || isCollapsedSeat) ? '' : (s.actionStatus === 'shampoo' || s.isShampooing ? 'シャンプー' : (s.actionStatus || 'シャンプー')),
+          shampooStaff: (isNoHelp || isZero || isCollapsedSeat) ? '' : (s.assistantStaffName || ''),
+          isRecruiting: !isNoHelp && !isZero && !isCollapsedSeat && !s.assistantStaffName && isRunning,
           isNoHelpNeeded: isNoHelp,
-          status: s.isShampooing || s.actionStatus === 'shampoo' ? 'shampoo' : (s.actionStatus || 'normal'),
+          status: (isZero || isCollapsedSeat) ? 'normal' : (s.isShampooing || s.actionStatus === 'shampoo' ? 'shampoo' : (s.actionStatus || 'normal')),
           checkTargetSeconds: s.checkTargetSeconds ? Number(s.checkTargetSeconds) : 0,
           checkEndTimestamp: s.checkEndTimestamp ? Number(s.checkEndTimestamp) : 0,
           checkStaffName: s.checkStaffName || '',
           isCheckCompleted: s.checkStatus === 'completed',
           // ★ Watch の「計測終了」で収納したカード。その時の終了時刻のまま停止している間だけ収納を保つ
           //   （以前は常に false を送っていたため、次の同期でカードが開いてしまっていた）
-          isCollapsed: !isRunning && !s.isReset && s.collapsedAtEnd != null
-            && Number(s.collapsedAtEnd) === Number(s.targetEndTimestamp || 0),
+          isCollapsed: isCollapsedSeat,
         };
-      }),
-    };
+      });
+    }
 
-    if (options.immediate) {
+    if (options.immediate || options.notification) {
       if (_syncDebounceTimer) {
         clearTimeout(_syncDebounceTimer);
         _syncDebounceTimer = null;
@@ -321,12 +409,17 @@ export default function SalonWorkScreen() {
   const [isConfirmProxyModalVisible, setIsConfirmProxyModalVisible] = useState(false);
   const [confirmProxyTargetSeat, setConfirmProxyTargetSeat] = useState(null);
 
-  // ★ サロン所属スタッフメンバー管理（初期値は空 []、スマホ側から追加・編集・削除可能）
+  // ★ サロン所属スタッフメンバー管理（一意ID・相手登録名・任意カスタム呼び名を保持）
   const [staffMembers, setStaffMembers] = useState([]);
   // ★ 席データ等の初期読み込み完了フラグ（Watchからの操作の受け取り開始条件）
   const [isDataLoaded, setIsDataLoaded] = useState(false);
   const [isMemberManageModalVisible, setIsMemberManageModalVisible] = useState(false);
-  const [inputNewMemberName, setInputNewMemberName] = useState('');
+  const [memberManageSection, setMemberManageSection] = useState('list'); // 'list' | 'join'
+  const [inputJoinMemberCode, setInputJoinMemberCode] = useState('');
+  const [inputJoinMemberNickname, setInputJoinMemberNickname] = useState('');
+  const [editingMemberForNickname, setEditingMemberForNickname] = useState(null);
+  const [inputMemberCustomNickname, setInputMemberCustomNickname] = useState('');
+  const [isEditNicknameModalVisible, setIsEditNicknameModalVisible] = useState(false);
 
   // 施術履歴（タイムライン）手動追加モーダル用ステート
   const [isAddHistoryModalVisible, setIsAddHistoryModalVisible] = useState(false);
@@ -343,6 +436,12 @@ export default function SalonWorkScreen() {
 
   // ★ ユーザー指定: 全体タイマー右側ヘルプ担当ボタンの表示ラベル（「チェック未定」ではなく「ヘルプ未定 ▾」）
   const getHelpHeaderButtonLabel = (seat, isAlert) => {
+    // ★ 00:00席・リセット席・未稼働停止席はヘルプを待機中として扱う（過去のヘルプ固定残り防止）
+    const isZeroSeat = seat?.isReset || (seat?.status === 'paused' && (seat?.pausedRemainingSeconds <= 0 || seat?.pausedRemainingSeconds == null));
+    if (isZeroSeat) {
+      return '待機中 ▾';
+    }
+
     const staff = (seat?.assistantStaffName || '').trim();
     const isNoHelp = staff === 'ヘルプなし' || staff === 'none';
     const actionInfo = getActionStatusInfo(seat?.actionStatus, seat?.isShampooing);
@@ -638,7 +737,8 @@ export default function SalonWorkScreen() {
   const salonStaffList = useMemo(() => {
     const list = new Set();
     staffMembers.forEach((m) => {
-      if (m && m.trim()) list.add(m.trim());
+      const name = getMemberDisplayName(m);
+      if (name && name.trim()) list.add(name.trim());
     });
     seats.forEach((s) => {
       if (s.colorStaffName) list.add(s.colorStaffName);
@@ -682,6 +782,12 @@ export default function SalonWorkScreen() {
     mainStaffConfirmed: true,
     assistantStaffConfirmed: true,
     stoppedBy: staff,
+    assistantStaffName: '',
+    isShampooing: false,
+    actionStatus: null,
+    helpProcess: null,
+    isRecruiting: false,
+    isNoHelpNeeded: false,
     checkTargetSeconds: null,
     checkEndTimestamp: null,
     checkPausedRemainingSeconds: null,
@@ -726,6 +832,102 @@ export default function SalonWorkScreen() {
         return currentSeats;
       });
       return;
+    }
+
+    // ★ Watchからのメインタイマー操作の即時処理＆同期
+    if (action && action.startsWith('MAIN_TIMER_')) {
+      const actionId = extra?.actionId || `${action}_${Date.now()}`;
+      if (action === 'MAIN_TIMER_START') {
+        const currentTarget = _cachedMainTimerState?.targetTime || 600;
+        const currentRem = (_cachedMainTimerState?.remainingTime > 0) ? _cachedMainTimerState.remainingTime : currentTarget;
+        const targetEnd = Date.now() + currentRem * 1000;
+        const updatedMain = {
+          ..._cachedMainTimerState,
+          isRunning: true,
+          isPaused: false,
+          remainingTime: currentRem,
+          targetEndTimestamp: targetEnd,
+        };
+        updateCachedMainTimerState(updatedMain);
+        if (requestMainTimerAction) {
+          requestMainTimerAction('start', { playSoundOnPhone: extra?.playSoundOnPhone === true }, actionId);
+        }
+        syncMainTimerToWatch(updatedMain, { immediate: true });
+        return;
+      }
+      if (action === 'MAIN_TIMER_PAUSE') {
+        const currentEnd = _cachedMainTimerState?.targetEndTimestamp || 0;
+        const nextRem = currentEnd > Date.now() ? Math.ceil((currentEnd - Date.now()) / 1000) : (_cachedMainTimerState?.remainingTime || 0);
+        const updatedMain = {
+          ..._cachedMainTimerState,
+          isRunning: false,
+          isPaused: true,
+          remainingTime: Math.max(0, nextRem),
+          targetEndTimestamp: 0,
+        };
+        updateCachedMainTimerState(updatedMain);
+        if (requestMainTimerAction) {
+          requestMainTimerAction('pause', null, actionId);
+        }
+        syncMainTimerToWatch(updatedMain, { immediate: true });
+        return;
+      }
+      if (action === 'MAIN_TIMER_RESET') {
+        const targetSec = _cachedMainTimerState?.targetTime || 600;
+        const updatedMain = {
+          ..._cachedMainTimerState,
+          isRunning: false,
+          isPaused: false,
+          remainingTime: targetSec,
+          targetEndTimestamp: 0,
+        };
+        updateCachedMainTimerState(updatedMain);
+        if (requestMainTimerAction) {
+          requestMainTimerAction('reset', null, actionId);
+        }
+        syncMainTimerToWatch(updatedMain, { immediate: true });
+        return;
+      }
+      if (action === 'MAIN_TIMER_SET_TIME') {
+        const totalSec = Number(extra?.totalSeconds) || 600;
+        const updatedMain = {
+          ..._cachedMainTimerState,
+          targetTime: totalSec,
+          remainingTime: totalSec,
+          isRunning: false,
+          isPaused: false,
+          targetEndTimestamp: 0,
+        };
+        updateCachedMainTimerState(updatedMain);
+        if (requestMainTimerAction) {
+          requestMainTimerAction('set_time', { totalSeconds: totalSec }, actionId);
+        }
+        syncMainTimerToWatch(updatedMain, { immediate: true });
+        return;
+      }
+      if (action === 'MAIN_TIMER_ADJUST') {
+        const delta = Number(extra?.secondsToAdd) || 0;
+        if (delta) {
+          let updatedMain = { ..._cachedMainTimerState };
+          if (updatedMain.isRunning && updatedMain.targetEndTimestamp) {
+            const nextEnd = updatedMain.targetEndTimestamp + delta * 1000;
+            const nextRem = Math.max(0, Math.ceil((nextEnd - Date.now()) / 1000));
+            updatedMain.targetEndTimestamp = nextEnd;
+            updatedMain.remainingTime = nextRem;
+          } else {
+            const currentRem = updatedMain.remainingTime || updatedMain.targetTime || 600;
+            const nextRem = Math.max(10, currentRem + delta);
+            updatedMain.remainingTime = nextRem;
+            updatedMain.targetTime = nextRem;
+          }
+          updateCachedMainTimerState(updatedMain);
+          if (requestMainTimerAction) {
+            requestMainTimerAction('adjust', { secondsToAdd: delta }, actionId);
+          }
+          syncMainTimerToWatch(updatedMain, { immediate: true });
+        }
+        return;
+      }
     }
 
     // ② Watch側での新規席追加
@@ -784,13 +986,19 @@ export default function SalonWorkScreen() {
     }
 
     // ★ Watch でアラームを止めた → iPhone 側で鳴っている同じ席のアラームも止める
-    // 放置タイム終了のアラーム（kind: 'main'）なら、その席のタイマーも停止（0:00）にする
+    // 放置タイム終了のアラーム（kind: 'main'）なら席を停止、チェックアラーム（kind: 'check'）ならチェック完了にする
     if (action === 'STOP_ALARM') {
       if (seatId) {
-        stopAlarm('salon', `${seatId}-main`);
-        stopAlarm('salon', `${seatId}-check`);
+        if (extra?.kind === 'main') {
+          stopAlarm('salon', `${seatId}-main`);
+        } else if (extra?.kind === 'check') {
+          stopAlarm('salon', `${seatId}-check`);
+        } else {
+          stopAlarm('salon', `${seatId}-main`);
+          stopAlarm('salon', `${seatId}-check`);
+        }
       }
-      if (!seatId || extra?.kind !== 'main') return;
+      if (!seatId) return;
     }
 
     if (!seatId) return;
@@ -870,15 +1078,22 @@ export default function SalonWorkScreen() {
             };
           }
           case 'ASSIGN_HELP': {
-            const staff = extra?.assistantStaffName || watchUser || '';
+            const hasCheckStaff = extra?.checkStaffName !== undefined;
+            const hasAssistantStaff = extra?.assistantStaffName !== undefined;
+            const rawStaff = hasCheckStaff ? extra.checkStaffName : (hasAssistantStaff ? extra.assistantStaffName : watchUser);
+            const staff = (rawStaff !== undefined && rawStaff !== null) ? rawStaff : '';
             const process = extra?.helpProcess || 'シャンプー';
             const isCheck = process === 'チェック';
             return {
               ...s,
-              assistantStaffName: staff,
-              actionStatus: process === 'シャンプー' ? 'shampoo' : process,
-              isShampooing: process === 'シャンプー',
-              ...(isCheck ? { checkStaffName: staff } : {}),
+              isRecruiting: false,
+              ...(isCheck
+                ? { checkStaffName: staff }
+                : {
+                    assistantStaffName: staff,
+                    actionStatus: process === 'シャンプー' ? 'shampoo' : process,
+                    isShampooing: process === 'シャンプー',
+                  }),
             };
           }
           case 'RECRUIT_HELP': {
@@ -886,8 +1101,8 @@ export default function SalonWorkScreen() {
             const isCheck = process === 'チェック';
             return {
               ...s,
-              assistantStaffName: '',
-              ...(isCheck ? { checkStaffName: '' } : {}),
+              isRecruiting: true,
+              ...(isCheck ? { checkStaffName: '' } : { assistantStaffName: '' }),
             };
           }
           case 'CLAIM_CHECK': {
@@ -897,10 +1112,21 @@ export default function SalonWorkScreen() {
             };
           }
           case 'COMPLETE_CHECK': {
+            const prevHist = s.history || [];
+            const chkStaff = watchUser || s.checkStaffName || 'スタッフ';
             return {
               ...s,
               checkStatus: 'completed',
-              checkStaffName: watchUser || s.checkStaffName,
+              checkStaffName: chkStaff,
+              history: [
+                ...prevHist,
+                {
+                  id: `h-${Date.now()}`,
+                  time: getCurrentTimeFormatted(),
+                  text: `${chkStaff} チェック完了（Apple Watch）`,
+                  type: 'check',
+                },
+              ],
             };
           }
           case 'CANCEL_CHECK': {
@@ -947,6 +1173,29 @@ export default function SalonWorkScreen() {
             return { ...stopSeat(s, '計測終了'), collapsedAtEnd: s.targetEndTimestamp || 0 };
           }
           case 'STOP_ALARM': {
+            // ★ チェック時間のアラーム停止ならチェックを完了にする（全体タイマーは終了前でも反映）
+            if (extra?.kind === 'check') {
+              if (s.checkStatus === 'completed') {
+                hasChanged = false;
+                return s;
+              }
+              const prevHist = s.history || [];
+              const chkStaff = watchUser || s.checkStaffName || 'スタッフ';
+              return {
+                ...s,
+                checkStatus: 'completed',
+                checkStaffName: chkStaff,
+                history: [
+                  ...prevHist,
+                  {
+                    id: `h-${Date.now()}`,
+                    time: getCurrentTimeFormatted(),
+                    text: `${chkStaff} チェック完了（Apple Watch）`,
+                    type: 'check',
+                  },
+                ],
+              };
+            }
             // 終了時刻を過ぎて稼働中の席だけ止める（すでに停止・タイム再入力済みなら何もしない）
             if (s.status !== 'running' || !s.targetEndTimestamp || Date.now() < s.targetEndTimestamp) {
               hasChanged = false;
@@ -1048,6 +1297,48 @@ export default function SalonWorkScreen() {
       // ★ 何も変わらなければ元の配列を返す（不要な保存・Watch への同期を起こさない）
       if (!hasChanged) return prevSeats;
       saveSeatsToStorage(updated);
+
+      // ★ 誰かが止めた・変更したアクションを関係者のApple Watchへ即時ブロードキャスト通知
+      let watchNotif = null;
+      const targetS = prevSeats.find((s) => s.id === seatId);
+      const seatLabel = targetS?.seatLabel || '席';
+      const actor = (watchUser || 'スタッフ').trim();
+      switch (action) {
+        case 'STOP_TIMER':
+          watchNotif = { text: `⏹️ ${actor}が【${seatLabel}】のタイマーを停止しました`, color: '#FF9500', sourceUser: actor };
+          break;
+        case 'STOP_ALARM':
+          if (extra?.kind === 'check') {
+            watchNotif = { text: `✅ ${actor}が【${seatLabel}】のチェックを完了しました`, color: '#30D158', sourceUser: actor };
+          } else {
+            watchNotif = { text: `🔕 ${actor}が【${seatLabel}】のアラームを停止しました`, color: '#FF9500', sourceUser: actor };
+          }
+          break;
+        case 'COMPLETE_CHECK':
+          watchNotif = { text: `✅ ${actor}が【${seatLabel}】のチェックを完了しました`, color: '#30D158', sourceUser: actor };
+          break;
+        case 'FINISH_MEASURE':
+          watchNotif = { text: `🏁 ${actor}が【${seatLabel}】の計測を終了しました`, color: '#30D158', sourceUser: actor };
+          break;
+        case 'ENTER_HELP':
+          watchNotif = { text: `🤝 ${actor}が【${seatLabel}】のヘルプ対応を開始しました`, color: '#30D158', sourceUser: actor };
+          break;
+        case 'START_SHAMPOO':
+          watchNotif = { text: `🧴 ${actor}が【${seatLabel}】のシャンプーを開始しました`, color: '#0A84FF', sourceUser: actor };
+          break;
+        case 'ASSIGN_HELP':
+          watchNotif = { text: `👤 【${seatLabel}】にヘルプ担当が指定されました`, color: '#30D158', sourceUser: actor };
+          break;
+        case 'RECRUIT_HELP':
+          watchNotif = { text: `📢 【${seatLabel}】がヘルプを募集中です！`, color: '#FF453A', sourceUser: actor };
+          break;
+        default:
+          break;
+      }
+      if (watchNotif) {
+        syncSeatsToWatch(updated, userName, staffMembers, { immediate: true, notification: watchNotif });
+      }
+
       return updated;
     });
   };
@@ -1077,6 +1368,14 @@ export default function SalonWorkScreen() {
       });
       if (!hasChanged) return prevSeats;
       saveSeatsToStorage(updated);
+      syncSeatsToWatch(updated, userName, staffMembers, {
+        immediate: true,
+        notification: {
+          text: `🔕 ${staff}がアラームを停止しました`,
+          color: '#FF9500',
+          sourceUser: staff,
+        },
+      });
       return updated;
     });
   };
@@ -1234,7 +1533,7 @@ export default function SalonWorkScreen() {
         try {
           const parsed = JSON.parse(savedMembersJson);
           if (Array.isArray(parsed)) {
-            loadedMembers = parsed;
+            loadedMembers = normalizeStaffMembers(parsed);
           }
         } catch (e) {
           console.warn('Failed to parse saved staff members', e);
@@ -1296,46 +1595,134 @@ export default function SalonWorkScreen() {
     }
   };
 
-  // ★ スタッフメンバーの追加（スマホ側で追加・即座にApple Watchへ同期）
-  const handleAddStaffMember = async () => {
-    const trimmed = inputNewMemberName.trim();
-    if (!trimmed) return;
-    if (staffMembers.includes(trimmed)) {
-      Alert.alert('確認', 'このスタッフ名は既に登録されています。');
+  // ★ 共有コードによるメンバー接続参加
+  const handleJoinMemberByCode = async () => {
+    const rawCode = (inputJoinMemberCode || '').trim().toUpperCase();
+    if (!rawCode) {
+      Alert.alert('入力エラー', '共有コード（招待コード）を入力してください');
       return;
     }
-    const updated = [...staffMembers, trimmed];
+    let code = rawCode;
+    if (/^\d{6}$/.test(rawCode)) {
+      code = `${rawCode.slice(0, 3)}-${rawCode.slice(3)}`;
+    }
+
+    const myNick = (inputJoinMemberNickname || userName || 'スタッフ').trim();
+    const newMemberId = `mem_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const newMember = {
+      id: newMemberId,
+      originalNickname: myNick,
+      customNickname: myNick,
+      inviteCode: code,
+      joinedAt: Date.now(),
+    };
+
+    // 重複チェック
+    const isDup = staffMembers.some(
+      (m) => (m.inviteCode === code || m.id === newMemberId) && getMemberDisplayName(m) === myNick
+    );
+    if (isDup) {
+      Alert.alert('確認', 'このメンバーは既に連携登録されています。');
+      return;
+    }
+
+    const updated = [...staffMembers, newMember];
     setStaffMembers(updated);
-    setInputNewMemberName('');
+    setInputJoinMemberCode('');
+    setInputJoinMemberNickname('');
+    setMemberManageSection('list');
+
     try {
       await AsyncStorage.setItem('@salon_staff_members', JSON.stringify(updated));
       // Apple Watchへ即時同期
-      syncSeatsToWatch(seats, userName, updated);
+      syncSeatsToWatch(seats, userName, updated, { immediate: true });
     } catch (e) {
       console.warn('Failed to save staff members', e);
     }
+
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 100, 50, 100]);
+    }
+    Alert.alert(
+      '🎉 共有メンバー接続完了',
+      `共有コード「${code}」で連携しました！\n\n・登録名: 【${myNick}】\n・メンバーID: #${newMemberId.slice(-6)}\n\nタイマーの開始・停止やチェック完了がリアルタイムに共有されます。`
+    );
+  };
+
+  // ★ メンバーのカスタム呼び名（表示名）変更
+  const handleOpenEditNicknameModal = (member) => {
+    setEditingMemberForNickname(member);
+    setInputMemberCustomNickname(getMemberDisplayName(member));
+    setIsEditNicknameModalVisible(true);
+  };
+
+  const handleSaveMemberCustomNickname = async () => {
+    if (!editingMemberForNickname) return;
+    const trimmed = (inputMemberCustomNickname || '').trim();
+    if (!trimmed) {
+      Alert.alert('入力エラー', '呼び名を入力してください');
+      return;
+    }
+
+    const targetId = editingMemberForNickname.id;
+    const updated = staffMembers.map((m) => {
+      const match = (typeof m === 'object' && m.id === targetId) || (typeof m === 'string' && m === targetId);
+      if (!match) return m;
+      if (typeof m === 'string') {
+        return {
+          id: `mem_${Date.now()}`,
+          originalNickname: m,
+          customNickname: trimmed,
+          joinedAt: Date.now(),
+        };
+      }
+      return {
+        ...m,
+        customNickname: trimmed,
+      };
+    });
+
+    setStaffMembers(updated);
+    setIsEditNicknameModalVisible(false);
+    setEditingMemberForNickname(null);
+    setInputMemberCustomNickname('');
+
+    try {
+      await AsyncStorage.setItem('@salon_staff_members', JSON.stringify(updated));
+      // Apple Watchへ即時同期
+      syncSeatsToWatch(seats, userName, updated, { immediate: true });
+    } catch (e) {
+      console.warn('Failed to save custom nickname', e);
+    }
+
     if (Platform.OS !== 'web') {
       Vibration.vibrate(40);
     }
   };
 
   // ★ スタッフメンバーの削除
-  const handleRemoveStaffMember = (memberToRemove) => {
+  const handleRemoveStaffMember = (memberItem) => {
+    const displayName = getMemberDisplayName(memberItem);
+    const targetId = typeof memberItem === 'object' ? memberItem.id : memberItem;
+
     Alert.alert(
-      'メンバーの削除',
-      `「${memberToRemove}」さんをスタッフ一覧から削除しますか？`,
+      'メンバーの解除',
+      `「${displayName}」さんとの共有連携を解除しますか？`,
       [
         { text: 'キャンセル', style: 'cancel' },
         {
-          text: '削除',
+          text: '解除する',
           style: 'destructive',
           onPress: async () => {
-            const updated = staffMembers.filter((m) => m !== memberToRemove);
+            const updated = staffMembers.filter((m) => {
+              if (typeof m === 'object') return m.id !== targetId;
+              return m !== targetId;
+            });
             setStaffMembers(updated);
             try {
               await AsyncStorage.setItem('@salon_staff_members', JSON.stringify(updated));
               // Apple Watchへ即時同期
-              syncSeatsToWatch(seats, userName, updated);
+              syncSeatsToWatch(seats, userName, updated, { immediate: true });
             } catch (e) {
               console.warn('Failed to save staff members after remove', e);
             }
@@ -1686,29 +2073,48 @@ export default function SalonWorkScreen() {
     };
 
     // タイマーを一時停止状態にし、指定されたステータスに変更、確認フラグをON（緑色シグナルへ移行）、停止者を記録、履歴追記
-    setSeats((prev) =>
-      prev.map((s) => {
-        if (s.id !== seat.id) return s;
-        const remaining = Math.max(0, Math.floor((s.targetEndTimestamp - Date.now()) / 1000));
-        const prevHistory = s.history || [];
-        return {
-          ...s,
-          status: 'paused',
-          pausedRemainingSeconds: remaining,
-          actionStatus: determinedActionId || null,
-          isShampooing: determinedActionId === 'shampoo',
-          mainStaffConfirmed: true,
-          assistantStaffConfirmed: true,
-          stoppedBy: currentUser,
-          history: [...prevHistory, historyItem],
-        };
-      })
-    );
+    const updatedSeats = seats.map((s) => {
+      if (s.id !== seat.id) return s;
+      const remaining = Math.max(0, Math.floor((s.targetEndTimestamp - Date.now()) / 1000));
+      const prevHistory = s.history || [];
+      const isZeroRem = remaining <= 0;
+      return {
+        ...s,
+        status: 'paused',
+        pausedRemainingSeconds: remaining,
+        actionStatus: determinedActionId || null,
+        isShampooing: determinedActionId === 'shampoo',
+        mainStaffConfirmed: true,
+        assistantStaffConfirmed: true,
+        stoppedBy: currentUser,
+        ...(isZeroRem ? {
+          assistantStaffName: '',
+          helpProcess: null,
+          isRecruiting: false,
+          isNoHelpNeeded: false,
+        } : {}),
+        history: [...prevHistory, historyItem],
+      };
+    });
+    setSeats(updatedSeats);
+    saveSeatsToStorage(updatedSeats);
 
     // 強い確認振動
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 250, 100, 250]);
     }
+
+    // ★ 相手のApple Watchへ即時ブロードキャスト通知
+    const notifTitle = actionLabel ? `${actionLabel}移行` : 'タイマー停止';
+    const notifText = `⏹️ ${currentUser}が【${seat.seatLabel || '席'}】の${notifTitle}を行いました`;
+    syncSeatsToWatch(updatedSeats, userName, staffMembers, {
+      immediate: true,
+      notification: {
+        text: notifText,
+        color: '#FF9500',
+        sourceUser: currentUser,
+      },
+    });
 
     const mainStaff = (seat.colorStaffName || '').trim();
     const assistStaff = (seat.assistantStaffName || '').trim();
@@ -1971,28 +2377,40 @@ export default function SalonWorkScreen() {
     const creatorName = (targetSeat?.colorStaffName || 'タイマー作成者').trim();
     const checker = (targetSeat?.checkStaffName || currentUser).trim();
 
-    setSeats((prev) =>
-      prev.map((s) => {
-        if (s.id !== seatId) return s;
-        const prevHistory = s.history || [];
-        const chkText = `${checker}チェック完了`;
-        const historyItem = {
-          id: `h-${Date.now()}`,
-          time: nowStr,
-          text: chkText,
-          type: 'check',
-        };
-        return {
-          ...s,
-          checkStatus: 'completed',
-          history: [...prevHistory, historyItem],
-        };
-      })
-    );
+    const updatedSeats = seats.map((s) => {
+      if (s.id !== seatId) return s;
+      const prevHistory = s.history || [];
+      const chkText = `${checker}チェック完了`;
+      const historyItem = {
+        id: `h-${Date.now()}`,
+        time: nowStr,
+        text: chkText,
+        type: 'check',
+      };
+      return {
+        ...s,
+        checkStatus: 'completed',
+        history: [...prevHistory, historyItem],
+      };
+    });
+    setSeats(updatedSeats);
+    saveSeatsToStorage(updatedSeats);
 
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 150, 80, 150]);
     }
+
+    // ★ 相手のApple Watchへ即時ブロードキャスト通知
+    const seatLabel = targetSeat?.seatLabel || '対象席';
+    const notifText = `✅ ${checker}が【${seatLabel}】のチェックを完了しました`;
+    syncSeatsToWatch(updatedSeats, userName, staffMembers, {
+      immediate: true,
+      notification: {
+        text: notifText,
+        color: '#30D158',
+        sourceUser: currentUser,
+      },
+    });
 
     // ★ ユーザー指定: 「そしたらタイマー設定者の方に通知が送られる」
     const isSelf = creatorName && creatorName.toLowerCase() === currentUser.toLowerCase();
@@ -2148,7 +2566,8 @@ export default function SalonWorkScreen() {
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
             colorStaffName: userName || 'スタイリスト',
-            assistantStaffName: s.assistantStaffName || null,
+            // ★ 新しく測る時は前の施術のヘルプを勝手に引き継がない
+            assistantStaffName: (modalAssistantStaff || '').trim() || '',
             isShampooing: false,
             targetSeconds: targetSec,
             initialMinutes: mins > 0 ? mins : Math.round(targetSec / 60),
@@ -2185,7 +2604,7 @@ export default function SalonWorkScreen() {
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
             colorStaffName: userName || s.colorStaffName || 'スタイリスト',
-            assistantStaffName: s.assistantStaffName || null,
+            assistantStaffName: (modalAssistantStaff !== undefined && modalAssistantStaff !== '') ? modalAssistantStaff.trim() : (s.assistantStaffName || ''),
             isShampooing: s.isShampooing,
             targetSeconds: targetSec,
             initialMinutes: mins > 0 ? mins : Math.round(targetSec / 60),
@@ -2222,7 +2641,7 @@ export default function SalonWorkScreen() {
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
             colorStaffName: userName || s.colorStaffName || 'スタイリスト',
-            assistantStaffName: s.assistantStaffName || null,
+            assistantStaffName: (modalAssistantStaff !== undefined && modalAssistantStaff !== '') ? modalAssistantStaff.trim() : (s.assistantStaffName || ''),
             isShampooing: s.isShampooing,
             targetSeconds: targetSec,
             initialMinutes: s.initialMinutes || (mins > 0 ? mins : Math.round(targetSec / 60)),
@@ -2254,7 +2673,8 @@ export default function SalonWorkScreen() {
           seatLabel: modalSeatLabel.trim() || s.seatLabel,
           status: 'running',
           colorStaffName: userName || 'スタイリスト',
-          assistantStaffName: s.assistantStaffName || null,
+          // ★ 新規開始時はモーダルの指定がなければ空文字
+          assistantStaffName: (modalAssistantStaff || '').trim() || '',
           isShampooing: false,
           targetSeconds: targetSec,
           initialMinutes: mins > 0 ? mins : Math.round(targetSec / 60),
@@ -2550,6 +2970,7 @@ export default function SalonWorkScreen() {
         if (s.id !== seatId) return s;
         if (s.status === 'running') {
           const remaining = Math.max(0, Math.floor((s.targetEndTimestamp - Date.now()) / 1000));
+          const isZeroRem = remaining <= 0;
           let checkRemaining = null;
           if (s.checkTargetSeconds > 0 && s.checkStatus === 'running' && s.checkEndTimestamp) {
             checkRemaining = Math.max(0, Math.floor((s.checkEndTimestamp - Date.now()) / 1000));
@@ -2562,6 +2983,15 @@ export default function SalonWorkScreen() {
             mainStaffConfirmed: true,
             assistantStaffConfirmed: true,
             stoppedBy: currentUser,
+            ...(isZeroRem ? {
+              assistantStaffName: '',
+              assistantStaffConfirmed: false,
+              actionStatus: null,
+              isShampooing: false,
+              helpProcess: null,
+              isRecruiting: false,
+              isNoHelpNeeded: false,
+            } : {}),
           };
         } else {
           const endTs = Date.now() + (s.pausedRemainingSeconds || 0) * 1000;
@@ -2641,35 +3071,54 @@ export default function SalonWorkScreen() {
       type: 'reset',
     };
 
-    setSeats((prev) =>
-      prev.map((s) => {
-        if (s.id !== seatId) return s;
-        const prevHist = s.history || [];
-        return {
-          ...s,
-          status: 'paused',
-          targetEndTimestamp: null,
-          pausedRemainingSeconds: 0,
-          initialMinutes: 0,
-          targetSeconds: 0,
-          isOver: false,
-          isReset: true,
-          // ★ ユーザー指定: チェックも消える
-          checkTargetSeconds: null,
-          checkEndTimestamp: null,
-          checkPausedRemainingSeconds: null,
-          checkStatus: null,
-          checkInitialMinutes: null,
-          checkStaffName: null,
-          checkAlerted: false,
-          // 停止・確認情報
-          stoppedBy: currentUser,
-          mainStaffConfirmed: true,
-          assistantStaffConfirmed: true,
-          history: [...prevHist, historyItem],
-        };
-      })
-    );
+    const updatedSeats = seats.map((s) => {
+      if (s.id !== seatId) return s;
+      const prevHist = s.history || [];
+      return {
+        ...s,
+        status: 'paused',
+        targetEndTimestamp: null,
+        pausedRemainingSeconds: 0,
+        initialMinutes: 0,
+        targetSeconds: 0,
+        isOver: false,
+        isReset: true,
+        // ★ 00:00席のヘルプ・助手・希望プロセスを完全解除（固定残り防止）
+        assistantStaffName: '',
+        assistantStaffConfirmed: false,
+        actionStatus: null,
+        isShampooing: false,
+        helpProcess: null,
+        isRecruiting: false,
+        isNoHelpNeeded: false,
+        // ★ ユーザー指定: チェックも消える
+        checkTargetSeconds: null,
+        checkEndTimestamp: null,
+        checkPausedRemainingSeconds: null,
+        checkStatus: null,
+        checkInitialMinutes: null,
+        checkStaffName: null,
+        checkAlerted: false,
+        // 停止・確認情報
+        stoppedBy: currentUser,
+        mainStaffConfirmed: true,
+        assistantStaffConfirmed: true,
+        history: [...prevHist, historyItem],
+      };
+    });
+    setSeats(updatedSeats);
+    saveSeatsToStorage(updatedSeats);
+
+    // ★ 相手のApple Watchへ即時ブロードキャスト通知
+    const resetNotifText = `🔄 ${currentUser}が【${seat.seatLabel || '席'}】のタイマーをリセットしました`;
+    syncSeatsToWatch(updatedSeats, userName, staffMembers, {
+      immediate: true,
+      notification: {
+        text: resetNotifText,
+        color: '#FF9500',
+        sourceUser: currentUser,
+      },
+    });
 
     // 触覚振動
     if (Platform.OS !== 'web') {
@@ -3401,6 +3850,7 @@ export default function SalonWorkScreen() {
           const s = remainingSec % 60;
           const timeString = `${isOver ? '+' : ''}${m}:${s < 10 ? '0' : ''}${s}`;
           const currentStatusInfo = getActionStatusInfo(item.actionStatus, item.isShampooing);
+          const isZeroPaused = isPaused && (remainingSec <= 0 || item.isReset || (item.pausedRemainingSeconds !== null && item.pausedRemainingSeconds <= 0));
 
           // 停止中かつ手動展開されていない場合は、アコーディオンで閉まったスリムバーを表示
           if (isPaused && !isExpanded) {
@@ -3458,12 +3908,16 @@ export default function SalonWorkScreen() {
                     style={[
                       styles.pausedHelpBadge,
                       {
-                        backgroundColor: item.assistantStaffName === 'ヘルプなし'
+                        backgroundColor: isZeroPaused
+                          ? (isEcoMode ? '#2C2C2E' : '#F3F4F6')
+                          : item.assistantStaffName === 'ヘルプなし'
                           ? (isEcoMode ? '#2C2C2E' : '#F3F4F6')
                           : item.assistantStaffName
                           ? theme.accentLight
                           : (isEcoMode ? '#2C2C2E' : '#FFF7ED'),
-                        borderColor: item.assistantStaffName === 'ヘルプなし'
+                        borderColor: isZeroPaused
+                          ? theme.cardBorder
+                          : item.assistantStaffName === 'ヘルプなし'
                           ? theme.cardBorder
                           : item.assistantStaffName
                           ? theme.accentBorder
@@ -3479,7 +3933,9 @@ export default function SalonWorkScreen() {
                       style={[
                         styles.pausedHelpBadgeText,
                         {
-                          color: item.assistantStaffName === 'ヘルプなし'
+                          color: isZeroPaused
+                            ? theme.textTertiary
+                            : item.assistantStaffName === 'ヘルプなし'
                             ? theme.textSecondary
                             : item.assistantStaffName
                             ? theme.accent
@@ -3487,7 +3943,9 @@ export default function SalonWorkScreen() {
                         },
                       ]}
                     >
-                      {item.assistantStaffName === 'ヘルプなし'
+                      {isZeroPaused
+                        ? '待機中'
+                        : item.assistantStaffName === 'ヘルプなし'
                         ? 'ヘルプなし'
                         : item.assistantStaffName
                         ? item.assistantStaffName
@@ -6892,7 +7350,7 @@ export default function SalonWorkScreen() {
         </TouchableOpacity>
       </Modal>
 
-      {/* ★ スタッフメンバー管理モーダル */}
+      {/* ★ 共有スタッフメンバー管理モーダル */}
       <Modal
         visible={isMemberManageModalVisible}
         transparent
@@ -6903,11 +7361,11 @@ export default function SalonWorkScreen() {
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={styles.modalOverlay}
         >
-          <View style={[styles.modalContent, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, maxHeight: '80%' }]}>
+          <View style={[styles.modalContent, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, maxHeight: '88%' }]}>
             <View style={styles.modalHeaderRow}>
               <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                 <Ionicons name="people" size={20} color={theme.accent} style={{ marginRight: 8 }} />
-                <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>スタッフメンバー管理</Text>
+                <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>共有メンバー管理</Text>
               </View>
               <TouchableOpacity onPress={() => setIsMemberManageModalVisible(false)}>
                 <Ionicons name="close" size={24} color={theme.textSecondary} />
@@ -6915,90 +7373,225 @@ export default function SalonWorkScreen() {
             </View>
 
             <Text style={{ fontSize: 12, color: theme.textSecondary, marginBottom: 12, lineHeight: 17 }}>
-              サロン内でヘルプやチェックを担当するスタッフ名を登録します。{'\n'}
-              Apple Watchのスタッフ選択にも自動でリアルタイム連動します。
+              招待コードで接続したメンバーのみが連動します。{'\n'}
+              IDで管理されるため、相手の登録名とこちらでの呼び名が違っても安全に同期されます。
             </Text>
 
-            {/* スタッフ追加入力欄 */}
-            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 16 }}>
-              <TextInput
-                style={[
-                  styles.modalInput,
-                  {
-                    flex: 1,
-                    backgroundColor: theme.inputBg,
-                    color: theme.textPrimary,
-                    borderColor: theme.cardBorder,
-                    marginBottom: 0,
-                  }
-                ]}
-                placeholder="スタッフ名 (例: 田中)"
-                placeholderTextColor={theme.textTertiary}
-                value={inputNewMemberName}
-                onChangeText={setInputNewMemberName}
-                onSubmitEditing={handleAddStaffMember}
-                returnKeyType="done"
-                maxLength={10}
-              />
+            {/* あなたの共有コード表示エリア */}
+            <View
+              style={{
+                backgroundColor: isEcoMode ? '#1C1C1E' : '#F2F2F7',
+                borderRadius: 10,
+                padding: 12,
+                marginBottom: 12,
+                borderWidth: 1,
+                borderColor: theme.cardBorder,
+              }}
+            >
+              <Text style={{ fontSize: 11, fontWeight: '700', color: theme.textSecondary, marginBottom: 4 }}>
+                あなたの共有コード（サロン / ペア）
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <Text
+                  style={{
+                    fontSize: 20,
+                    fontWeight: '800',
+                    color: theme.accent,
+                    letterSpacing: 2,
+                    fontVariant: ['tabular-nums'],
+                  }}
+                >
+                  {currentSalon?.inviteCode || '---'}
+                </Text>
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: theme.accent,
+                    paddingHorizontal: 12,
+                    paddingVertical: 6,
+                    borderRadius: 8,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                  }}
+                  onPress={() => handleShareInviteCode(currentSalon)}
+                >
+                  <Ionicons name="share-outline" size={14} color="#fff" style={{ marginRight: 4 }} />
+                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 12 }}>コード共有</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* セクション切り替えタブ */}
+            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
               <TouchableOpacity
                 style={{
-                  backgroundColor: theme.accent,
-                  paddingHorizontal: 16,
-                  borderRadius: 10,
-                  justifyContent: 'center',
+                  flex: 1,
+                  paddingVertical: 8,
+                  borderRadius: 8,
+                  backgroundColor: memberManageSection === 'list' ? theme.accent : theme.inputBg,
                   alignItems: 'center',
                 }}
-                onPress={handleAddStaffMember}
+                onPress={() => setMemberManageSection('list')}
               >
-                <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 13 }}>＋追加</Text>
+                <Text
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 'bold',
+                    color: memberManageSection === 'list' ? '#fff' : theme.textSecondary,
+                  }}
+                >
+                  メンバー一覧 ({staffMembers.length})
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{
+                  flex: 1,
+                  paddingVertical: 8,
+                  borderRadius: 8,
+                  backgroundColor: memberManageSection === 'join' ? theme.accent : theme.inputBg,
+                  alignItems: 'center',
+                }}
+                onPress={() => setMemberManageSection('join')}
+              >
+                <Text
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 'bold',
+                    color: memberManageSection === 'join' ? '#fff' : theme.textSecondary,
+                  }}
+                >
+                  ＋ コードで参加
+                </Text>
               </TouchableOpacity>
             </View>
 
-            {/* 登録済みメンバーリスト */}
-            <Text style={{ fontSize: 12, fontWeight: '700', color: theme.textSecondary, marginBottom: 8 }}>
-              登録メンバー一覧 ({staffMembers.length}名)
-            </Text>
+            {/* セクション1: 共有コードで参加フォーム */}
+            {memberManageSection === 'join' ? (
+              <View style={{ backgroundColor: theme.inputBg, padding: 12, borderRadius: 10, borderWidth: 1, borderColor: theme.cardBorder, marginBottom: 12 }}>
+                <Text style={{ fontSize: 12, fontWeight: '700', color: theme.textPrimary, marginBottom: 6 }}>
+                  相手の共有コードを入力して連携
+                </Text>
+                <TextInput
+                  style={[
+                    styles.modalInput,
+                    {
+                      backgroundColor: theme.cardBg,
+                      color: theme.textPrimary,
+                      borderColor: theme.cardBorder,
+                      marginBottom: 8,
+                      fontSize: 14,
+                    },
+                  ]}
+                  placeholder="共有コード (例: 123-456)"
+                  placeholderTextColor={theme.textTertiary}
+                  value={inputJoinMemberCode}
+                  onChangeText={setInputJoinMemberCode}
+                  autoCapitalize="characters"
+                  returnKeyType="next"
+                />
+                <Text style={{ fontSize: 11, color: theme.textSecondary, marginBottom: 4 }}>
+                  相手に通知されるあなたのニックネーム
+                </Text>
+                <TextInput
+                  style={[
+                    styles.modalInput,
+                    {
+                      backgroundColor: theme.cardBg,
+                      color: theme.textPrimary,
+                      borderColor: theme.cardBorder,
+                      marginBottom: 12,
+                      fontSize: 14,
+                    },
+                  ]}
+                  placeholder={`あなたのニックネーム (例: ${userName || '田中'})`}
+                  placeholderTextColor={theme.textTertiary}
+                  value={inputJoinMemberNickname}
+                  onChangeText={setInputJoinMemberNickname}
+                  maxLength={12}
+                  returnKeyType="done"
+                />
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: theme.accent,
+                    paddingVertical: 10,
+                    borderRadius: 8,
+                    alignItems: 'center',
+                  }}
+                  onPress={handleJoinMemberByCode}
+                >
+                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 13 }}>連携してメンバーに参加</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              /* セクション2: 登録メンバー一覧 */
+              <ScrollView style={{ maxHeight: 220 }} showsVerticalScrollIndicator={false}>
+                {staffMembers.length === 0 ? (
+                  <View style={{ paddingVertical: 24, alignItems: 'center' }}>
+                    <Ionicons name="people-outline" size={32} color={theme.textTertiary} style={{ marginBottom: 6 }} />
+                    <Text style={{ fontSize: 12, color: theme.textTertiary, textAlign: 'center', lineHeight: 18 }}>
+                      まだ共有メンバーがいません{'\n'}上の共有コードをスタッフに渡すか、{'\n'}「＋ コードで参加」から連携してください
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={{ gap: 8 }}>
+                    {staffMembers.map((member, idx) => {
+                      const displayName = getMemberDisplayName(member);
+                      const origName = typeof member === 'object' ? member.originalNickname : member;
+                      const memberId = typeof member === 'object' && member.id ? member.id.slice(-6) : `L${idx + 1}`;
+                      const hasCustom = typeof member === 'object' && member.customNickname && member.customNickname !== member.originalNickname;
 
-            <ScrollView style={{ maxHeight: 220 }} showsVerticalScrollIndicator={false}>
-              {staffMembers.length === 0 ? (
-                <View style={{ paddingVertical: 24, alignItems: 'center' }}>
-                  <Ionicons name="person-add-outline" size={32} color={theme.textTertiary} style={{ marginBottom: 6 }} />
-                  <Text style={{ fontSize: 12, color: theme.textTertiary, textAlign: 'center', lineHeight: 18 }}>
-                    まだメンバーが登録されていません{'\n'}上の入力欄からスタッフを追加してください
-                  </Text>
-                </View>
-              ) : (
-                <View style={{ gap: 8 }}>
-                  {staffMembers.map((member, idx) => (
-                    <View
-                      key={`${member}-${idx}`}
-                      style={{
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        paddingHorizontal: 12,
-                        paddingVertical: 10,
-                        backgroundColor: theme.inputBg,
-                        borderRadius: 8,
-                        borderColor: theme.cardBorder,
-                        borderWidth: 1,
-                      }}
-                    >
-                      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                        <Ionicons name="person" size={14} color={theme.accent} style={{ marginRight: 8 }} />
-                        <Text style={{ fontSize: 14, fontWeight: '600', color: theme.textPrimary }}>{member}</Text>
-                      </View>
-                      <TouchableOpacity
-                        onPress={() => handleRemoveStaffMember(member)}
-                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                      >
-                        <Ionicons name="trash-outline" size={18} color={theme.danger} />
-                      </TouchableOpacity>
-                    </View>
-                  ))}
-                </View>
-              )}
-            </ScrollView>
+                      return (
+                        <View
+                          key={typeof member === 'object' && member.id ? member.id : `mem-${idx}`}
+                          style={{
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            paddingHorizontal: 12,
+                            paddingVertical: 10,
+                            backgroundColor: theme.inputBg,
+                            borderRadius: 10,
+                            borderColor: theme.cardBorder,
+                            borderWidth: 1,
+                          }}
+                        >
+                          <View style={{ flex: 1, marginRight: 8 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                              <Ionicons name="person" size={14} color={theme.accent} style={{ marginRight: 6 }} />
+                              <Text style={{ fontSize: 15, fontWeight: '700', color: theme.textPrimary }}>
+                                {displayName}
+                              </Text>
+                            </View>
+                            <Text style={{ fontSize: 10, color: theme.textTertiary, marginTop: 2, marginLeft: 20 }}>
+                              登録名: {origName} {hasCustom ? '(呼び名変更中)' : ''} | ID: #{memberId}
+                            </Text>
+                          </View>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                            <TouchableOpacity
+                              onPress={() => handleOpenEditNicknameModal(member)}
+                              style={{
+                                paddingHorizontal: 8,
+                                paddingVertical: 4,
+                                backgroundColor: isEcoMode ? '#2C2C2E' : '#E5E5EA',
+                                borderRadius: 6,
+                              }}
+                            >
+                              <Text style={{ fontSize: 11, fontWeight: '600', color: theme.accent }}>呼び名</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              onPress={() => handleRemoveStaffMember(member)}
+                              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                              style={{ padding: 4 }}
+                            >
+                              <Ionicons name="trash-outline" size={17} color={theme.danger} />
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </View>
+                )}
+              </ScrollView>
+            )}
 
             <TouchableOpacity
               style={[styles.modalButtonPrimary, { backgroundColor: theme.accent, marginTop: 16 }]}
@@ -7006,6 +7599,69 @@ export default function SalonWorkScreen() {
             >
               <Text style={styles.modalButtonPrimaryText}>完了</Text>
             </TouchableOpacity>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ★ 呼び名（カスタムニックネーム）変更モーダル */}
+      <Modal
+        visible={isEditNicknameModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsEditNicknameModalVisible(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalOverlay}
+        >
+          <View style={[styles.modalContent, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
+            <View style={styles.modalHeaderRow}>
+              <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>呼び名（表示名）の変更</Text>
+              <TouchableOpacity onPress={() => setIsEditNicknameModalVisible(false)}>
+                <Ionicons name="close" size={24} color={theme.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={{ fontSize: 12, color: theme.textSecondary, marginBottom: 8, lineHeight: 17 }}>
+              相手の登録名: 【{typeof editingMemberForNickname === 'object' ? editingMemberForNickname?.originalNickname : editingMemberForNickname}】{'\n'}
+              あなた側から見える呼びやすい名前を設定できます。{'\n'}
+              IDで紐づいているため、呼び名を変えても連動は維持されます。
+            </Text>
+
+            <TextInput
+              style={[
+                styles.modalInput,
+                {
+                  backgroundColor: theme.inputBg,
+                  color: theme.textPrimary,
+                  borderColor: theme.cardBorder,
+                  marginBottom: 16,
+                  fontSize: 15,
+                },
+              ]}
+              placeholder="呼び名 (例: 田中 店長)"
+              placeholderTextColor={theme.textTertiary}
+              value={inputMemberCustomNickname}
+              onChangeText={setInputMemberCustomNickname}
+              maxLength={12}
+              returnKeyType="done"
+              onSubmitEditing={handleSaveMemberCustomNickname}
+            />
+
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TouchableOpacity
+                style={[styles.proxyCancelBtn, { flex: 1, backgroundColor: isEcoMode ? '#2C2C2E' : '#E5E5EA' }]}
+                onPress={() => setIsEditNicknameModalVisible(false)}
+              >
+                <Text style={[styles.proxyCancelBtnText, { color: theme.textPrimary }]}>キャンセル</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButtonPrimary, { flex: 1, backgroundColor: theme.accent, marginTop: 0 }]}
+                onPress={handleSaveMemberCustomNickname}
+              >
+                <Text style={styles.modalButtonPrimaryText}>保存する</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </KeyboardAvoidingView>
       </Modal>
