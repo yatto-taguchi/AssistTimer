@@ -574,6 +574,7 @@ struct ContentView: View {
     
     // 客席サムネイル・バードビューシートフラグ（画面長押しまたは右上⊞アイコンでオープン）
     @State private var showingThumbnailMap = false
+    @State private var hasInitialOpenedMap = false
     
     // 客席タイマー一覧（iPhone同期受信データ、初期値は空）
     @State private var timers: [SeatTimerItem] = []
@@ -731,7 +732,10 @@ struct ContentView: View {
                     currentUserName: currentUserName,
                     now: now,
                     onSelectSeat: { selectedSeat in
-                        timeActionTargetId = selectedSeat.id
+                        showingThumbnailMap = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                            timeActionTargetId = selectedSeat.id
+                        }
                     },
                     onToggleMainTimer: {
                         playHaptic(.click)
@@ -796,7 +800,8 @@ struct ContentView: View {
             .onAppear {
                 sessionManager.requestSyncFromPhone()
                 alarm.update(timers: timers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled)
-                if alarm.ringing.isEmpty {
+                if !hasInitialOpenedMap && alarm.ringing.isEmpty {
+                    hasInitialOpenedMap = true
                     showingThumbnailMap = true
                 }
             }
@@ -3957,67 +3962,84 @@ struct ThumbnailMainTimerCard: View {
     }
     
     var body: some View {
-        Button(action: onToggle) {
-            HStack(spacing: 8) {
-                // 左側: アイコン ＆ ラベル
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 3) {
-                        Image(systemName: "stopwatch.fill")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(stateColor.text)
-                        Text("メインタイマー")
-                            .font(.system(size: 11, weight: .heavy))
-                            .foregroundColor(.white)
-                            .lineLimit(1)
+        HStack(spacing: 8) {
+            // 左側・中央: アイコン ＆ ラベル ＆ タイマー数字（タップで再生/一時停止）
+            Button(action: onToggle) {
+                HStack(spacing: 6) {
+                    // 左側: アイコン ＆ ラベル
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "stopwatch.fill")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(stateColor.text)
+                            Text("メインタイマー")
+                                .font(.system(size: 11, weight: .heavy))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                        }
+                        if let genre = item.genre, !genre.isEmpty {
+                            Text(genre)
+                                .font(.system(size: 8.5, weight: .bold))
+                                .foregroundColor(stateColor.text)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(stateColor.text.opacity(0.2))
+                                .cornerRadius(4)
+                                .lineLimit(1)
+                        }
                     }
-                    if let genre = item.genre, !genre.isEmpty {
-                        Text(genre)
-                            .font(.system(size: 8.5, weight: .bold))
+                    
+                    Spacer(minLength: 4)
+                    
+                    // 中央: タイマー数字
+                    if isRunning {
+                        Text(formatSeconds(rem))
+                            .font(.system(size: 17, weight: .black, design: .rounded))
+                            .monospacedDigit()
                             .foregroundColor(stateColor.text)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(stateColor.text.opacity(0.2))
-                            .cornerRadius(4)
-                            .lineLimit(1)
+                    } else if isOvertime {
+                        Text("+\(formatSeconds(abs(rem)))")
+                            .font(.system(size: 16, weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(Color(hex: "#FF453A"))
+                    } else {
+                        Text(formatSeconds(item.totalSeconds))
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(Color(hex: "#8E8E93"))
                     }
                 }
-                
-                Spacer()
-                
-                // 中央: タイマー数字
-                if isRunning {
-                    Text(formatSeconds(rem))
-                        .font(.system(size: 17, weight: .black, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundColor(stateColor.text)
-                } else if isOvertime {
-                    Text("+\(formatSeconds(abs(rem)))")
-                        .font(.system(size: 16, weight: .black, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundColor(Color(hex: "#FF453A"))
-                } else {
-                    Text(formatSeconds(item.totalSeconds))
-                        .font(.system(size: 16, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundColor(Color(hex: "#8E8E93"))
-                }
-                
-                // 右側: 状態バッジ（タップで再生/一時停止）
-                Image(systemName: isRunning ? "pause.circle.fill" : (isOvertime ? "exclamationmark.circle.fill" : "play.circle.fill"))
-                    .font(.system(size: 17, weight: .bold))
-                    .foregroundColor(stateColor.text)
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
-            .background(stateColor.bg)
-            .cornerRadius(9)
-            .overlay(
-                RoundedRectangle(cornerRadius: 9)
-                    .stroke(stateColor.border, lineWidth: isOvertime && isPulsing ? 1.5 : 1)
-            )
-            .shadow(color: isOvertime && isPulsing ? Color(hex: "#FF453A").opacity(0.85) : Color.clear, radius: 4)
+            .buttonStyle(.plain)
+            
+            // 右側: 操作ボタン群（停止中/超過時はリセットボタンも併記）
+            HStack(spacing: 6) {
+                if !isRunning || isOvertime {
+                    Button(action: onReset) {
+                        Image(systemName: "arrow.counterclockwise.circle.fill")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(Color(hex: "#8E8E93"))
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                Button(action: onToggle) {
+                    Image(systemName: isRunning ? "pause.circle.fill" : (isOvertime ? "exclamationmark.circle.fill" : "play.circle.fill"))
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(stateColor.text)
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(stateColor.bg)
+        .cornerRadius(9)
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(stateColor.border, lineWidth: isOvertime && isPulsing ? 1.5 : 1)
+        )
+        .shadow(color: isOvertime && isPulsing ? Color(hex: "#FF453A").opacity(0.85) : Color.clear, radius: 4)
         .onAppear {
             withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
                 isPulsing = true
