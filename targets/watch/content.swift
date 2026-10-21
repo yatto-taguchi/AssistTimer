@@ -1158,68 +1158,274 @@ struct ContentView: View {
         .padding(.horizontal, 4)
     }
 
+    // MARK: - ★ アラーム鳴動中の連動アクション判定（シャンプーとチェックは同居せずヘルプ連動・未指定は止めるのみ）
+    private enum RingingHelpAction {
+        case check(isCheckOnly: Bool) // チェックに入る (isCheckOnly: trueなら全体タイマーは止まらない)
+        case shampoo(label: String)   // シャンプーに入る (全体タイマー停止)
+        case custom(label: String)    // コーミング等に入る (全体タイマー停止)
+    }
+
+    private var activeRingingAction: (item: SeatTimerItem, action: RingingHelpAction)? {
+        guard let firstEvent = alarm.ringing.first else { return nil }
+        guard let seat = timers.first(where: { $0.id == firstEvent.seatId }) else { return nil }
+        
+        let isCheckAlarm = firstEvent.key.contains("-check@")
+        if isCheckAlarm {
+            // 中間チェックタイマーのアラーム: チェックタイマーのみ停止、全体は止まらない
+            return (item: seat, action: .check(isCheckOnly: true))
+        }
+        
+        // 全体タイマーのアラーム: ヘルプ指定項目に連動（未指定ならnil）
+        if seat.isNoHelpNeeded { return nil }
+        let rawProcess = seat.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+        if rawProcess.isEmpty { return nil }
+        
+        if rawProcess == "チェック" {
+            // 全体タイマーのヘルプがチェック: 全体タイマーも止まる
+            return (item: seat, action: .check(isCheckOnly: false))
+        } else if rawProcess == "シャンプー" {
+            return (item: seat, action: .shampoo(label: "シャンプーに入る"))
+        } else {
+            return (item: seat, action: .custom(label: "\(rawProcess)に入る"))
+        }
+    }
+
     // ★ タイムアップ時の全画面アラーム表示（watchOS純正準拠・漆黒ピュアブラック ＆ 鮮烈アクセントUI）
     @ViewBuilder
     private var alarmOverlay: some View {
-        VStack(spacing: 8) {
-            Spacer(minLength: 18)
-            
-            // アイコン ＋ タイムアップ
-            VStack(spacing: 4) {
-                Image(systemName: "bell.badge.fill")
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundColor(Color(hex: "#FF453A"))
+        ScrollView {
+            VStack(spacing: 7) {
+                Spacer(minLength: 10)
                 
-                Text("タイムアップ")
-                    .font(.system(size: 18, weight: .black, design: .rounded))
-                    .foregroundColor(.white)
-            }
-            
-            // 席名・アラーム対象（黒背景に美しく映える赤枠バッジ）
-            VStack(spacing: 5) {
-                ForEach(alarm.ringing.prefix(3), id: \.key) { e in
-                    Text(e.title)
-                        .font(.system(size: 15, weight: .heavy, design: .rounded))
+                // アイコン ＋ タイムアップ
+                VStack(spacing: 3) {
+                    Image(systemName: "bell.badge.fill")
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundColor(Color(hex: "#FF453A"))
+                    
+                    Text("タイムアップ")
+                        .font(.system(size: 17, weight: .black, design: .rounded))
                         .foregroundColor(.white)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
-                        .background(Color(hex: "#FF453A").opacity(0.22))
-                        .cornerRadius(9)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 9)
-                                .stroke(Color(hex: "#FF453A").opacity(0.45), lineWidth: 1)
-                        )
                 }
-                if alarm.ringing.count > 3 {
-                    Text("ほか \(alarm.ringing.count - 3) 件")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.75))
+                
+                // 席名・アラーム対象（黒背景に美しく映える赤枠バッジ）
+                VStack(spacing: 4) {
+                    ForEach(alarm.ringing.prefix(3), id: \.key) { e in
+                        Text(e.title)
+                            .font(.system(size: 14, weight: .heavy, design: .rounded))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(Color(hex: "#FF453A").opacity(0.22))
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color(hex: "#FF453A").opacity(0.45), lineWidth: 1)
+                            )
+                    }
+                    if alarm.ringing.count > 3 {
+                        Text("ほか \(alarm.ringing.count - 3) 件")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white.opacity(0.75))
+                    }
+                }
+                
+                Spacer(minLength: 6)
+                
+                // ★ 連動ボタン ＆ 止めるボタン
+                if let ringingInfo = activeRingingAction {
+                    // ① 内容連動ボタン（シャンプーに入る／チェックに入る等）
+                    switch ringingInfo.action {
+                    case .check(let isCheckOnly):
+                        Button(action: {
+                            alarm.stop()
+                            WKInterfaceDevice.current().play(.success)
+                            if let idx = timers.firstIndex(where: { $0.id == ringingInfo.item.id }) {
+                                if isCheckOnly {
+                                    // ★ チェックタイマーのみ停止・完了（全体のタイマーは止まらない！）
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                        timers[idx].isCheckCompleted = true
+                                        timers[idx].checkStaff = currentUserName
+                                    }
+                                    sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: ringingInfo.item.id)
+                                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                                    showNotification(
+                                        text: "✅ 【\(ringingInfo.item.displaySeatName)】チェック完了（タイマー続行）",
+                                        color: Color(hex: "#30D158")
+                                    )
+                                } else {
+                                    // ★ 全体タイマーのチェック: 全体のタイマーも止まる
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                        timers[idx].isRunning = false
+                                        timers[idx].pausedRemainingSeconds = 0
+                                        timers[idx].isCheckCompleted = true
+                                        timers[idx].checkStaff = currentUserName
+                                    }
+                                    sessionManager.markLocalStop(seatId: ringingInfo.item.id, endTime: ringingInfo.item.targetEndTime)
+                                    sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: ringingInfo.item.id, extra: ["expectedEnd": ringingInfo.item.expectedEndMs])
+                                    sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: ringingInfo.item.id)
+                                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                                    showNotification(
+                                        text: "✅ 【\(ringingInfo.item.displaySeatName)】\(currentUserName)さんがチェックに入りました",
+                                        color: Color(hex: "#30D158")
+                                    )
+                                }
+                            }
+                        }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "magnifyingglass")
+                                    .font(.system(size: 13, weight: .heavy))
+                                Text(isCheckOnly ? "チェックに入る（タイマー続行）" : "チェックに入る")
+                                    .font(.system(size: 14, weight: .heavy))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                            .background(
+                                LinearGradient(
+                                    colors: [Color(hex: "#30D158"), Color(hex: "#248A3D")],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .foregroundColor(.white)
+                            .cornerRadius(12)
+                            .shadow(color: Color(hex: "#30D158").opacity(0.35), radius: 3, x: 0, y: 1)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 4)
+                        
+                    case .shampoo(let label):
+                        Button(action: {
+                            alarm.stop()
+                            WKInterfaceDevice.current().play(.success)
+                            if let idx = timers.firstIndex(where: { $0.id == ringingInfo.item.id }) {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                    timers[idx].isRunning = false
+                                    timers[idx].pausedRemainingSeconds = 0
+                                    timers[idx].status = .normal
+                                    timers[idx].shampooStaff = currentUserName
+                                    timers[idx].isRecruiting = false
+                                }
+                                sessionManager.markLocalStop(seatId: ringingInfo.item.id, endTime: ringingInfo.item.targetEndTime)
+                                sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: ringingInfo.item.id, extra: ["expectedEnd": ringingInfo.item.expectedEndMs, "isCompleted": true])
+                                WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                                showNotification(
+                                    text: "✅ 【\(ringingInfo.item.displaySeatName)】\(currentUserName)さんがシャンプーに入りました",
+                                    color: Color(hex: "#30D158")
+                                )
+                            }
+                        }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "drop.fill")
+                                    .font(.system(size: 13, weight: .heavy))
+                                Text(label)
+                                    .font(.system(size: 14, weight: .heavy))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                            .background(
+                                LinearGradient(
+                                    colors: [Color(hex: "#0A84FF"), Color(hex: "#0062D2")],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .foregroundColor(.white)
+                            .cornerRadius(12)
+                            .shadow(color: Color(hex: "#0A84FF").opacity(0.35), radius: 3, x: 0, y: 1)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 4)
+                        
+                    case .custom(let label):
+                        let iconName = (ringingInfo.item.helpProcess == "コーミング") ? "comb.fill" : "sparkles"
+                        Button(action: {
+                            alarm.stop()
+                            WKInterfaceDevice.current().play(.success)
+                            if let idx = timers.firstIndex(where: { $0.id == ringingInfo.item.id }) {
+                                let process = ringingInfo.item.helpProcess
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                    timers[idx].isRunning = false
+                                    timers[idx].pausedRemainingSeconds = 0
+                                    timers[idx].status = .normal
+                                    timers[idx].shampooStaff = currentUserName
+                                    timers[idx].isRecruiting = false
+                                }
+                                sessionManager.markLocalStop(seatId: ringingInfo.item.id, endTime: ringingInfo.item.targetEndTime)
+                                sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: ringingInfo.item.id, extra: ["expectedEnd": ringingInfo.item.expectedEndMs, "isCompleted": true])
+                                WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                                showNotification(
+                                    text: "✅ 【\(ringingInfo.item.displaySeatName)】\(currentUserName)さんが\(process)に入りました",
+                                    color: Color(hex: "#30D158")
+                                )
+                            }
+                        }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: iconName)
+                                    .font(.system(size: 13, weight: .heavy))
+                                Text(label)
+                                    .font(.system(size: 14, weight: .heavy))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 11)
+                            .background(
+                                LinearGradient(
+                                    colors: [Color(hex: "#0A84FF"), Color(hex: "#0062D2")],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .foregroundColor(.white)
+                            .cornerRadius(12)
+                            .shadow(color: Color(hex: "#0A84FF").opacity(0.35), radius: 3, x: 0, y: 1)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 4)
+                    }
+                    
+                    // ② 止めるボタン（並び表示時: 押しやすい赤ボタン）
+                    Button(action: {
+                        alarm.stop()
+                        WKInterfaceDevice.current().play(.success)
+                    }) {
+                        Text("止める")
+                            .font(.system(size: 16, weight: .heavy, design: .rounded))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color(hex: "#FF453A"))
+                            .foregroundColor(.white)
+                            .cornerRadius(12)
+                            .shadow(color: Color(hex: "#FF453A").opacity(0.3), radius: 3, x: 0, y: 1)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 4)
+                    .padding(.bottom, 4)
+                } else {
+                    // ★ 未指定時: 従来の特大レッドピルボタン「止める」のみ
+                    Button(action: {
+                        alarm.stop()
+                        WKInterfaceDevice.current().play(.success)
+                    }) {
+                        Text("止める")
+                            .font(.system(size: 21, weight: .heavy, design: .rounded))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(Color(hex: "#FF453A"))
+                            .foregroundColor(.white)
+                            .cornerRadius(14)
+                            .shadow(color: Color(hex: "#FF453A").opacity(0.35), radius: 5, x: 0, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 6)
+                    .padding(.bottom, 6)
                 }
             }
-            
-            Spacer(minLength: 8)
-            
-            // 止めるボタン（watchOS標準アラームと同じ、押しやすい特大レッドピルボタン）
-            Button(action: {
-                alarm.stop()
-                WKInterfaceDevice.current().play(.success)
-            }) {
-                Text("止める")
-                    .font(.system(size: 21, weight: .heavy, design: .rounded))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(Color(hex: "#FF453A"))
-                    .foregroundColor(.white)
-                    .cornerRadius(14)
-                    .shadow(color: Color(hex: "#FF453A").opacity(0.35), radius: 5, x: 0, y: 2)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 6)
-            .padding(.bottom, 6)
+            .padding(.horizontal, 8)
         }
-        .padding(.horizontal, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
         .ignoresSafeArea()
@@ -1690,6 +1896,48 @@ struct ContentView: View {
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
                         sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         showNotification(text: "⏹️ \(item.displaySeatName)のタイマーを止めました", color: Color(hex: "#30D158"))
+                    }
+                },
+                onEnterHelp: {
+                    // ★ タイムが早くても切り上げて指定施術（シャンプー・コーミング等）に入る
+                    triggerScroll(to: item.id)
+                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        let rawProcess = timers[idx].helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let process = rawProcess.isEmpty ? "シャンプー" : rawProcess
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].isRunning = false
+                            timers[idx].pausedRemainingSeconds = 0
+                            timers[idx].status = .normal
+                            timers[idx].shampooStaff = currentUserName
+                            timers[idx].isRecruiting = false
+                        }
+                        sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
+                        sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs, "isCompleted": true])
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        showNotification(
+                            text: "✅ 【\(item.displaySeatName)】\(currentUserName)さんが\(process)に入りました",
+                            color: Color(hex: "#30D158")
+                        )
+                    }
+                },
+                onCompleteCheck: {
+                    // ★ タイムが早くても切り上げてチェックに入る（全体タイマー連動のため全体タイマーも00:00停止）
+                    triggerScroll(to: item.id)
+                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].isRunning = false
+                            timers[idx].pausedRemainingSeconds = 0
+                            timers[idx].isCheckCompleted = true
+                            timers[idx].checkStaff = currentUserName
+                        }
+                        sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
+                        sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
+                        sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        showNotification(
+                            text: "✅ 【\(item.displaySeatName)】\(currentUserName)さんがチェックに入りました",
+                            color: Color(hex: "#30D158")
+                        )
                     }
                 },
                 onReinputTime: { totalSec, checkSec in
@@ -2973,32 +3221,39 @@ struct OvertimeActionSheet: View {
                     .background(Color.white.opacity(0.15))
                     .padding(.vertical, 1)
                 
-                // ② ボタン1: ヘルプ項目連動「シャンプー入る」ボタン
-                Button(action: {
-                    playHaptic(.start)
-                    onEnterHelp()
-                    dismiss()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: helpIconName)
-                            .font(.system(size: 14, weight: .bold))
-                        Text("\(helpProcessName)入る")
-                            .font(.system(size: 14, weight: .heavy))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(
-                        LinearGradient(
-                            colors: [Color(hex: "#0A84FF"), Color(hex: "#0062D2")],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+                // ② ボタン1: ヘルプ項目連動「シャンプー入る／チェック入る」ボタン（未指定時は非表示）
+                if !item.isNoHelpNeeded && !item.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button(action: {
+                        playHaptic(.start)
+                        onEnterHelp()
+                        dismiss()
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: helpIconName)
+                                .font(.system(size: 14, weight: .bold))
+                            Text("\(helpProcessName)入る")
+                                .font(.system(size: 14, weight: .heavy))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(
+                            LinearGradient(
+                                colors: helpProcessName == "チェック"
+                                    ? [Color(hex: "#30D158"), Color(hex: "#248A3D")]
+                                    : [Color(hex: "#0A84FF"), Color(hex: "#0062D2")],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
                         )
-                    )
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
-                    .shadow(color: Color(hex: "#0A84FF").opacity(0.4), radius: 3, x: 0, y: 1)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                        .shadow(
+                            color: (helpProcessName == "チェック" ? Color(hex: "#30D158") : Color(hex: "#0A84FF")).opacity(0.4),
+                            radius: 3, x: 0, y: 1
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
                 
                 // ③ ボタン2: 「タイムをリセット」ボタン（００００に変わる）
                 Button(action: {
@@ -3459,6 +3714,8 @@ struct TimeActionSheet: View {
     let initialReinputMode: Bool
     let onAdjust: (Int) -> Void
     let onStop: () -> Void
+    let onEnterHelp: (() -> Void)?
+    let onCompleteCheck: (() -> Void)?
     let onReinputTime: (Int, Int?) -> Void
     
     // 累積追加秒数（何回もタップ可能！）
@@ -3485,6 +3742,8 @@ struct TimeActionSheet: View {
         initialReinputMode: Bool = false,
         onAdjust: @escaping (Int) -> Void,
         onStop: @escaping () -> Void,
+        onEnterHelp: (() -> Void)? = nil,
+        onCompleteCheck: (() -> Void)? = nil,
         onReinputTime: @escaping (Int, Int?) -> Void
     ) {
         self.item = item
@@ -3492,6 +3751,8 @@ struct TimeActionSheet: View {
         self._isReinputMode = State(initialValue: initialReinputMode)
         self.onAdjust = onAdjust
         self.onStop = onStop
+        self.onEnterHelp = onEnterHelp
+        self.onCompleteCheck = onCompleteCheck
         self.onReinputTime = onReinputTime
         let initialCheckMin = (item.checkTotalSeconds ?? 0) / 60
         self._checkMinutes = State(initialValue: initialCheckMin)
@@ -3835,7 +4096,68 @@ struct TimeActionSheet: View {
                 }
                 .buttonStyle(.plain)
                 
-                // ② +1分, +3分, +5分（何回も押せる！dismissしない）
+                // ★ ② ヘルプ項目連動ボタン（シャンプー／チェック／コーミング等に連動。未指定時は非表示・同居絶対防止）
+                if !item.isNoHelpNeeded {
+                    let p = item.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !p.isEmpty {
+                        if p == "チェック" {
+                            Button(action: {
+                                WKInterfaceDevice.current().play(.click)
+                                onCompleteCheck?()
+                                dismiss()
+                            }) {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "magnifyingglass")
+                                        .font(.system(size: 12, weight: .heavy))
+                                    Text("チェックに入る（切り上げ）")
+                                        .font(.system(size: 12, weight: .heavy))
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(
+                                    LinearGradient(
+                                        colors: [Color(hex: "#30D158"), Color(hex: "#248A3D")],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .foregroundColor(.white)
+                                .cornerRadius(8)
+                                .shadow(color: Color(hex: "#30D158").opacity(0.3), radius: 2, x: 0, y: 1)
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            let iconName = (p == "コーミング") ? "comb.fill" : "drop.fill"
+                            Button(action: {
+                                WKInterfaceDevice.current().play(.click)
+                                onEnterHelp?()
+                                dismiss()
+                            }) {
+                                HStack(spacing: 5) {
+                                    Image(systemName: iconName)
+                                        .font(.system(size: 12, weight: .heavy))
+                                    Text("\(p)に入る（切り上げ）")
+                                        .font(.system(size: 12, weight: .heavy))
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(
+                                    LinearGradient(
+                                        colors: [Color(hex: "#0A84FF"), Color(hex: "#0062D2")],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .foregroundColor(.white)
+                                .cornerRadius(8)
+                                .shadow(color: Color(hex: "#0A84FF").opacity(0.35), radius: 2, x: 0, y: 1)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                
+                // ③ +1分, +3分, +5分（何回も押せる！dismissしない）
                 HStack(spacing: 5) {
                     Button(action: {
                         accumulatedDelta += 60
