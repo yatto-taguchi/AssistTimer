@@ -570,9 +570,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
                 return nil
             }
-            // ★ 安全防御: すでに客席があり、稼働中のタイマーが存在する場合、空配列による全消滅・強制停止を防ぐ
-            if parsed.isEmpty && !self.timers.isEmpty && self.timers.contains(where: { $0.isRunning }) {
-                // 稼働中タイマーがある時は空データでの上書きをブロック
+            // ★ 安全防御: すでに客席がある場合、空配列による全消滅・強制停止を鉄壁ブロック
+            let allowClear = (data["clearAllSeats"] as? Bool) == true
+            if parsed.isEmpty && !self.timers.isEmpty && !allowClear {
+                // 稼働中・停止中問わず、空データによる客席全滅を完全ブロック
                 if didUpdateMain {
                     WatchAlarmCoordinator.shared.update(timers: self.timers, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled, currentUserName: self.currentUserName)
                     WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer, userName: self.currentUserName)
@@ -805,6 +806,8 @@ struct ContentView: View {
     
     // 客席タイマー一覧（iPhone同期受信データ、初期値は空）
     @State private var timers: [SeatTimerItem] = []
+    // メインタイマー（iPhoneホーム画面同期データ）
+    @State private var mainTimer: SeatTimerItem? = nil
     
     // ★ タイム確定時などの自動スクロール用ステート
     @State private var scrollToSeatId: String? = nil
@@ -922,7 +925,7 @@ struct ContentView: View {
                     alarm.update(timers: newTimers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                     WidgetSync.save(timers: newTimers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                 }
-                .onChange(of: sessionManager.mainTimer) { _, newMain in
+                .onChange(of: self.mainTimer) { _, newMain in
                     alarm.update(timers: timers, mainTimer: newMain, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                     WidgetSync.save(timers: timers, mainTimer: newMain, userName: currentUserName)
                 }
@@ -1027,6 +1030,11 @@ struct ContentView: View {
                     self.timers = received
                 }
             }
+            .onReceive(sessionManager.$mainTimer) { receivedMain in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    self.mainTimer = receivedMain
+                }
+            }
             .onReceive(sessionManager.$currentUserName) { receivedName in
                 if !receivedName.isEmpty {
                     self.currentUserName = receivedName
@@ -1040,6 +1048,9 @@ struct ContentView: View {
             }
             .onAppear {
                 sessionManager.requestSyncFromPhone()
+                if let initialMain = sessionManager.mainTimer {
+                    self.mainTimer = initialMain
+                }
                 alarm.update(timers: timers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                 if !hasInitialOpenedMap && alarm.ringing.isEmpty {
                     hasInitialOpenedMap = true
@@ -1436,16 +1447,15 @@ struct ContentView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 12) {
-                    // ★ メインタイマーカード（HomeScreen連動・エメラルドグリーン）
                     // ★ メインタイマーカード（HomeScreen連動・エメラルドグリーン、常に操作可能）
-                    let main = sessionManager.mainTimer ?? defaultMainTimer()
+                    let currentMain = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
                     MainTimerCard(
-                        item: main,
+                        item: currentMain,
                         now: now,
                         onToggle: {
                             playHaptic(.click)
-                            let willPause = main.isRunning || main.isPreCountingDown
-                            var m = sessionManager.mainTimer ?? defaultMainTimer()
+                            let willPause = currentMain.isRunning || currentMain.isPreCountingDown
+                            var m = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
                             if willPause {
                                 m.isRunning = false
                                 m.isPreCountingDown = false
@@ -1466,6 +1476,7 @@ struct ContentView: View {
                                     m.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
                                 }
                             }
+                            self.mainTimer = m
                             sessionManager.mainTimer = m
                             WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
                             WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
@@ -1473,12 +1484,13 @@ struct ContentView: View {
                         },
                         onReset: {
                             playHaptic(.click)
-                            var m = sessionManager.mainTimer ?? defaultMainTimer()
+                            var m = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
                             m.isRunning = false
                             m.isPreCountingDown = false
                             m.preCountdownSeconds = 0
                             m.prepEndTime = nil
                             m.pausedRemainingSeconds = m.totalSeconds
+                            self.mainTimer = m
                             sessionManager.mainTimer = m
                             WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
                             WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)

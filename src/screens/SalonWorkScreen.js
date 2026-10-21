@@ -170,7 +170,49 @@ export const updateCachedMainTimerState = (state) => {
   _cachedMainTimerState = state;
 };
 
-// ★ Apple Watchへのメインタイマー専用同期ヘルパー（客席seatsを絶対に含めず、各タイマーの完全独立を保証）
+export const formatSeatsPayload = (seatsList) => {
+  if (!Array.isArray(seatsList) || seatsList.length === 0) return [];
+  return seatsList.map((s, index) => {
+    let seatNum = index + 1;
+    if (s.seatLabel) {
+      const match = s.seatLabel.match(/\d+/);
+      if (match) seatNum = parseInt(match[0], 10);
+    }
+
+    const isRunning = s.status === 'running';
+    const targetEnd = isRunning ? (s.targetEndTimestamp || Date.now()) : 0;
+    const pausedRem = !isRunning
+      ? (typeof s.pausedRemainingSeconds === 'number' ? Math.max(0, Math.floor(s.pausedRemainingSeconds)) : 0)
+      : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
+
+    const isZero = !isRunning && pausedRem <= 0;
+    const isCollapsedSeat = !isRunning && !s.isReset && s.collapsedAtEnd != null;
+    const isNoHelp = !isZero && !isCollapsedSeat && (s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none');
+
+    return {
+      id: String(s.id),
+      seatNumber: seatNum,
+      seatLabel: s.seatLabel || `${seatNum}番席`,
+      creatorName: s.colorStaffName || 'スタイリスト',
+      totalSeconds: s.targetSeconds || 600,
+      targetEndTimestamp: targetEnd,
+      isRunning: isRunning,
+      pausedRemainingSeconds: pausedRem,
+      helpProcess: (isZero || isCollapsedSeat) ? '' : (s.actionStatus === 'shampoo' || s.isShampooing ? 'シャンプー' : (s.actionStatus || 'シャンプー')),
+      shampooStaff: (isNoHelp || isZero || isCollapsedSeat) ? '' : (s.assistantStaffName || ''),
+      isRecruiting: !isNoHelp && !isZero && !isCollapsedSeat && !s.assistantStaffName && isRunning,
+      isNoHelpNeeded: isNoHelp,
+      status: (isZero || isCollapsedSeat) ? 'normal' : (s.isShampooing || s.actionStatus === 'shampoo' ? 'shampoo' : (s.actionStatus || 'normal')),
+      checkTargetSeconds: s.checkTargetSeconds ? Number(s.checkTargetSeconds) : 0,
+      checkEndTimestamp: isRunning && s.checkEndTimestamp ? Number(s.checkEndTimestamp) : 0,
+      checkStaffName: s.checkStaffName || '',
+      isCheckCompleted: s.checkStatus === 'completed',
+      isCollapsed: isCollapsedSeat,
+    };
+  });
+};
+
+// ★ Apple Watchへのメインタイマー専用同期ヘルパー（最新客席キャッシュを保持してコンテキスト上書き消失を完全防止）
 export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
   if (Platform.OS !== 'ios') return;
   try {
@@ -208,12 +250,16 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       prepEndTimestamp: state.prepEndTimestamp || 0,
     };
 
-    // ★ seats キーは絶対に含めない。Watch 側の timers 配列に1ミリも触れさせない！
     const watchPayload = {
       type: 'SYNC_MAIN_TIMER',
       timestamp: Date.now(),
       mainTimer: mainTimerPayload,
     };
+
+    // ★ 客席キャッシュが存在する場合は保持して送信し、WCSession のコンテキスト上書きによる客席全滅を絶対防止！
+    if (Array.isArray(_cachedCurrentSeats) && _cachedCurrentSeats.length > 0) {
+      watchPayload.seats = formatSeatsPayload(_cachedCurrentSeats);
+    }
 
     WatchConnectivity.syncData(watchPayload).catch(() => {});
   } catch (e) {
@@ -230,8 +276,9 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
       _cachedCurrentSeats = currentSeats;
       validSeats = currentSeats;
     } else if (Array.isArray(_cachedCurrentSeats) && _cachedCurrentSeats.length > 0) {
+      // currentSeats が空配列や未初期化でも、既存の有効な客席キャッシュがあるなら絶対に消さず保持！
       validSeats = _cachedCurrentSeats;
-    } else if (currentSeats !== null && Array.isArray(currentSeats)) {
+    } else if (options.forceEmpty || (currentSeats !== null && Array.isArray(currentSeats) && _cachedCurrentSeats.length === 0)) {
       validSeats = [];
       _cachedCurrentSeats = [];
     }
@@ -318,47 +365,7 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
 
     // ★ 客席データが有効な場合のみ seats を追加。未指定（null）の時は seats を含めず客席タイマーを保護
     if (validSeats !== null) {
-      watchPayload.seats = validSeats.map((s, index) => {
-        let seatNum = index + 1;
-        if (s.seatLabel) {
-          const match = s.seatLabel.match(/\d+/);
-          if (match) seatNum = parseInt(match[0], 10);
-        }
-
-        const isRunning = s.status === 'running';
-        const targetEnd = isRunning ? (s.targetEndTimestamp || Date.now()) : 0;
-        // ★ 停止中は保存済みの残り秒数を送る（終了時刻から計算すると、止めた後も Watch 側で残りが減っていった）
-        const pausedRem = !isRunning
-          ? (typeof s.pausedRemainingSeconds === 'number' ? Math.max(0, Math.floor(s.pausedRemainingSeconds)) : 0)
-          : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
-
-        const isZero = !isRunning && pausedRem <= 0;
-        const isCollapsedSeat = !isRunning && !s.isReset && s.collapsedAtEnd != null;
-        const isNoHelp = !isZero && !isCollapsedSeat && (s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none');
-
-        return {
-          id: String(s.id),
-          seatNumber: seatNum,
-          seatLabel: s.seatLabel || `${seatNum}番席`,
-          creatorName: s.colorStaffName || 'スタイリスト',
-          totalSeconds: s.targetSeconds || 600,
-          targetEndTimestamp: targetEnd,
-          isRunning: isRunning,
-          pausedRemainingSeconds: pausedRem,
-          helpProcess: (isZero || isCollapsedSeat) ? '' : (s.actionStatus === 'shampoo' || s.isShampooing ? 'シャンプー' : (s.actionStatus || 'シャンプー')),
-          shampooStaff: (isNoHelp || isZero || isCollapsedSeat) ? '' : (s.assistantStaffName || ''),
-          isRecruiting: !isNoHelp && !isZero && !isCollapsedSeat && !s.assistantStaffName && isRunning,
-          isNoHelpNeeded: isNoHelp,
-          status: (isZero || isCollapsedSeat) ? 'normal' : (s.isShampooing || s.actionStatus === 'shampoo' ? 'shampoo' : (s.actionStatus || 'normal')),
-          checkTargetSeconds: s.checkTargetSeconds ? Number(s.checkTargetSeconds) : 0,
-          checkEndTimestamp: isRunning && s.checkEndTimestamp ? Number(s.checkEndTimestamp) : 0,
-          checkStaffName: s.checkStaffName || '',
-          isCheckCompleted: s.checkStatus === 'completed',
-          // ★ Watch の「計測終了」で収納したカード。その時の終了時刻のまま停止している間だけ収納を保つ
-          //   （以前は常に false を送っていたため、次の同期でカードが開いてしまっていた）
-          isCollapsed: isCollapsedSeat,
-        };
-      });
+      watchPayload.seats = formatSeatsPayload(validSeats);
     }
 
     if (options.immediate || options.notification) {
@@ -1427,14 +1434,19 @@ export default function SalonWorkScreen() {
     });
   }, [isDataLoaded]);
 
-  // ★ seats または staffMembers または mainTimerState が更新された際、Watch へ最新データを同期
+  // ★ メインタイマー状態が更新された際はキャッシュの更新のみ行い、客席同期は巻き込まない（毎秒の不要通信を完全根絶）
   useEffect(() => {
     updateCachedMainTimerState(mainTimerState);
+  }, [mainTimerState]);
+
+  // ★ seats または staffMembers が更新された際のみ、Watch へ客席データを同期（データロード完了後のみ）
+  useEffect(() => {
+    if (!isDataLoaded) return;
     _watchAlarmSound = !!isWatchAlarmSoundEnabled;
     if (Platform.OS === 'ios') {
       syncSeatsToWatch(seats, userName, staffMembers);
     }
-  }, [seats, userName, staffMembers, isWatchAlarmSoundEnabled, mainTimerState]);
+  }, [isDataLoaded, seats, userName, staffMembers, isWatchAlarmSoundEnabled]);
 
   // ★ サロン席の終了時刻を iPhone 純正アラーム（AlarmKit）に予約
   // 画面ロック中・バックグラウンドでも、止めるまで鳴り続ける。
