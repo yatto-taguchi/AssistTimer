@@ -1191,6 +1191,14 @@ export default function HomeScreen({ navigation }) {
   resetTimerRef.current = resetTimer;
   const applyTimeInSecondsRef = useRef(applyTimeInSeconds);
   applyTimeInSecondsRef.current = applyTimeInSeconds;
+  const targetTimeRef = useRef(targetTime);
+  targetTimeRef.current = targetTime;
+  const selectedCategoryRef = useRef(selectedCategory);
+  selectedCategoryRef.current = selectedCategory;
+  const isCountdownEnabledRef = useRef(isCountdownEnabled);
+  isCountdownEnabledRef.current = isCountdownEnabled;
+  const countdownSecondsRef = useRef(countdownSeconds);
+  countdownSecondsRef.current = countdownSeconds;
 
   // ★ メインタイマー操作（Watch直接受信 ＆ サロン画面等のUIリクエスト）の共通実行ハンドラ
   const processedMainActionIdsRef = useRef(new Set());
@@ -1216,16 +1224,55 @@ export default function HomeScreen({ navigation }) {
       const playPhoneSound = payload?.playSoundOnPhone !== false;
       setWatchMutedState(!playPhoneSound);
       console.log('[HomeScreen] MAIN_TIMER_START received. playSoundOnPhone:', playPhoneSound, 'isMuted:', !playPhoneSound);
+      // 残り時間が0秒以下の場合は設定時間にリセットしてから開始
+      if (remainingTimeRef.current <= 0 && targetTimeRef.current > 0) {
+        remainingTimeRef.current = targetTimeRef.current;
+        setRemainingTime(targetTimeRef.current);
+      }
       if (!isRunningRef.current && !isPreCountingDownRef.current && toggleTimerRef.current) {
-        toggleTimerRef.current(false);
+        toggleTimerRef.current(true); // ★ Watch主導フラグ(isFromWatch=true)を正しく伝達
+      }
+      if (Platform.OS === 'ios') {
+        const startState = {
+          remainingTime: remainingTimeRef.current,
+          targetTime: targetTimeRef.current,
+          targetEndTimestamp: targetEndTimeRef.current || (Date.now() + remainingTimeRef.current * 1000),
+          isRunning: true,
+          isPaused: false,
+          isCountUp: false,
+          genre: selectedCategoryRef.current || '',
+          isPreCountingDown: isPreCountingDownRef.current,
+          preCountdownSeconds: preCountdownTimeRef.current || 0,
+          isCountdownConfigEnabled: !!isCountdownEnabledRef.current,
+          countdownConfigSeconds: countdownSecondsRef.current || 5,
+          prepEndTimestamp: prepEndTimeRef.current,
+        };
+        updateCachedMainTimerState(startState);
+        syncMainTimerToWatch(startState, { immediate: true });
       }
     } else if (cleanAction === 'pause') {
       if ((isRunningRef.current || isPreCountingDownRef.current) && toggleTimerRef.current) {
-        toggleTimerRef.current(false);
+        toggleTimerRef.current(true);
+      }
+      if (Platform.OS === 'ios') {
+        const pauseState = {
+          remainingTime: remainingTimeRef.current,
+          targetTime: targetTimeRef.current,
+          targetEndTimestamp: 0,
+          isRunning: false,
+          isPaused: true,
+          isCountUp: false,
+          genre: selectedCategoryRef.current || '',
+          isPreCountingDown: false,
+          preCountdownSeconds: 0,
+          prepEndTimestamp: null,
+        };
+        updateCachedMainTimerState(pauseState);
+        syncMainTimerToWatch(pauseState, { immediate: true });
       }
     } else if (cleanAction === 'toggle') {
       if (toggleTimerRef.current) {
-        toggleTimerRef.current(false);
+        toggleTimerRef.current(true);
       }
     } else if (cleanAction === 'reset') {
       setWatchMutedState(false);
@@ -1259,33 +1306,36 @@ export default function HomeScreen({ navigation }) {
         if (Platform.OS === 'ios') {
           const updated = {
             remainingTime: nextRem,
-            targetTime: isRunningRef.current ? targetTime : nextRem,
+            targetTime: isRunningRef.current ? targetTimeRef.current : nextRem,
             targetEndTimestamp: isRunningRef.current ? targetEndTimeRef.current : 0,
             isRunning: isRunningRef.current,
             isPaused: !isRunningRef.current,
             isCountUp: false,
-            genre: selectedCategory || '',
+            genre: selectedCategoryRef.current || '',
           };
           updateCachedMainTimerState(updated);
           syncMainTimerToWatch(updated, { immediate: true });
         }
       }
     }
-  }, [setWatchMutedState, targetTime, selectedCategory]);
+  }, [setWatchMutedState]);
+
+  const handleMainTimerActionDispatchRef = useRef(handleMainTimerActionDispatch);
+  handleMainTimerActionDispatchRef.current = handleMainTimerActionDispatch;
 
   useEffect(() => {
     if (Platform.OS !== 'ios') return undefined;
     const unsubscribe = WatchConnectivity.subscribeActions((payload) => {
       if (!payload || !payload.action) return;
       const { action, actionId } = payload;
-      if (action.startsWith('MAIN_TIMER_')) {
-        handleMainTimerActionDispatch(action, payload, actionId || `${action}_${Date.now()}`);
+      if (action.startsWith('MAIN_TIMER_') && handleMainTimerActionDispatchRef.current) {
+        handleMainTimerActionDispatchRef.current(action, payload, actionId || `${action}_${Date.now()}`);
       }
     });
     return () => {
       if (unsubscribe) unsubscribe();
     };
-  }, [handleMainTimerActionDispatch]);
+  }, []);
 
   // サロン画面等からの操作リクエスト（一時停止/再開/リセット/時間変更/微調整）の実行
   useEffect(() => {

@@ -757,6 +757,7 @@ struct ContentView: View {
     @State private var showingMainTimerSheet = false
     @State private var hasInitialOpenedMap = false
     @State private var pendingSelectedSeatId: String? = nil
+    @State private var pendingOpenMainTimerSheet: Bool = false
     
     // 客席タイマー一覧（iPhone同期受信データ、初期値は空）
     @State private var timers: [SeatTimerItem] = []
@@ -927,6 +928,11 @@ struct ContentView: View {
                 if let targetId = pendingSelectedSeatId {
                     pendingSelectedSeatId = nil
                     timeActionTargetId = targetId
+                } else if pendingOpenMainTimerSheet {
+                    pendingOpenMainTimerSheet = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        showingMainTimerSheet = true
+                    }
                 }
             }) {
                 thumbnailMapSheetView
@@ -1442,6 +1448,10 @@ struct ContentView: View {
             onSelectSeat: { selectedSeat in
                 pendingSelectedSeatId = selectedSeat.id
                 triggerScroll(to: selectedSeat.id)
+                showingThumbnailMap = false
+            },
+            onSelectMainTimer: {
+                pendingOpenMainTimerSheet = true
                 showingThumbnailMap = false
             },
             onToggleMainTimer: { handleToggleMainTimer() },
@@ -3222,6 +3232,7 @@ struct MainTimerActionSheet: View {
                             let isSelected = (currentItem.totalSeconds == m * 60)
                             Button(action: {
                                 WKInterfaceDevice.current().play(.click)
+                                pickerSeconds = m * 60
                                 onSetTime(m * 60)
                             }) {
                                 Text("\(m)分")
@@ -4842,14 +4853,13 @@ struct SeatThumbnailMapSheet: View {
     let currentUserName: String
     let now: Date
     let onSelectSeat: (SeatTimerItem) -> Void
+    let onSelectMainTimer: () -> Void
     let onToggleMainTimer: () -> Void
     let onResetMainTimer: () -> Void
     let onSetMainTimerTime: (Int) -> Void
     let onAdjustMainTimer: (Int) -> Void
     let onStartMainTimer: () -> Void
     let onPauseMainTimer: () -> Void
-    
-    @State private var showingMainTimerSheet: Bool = false
     
     // 席番号順（1番席、2番席、3番席...）に整列して物理レイアウトと連動
     var physicalSortedTimers: [SeatTimerItem] {
@@ -4938,7 +4948,7 @@ struct SeatThumbnailMapSheet: View {
                         item: main,
                         now: now,
                         onTap: {
-                            showingMainTimerSheet = true
+                            onSelectMainTimer()
                         }
                     )
                 }
@@ -4970,18 +4980,6 @@ struct SeatThumbnailMapSheet: View {
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 4)
-        }
-        .sheet(isPresented: $showingMainTimerSheet) {
-            if let main = mainTimer {
-                MainTimerActionSheet(
-                    item: main,
-                    onStart: onStartMainTimer,
-                    onPause: onPauseMainTimer,
-                    onReset: onResetMainTimer,
-                    onSetTime: onSetMainTimerTime,
-                    onAdjust: onAdjustMainTimer
-                )
-            }
         }
     }
 }
