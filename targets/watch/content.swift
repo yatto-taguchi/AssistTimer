@@ -1639,7 +1639,7 @@ struct ContentView: View {
     
     private func handleToggleMainTimer() {
         playHaptic(.click)
-        var main = sessionManager.mainTimer ?? defaultMainTimer()
+        var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         let willPause = main.isRunning || main.isPreCountingDown
         if willPause {
             main.isRunning = false
@@ -1661,6 +1661,7 @@ struct ContentView: View {
                 main.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
             }
         }
+        self.mainTimer = main
         sessionManager.mainTimer = main
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
@@ -1669,7 +1670,7 @@ struct ContentView: View {
     
     private func handleStartMainTimer() {
         playHaptic(.click)
-        var main = sessionManager.mainTimer ?? defaultMainTimer()
+        var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds || main.isOvertime)
         if isInitialStart && main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
             main.isPreCountingDown = true
@@ -1682,6 +1683,7 @@ struct ContentView: View {
             let rem = (main.pausedRemainingSeconds > 0 && !main.isOvertime) ? main.pausedRemainingSeconds : main.totalSeconds
             main.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
         }
+        self.mainTimer = main
         sessionManager.mainTimer = main
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
@@ -1690,12 +1692,13 @@ struct ContentView: View {
     
     private func handlePauseMainTimer() {
         playHaptic(.click)
-        var main = sessionManager.mainTimer ?? defaultMainTimer()
+        var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         main.isRunning = false
         main.isPreCountingDown = false
         main.preCountdownSeconds = 0
         main.prepEndTime = nil
         main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(Date())))
+        self.mainTimer = main
         sessionManager.mainTimer = main
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
@@ -1704,12 +1707,13 @@ struct ContentView: View {
     
     private func handleResetMainTimer() {
         playHaptic(.click)
-        var main = sessionManager.mainTimer ?? defaultMainTimer()
+        var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         main.isRunning = false
         main.isPreCountingDown = false
         main.preCountdownSeconds = 0
         main.prepEndTime = nil
         main.pausedRemainingSeconds = main.totalSeconds
+        self.mainTimer = main
         sessionManager.mainTimer = main
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
@@ -1718,24 +1722,26 @@ struct ContentView: View {
     
     private func handleSetMainTimerTime(totalSec: Int) {
         playHaptic(.click)
-        var main = sessionManager.mainTimer ?? defaultMainTimer()
+        var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         main.totalSeconds = totalSec
         main.pausedRemainingSeconds = totalSec
         if main.isRunning {
             main.targetEndTime = Date().addingTimeInterval(TimeInterval(totalSec))
         }
+        self.mainTimer = main
         sessionManager.mainTimer = main
         sessionManager.sendMainTimerSetTime(seconds: totalSec)
     }
     
     private func handleAdjustMainTimer(deltaSec: Int) {
         playHaptic(.click)
-        var main = sessionManager.mainTimer ?? defaultMainTimer()
+        var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         if main.isRunning {
             main.targetEndTime = main.targetEndTime.addingTimeInterval(Double(deltaSec))
         } else {
             main.pausedRemainingSeconds = max(0, main.pausedRemainingSeconds + deltaSec)
         }
+        self.mainTimer = main
         sessionManager.mainTimer = main
         sessionManager.sendMainTimerAdjust(seconds: deltaSec)
     }

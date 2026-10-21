@@ -172,44 +172,47 @@ export const updateCachedMainTimerState = (state) => {
 
 export const formatSeatsPayload = (seatsList) => {
   if (!Array.isArray(seatsList) || seatsList.length === 0) return [];
-  return seatsList.map((s, index) => {
-    let seatNum = index + 1;
-    if (s.seatLabel) {
-      const match = s.seatLabel.match(/\d+/);
-      if (match) seatNum = parseInt(match[0], 10);
-    }
+  return seatsList
+    .map((s, index) => {
+      if (!s || typeof s !== 'object' || !s.id) return null;
+      let seatNum = index + 1;
+      if (s.seatLabel) {
+        const match = String(s.seatLabel).match(/\d+/);
+        if (match) seatNum = parseInt(match[0], 10);
+      }
 
-    const isRunning = s.status === 'running';
-    const targetEnd = isRunning ? (s.targetEndTimestamp || Date.now()) : 0;
-    const pausedRem = !isRunning
-      ? (typeof s.pausedRemainingSeconds === 'number' ? Math.max(0, Math.floor(s.pausedRemainingSeconds)) : 0)
-      : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
+      const isRunning = s.status === 'running';
+      const targetEnd = isRunning ? (s.targetEndTimestamp || Date.now()) : 0;
+      const pausedRem = !isRunning
+        ? (typeof s.pausedRemainingSeconds === 'number' ? Math.max(0, Math.floor(s.pausedRemainingSeconds)) : 0)
+        : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
-    const isZero = !isRunning && pausedRem <= 0;
-    const isCollapsedSeat = !isRunning && !s.isReset && s.collapsedAtEnd != null;
-    const isNoHelp = !isZero && !isCollapsedSeat && (s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none');
+      const isZero = !isRunning && pausedRem <= 0;
+      const isCollapsedSeat = !isRunning && !s.isReset && s.collapsedAtEnd != null;
+      const isNoHelp = !isZero && !isCollapsedSeat && (s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none');
 
-    return {
-      id: String(s.id),
-      seatNumber: seatNum,
-      seatLabel: s.seatLabel || `${seatNum}番席`,
-      creatorName: s.colorStaffName || 'スタイリスト',
-      totalSeconds: s.targetSeconds || 600,
-      targetEndTimestamp: targetEnd,
-      isRunning: isRunning,
-      pausedRemainingSeconds: pausedRem,
-      helpProcess: (isZero || isCollapsedSeat) ? '' : (s.actionStatus === 'shampoo' || s.isShampooing ? 'シャンプー' : (s.actionStatus || 'シャンプー')),
-      shampooStaff: (isNoHelp || isZero || isCollapsedSeat) ? '' : (s.assistantStaffName || ''),
-      isRecruiting: !isNoHelp && !isZero && !isCollapsedSeat && !s.assistantStaffName && isRunning,
-      isNoHelpNeeded: isNoHelp,
-      status: (isZero || isCollapsedSeat) ? 'normal' : (s.isShampooing || s.actionStatus === 'shampoo' ? 'shampoo' : (s.actionStatus || 'normal')),
-      checkTargetSeconds: s.checkTargetSeconds ? Number(s.checkTargetSeconds) : 0,
-      checkEndTimestamp: isRunning && s.checkEndTimestamp ? Number(s.checkEndTimestamp) : 0,
-      checkStaffName: s.checkStaffName || '',
-      isCheckCompleted: s.checkStatus === 'completed',
-      isCollapsed: isCollapsedSeat,
-    };
-  });
+      return {
+        id: String(s.id),
+        seatNumber: seatNum,
+        seatLabel: s.seatLabel || `${seatNum}番席`,
+        creatorName: s.colorStaffName || 'スタイリスト',
+        totalSeconds: s.targetSeconds || 600,
+        targetEndTimestamp: targetEnd,
+        isRunning: isRunning,
+        pausedRemainingSeconds: pausedRem,
+        helpProcess: (isZero || isCollapsedSeat) ? '' : (s.actionStatus === 'shampoo' || s.isShampooing ? 'シャンプー' : (s.actionStatus || 'シャンプー')),
+        shampooStaff: (isNoHelp || isZero || isCollapsedSeat) ? '' : (s.assistantStaffName || ''),
+        isRecruiting: !isNoHelp && !isZero && !isCollapsedSeat && !s.assistantStaffName && isRunning,
+        isNoHelpNeeded: isNoHelp,
+        status: (isZero || isCollapsedSeat) ? 'normal' : (s.isShampooing || s.actionStatus === 'shampoo' ? 'shampoo' : (s.actionStatus || 'normal')),
+        checkTargetSeconds: s.checkTargetSeconds ? Number(s.checkTargetSeconds) : 0,
+        checkEndTimestamp: isRunning && s.checkEndTimestamp ? Number(s.checkEndTimestamp) : 0,
+        checkStaffName: s.checkStaffName || '',
+        isCheckCompleted: s.checkStatus === 'completed',
+        isCollapsed: isCollapsedSeat,
+      };
+    })
+    .filter(Boolean);
 };
 
 // ★ Apple Watchへのメインタイマー専用同期ヘルパー（最新客席キャッシュを保持してコンテキスト上書き消失を完全防止）

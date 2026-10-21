@@ -1407,11 +1407,54 @@ export default function HomeScreen({ navigation }) {
   const handleMainTimerActionDispatchRef = useRef(handleMainTimerActionDispatch);
   handleMainTimerActionDispatchRef.current = handleMainTimerActionDispatch;
 
+  const getLatestMainTimerState = useCallback(() => {
+    const isRunning = isRunningRef.current;
+    const currentRemaining = remainingTimeRef.current;
+    const currentTarget = targetTimeRef.current || targetTime || 600;
+    let endMs = 0;
+    if (isRunning) {
+      if (isCountUpRef.current) {
+        endMs = overStartTimeRef.current || (Date.now() - currentRemaining * 1000);
+      } else {
+        endMs = targetEndTimeRef.current || (Date.now() + currentRemaining * 1000);
+      }
+    }
+    return {
+      remainingTime: currentRemaining,
+      targetTime: currentTarget,
+      targetEndTimestamp: endMs,
+      isRunning,
+      isPaused: !isRunning && currentRemaining !== currentTarget && !isCountUpRef.current,
+      isCountUp: isCountUpRef.current,
+      genre: selectedCategoryRef.current || selectedCategory || '',
+      isPreCountingDown: !!isPreCountingDownRef.current,
+      preCountdownSeconds: preCountdownTimeRef.current || 0,
+      isCountdownConfigEnabled: !!isCountdownEnabledRef.current,
+      countdownConfigSeconds: countdownSecondsRef.current || 5,
+      prepEndTimestamp: isPreCountingDownRef.current ? prepEndTimeRef.current : null,
+    };
+  }, [targetTime, selectedCategory]);
+
   useEffect(() => {
     if (Platform.OS !== 'ios') return undefined;
+
+    // ★ マウント直後（アプリ起動時）に現在のメインタイマー状態を1度確実にWatchへ送信
+    const initialState = getLatestMainTimerState();
+    updateCachedMainTimerState(initialState);
+    syncMainTimerToWatch(initialState, { immediate: true });
+
     const unsubscribe = WatchConnectivity.subscribeActions((payload) => {
       if (!payload || !payload.action) return;
       const { action, actionId } = payload;
+
+      // ★ Watchからの同期要求（REQUEST_SYNC）に対し、サロン画面を開いていなくても即座にメインタイマー最新状態を返送！
+      if (action === 'REQUEST_SYNC') {
+        const latest = getLatestMainTimerState();
+        updateCachedMainTimerState(latest);
+        syncMainTimerToWatch(latest, { immediate: true });
+        return;
+      }
+
       if (action.startsWith('MAIN_TIMER_') && handleMainTimerActionDispatchRef.current) {
         handleMainTimerActionDispatchRef.current(action, payload, actionId || `${action}_${Date.now()}`);
       }
@@ -1419,7 +1462,7 @@ export default function HomeScreen({ navigation }) {
     return () => {
       if (unsubscribe) unsubscribe();
     };
-  }, []);
+  }, [getLatestMainTimerState]);
 
   // サロン画面等からの操作リクエスト（一時停止/再開/リセット/時間変更/微調整）の実行
   useEffect(() => {
