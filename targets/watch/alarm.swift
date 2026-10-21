@@ -161,7 +161,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private func isKeyDueOrDone(_ key: String?) -> Bool {
         guard let key = key else { return true }
         if acknowledged[key] != nil { return true }
-        guard let ev = events.first(where: { $0.key == key }) else { return true }
+        guard let ev = events.first(where: { isSameTarget(key1: $0.key, key2: key) }) else { return true }
         return ev.date <= Date()
     }
 
@@ -202,8 +202,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
 
         // 鳴っている予定または予約中の予定が相手によって止められた・席が終了した → アラームを即時消火
+        // （★ isSameTarget により、通信時のミリ秒丸め誤差（±2秒）による誤消火を確実に防止）
         if session != nil {
-            let keyInvalid = (sessionKey != nil && (!events.contains { $0.key == sessionKey } || acknowledged[sessionKey!] != nil))
+            let keyInvalid = (sessionKey != nil && (!events.contains { isSameTarget(key1: $0.key, key2: sessionKey) } || acknowledged[sessionKey!] != nil))
             let noEventsAtAll = events.isEmpty && ringing.isEmpty
             if keyInvalid || noEventsAtAll {
                 invalidateCurrentSession()
