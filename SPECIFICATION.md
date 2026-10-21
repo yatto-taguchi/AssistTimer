@@ -2035,10 +2035,22 @@ Apple Watch の文字盤モジュール（コンプリケーション）をタ�
      - `toggleTimer` 内部におけるタイマー動作・準備中・超過判定を、Reactの非同期State（`isRunning`, `isPreCountingDown`, `isCountUp`）から同期的Ref（`isRunningRef.current`, `isPreCountingDownRef.current`, `isCountUpRef.current`）へ完全統一。
      - 超過カウントアップ中や停止直後にWatchからスタートシグナルが届いた際、非同期ステート遅延によって「すでに稼働中」と誤認されスタートではなく停止処理が走ってしまう致命的バグを根本解決。
      - `handleMainTimerActionDispatch('start')` において超過からのリスタート時に `isRunningRef.current = false; setIsRunning(false);` を同期リセットし、`toggleTimer` が100%確実に初期スタート（または準備カウントダウン）として発火することを保証。
-   - **メインタイマー・共有客席タイマーの終了/停止時に超過のまま固まる不整合の完全解消 (`SalonWorkScreen.js`, `HomeScreen.js`)**:
-     - `SalonWorkScreen.js`: `syncMainTimerToWatch` および `syncSeatsToWatch` の `mainTimerPayload` において、`isCountUp` を稼働中のみ（`isRunning && !!state.isCountUp`）に限定し、停止中の `pausedRem` から負の秒数送信（`-Math.max(0, ...)`）を完全撤廃。Watch側の `SeatTimerItem.remainingSeconds` が負値（`< 0`）を返して `isOvertime` が `true` のまま赤色点滅し続ける致命的バグを解消。また停止時は `targetEndTimestamp: 0` を送信し過去エポックからの動的超過計算を抑止。
-     - `SalonWorkScreen.js`: `buildStoppedSeat` および `handleFinishSeat` において、`targetEndTimestamp: null, isOver: false, pausedRemainingSeconds: 0, isReset: true` を明示セットし、停止・施術終了した客席がiPhone側・Watch側で超過判定されたまま固まる不整合を根絶。iPhone側の「施術終了」「席削除」「新規追加」時にも `syncSeatsToWatch` を即座に呼び出し、Watch側へ即時待機中同期を行うよう徹底。また `FINISH_MEASURE` 時も `collapsedAtEnd` を確実に保持してカード収納を維持。
-     - `HomeScreen.js`: `handleOpenSaveModal` および `handleOpenSaveInTimeModal` において、`isRunningRef.current = false; isPreCountingDownRef.current = false;` を即座に同期的同期。また保存モーダルのキャンセルボタン押下時に `resetTimer(true)` を呼び出し、モーダルを閉じた後に画面が超過のまま残る現象を完全解消。
+   - **メインタイマー・共有客席タイマーの終了/停止時に超過のまま固まる不整合の完全解消 (`SalonWorkScreen.js`, `HomeScreen.js`, `content.swift`)**:
+     - **負数秒数（`-Math.max(0, ...)`）の完全撤廃と停止時超過判定の根本防止**:
+       - `SalonWorkScreen.js` の `syncMainTimerToWatch` および `syncSeatsToWatch` 内の `mainTimerPayload` において、`isCountUp` を稼働中のみ（`isRunning && !!state.isCountUp`）に限定。
+       - 停止時の `pausedRem` 送信において `-Math.max(0, ...)` と負数化していた不整合を完全撤廃し、常に `>= 0` の正数を送信。
+       - これにより、Watch側（`content.swift`）の `SeatTimerItem.remainingSeconds` が負値（`-15` など）を返し、停止中であるにもかかわらず `isOvertime`（`remainingSeconds < 0`）が `true` と判定されて赤色点滅し続ける致命的バグを根本解決。
+     - **停止時の過去タイムスタンプ送信抑止 (`targetEndTimestamp: 0`)**:
+       - タイマー停止時（`!isRunning`）は、客席タイマー・メインタイマーともに `targetEndTimestamp: 0` を送信。Watch側で過去エポック時刻から逆算して超過と誤認されるのを完全に防止。
+     - **客席タイマー停止時・施術終了時の超過フラグ完全クリーンアップ**:
+       - `buildStoppedSeat` および `handleFinishSeat`（施術終了）において、`targetEndTimestamp: null, isOver: false, pausedRemainingSeconds: 0, isReset: true, timeUpTimestamp: null, escalationLevel: 0` を明示セット。
+       - これにより、iPhone側で「施術終了」「空席に戻す」を押した際、iPhone内部の超過判定が即座に消去されるだけでなく、直後に `syncSeatsToWatch(..., { immediate: true })` を呼び出すことでApple Watchへも即座に待機中状態（00:00）が通知され、Watch側が超過のまま取り残される不整合を根絶。
+       - また、席マスターからの「席削除（`handleDeleteSeat`）」および「新規席追加（`handleAddNewSeatMaster`）」時にも即座に `syncSeatsToWatch` を実行し、端末間の席リスト表示の完全一致を保証。
+       - ステータス変更（`handleSelectActionStatus`）時も、タイムアップ（`isZeroRem`）からの移行では `targetEndTimestamp: null, isOver: false` をクリアし、超過判定の残存を抑止。
+     - **HomeScreen 保存モーダル操作時のクリーンリセット**:
+       - `handleOpenSaveModal` および `handleOpenSaveInTimeModal` において、`isRunningRef.current = false; isPreCountingDownRef.current = false;` を即座に更新。
+       - 保存モーダルの「キャンセル」ボタン押下時に `resetTimer(true)` を呼び出し、モーダルを閉じた後に画面背景が超過カウントアップ（赤色）のまま置き去りになる現象を解消。
+       - Watch側へも即時に `remainingTime: targetTime, targetEndTimestamp: 0, isCountUp: false, isRunning: false` が配信され、両端末ともに設定時間へのクリーンな復帰を実現。
 
 
 
