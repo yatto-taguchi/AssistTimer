@@ -873,158 +873,11 @@ struct ContentView: View {
                     timeActionTargetId = targetId
                 }
             }) {
-                SeatThumbnailMapSheet(
-                    timers: timers,
-                    mainTimer: sessionManager.mainTimer,
-                    currentUserName: currentUserName,
-                    now: now,
-                    onSelectSeat: { selectedSeat in
-                        pendingSelectedSeatId = selectedSeat.id
-                        triggerScroll(to: selectedSeat.id)
-                        showingThumbnailMap = false
-                    },
-                    onToggleMainTimer: {
-                        playHaptic(.click)
-                        let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: now.addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
-                        var main = sessionManager.mainTimer ?? defaultMain
-                        let willPause = main.isRunning
-                        if willPause {
-                            main.isRunning = false
-                            main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(now)))
-                        } else {
-                            main.isRunning = true
-                            let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
-                            main.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
-                        }
-                        sessionManager.mainTimer = main
-                        sessionManager.sendMainTimerAction(action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START")
-                    },
-                    onResetMainTimer: {
-                        playHaptic(.click)
-                        let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: now.addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
-                        var main = sessionManager.mainTimer ?? defaultMain
-                        main.isRunning = false
-                        main.pausedRemainingSeconds = main.totalSeconds
-                        sessionManager.mainTimer = main
-                        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
-                    },
-                    onSetMainTimerTime: { totalSec in
-                        playHaptic(.click)
-                        let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: Date().addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
-                        var main = sessionManager.mainTimer ?? defaultMain
-                        main.totalSeconds = totalSec
-                        main.pausedRemainingSeconds = totalSec
-                        if main.isRunning {
-                            main.targetEndTime = Date().addingTimeInterval(TimeInterval(totalSec))
-                        }
-                        sessionManager.mainTimer = main
-                        sessionManager.sendMainTimerSetTime(seconds: totalSec)
-                    },
-                    onAdjustMainTimer: { deltaSec in
-                        playHaptic(.click)
-                        let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: Date().addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
-                        var main = sessionManager.mainTimer ?? defaultMain
-                        if main.isRunning {
-                            main.targetEndTime = main.targetEndTime.addingTimeInterval(Double(deltaSec))
-                        } else {
-                            main.pausedRemainingSeconds = max(0, main.pausedRemainingSeconds + deltaSec)
-                        }
-                        sessionManager.mainTimer = main
-                        sessionManager.sendMainTimerAdjust(seconds: deltaSec)
-                    },
-                    onStartMainTimer: {
-                        playHaptic(.click)
-                        let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: Date().addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
-                        var main = sessionManager.mainTimer ?? defaultMain
-                        let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds)
-                        if isInitialStart && main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
-                            main.isPreCountingDown = true
-                            main.preCountdownSeconds = main.countdownConfigSeconds
-                            main.prepEndTime = Date().addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
-                            main.isRunning = false
-                        } else {
-                            main.isRunning = true
-                            let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
-                            main.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
-                        }
-                        sessionManager.mainTimer = main
-                        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START")
-                    },
-                    onPauseMainTimer: {
-                        playHaptic(.click)
-                        let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: Date().addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
-                        var main = sessionManager.mainTimer ?? defaultMain
-                        main.isRunning = false
-                        main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(Date())))
-                        sessionManager.mainTimer = main
-                        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_PAUSE")
-                    }
-                )
+                thumbnailMapSheetView
             }
             // ★ メインタイマー専用操作・時間設定シート（メイン画面のカードタップ用）
             .sheet(isPresented: $showingMainTimerSheet) {
-                let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: Date().addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
-                let currentMain = sessionManager.mainTimer ?? defaultMain
-                MainTimerActionSheet(
-                    item: currentMain,
-                    onStart: {
-                        playHaptic(.click)
-                        var main = sessionManager.mainTimer ?? currentMain
-                        let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds)
-                        if isInitialStart && main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
-                            main.isPreCountingDown = true
-                            main.preCountdownSeconds = main.countdownConfigSeconds
-                            main.prepEndTime = Date().addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
-                            main.isRunning = false
-                        } else {
-                            main.isRunning = true
-                            let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
-                            main.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
-                        }
-                        sessionManager.mainTimer = main
-                        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START")
-                    },
-                    onPause: {
-                        playHaptic(.click)
-                        var main = sessionManager.mainTimer ?? currentMain
-                        main.isRunning = false
-                        main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(Date())))
-                        sessionManager.mainTimer = main
-                        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_PAUSE")
-                    },
-                    onReset: {
-                        playHaptic(.click)
-                        var main = sessionManager.mainTimer ?? currentMain
-                        main.isRunning = false
-                        main.pausedRemainingSeconds = main.totalSeconds
-                        sessionManager.mainTimer = main
-                        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
-                        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
-                    },
-                    onSetTime: { totalSec in
-                        playHaptic(.click)
-                        var main = sessionManager.mainTimer ?? currentMain
-                        main.totalSeconds = totalSec
-                        main.pausedRemainingSeconds = totalSec
-                        if main.isRunning {
-                            main.targetEndTime = Date().addingTimeInterval(TimeInterval(totalSec))
-                        }
-                        sessionManager.mainTimer = main
-                        sessionManager.sendMainTimerSetTime(seconds: totalSec)
-                    },
-                    onAdjust: { deltaSec in
-                        playHaptic(.click)
-                        var main = sessionManager.mainTimer ?? currentMain
-                        if main.isRunning {
-                            main.targetEndTime = main.targetEndTime.addingTimeInterval(Double(deltaSec))
-                        } else {
-                            main.pausedRemainingSeconds = max(0, main.pausedRemainingSeconds + deltaSec)
-                        }
-                        sessionManager.mainTimer = main
-                        sessionManager.sendMainTimerAdjust(seconds: deltaSec)
-                    }
-                )
+                mainTimerSheetView
             }
             // 新規席追加シート
             .sheet(isPresented: $showingAddSeatSheet, onDismiss: {
@@ -1428,6 +1281,134 @@ struct ContentView: View {
                 notificationBannerText = nil
             }
         }
+    }
+    
+    // MARK: - メインタイマー操作ヘルパー（型推論タイムアウト解消のための分離）
+    private func defaultMainTimer() -> SeatTimerItem {
+        SeatTimerItem(
+            id: "main-timer",
+            seatNumber: 0,
+            seatLabel: "メインタイマー",
+            isMainTimer: true,
+            creatorName: currentUserName ?? "スタイリスト",
+            totalSeconds: 600,
+            targetEndTime: Date().addingTimeInterval(600),
+            isRunning: false,
+            pausedRemainingSeconds: 600
+        )
+    }
+    
+    private func handleToggleMainTimer() {
+        playHaptic(.click)
+        var main = sessionManager.mainTimer ?? defaultMainTimer()
+        let willPause = main.isRunning
+        if willPause {
+            main.isRunning = false
+            main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(now)))
+        } else {
+            main.isRunning = true
+            let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
+            main.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
+        }
+        sessionManager.mainTimer = main
+        sessionManager.sendMainTimerAction(action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START")
+    }
+    
+    private func handleStartMainTimer() {
+        playHaptic(.click)
+        var main = sessionManager.mainTimer ?? defaultMainTimer()
+        let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds)
+        if isInitialStart && main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
+            main.isPreCountingDown = true
+            main.preCountdownSeconds = main.countdownConfigSeconds
+            main.prepEndTime = Date().addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
+            main.isRunning = false
+        } else {
+            main.isRunning = true
+            let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
+            main.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
+        }
+        sessionManager.mainTimer = main
+        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START")
+    }
+    
+    private func handlePauseMainTimer() {
+        playHaptic(.click)
+        var main = sessionManager.mainTimer ?? defaultMainTimer()
+        main.isRunning = false
+        main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(Date())))
+        sessionManager.mainTimer = main
+        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_PAUSE")
+    }
+    
+    private func handleResetMainTimer() {
+        playHaptic(.click)
+        var main = sessionManager.mainTimer ?? defaultMainTimer()
+        main.isRunning = false
+        main.pausedRemainingSeconds = main.totalSeconds
+        sessionManager.mainTimer = main
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
+    }
+    
+    private func handleSetMainTimerTime(totalSec: Int) {
+        playHaptic(.click)
+        var main = sessionManager.mainTimer ?? defaultMainTimer()
+        main.totalSeconds = totalSec
+        main.pausedRemainingSeconds = totalSec
+        if main.isRunning {
+            main.targetEndTime = Date().addingTimeInterval(TimeInterval(totalSec))
+        }
+        sessionManager.mainTimer = main
+        sessionManager.sendMainTimerSetTime(seconds: totalSec)
+    }
+    
+    private func handleAdjustMainTimer(deltaSec: Int) {
+        playHaptic(.click)
+        var main = sessionManager.mainTimer ?? defaultMainTimer()
+        if main.isRunning {
+            main.targetEndTime = main.targetEndTime.addingTimeInterval(Double(deltaSec))
+        } else {
+            main.pausedRemainingSeconds = max(0, main.pausedRemainingSeconds + deltaSec)
+        }
+        sessionManager.mainTimer = main
+        sessionManager.sendMainTimerAdjust(seconds: deltaSec)
+    }
+    
+    @ViewBuilder
+    private var thumbnailMapSheetView: some View {
+        SeatThumbnailMapSheet(
+            timers: timers,
+            mainTimer: sessionManager.mainTimer,
+            currentUserName: currentUserName,
+            now: now,
+            onSelectSeat: { selectedSeat in
+                pendingSelectedSeatId = selectedSeat.id
+                triggerScroll(to: selectedSeat.id)
+                showingThumbnailMap = false
+            },
+            onToggleMainTimer: { handleToggleMainTimer() },
+            onResetMainTimer: { handleResetMainTimer() },
+            onSetMainTimerTime: { handleSetMainTimerTime(totalSec: $0) },
+            onAdjustMainTimer: { handleAdjustMainTimer(deltaSec: $0) },
+            onStartMainTimer: { handleStartMainTimer() },
+            onPauseMainTimer: { handlePauseMainTimer() }
+        )
+    }
+    
+    @ViewBuilder
+    private var mainTimerSheetView: some View {
+        let defaultMain = defaultMainTimer()
+        let currentMain = sessionManager.mainTimer ?? defaultMain
+        MainTimerActionSheet(
+            item: currentMain,
+            onStart: { handleStartMainTimer() },
+            onPause: { handlePauseMainTimer() },
+            onReset: { handleResetMainTimer() },
+            onSetTime: { handleSetMainTimerTime(totalSec: $0) },
+            onAdjust: { handleAdjustMainTimer(deltaSec: $0) }
+        )
     }
     
     @ViewBuilder
