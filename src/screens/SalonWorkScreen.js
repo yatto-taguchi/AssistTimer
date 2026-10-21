@@ -67,6 +67,22 @@ export const generateRandomInviteCode = () => {
   return `${part1}-${part2}`;
 };
 
+// 共有コード・招待コードの共通正規化・サニタイズ関数（全角英数の半角化、各種ハイフン・長音記号の統一、空白除去、6桁自動整形）
+export const sanitizeInviteCode = (input) => {
+  if (!input) return '';
+  // 全角英数を半角に変換
+  let s = String(input).replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0));
+  // 全角スペースや制御文字、通常の空白を除去
+  s = s.replace(/[\s\u3000]+/g, '').toUpperCase();
+  // 各種ハイフン（全角ハイフン・長音記号・ダッシュ・波ダッシュ等）を半角 '-' に統一
+  s = s.replace(/[ー−―‐—ｰ〜~]/g, '-');
+  // ハイフンなしの連続6桁数字なら '123-456' にフォーマット
+  if (/^\d{6}$/.test(s)) {
+    s = `${s.slice(0, 3)}-${s.slice(3)}`;
+  }
+  return s;
+};
+
 // デフォルトのワークスペース（タイマー同期モード・2人まで同期無料・1名利用中）
 export const createDefaultFreeSalon = (customCode) => ({
   id: 'workspace-free',
@@ -1572,36 +1588,41 @@ export default function SalonWorkScreen() {
     }
   };
 
-  // ★ 共有コードによるメンバー接続参加
+  // ★ 共有コードによるメンバー接続参加・手動追加
   const handleJoinMemberByCode = async () => {
-    const rawCode = (inputJoinMemberCode || '').trim().toUpperCase();
-    if (!rawCode) {
-      Alert.alert('入力エラー', '共有コード（招待コード）を入力してください');
+    const staffNick = (inputJoinMemberNickname || '').trim();
+    if (!staffNick) {
+      Alert.alert('入力エラー', 'スタッフのお名前（ニックネーム）を入力してください');
       return;
     }
-    let code = rawCode;
-    if (/^\d{6}$/.test(rawCode)) {
-      code = `${rawCode.slice(0, 3)}-${rawCode.slice(3)}`;
+
+    const currentMyName = (userName || 'スタイリスト').trim();
+    if (staffNick.toLowerCase() === currentMyName.toLowerCase()) {
+      Alert.alert(
+        '確認',
+        `「${staffNick}」はあなたの現在の表示名と同じです。\nサロンで一緒に働く相手スタッフのお名前を入力してください。`
+      );
+      return;
     }
 
-    const myNick = (inputJoinMemberNickname || userName || 'スタッフ').trim();
+    // 重複チェック（名前）
+    const isDup = staffMembers.some(
+      (m) => getMemberDisplayName(m).toLowerCase() === staffNick.toLowerCase()
+    );
+    if (isDup) {
+      Alert.alert('確認', `「${staffNick}」さんは既にメンバー登録されています。`);
+      return;
+    }
+
+    const code = sanitizeInviteCode(inputJoinMemberCode);
     const newMemberId = `mem_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const newMember = {
       id: newMemberId,
-      originalNickname: myNick,
-      customNickname: myNick,
+      originalNickname: staffNick,
+      customNickname: staffNick,
       inviteCode: code,
       joinedAt: Date.now(),
     };
-
-    // 重複チェック
-    const isDup = staffMembers.some(
-      (m) => (m.inviteCode === code || m.id === newMemberId) && getMemberDisplayName(m) === myNick
-    );
-    if (isDup) {
-      Alert.alert('確認', 'このメンバーは既に連携登録されています。');
-      return;
-    }
 
     const updated = [...staffMembers, newMember];
     setStaffMembers(updated);
@@ -1621,8 +1642,10 @@ export default function SalonWorkScreen() {
       Vibration.vibrate([0, 100, 50, 100]);
     }
     Alert.alert(
-      '🎉 共有メンバー接続完了',
-      `共有コード「${code}」で連携しました！\n\n・登録名: 【${myNick}】\n・メンバーID: #${newMemberId.slice(-6)}\n\nタイマーの開始・停止やチェック完了がリアルタイムに共有されます。`
+      '🎉 メンバー登録完了',
+      code
+        ? `共有コード「${code}」で「${staffNick}」さんを連携登録しました！\n\n・メンバーID: #${newMemberId.slice(-6)}\n\n客席タイマーやApple Watchで担当者として選択・リアルタイム共有できるようになりました。`
+        : `「${staffNick}」さんをサロンメンバーに追加しました！\n\n・メンバーID: #${newMemberId.slice(-6)}\n\n客席タイマーやApple Watchで担当者として選択・共有できるようになりました。`
     );
   };
 
@@ -1718,27 +1741,36 @@ export default function SalonWorkScreen() {
 
   // 招待コードの共有・コピー（OS標準の共有シート / LINE・メッセージ等）
   const handleShareInviteCode = async (salon) => {
-    const targetSalon = salon || currentSalon;
+    let targetSalon = salon || currentSalon;
     if (!targetSalon) return;
-    const code = targetSalon.inviteCode || generateRandomInviteCode();
+    let code = sanitizeInviteCode(targetSalon.inviteCode);
+    if (!code) {
+      code = generateRandomInviteCode();
+      const updatedSalons = savedSalons.map((s) => (s.id === targetSalon.id ? { ...s, inviteCode: code } : s));
+      setSavedSalons(updatedSalons);
+      targetSalon = { ...targetSalon, inviteCode: code };
+      if (currentSalon?.id === targetSalon.id) {
+        setCurrentSalon(targetSalon);
+      }
+      saveSalonsToStorage(updatedSalons, targetSalon.id);
+    }
+
     const isPair = targetSalon.type === 'pair';
     const name = targetSalon.name || (isPair ? 'タイマー同期モード' : 'サロン');
     try {
-      const message = isPair
-        ? `【Assist Timer】タイマー同期モード（完全無料）の招待コードです。\n\n🔑 ペア招待コード: ${code}\n\nアプリを開き、サロン画面 > ワークスペース切り替え > 「コードで参加」に入力すると、2人でタイマーをリアルタイム同期（無料）できます！`
-        : `【Assist Timer】サロン「${name}」の招待コードです。\n\n🔑 招待コード: ${code}\n\nアプリを開き、サロン画面 > ワークスペース切り替え > 「コードで参加」に入力して参加してください。`;
+      const message = `【Assist Timer】タイマー共有の招待コードです。\n\n🔑 共有コード: ${code}\n\n▼ 連携手順:\n① アプリを開き、サロン画面上部の「👥 メンバー」>「＋ メンバー追加・連携」にこのコードを入力すると、担当者としてタイマーを相互共有・連携できます！\n\n（※ 新規サロンとして接続する場合は、画面上のサロン名をタップ >「＋ コードで参加」からも参加可能です）`;
       await Share.share({
         message,
-        title: isPair ? `タイマー同期の招待コード: ${code}` : `${name}の招待コード: ${code}`,
+        title: isPair ? `タイマー同期の共有コード: ${code}` : `${name}の共有コード: ${code}`,
       });
     } catch (e) {
-      Alert.alert('招待コード', `招待コード: ${code}`);
+      Alert.alert('共有コード', `共有コード: ${code}`);
     }
   };
 
   // 招待コードの直接変更・保存
   const handleSaveCustomInviteCode = () => {
-    const clean = (inputNewInviteCode || '').trim().toUpperCase();
+    const clean = sanitizeInviteCode(inputNewInviteCode);
     if (!clean) {
       Alert.alert('入力エラー', '招待コードを入力してください');
       return;
@@ -1766,22 +1798,36 @@ export default function SalonWorkScreen() {
     setInputNewInviteCode(newCode);
   };
 
-  // 招待コードで新規参加
+  // 招待コードで新規参加（ワークスペース追加）
   const handleJoinByCode = () => {
-    const rawCode = inputInviteCode.trim().toUpperCase();
-    if (!rawCode) {
+    const code = sanitizeInviteCode(inputInviteCode);
+    if (!code) {
       Alert.alert('入力エラー', '招待コードを入力してください');
       return;
     }
-    // 6桁数字のみで打たれた場合は自動で3桁-3桁にフォーマット
-    let code = rawCode;
-    if (/^\d{6}$/.test(rawCode)) {
-      code = `${rawCode.slice(0, 3)}-${rawCode.slice(3)}`;
+
+    // 現在のサロンと同じコードかチェック
+    if (currentSalon?.inviteCode === code) {
+      Alert.alert('確認', `現在開いている「${currentSalon.name || 'サロン'}」と同じ招待コードです。`);
+      setIsJoinCodeModalVisible(false);
+      return;
+    }
+
+    // 既に保存されているサロン一覧に同じコードがあるかチェック
+    const existing = savedSalons.find((s) => s.inviteCode === code);
+    if (existing) {
+      setCurrentSalon(existing);
+      AsyncStorage.setItem('@salon_current_salon_id', existing.id).catch((e) => console.warn(e));
+      setIsJoinCodeModalVisible(false);
+      setInputInviteCode('');
+      setInputSalonName('');
+      Alert.alert('サロン切り替え', `既に登録済みの「${existing.name}」に切り替えました！`);
+      return;
     }
 
     const newSalonItem = {
       id: `salon-${Date.now()}`,
-      name: inputSalonName.trim() || `サロン (${code})`,
+      name: (inputSalonName || '').trim() || `サロン (${code})`,
       type: 'salon',
       inviteCode: code,
       isPro: false,
@@ -7459,16 +7505,20 @@ export default function SalonWorkScreen() {
                     color: memberManageSection === 'join' ? '#fff' : theme.textSecondary,
                   }}
                 >
-                  ＋ コードで参加
+                  ＋ メンバー追加・連携
                 </Text>
               </TouchableOpacity>
             </View>
 
-            {/* セクション1: 共有コードで参加フォーム */}
+            {/* セクション1: スタッフメンバー追加・連携フォーム */}
             {memberManageSection === 'join' ? (
               <View style={{ backgroundColor: theme.inputBg, padding: 12, borderRadius: 10, borderWidth: 1, borderColor: theme.cardBorder, marginBottom: 12 }}>
                 <Text style={{ fontSize: 12, fontWeight: '700', color: theme.textPrimary, marginBottom: 6 }}>
-                  相手の共有コードを入力して連携
+                  スタッフメンバーを追加・連携
+                </Text>
+
+                <Text style={{ fontSize: 11, color: theme.textSecondary, marginBottom: 4 }}>
+                  スタッフのお名前・ニックネーム（必須）
                 </Text>
                 <TextInput
                   style={[
@@ -7481,15 +7531,16 @@ export default function SalonWorkScreen() {
                       fontSize: 14,
                     },
                   ]}
-                  placeholder="共有コード (例: 123-456)"
+                  placeholder="例: 佐藤、田中、アシスタント"
                   placeholderTextColor={theme.textTertiary}
-                  value={inputJoinMemberCode}
-                  onChangeText={setInputJoinMemberCode}
-                  autoCapitalize="characters"
+                  value={inputJoinMemberNickname}
+                  onChangeText={setInputJoinMemberNickname}
+                  maxLength={12}
                   returnKeyType="next"
                 />
+
                 <Text style={{ fontSize: 11, color: theme.textSecondary, marginBottom: 4 }}>
-                  相手に通知されるあなたのニックネーム
+                  相手の共有コード（任意・コード連携時に入力）
                 </Text>
                 <TextInput
                   style={[
@@ -7502,13 +7553,14 @@ export default function SalonWorkScreen() {
                       fontSize: 14,
                     },
                   ]}
-                  placeholder={`あなたのニックネーム (例: ${userName || '田中'})`}
+                  placeholder="例: 738-921 (未入力でも追加可能)"
                   placeholderTextColor={theme.textTertiary}
-                  value={inputJoinMemberNickname}
-                  onChangeText={setInputJoinMemberNickname}
-                  maxLength={12}
+                  value={inputJoinMemberCode}
+                  onChangeText={setInputJoinMemberCode}
+                  autoCapitalize="characters"
                   returnKeyType="done"
                 />
+
                 <TouchableOpacity
                   style={{
                     backgroundColor: theme.accent,
@@ -7518,7 +7570,7 @@ export default function SalonWorkScreen() {
                   }}
                   onPress={handleJoinMemberByCode}
                 >
-                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 13 }}>連携してメンバーに参加</Text>
+                  <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 13 }}>メンバーを追加・連携する</Text>
                 </TouchableOpacity>
               </View>
             ) : (
@@ -7528,7 +7580,7 @@ export default function SalonWorkScreen() {
                   <View style={{ paddingVertical: 24, alignItems: 'center' }}>
                     <Ionicons name="people-outline" size={32} color={theme.textTertiary} style={{ marginBottom: 6 }} />
                     <Text style={{ fontSize: 12, color: theme.textTertiary, textAlign: 'center', lineHeight: 18 }}>
-                      まだ共有メンバーがいません{'\n'}上の共有コードをスタッフに渡すか、{'\n'}「＋ コードで参加」から連携してください
+                      まだ共有メンバーがいません{'\n'}上の共有コードをスタッフに渡すか、{'\n'}「＋ メンバー追加・連携」から登録してください
                     </Text>
                   </View>
                 ) : (
