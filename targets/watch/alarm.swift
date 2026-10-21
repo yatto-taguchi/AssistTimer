@@ -82,11 +82,6 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             ))
         }
         for t in timers where t.isRunning {
-            // ★ 関係者判定: ユーザー名がある場合、自分に関係する席（作成者・ヘルプ予定・チェック担当・募集中）のみ鳴らす
-            if let user = currentUserName, !user.isEmpty {
-                guard t.isRelated(to: user) else { continue }
-            }
-            
             let label = t.displaySeatName
             let mainEpoch = Int(t.targetEndTime.timeIntervalSince1970)
             list.append(WatchAlarmEvent(
@@ -232,6 +227,14 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     // ★ 鳴っていたタイマーの終了時刻。iPhone は席の終了時刻と照合し、別のタイマーなら止めない
                     extra["expectedEnd"] = mainEvent.date.timeIntervalSince1970 * 1000.0
                     WatchSessionManager.shared.applyLocalStop(seatId: id)
+                    if id == "main-timer" || id == WatchSessionManager.shared.mainTimer?.id {
+                        if var m = WatchSessionManager.shared.mainTimer {
+                            m.isRunning = false
+                            m.pausedRemainingSeconds = 0
+                            WatchSessionManager.shared.mainTimer = m
+                        }
+                        WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_PAUSE")
+                    }
                 } else if !isMain {
                     // ★ チェック時間アラームの停止: Watch側でも即座にチェック完了を反映
                     WatchSessionManager.shared.applyLocalCheckComplete(seatId: id)
@@ -483,38 +486,48 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         let targets = events
             .filter { $0.date.addingTimeInterval(lastOffset) > now && acknowledged[$0.key] == nil }
             .sorted { $0.date < $1.date }
-        let signature = targets.map { $0.key }.joined(separator: "|") + "#\(soundOn)"
+        let signature = targets.map { $0.key }.joined(separator: "|")
         guard signature != notificationSignature else { return }
         notificationSignature = signature
 
-        let soundOn = self.soundOn
         let offsets = repeatOffsets
         let prefix = notificationPrefix
         let limit = maxNotifications
         let center = UNUserNotificationCenter.current()
+
+        // ★ 1. 即座に（同期的に）すべてのターゲット通知を usernoted へ投入！
+        //    非同期ブロックの内側に置くと、手首を下げた瞬間にアプリが中断され通知が登録されない致命的バグを防止
+        var count = 0
+        var newIdentifiers = Set<String>()
+        for e in targets {
+            for (i, offset) in offsets.enumerated() {
+                if count >= limit { break }
+                let interval = e.date.addingTimeInterval(offset).timeIntervalSinceNow
+                if interval < -60 { continue }
+                let id = "\(prefix)\(e.key).\(i)"
+                newIdentifiers.insert(id)
+
+                let content = UNMutableNotificationContent()
+                content.title = "⏰ \(e.title)"
+                content.body = i == 0
+                    ? "タイムアップです。アプリを開いて止めてください。"
+                    : "まだ止められていません（\(Int(offset))秒経過）"
+                // ★ watchOS では content.sound を指定しないと触覚（Taptic Engine）の振動が一切鳴らない。
+                //   消音モード時はシステム側で自動的に「振動のみ」となるため、常に .default を指定して振動を保証する。
+                content.sound = .default
+                content.threadIdentifier = "assisttimer.alarm"
+                let triggerInterval = max(1, interval)
+                let trigger = UNTimeIntervalNotificationTrigger(timeInterval: triggerInterval, repeats: false)
+                center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
+                count += 1
+            }
+        }
+
+        // ★ 2. 不要になった古い通知IDのみ非同期で掃除（新規予約の登録をブロック・遅延させない）
         center.getPendingNotificationRequests { requests in
-            let old = requests.map { $0.identifier }.filter { $0.hasPrefix(prefix) }
-            center.removePendingNotificationRequests(withIdentifiers: old)
-            var count = 0
-            for e in targets {
-                for (i, offset) in offsets.enumerated() {
-                    if count >= limit { break }
-                    let interval = e.date.addingTimeInterval(offset).timeIntervalSinceNow
-                    if interval < -60 { continue }
-                    let content = UNMutableNotificationContent()
-                    content.title = "⏰ \(e.title)"
-                    content.body = i == 0
-                        ? "タイムアップです。アプリを開いて止めてください。"
-                        : "まだ止められていません（\(Int(offset))秒経過）"
-                    // ★ watchOS では content.sound を指定しないと触覚（Taptic Engine）の振動が一切鳴らない。
-                    //   消音モード時はシステム側で自動的に「振動のみ」となるため、常に .default を指定して振動を保証する。
-                    content.sound = .default
-                    content.threadIdentifier = "assisttimer.alarm"
-                    let triggerInterval = max(1, interval)
-                    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: triggerInterval, repeats: false)
-                    center.add(UNNotificationRequest(identifier: "\(prefix)\(e.key).\(i)", content: content, trigger: trigger))
-                    count += 1
-                }
+            let stale = requests.map(\.identifier).filter { $0.hasPrefix(prefix) && !newIdentifiers.contains($0) }
+            if !stale.isEmpty {
+                center.removePendingNotificationRequests(withIdentifiers: stale)
             }
         }
     }
