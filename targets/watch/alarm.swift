@@ -165,6 +165,19 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         return ev.date <= Date()
     }
 
+    // ★ 2つのイベントキーが実質的に同一ターゲット（同一席・同一種別、かつ時刻差が2秒以内）か判定
+    private func isSameTarget(key1: String?, key2: String?) -> Bool {
+        guard let k1 = key1, let k2 = key2 else { return false }
+        if k1 == k2 { return true }
+        let parts1 = k1.components(separatedBy: "@")
+        let parts2 = k2.components(separatedBy: "@")
+        guard parts1.count == 2, parts2.count == 2, parts1[0] == parts2[0] else { return false }
+        if let epoch1 = Int(parts1[1]), let epoch2 = Int(parts2[1]), abs(epoch1 - epoch2) <= 2 {
+            return true
+        }
+        return false
+    }
+
     private func refresh() {
         let now = Date()
         var changed = false
@@ -365,12 +378,14 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             startDate = now
         }
 
-        if let s = session, let key = sessionKey, key == target?.key, s.state == .scheduled || s.state == .notStarted {
+        if let s = session, isSameTarget(key1: sessionKey, key2: target?.key), s.state == .scheduled || s.state == .notStarted {
             return // 予約済み
         }
 
-        // ★ 既存の別予定セッションがある場合は即座に無効化
+        // ★ 既存の別予定セッションがある場合：
+        //    画面消灯中（バックグラウンド）は新規予約が不可能なため、既存セッションを絶対に破棄せず保護する！
         if session != nil {
+            guard canScheduleSmartAlarm else { return }
             invalidateCurrentSession()
         }
 
