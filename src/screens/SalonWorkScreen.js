@@ -162,15 +162,15 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
     if (!state) return;
 
     const isRunning = !!state.isRunning;
-    const isCountUp = !!state.isCountUp;
-    const targetEnd = state.targetEndTimestamp || (
-      isRunning 
-        ? (isCountUp ? Date.now() - (state.remainingTime || 0) * 1000 : Date.now() + (state.remainingTime || 0) * 1000)
-        : 0
-    );
+    const isCountUp = isRunning && !!state.isCountUp;
+    const targetEnd = isRunning
+      ? (state.targetEndTimestamp || (
+          isCountUp ? Date.now() - (state.remainingTime || 0) * 1000 : Date.now() + (state.remainingTime || 0) * 1000
+        ))
+      : 0;
     
     const pausedRem = !isRunning
-      ? (isCountUp ? -Math.max(0, state.remainingTime || 0) : (state.remainingTime != null ? state.remainingTime : (state.targetTime || 600)))
+      ? (state.remainingTime != null ? Math.max(0, state.remainingTime) : (state.targetTime || 600))
       : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
     const mainTimerPayload = {
@@ -247,15 +247,15 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
     let mainTimerPayload = null;
     if (_cachedMainTimerState) {
       const isRunning = !!_cachedMainTimerState.isRunning;
-      const isCountUp = !!_cachedMainTimerState.isCountUp;
-      const targetEnd = _cachedMainTimerState.targetEndTimestamp || (
-        isRunning 
-          ? (isCountUp ? Date.now() - (_cachedMainTimerState.remainingTime || 0) * 1000 : Date.now() + (_cachedMainTimerState.remainingTime || 0) * 1000)
-          : 0
-      );
+      const isCountUp = isRunning && !!_cachedMainTimerState.isCountUp;
+      const targetEnd = isRunning
+        ? (_cachedMainTimerState.targetEndTimestamp || (
+            isCountUp ? Date.now() - (_cachedMainTimerState.remainingTime || 0) * 1000 : Date.now() + (_cachedMainTimerState.remainingTime || 0) * 1000
+          ))
+        : 0;
       
       const pausedRem = !isRunning
-        ? (isCountUp ? -Math.max(0, _cachedMainTimerState.remainingTime || 0) : (_cachedMainTimerState.remainingTime != null ? _cachedMainTimerState.remainingTime : (_cachedMainTimerState.targetTime || 600)))
+        ? (_cachedMainTimerState.remainingTime != null ? Math.max(0, _cachedMainTimerState.remainingTime) : (_cachedMainTimerState.targetTime || 600))
         : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
       mainTimerPayload = {
@@ -310,15 +310,14 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
         }
 
         const isRunning = s.status === 'running';
-        const targetEnd = s.targetEndTimestamp || Date.now();
+        const targetEnd = isRunning ? (s.targetEndTimestamp || Date.now()) : 0;
         // ★ 停止中は保存済みの残り秒数を送る（終了時刻から計算すると、止めた後も Watch 側で残りが減っていった）
-        const pausedRem = !isRunning && typeof s.pausedRemainingSeconds === 'number'
-          ? Math.max(0, Math.floor(s.pausedRemainingSeconds))
+        const pausedRem = !isRunning
+          ? (typeof s.pausedRemainingSeconds === 'number' ? Math.max(0, Math.floor(s.pausedRemainingSeconds)) : 0)
           : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
         const isZero = !isRunning && pausedRem <= 0;
-        const isCollapsedSeat = !isRunning && !s.isReset && s.collapsedAtEnd != null
-          && Number(s.collapsedAtEnd) === Number(s.targetEndTimestamp || 0);
+        const isCollapsedSeat = !isRunning && !s.isReset && s.collapsedAtEnd != null;
         const isNoHelp = !isZero && !isCollapsedSeat && (s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none');
 
         return {
@@ -336,7 +335,7 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
           isNoHelpNeeded: isNoHelp,
           status: (isZero || isCollapsedSeat) ? 'normal' : (s.isShampooing || s.actionStatus === 'shampoo' ? 'shampoo' : (s.actionStatus || 'normal')),
           checkTargetSeconds: s.checkTargetSeconds ? Number(s.checkTargetSeconds) : 0,
-          checkEndTimestamp: s.checkEndTimestamp ? Number(s.checkEndTimestamp) : 0,
+          checkEndTimestamp: isRunning && s.checkEndTimestamp ? Number(s.checkEndTimestamp) : 0,
           checkStaffName: s.checkStaffName || '',
           isCheckCompleted: s.checkStatus === 'completed',
           // ★ Watch の「計測終了」で収納したカード。その時の終了時刻のまま停止している間だけ収納を保つ
@@ -822,6 +821,8 @@ export default function SalonWorkScreen() {
     ...s,
     status: 'paused',
     pausedRemainingSeconds: 0,
+    targetEndTimestamp: null,
+    isOver: false,
     timeUpTimestamp: null,
     escalationLevel: 0,
     mainStaffConfirmed: true,
@@ -1121,8 +1122,8 @@ export default function SalonWorkScreen() {
           }
           case 'FINISH_MEASURE': {
             // ★ 以前は未対応だったため、Watch で計測終了しても次の同期で「超過」に戻っていた
-            // ★ カードの収納は、この終了時刻のまま停止している間だけ保つ（再スタートで自動的に解除）
-            return { ...stopSeat(s, '計測終了'), collapsedAtEnd: s.targetEndTimestamp || 0 };
+            // ★ カードの収納は、停止している間だけ保つ（再スタートで自動的に解除）
+            return { ...stopSeat(s, '計測終了'), collapsedAtEnd: s.targetEndTimestamp || Date.now() };
           }
           case 'STOP_ALARM': {
             // ★ チェック時間のアラーム停止ならチェックを完了にする（全体タイマーは終了前でも反映）

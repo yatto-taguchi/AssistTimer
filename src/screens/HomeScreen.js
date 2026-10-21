@@ -1767,6 +1767,8 @@ export default function HomeScreen({ navigation }) {
 
   // ---- 記録・保存機能 ----
   const handleOpenSaveModal = () => {
+    isRunningRef.current = false;
+    isPreCountingDownRef.current = false;
     setIsRunning(false); // タイマーを止める
     setIsPreCountingDown(false);
     cancelVibration();
@@ -1804,6 +1806,8 @@ export default function HomeScreen({ navigation }) {
   };
 
   const handleOpenSaveInTimeModal = () => {
+    isRunningRef.current = false;
+    isPreCountingDownRef.current = false;
     setIsRunning(false); // タイマーを止める
     setIsPreCountingDown(false);
     cancelVibration();
@@ -2751,6 +2755,7 @@ export default function HomeScreen({ navigation }) {
             onPress={() => {
               setSaveModalVisible(false);
               setSaveIsFavorite(false);
+              resetTimer(true);
             }}
           >
              <Text style={{textAlign: 'center', color: '#000', fontWeight: 'bold'}}>キャンセル</Text>
