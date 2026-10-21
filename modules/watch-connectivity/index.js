@@ -257,6 +257,17 @@ export const WatchConnectivity = {
         messageResult = '未接続のため即時送信なし';
       }
 
+      // ★ 即時通信（sendMessage）が未接続・失敗時、または相手への通知（タイマー停止・チェック完了）を含む場合は
+      //   バックグラウンドのWatch Extensionを起床させる transferUserInfo を併用して確実に届ける！
+      const needUserInfoFallback = !reachable || messageResult.startsWith('失敗') || !!data?.notification;
+      if (needUserInfoFallback && typeof NativeModule.transferUserInfo === 'function') {
+        try {
+          await NativeModule.transferUserInfo(data);
+        } catch (uErr) {
+          console.warn('[WatchConnectivity] transferUserInfo fallback error:', uErr);
+        }
+      }
+
       try {
         const ok = await NativeModule.updateApplicationContext(data);
         contextResult = ok ? '保存OK' : '保存されず';

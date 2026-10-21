@@ -170,7 +170,7 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
     );
     
     const pausedRem = !isRunning
-      ? (isCountUp ? -Math.max(0, state.remainingTime || 0) : Math.max(0, state.remainingTime || 0))
+      ? (isCountUp ? -Math.max(0, state.remainingTime || 0) : (state.remainingTime != null ? state.remainingTime : (state.targetTime || 600)))
       : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
     const mainTimerPayload = {
@@ -255,7 +255,7 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
       );
       
       const pausedRem = !isRunning
-        ? (isCountUp ? -Math.max(0, _cachedMainTimerState.remainingTime || 0) : Math.max(0, _cachedMainTimerState.remainingTime || 0))
+        ? (isCountUp ? -Math.max(0, _cachedMainTimerState.remainingTime || 0) : (_cachedMainTimerState.remainingTime != null ? _cachedMainTimerState.remainingTime : (_cachedMainTimerState.targetTime || 600)))
         : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
       mainTimerPayload = {

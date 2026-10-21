@@ -2009,6 +2009,26 @@ Apple Watch の文字盤モジュール（コンプリケーション）をタ�
    - **サムネイルマップからのメインタイマーシート遷移遅延の最適化 (`content.swift`)**:
      - シート破棄後の再表示ディレイを実機安全値の `0.18s` に調整。
 
+9. **Apple Watch・iPhone間タイマー操作・鳴動・停止の不整合解消および通知連打防止（Build 60）**:
+   - **メインタイマーのApple Watchからの開始・超過リスタートの完全保証 (`HomeScreen.js`, `content.swift`)**:
+     - `HomeScreen.js`: `handleMainTimerActionDispatch('start')` において超過状態（`isCountUp: true`）からの再スタート時、`isCountUpRef.current = false` をクリアし、`remainingTime = targetTime` に安全にリセットしてスタート。
+     - `content.swift`: `MainTimerCard.onToggle` および `MainTimerActionSheet` において、`isOvertime` 状態からのトグル時に `isOvertime = false`, `isCountUp = false` をクリアし、ローカルタイマーおよびスマートアラームを即座に同期・再スケジュール。停止中や準備カウントダウン中からの開始も確実にiPhoneに `MAIN_TIMER_START` を送信。
+   - **共有タイマー大元およびメインタイマーの自動鳴動・触覚振動の完全保証（タップ待ちバグの解消） (`alarm.swift`)**:
+     - セッション無効化時（`didInvalidateWith`）のスマートアラーム再スケジュールにおいて、未来の予定（`startDate > now`）に対する予約はバックグラウンド移行時であっても OS に `s.start(at: startDate)` を登録可能であるため、即時鳴動ガード（`canScheduleSmartAlarm`）を未来予定に誤適用していたのを解除。これによりチェックタイマーを止めた直後にアプリがバックグラウンドになっても、残りの放置本タイマーのスマートアラームが100%予約される。
+     - ローカル通知（`UNNotificationRequest`）に `content.interruptionLevel = .timeSensitive` を追加。watchOS 8+ において、画面スリープ・消音時・腕下げ時でも確実に画面を点灯させ Taptic Engine を強く振動させる最優先レベルに引き上げ。
+     - タップしないと鳴らない（超過後にタップして初めて鳴り出す）現象の根本原因となっていたセッション予約漏れおよび通知プライオリティ不足を完全根絶。
+   - **iPhone側チェックタイマー停止時のApple Watchバックグラウンド即時消火 (`modules/watch-connectivity/index.js`)**:
+     - `syncData` において、`WCSession.isReachable` が `false`（Watch画面がオフ・バックグラウンド）の場合や `sendMessage` がエラーになった場合、および通知・消火メッセージ（`data.notification`）が含まれる場合に、バックグラウンド転送APIである `transferUserInfo` を確実にフォールバック/併用送信。
+     - これにより、iPhone側でチェックタイマーを止めた際、WatchがバックグラウンドにいてもExtensionが起床して `alarm.swift` の `handleIncomingContext` / `rescheduleNotifications` が走り、Watch側のアラームが即座に消火される。
+   - **メインタイマー停止の永続化と超過ゾンビ復活の根絶 (`HomeScreen.js`, `alarm.swift`, `SalonWorkScreen.js`)**:
+     - `HomeScreen.js`: `resetTimer()` 内で `isRunningRef.current = false; isPreCountingDownRef.current = false; isCountUpRef.current = false;` を即座に明示クリアし、即座にクリーンなリセット状態（`isCountUp: false`, `isRunning: false`, `remainingTime: targetTime`）を `syncMainTimerToWatch` でWatchに配信。
+     - `HomeScreen.js`: モーダルオープン時（`handleOpenSaveModal`, `handleOpenSaveInTimeModal`）にも即座に停止状態（`isRunning: false`）をWatchへ同期し、記録中・保存モーダル中にWatch側で超過が暴走しないよう保護。
+     - `alarm.swift`: メインタイマー鳴動停止操作（`acknowledgeRinging` で `id == "main-timer"`）時に送信するアクションを `MAIN_TIMER_PAUSE` から `MAIN_TIMER_RESET` に変更。一時停止ではなく完全リセットとすることで、次回Watchアプリを起動した際に「超過の続き」がゾンビのように復活する現象を完全防止。
+     - `SalonWorkScreen.js`: `syncMainTimerToWatch` において、タイマー停止かつ超過中でない場合の `pausedRem` を `state.remainingTime != null ? state.remainingTime : (state.targetTime || 600)` と安全にデフォルト化し、1970年エポックへの不正タイムスタンプ化を防止。
+   - **「まだ止められていません」などの過剰通知スパム・連打の抑制 (`alarm.swift`)**:
+     - `alarm.swift`: `repeatOffsets` を従来の小刻み（15秒・30秒・45秒・60秒・90秒・120秒の7回連打）から `[0, 60, 180]`（到達時・1分後・3分後）の適切な間隔・回数に調整。
+     - 短時間でのシステム通知キューのパンク、およびメンバー全員へのアラーム通知スパムを根本防止。
+
 
 
 

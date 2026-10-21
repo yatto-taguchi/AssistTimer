@@ -53,7 +53,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private let armedStoreKey = "assisttimer.alarm.armed"
     private let ackStoreKey = "assisttimer.alarm.ack"
     private let notificationPrefix = "assisttimer.alarm."
-    private let repeatOffsets: [TimeInterval] = [0, 15, 30, 45, 60, 90, 120]
+    private let repeatOffsets: [TimeInterval] = [0, 60, 180]
     private let maxNotifications = 60 // watchOS の保留通知上限（64件）未満に抑える
     // 強めに感じる触覚を交互に鳴らす
     private let strongHaptics: [WKHapticType] = [.notification, .failure, .retry]
@@ -230,10 +230,10 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     if id == "main-timer" || id == WatchSessionManager.shared.mainTimer?.id {
                         if var m = WatchSessionManager.shared.mainTimer {
                             m.isRunning = false
-                            m.pausedRemainingSeconds = 0
+                            m.pausedRemainingSeconds = m.totalSeconds
                             WatchSessionManager.shared.mainTimer = m
                         }
-                        WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_PAUSE")
+                        WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_RESET")
                     }
                 } else if !isMain {
                     // ★ チェック時間アラームの停止: Watch側でも即座にチェック完了を反映
@@ -350,14 +350,13 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             return
         }
 
-        // start(at:) はアプリ表示中（active / inactive）に呼べる
-        guard canScheduleSmartAlarm else { return }
-
         // 鳴動中なのにセッションが無い（アプリを開いた時点で過ぎていた等）→ 1秒後開始で予約し、
         // 画面が暗くなっても止めるまで鳴り続けるようにする
         let target: WatchAlarmEvent?
         let startDate: Date
         if let r = currentRinging(now).first {
+            // 即時鳴動セッションの開始はフォアグラウンド表示中のみ許可
+            guard canScheduleSmartAlarm else { return }
             target = r
             startDate = now.addingTimeInterval(1)
         } else if let n = events
@@ -515,6 +514,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 // ★ watchOS では content.sound を指定しないと触覚（Taptic Engine）の振動が一切鳴らない。
                 //   消音モード時はシステム側で自動的に「振動のみ」となるため、常に .default を指定して振動を保証する。
                 content.sound = .default
+                content.interruptionLevel = .timeSensitive
                 content.threadIdentifier = "assisttimer.alarm"
                 let triggerInterval = max(1, interval)
                 let trigger = UNTimeIntervalNotificationTrigger(timeInterval: triggerInterval, repeats: false)

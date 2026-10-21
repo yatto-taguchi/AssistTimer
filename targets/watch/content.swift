@@ -196,28 +196,30 @@ extension SeatTimerItem {
         self.creatorName = (dictionary["creatorName"] as? String) ?? (dictionary["colorStaffName"] as? String) ?? "スタイリスト"
         self.totalSeconds = (dictionary["totalSeconds"] as? NSNumber)?.intValue ?? (dictionary["totalSeconds"] as? Int) ?? (dictionary["targetSeconds"] as? Int) ?? 600
         
-        // 終了時刻
-        if let endMs = (dictionary["targetEndTimestamp"] as? NSNumber)?.doubleValue ?? (dictionary["targetEndTimestamp"] as? Double) {
-            self.targetEndTime = Date(timeIntervalSince1970: endMs / 1000.0)
-        } else if let endSec = (dictionary["targetEndTime"] as? NSNumber)?.doubleValue ?? (dictionary["targetEndTime"] as? Double) {
-            self.targetEndTime = Date(timeIntervalSince1970: endSec)
-        } else {
-            self.targetEndTime = Date().addingTimeInterval(TimeInterval(self.totalSeconds))
-        }
-        
         // ★ isRunning の正確な判定 (Bool / NSNumber を最優先、なければ status 文字列)
+        let isRunningVal: Bool
         if let running = (dictionary["isRunning"] as? NSNumber)?.boolValue ?? (dictionary["isRunning"] as? Bool) {
-            self.isRunning = running
+            isRunningVal = running
         } else {
             let statusStr = dictionary["status"] as? String ?? ""
-            self.isRunning = (statusStr == "running")
+            isRunningVal = (statusStr == "running")
         }
+        self.isRunning = isRunningVal
         
         if let paused = (dictionary["pausedRemainingSeconds"] as? NSNumber)?.intValue ?? (dictionary["pausedRemainingSeconds"] as? Int) {
             self.pausedRemainingSeconds = paused
         } else {
-            let rem = Int(self.targetEndTime.timeIntervalSince(Date()))
-            self.pausedRemainingSeconds = max(0, rem)
+            self.pausedRemainingSeconds = self.totalSeconds
+        }
+        
+        // 終了時刻（稼働中かつ有効な未来/過去の絶対時刻があればそれを採用、停止中は残り秒数から安全に算出）
+        if let endMs = (dictionary["targetEndTimestamp"] as? NSNumber)?.doubleValue ?? (dictionary["targetEndTimestamp"] as? Double), endMs > 0 {
+            self.targetEndTime = Date(timeIntervalSince1970: endMs / 1000.0)
+        } else if let endSec = (dictionary["targetEndTime"] as? NSNumber)?.doubleValue ?? (dictionary["targetEndTime"] as? Double), endSec > 0 {
+            self.targetEndTime = Date(timeIntervalSince1970: endSec)
+        } else {
+            let rem = self.pausedRemainingSeconds > 0 ? self.pausedRemainingSeconds : self.totalSeconds
+            self.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
         }
         
         self.helpProcess = (dictionary["helpProcess"] as? String) ?? (dictionary["actionStatus"] as? String) ?? "シャンプー"
@@ -515,6 +517,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
         
         // メインタイマー同期（直近Watchローカル操作中も、iPhoneからの準備中カウントダウンや最新データは確実に反映）
+        var didUpdateMain = false
         if let rawMain = data["mainTimer"] as? [String: Any], let parsedMain = SeatTimerItem(dictionary: rawMain) {
             let isRecentlyModifiedOnWatch = Date().timeIntervalSince(self.lastMainTimerLocalActionTime) < self.mainTimerLocalHoldSeconds
             let payloadTs = (data["timestamp"] as? NSNumber)?.doubleValue ?? 0
@@ -522,6 +525,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             let isNewerThanLocal = payloadTs > localActionTs
             if !isRecentlyModifiedOnWatch || parsedMain.isPreCountingDown || isNewerThanLocal {
                 self.mainTimer = parsedMain
+                didUpdateMain = true
             }
         }
 
@@ -537,6 +541,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             // ★ 安全防御: すでに客席があり、稼働中のタイマーが存在する場合、空配列による全消滅・強制停止を防ぐ
             if parsed.isEmpty && !self.timers.isEmpty && self.timers.contains(where: { $0.isRunning }) {
                 // 稼働中タイマーがある時は空データでの上書きをブロック
+                if didUpdateMain {
+                    WatchAlarmCoordinator.shared.update(timers: self.timers, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled, currentUserName: self.currentUserName)
+                    WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer, userName: self.currentUserName)
+                }
             } else {
                 // ★ Watch で止めたのに、まだ「止める前と同じ終了時刻で稼働中」のデータが届いた場合は、
                 //   iPhone がまだ反映していないだけなので停止のままにする（最大60秒）
@@ -571,7 +579,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 // ★ 文字盤コンプリケーションへ共有
                 WidgetSync.save(timers: parsed, mainTimer: self.mainTimer, userName: self.currentUserName)
             }
-        } else if data["mainTimer"] != nil {
+        } else if data["mainTimer"] != nil || didUpdateMain {
             // ★ メインタイマーのみの更新時（seatsキーなし）も文字盤・アラームを同期
             WatchAlarmCoordinator.shared.update(timers: self.timers, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled, currentUserName: self.currentUserName)
             WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer, userName: self.currentUserName)
@@ -1201,11 +1209,22 @@ struct ContentView: View {
                                         m.isRunning = false
                                         m.pausedRemainingSeconds = max(0, Int(m.targetEndTime.timeIntervalSince(now)))
                                     } else {
-                                        m.isRunning = true
-                                        let rem = m.pausedRemainingSeconds > 0 ? m.pausedRemainingSeconds : m.totalSeconds
-                                        m.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
+                                        let isInitialStart = (m.pausedRemainingSeconds <= 0 || m.pausedRemainingSeconds == m.totalSeconds || m.isOvertime)
+                                        if isInitialStart && m.isCountdownConfigEnabled && m.countdownConfigSeconds > 0 {
+                                            m.isPreCountingDown = true
+                                            m.preCountdownSeconds = m.countdownConfigSeconds
+                                            m.prepEndTime = now.addingTimeInterval(TimeInterval(m.countdownConfigSeconds))
+                                            m.isRunning = false
+                                            m.pausedRemainingSeconds = m.totalSeconds
+                                        } else {
+                                            m.isRunning = true
+                                            let rem = (m.pausedRemainingSeconds > 0 && !m.isOvertime) ? m.pausedRemainingSeconds : m.totalSeconds
+                                            m.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
+                                        }
                                     }
                                     sessionManager.mainTimer = m
+                                    WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
+                                    WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                                 }
                                 sessionManager.sendMainTimerAction(action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START")
                             },
@@ -1370,29 +1389,43 @@ struct ContentView: View {
             main.isRunning = false
             main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(now)))
         } else {
-            main.isRunning = true
-            let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
-            main.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
+            let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds || main.isOvertime)
+            if isInitialStart && main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
+                main.isPreCountingDown = true
+                main.preCountdownSeconds = main.countdownConfigSeconds
+                main.prepEndTime = now.addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
+                main.isRunning = false
+                main.pausedRemainingSeconds = main.totalSeconds
+            } else {
+                main.isRunning = true
+                let rem = (main.pausedRemainingSeconds > 0 && !main.isOvertime) ? main.pausedRemainingSeconds : main.totalSeconds
+                main.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
+            }
         }
         sessionManager.mainTimer = main
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START")
     }
     
     private func handleStartMainTimer() {
         playHaptic(.click)
         var main = sessionManager.mainTimer ?? defaultMainTimer()
-        let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds)
+        let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds || main.isOvertime)
         if isInitialStart && main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
             main.isPreCountingDown = true
             main.preCountdownSeconds = main.countdownConfigSeconds
             main.prepEndTime = Date().addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
             main.isRunning = false
+            main.pausedRemainingSeconds = main.totalSeconds
         } else {
             main.isRunning = true
-            let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
+            let rem = (main.pausedRemainingSeconds > 0 && !main.isOvertime) ? main.pausedRemainingSeconds : main.totalSeconds
             main.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
         }
         sessionManager.mainTimer = main
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START")
     }
     

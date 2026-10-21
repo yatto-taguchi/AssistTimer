@@ -1095,6 +1095,9 @@ export default function HomeScreen({ navigation }) {
     isFirstCheerTriggeredRef.current = false;
     lastCheerTriggerTimeRef.current = 0;
     nextCheerIntervalMsRef.current = 0;
+    isRunningRef.current = false;
+    isPreCountingDownRef.current = false;
+    isCountUpRef.current = false;
     setIsRunning(false);
     setIsPreCountingDown(false);
     setIsCountUp(false);
@@ -1106,13 +1109,34 @@ export default function HomeScreen({ navigation }) {
     triggeredVoicesRef.current.clear();
     triggeredPrepVoicesRef.current.clear();
     triggeredOverVoicesRef.current.clear();
-    remainingTimeRef.current = targetTime;
-    setRemainingTime(targetTime);
+    const finalTarget = targetTimeRef.current || targetTime || 600;
+    remainingTimeRef.current = finalTarget;
+    setRemainingTime(finalTarget);
     if (sound) {
       sound.stopAsync().catch(() => {});
     }
     if (voiceSound) {
       voiceSound.stopAsync().catch(() => {});
+    }
+
+    // ★ リセット時はWatchへクリーンな初期待機状態を即座に伝達（超過の復活を根絶）
+    if (Platform.OS === 'ios') {
+      const resetState = {
+        remainingTime: finalTarget,
+        targetTime: finalTarget,
+        targetEndTimestamp: 0,
+        isRunning: false,
+        isPaused: false,
+        isCountUp: false,
+        genre: selectedCategoryRef.current || selectedCategory || '',
+        isPreCountingDown: false,
+        preCountdownSeconds: 0,
+        isCountdownConfigEnabled: !!isCountdownEnabledRef.current,
+        countdownConfigSeconds: countdownSecondsRef.current || 5,
+        prepEndTimestamp: null,
+      };
+      updateCachedMainTimerState(resetState);
+      syncMainTimerToWatch(resetState, { immediate: true });
     }
 
     // リセットボタン押下後の待機中やまいもウォーキング演出（クールダウン30秒、出現率50%）
@@ -1131,6 +1155,7 @@ export default function HomeScreen({ navigation }) {
   const prevIsPreCountdownForWatchRef = useRef(isPreCountingDown);
   const prevIsCountdownConfigEnabledRef = useRef(isCountdownEnabled);
   const prevCountdownConfigSecondsRef = useRef(countdownSeconds);
+  const prevIsCountUpForWatchRef = useRef(isCountUp);
 
   useEffect(() => {
     let endMs = null;
@@ -1162,20 +1187,22 @@ export default function HomeScreen({ navigation }) {
     }
     updateCachedMainTimerState(newState);
 
-    // ★ Watchへの即時同期: スタート/ストップの切り替わり、設定時間変更、準備中カウントダウンの開始/終了、設定の変更、または停止中の秒数変化時に送信
+    // ★ Watchへの即時同期: スタート/ストップの切り替わり、設定時間変更、準備中カウントダウンの開始/終了、設定の変更、超過状態の変化、または停止中の秒数変化時に送信
     const isStateToggled = prevIsRunningForWatchRef.current !== isRunning;
     const isTargetChanged = prevTargetTimeForWatchRef.current !== targetTime;
     const isPreCountdownToggled = prevIsPreCountdownForWatchRef.current !== isPreCountingDown;
     const isCountdownConfigToggled = prevIsCountdownConfigEnabledRef.current !== isCountdownEnabled || prevCountdownConfigSecondsRef.current !== countdownSeconds;
+    const isCountUpToggled = prevIsCountUpForWatchRef.current !== isCountUp;
     const isRemainingChangedWhileStopped = !isRunning && !isPreCountingDown && prevRemainingTimeForWatchRef.current !== remainingTime;
 
-    if (isStateToggled || isTargetChanged || isPreCountdownToggled || isCountdownConfigToggled || isRemainingChangedWhileStopped) {
+    if (isStateToggled || isTargetChanged || isPreCountdownToggled || isCountdownConfigToggled || isCountUpToggled || isRemainingChangedWhileStopped) {
       prevIsRunningForWatchRef.current = isRunning;
       prevTargetTimeForWatchRef.current = targetTime;
       prevRemainingTimeForWatchRef.current = remainingTime;
       prevIsPreCountdownForWatchRef.current = isPreCountingDown;
       prevIsCountdownConfigEnabledRef.current = isCountdownEnabled;
       prevCountdownConfigSecondsRef.current = countdownSeconds;
+      prevIsCountUpForWatchRef.current = isCountUp;
       if (Platform.OS === 'ios') {
         syncMainTimerToWatch(newState, { immediate: true });
       }
@@ -1224,31 +1251,39 @@ export default function HomeScreen({ navigation }) {
       const playPhoneSound = payload?.playSoundOnPhone !== false;
       setWatchMutedState(!playPhoneSound);
       console.log('[HomeScreen] MAIN_TIMER_START received. playSoundOnPhone:', playPhoneSound, 'isMuted:', !playPhoneSound);
-      // 残り時間が0秒以下の場合は設定時間にリセットしてから開始
-      if (remainingTimeRef.current <= 0 && targetTimeRef.current > 0) {
-        remainingTimeRef.current = targetTimeRef.current;
-        setRemainingTime(targetTimeRef.current);
+      // 超過中（カウントアップ中）または残り時間が0秒以下の場合はカウントアップ解除＆設定時間にリセットしてから開始
+      if (isCountUpRef.current || isCountUp || remainingTimeRef.current <= 0) {
+        isCountUpRef.current = false;
+        setIsCountUp(false);
+        overStartTimeRef.current = null;
+        const resetTarget = (targetTimeRef.current && targetTimeRef.current > 0) ? targetTimeRef.current : (targetTime || 600);
+        remainingTimeRef.current = resetTarget;
+        setRemainingTime(resetTarget);
       }
       if (!isRunningRef.current && !isPreCountingDownRef.current && toggleTimerRef.current) {
         toggleTimerRef.current(true); // ★ Watch主導フラグ(isFromWatch=true)を正しく伝達
       }
       if (Platform.OS === 'ios') {
-        const startState = {
-          remainingTime: remainingTimeRef.current,
-          targetTime: targetTimeRef.current,
-          targetEndTimestamp: targetEndTimeRef.current || (Date.now() + remainingTimeRef.current * 1000),
-          isRunning: true,
-          isPaused: false,
-          isCountUp: false,
-          genre: selectedCategoryRef.current || '',
-          isPreCountingDown: isPreCountingDownRef.current,
-          preCountdownSeconds: preCountdownTimeRef.current || 0,
-          isCountdownConfigEnabled: !!isCountdownEnabledRef.current,
-          countdownConfigSeconds: countdownSecondsRef.current || 5,
-          prepEndTimestamp: prepEndTimeRef.current,
-        };
-        updateCachedMainTimerState(startState);
-        syncMainTimerToWatch(startState, { immediate: true });
+        // toggleTimer内で準備カウントダウンが発動した場合は、toggleTimer側がprepStateを送信済みのため二重・矛盾送信を抑制
+        const isPrep = !!isPreCountingDownRef.current;
+        if (!isPrep) {
+          const startState = {
+            remainingTime: remainingTimeRef.current,
+            targetTime: targetTimeRef.current || targetTime,
+            targetEndTimestamp: targetEndTimeRef.current || (Date.now() + remainingTimeRef.current * 1000),
+            isRunning: true,
+            isPaused: false,
+            isCountUp: false,
+            genre: selectedCategoryRef.current || '',
+            isPreCountingDown: false,
+            preCountdownSeconds: 0,
+            isCountdownConfigEnabled: !!isCountdownEnabledRef.current,
+            countdownConfigSeconds: countdownSecondsRef.current || 5,
+            prepEndTimestamp: null,
+          };
+          updateCachedMainTimerState(startState);
+          syncMainTimerToWatch(startState, { immediate: true });
+        }
       }
     } else if (cleanAction === 'pause') {
       if ((isRunningRef.current || isPreCountingDownRef.current) && toggleTimerRef.current) {
@@ -1734,6 +1769,25 @@ export default function HomeScreen({ navigation }) {
     setSelectedTags([]); // タグを初期化
     setRecordDate(new Date().toISOString()); // 計測終了日時を記録
     setSaveModalVisible(true);
+    // ★ 保存モーダル表示中もWatchへは停止（待機状態）として即座に同期し、超過カウントの復活・続き表示を防止
+    if (Platform.OS === 'ios') {
+      const stoppedState = {
+        remainingTime: targetTime,
+        targetTime: targetTime,
+        targetEndTimestamp: 0,
+        isRunning: false,
+        isPaused: false,
+        isCountUp: false,
+        genre: selectedCategory || '',
+        isPreCountingDown: false,
+        preCountdownSeconds: 0,
+        isCountdownConfigEnabled: !!isCountdownEnabled,
+        countdownConfigSeconds: countdownSeconds || 5,
+        prepEndTimestamp: null,
+      };
+      updateCachedMainTimerState(stoppedState);
+      syncMainTimerToWatch(stoppedState, { immediate: true });
+    }
   };
 
   const handleOpenSaveInTimeModal = () => {
@@ -1752,6 +1806,25 @@ export default function HomeScreen({ navigation }) {
     setSelectedTags([]); // タグを初期化
     setRecordDate(new Date().toISOString()); // 計測終了日時を記録
     setSaveModalVisible(true);
+    // ★ 保存モーダル表示中もWatchへは停止（待機状態）として即座に同期
+    if (Platform.OS === 'ios') {
+      const stoppedState = {
+        remainingTime: targetTime,
+        targetTime: targetTime,
+        targetEndTimestamp: 0,
+        isRunning: false,
+        isPaused: false,
+        isCountUp: false,
+        genre: selectedCategory || '',
+        isPreCountingDown: false,
+        preCountdownSeconds: 0,
+        isCountdownConfigEnabled: !!isCountdownEnabled,
+        countdownConfigSeconds: countdownSeconds || 5,
+        prepEndTimestamp: null,
+      };
+      updateCachedMainTimerState(stoppedState);
+      syncMainTimerToWatch(stoppedState, { immediate: true });
+    }
   };
 
   const handleTakePhoto = async () => {
