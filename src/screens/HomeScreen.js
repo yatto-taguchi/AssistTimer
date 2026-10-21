@@ -1080,6 +1080,8 @@ export default function HomeScreen({ navigation }) {
           // 一時停止
           isRunningRef.current = false;
           setIsRunning(false);
+          isCountUpRef.current = false;
+          setIsCountUp(false);
           targetEndTimeRef.current = null;
           overStartTimeRef.current = null;
           cancelVibration();
@@ -1145,6 +1147,9 @@ export default function HomeScreen({ navigation }) {
         countdownConfigSeconds: countdownSecondsRef.current || 5,
         prepEndTimestamp: null,
       };
+      if (setMainTimerState) {
+        setMainTimerState(resetState);
+      }
       updateCachedMainTimerState(resetState);
       syncMainTimerToWatch(resetState, { immediate: true });
     }
@@ -1299,22 +1304,28 @@ export default function HomeScreen({ navigation }) {
         }
       }
     } else if (cleanAction === 'pause') {
+      isCountUpRef.current = false;
+      setIsCountUp(false);
+      overStartTimeRef.current = null;
       if ((isRunningRef.current || isPreCountingDownRef.current) && toggleTimerRef.current) {
         toggleTimerRef.current(true);
       }
       if (Platform.OS === 'ios') {
         const pauseState = {
           remainingTime: remainingTimeRef.current,
-          targetTime: targetTimeRef.current,
+          targetTime: targetTimeRef.current || targetTime,
           targetEndTimestamp: 0,
           isRunning: false,
           isPaused: true,
           isCountUp: false,
-          genre: selectedCategoryRef.current || '',
+          genre: selectedCategoryRef.current || selectedCategory || '',
           isPreCountingDown: false,
           preCountdownSeconds: 0,
           prepEndTimestamp: null,
         };
+        if (setMainTimerState) {
+          setMainTimerState(pauseState);
+        }
         updateCachedMainTimerState(pauseState);
         syncMainTimerToWatch(pauseState, { immediate: true });
       }
@@ -1324,8 +1335,33 @@ export default function HomeScreen({ navigation }) {
       }
     } else if (cleanAction === 'reset') {
       setWatchMutedState(false);
+      isCountUpRef.current = false;
+      setIsCountUp(false);
+      overStartTimeRef.current = null;
       if (resetTimerRef.current) {
-        resetTimerRef.current();
+        resetTimerRef.current(true);
+      }
+      if (Platform.OS === 'ios') {
+        const finalTarget = targetTimeRef.current || targetTime || 600;
+        const resetState = {
+          remainingTime: finalTarget,
+          targetTime: finalTarget,
+          targetEndTimestamp: 0,
+          isRunning: false,
+          isPaused: false,
+          isCountUp: false,
+          genre: selectedCategoryRef.current || selectedCategory || '',
+          isPreCountingDown: false,
+          preCountdownSeconds: 0,
+          isCountdownConfigEnabled: !!isCountdownEnabledRef.current,
+          countdownConfigSeconds: countdownSecondsRef.current || 5,
+          prepEndTimestamp: null,
+        };
+        if (setMainTimerState) {
+          setMainTimerState(resetState);
+        }
+        updateCachedMainTimerState(resetState);
+        syncMainTimerToWatch(resetState, { immediate: true });
       }
     } else if (cleanAction === 'set_time') {
       const sec = Number(payload?.totalSeconds || payload?.extra?.totalSeconds);

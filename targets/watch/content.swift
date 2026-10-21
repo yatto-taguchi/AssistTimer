@@ -331,12 +331,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     //   席が稼働したら消す（同期のたびにカードが勝手に開閉しないようにする）
     private var collapseOverrides: [String: Bool] = [:]
     
-    // ★ メインタイマーの直近ローカル操作保護（Watchで操作後、iPhoneからの古いスナップショットによる巻き戻しを防止）
+    // ★ メインタイマーの直近ローカル操作保護（Watchで操作後、iPhoneからの古いスナップショットによる巻き戻し・超過復活を完全ブロック）
     private var lastMainTimerLocalActionTime: Date = Date.distantPast
-    private let mainTimerLocalHoldSeconds: TimeInterval = 5.0
+    private var lastMainTimerLocalActionType: String = "" // "RESET", "PAUSE", "START"
+    private var lastMainTimerLocalStopEndTime: Double = 0
+    private let mainTimerLocalHoldSeconds: TimeInterval = 10.0
     
-    func recordMainTimerLocalAction() {
+    func recordMainTimerLocalAction(_ actionType: String = "", endTime: Double = 0) {
         self.lastMainTimerLocalActionTime = Date()
+        self.lastMainTimerLocalActionType = actionType
+        self.lastMainTimerLocalStopEndTime = endTime
     }
     
     override init() {
@@ -520,10 +524,38 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         var didUpdateMain = false
         if let rawMain = data["mainTimer"] as? [String: Any], let parsedMain = SeatTimerItem(dictionary: rawMain) {
             let isRecentlyModifiedOnWatch = Date().timeIntervalSince(self.lastMainTimerLocalActionTime) < self.mainTimerLocalHoldSeconds
-            let payloadTs = (data["timestamp"] as? NSNumber)?.doubleValue ?? 0
-            let localActionTs = self.lastMainTimerLocalActionTime.timeIntervalSince1970 * 1000.0
-            let isNewerThanLocal = payloadTs > localActionTs
-            if !isRecentlyModifiedOnWatch || parsedMain.isPreCountingDown || isNewerThanLocal {
+            
+            if isRecentlyModifiedOnWatch {
+                // ★ ローカルでリセットした場合: iPhone側が停止完了（isRunning == false）を返すまでリセット状態を死守し、超過のゾンビ復活を完全ブロック
+                if self.lastMainTimerLocalActionType == "RESET" {
+                    if !parsedMain.isRunning && (parsedMain.targetEndTime <= Date() || parsedMain.pausedRemainingSeconds == parsedMain.totalSeconds || parsedMain.pausedRemainingSeconds == 0) {
+                        self.mainTimer = parsedMain
+                        self.lastMainTimerLocalActionTime = Date.distantPast
+                        didUpdateMain = true
+                    } else {
+                        // iPhoneがまだ古い超過・稼働中データを送ってきている間はリセット状態（設定時間・停止）を強制維持
+                        if var cur = self.mainTimer {
+                            cur.isRunning = false
+                            cur.isPreCountingDown = false
+                            cur.pausedRemainingSeconds = cur.totalSeconds
+                            self.mainTimer = cur
+                        }
+                    }
+                } else if self.lastMainTimerLocalActionType == "PAUSE" {
+                    if !parsedMain.isRunning {
+                        self.mainTimer = parsedMain
+                        self.lastMainTimerLocalActionTime = Date.distantPast
+                        didUpdateMain = true
+                    }
+                } else if self.lastMainTimerLocalActionType == "START" {
+                    if parsedMain.isRunning || parsedMain.isPreCountingDown {
+                        self.mainTimer = parsedMain
+                        self.lastMainTimerLocalActionTime = Date.distantPast
+                        didUpdateMain = true
+                    }
+                }
+            } else {
+                // 通常同期: iPhone側の最新確定データを受容
                 self.mainTimer = parsedMain
                 didUpdateMain = true
             }
@@ -588,7 +620,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     
     // ★ メインタイマー専用の操作送信（携帯の音出力フラグおよび一意なactionIdを付与）
     func sendMainTimerAction(action: String, extra: [String: Any] = [:]) {
-        recordMainTimerLocalAction()
+        let clean = action.replacingOccurrences(of: "MAIN_TIMER_", with: "")
+        let endTime = self.mainTimer?.targetEndTime.timeIntervalSince1970 ?? 0
+        recordMainTimerLocalAction(clean, endTime: endTime)
         var fullExtra = extra
         if fullExtra["actionId"] == nil {
             fullExtra["actionId"] = "\(action)_\(Int(Date().timeIntervalSince1970 * 1000))"

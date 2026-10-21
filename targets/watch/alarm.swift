@@ -53,7 +53,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private let armedStoreKey = "assisttimer.alarm.armed"
     private let ackStoreKey = "assisttimer.alarm.ack"
     private let notificationPrefix = "assisttimer.alarm."
-    private let repeatOffsets: [TimeInterval] = [0, 60, 180]
+    // ★ 高密度連続TimeSensitive通知オフセット（0秒から5秒・10秒おきに連続投入し、画面オフでも確実に気づけるようにする）
+    private let repeatOffsets: [TimeInterval] = [0, 5, 10, 15, 20, 25, 30, 45, 60, 90, 120, 180]
     private let maxNotifications = 60 // watchOS の保留通知上限（64件）未満に抑える
     // 強めに感じる触覚を交互に鳴らす
     private let strongHaptics: [WKHapticType] = [.notification, .failure, .retry]
@@ -62,6 +63,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         super.init()
         armed = (UserDefaults.standard.dictionary(forKey: armedStoreKey) as? [String: Double]) ?? [:]
         acknowledged = (UserDefaults.standard.dictionary(forKey: ackStoreKey) as? [String: Double]) ?? [:]
+        let stopAction = UNNotificationAction(identifier: "STOP_ACTION", title: "アラーム停止", options: [.foreground])
+        let category = UNNotificationCategory(identifier: "ALARM_CATEGORY", actions: [stopAction], intentIdentifiers: [], options: [])
+        UNUserNotificationCenter.current().setNotificationCategories([category])
         UNUserNotificationCenter.current().delegate = self
         requestAuthorizationIfNeeded()
     }
@@ -380,6 +384,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             return
         }
         guard let t = target, startDate.timeIntervalSince(now) < 36 * 3600 else { return }
+        guard canScheduleSmartAlarm else { return }
 
         let s = WKExtendedRuntimeSession()
         s.delegate = self
@@ -515,6 +520,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 //   消音モード時はシステム側で自動的に「振動のみ」となるため、常に .default を指定して振動を保証する。
                 content.sound = .default
                 content.interruptionLevel = .timeSensitive
+                content.categoryIdentifier = "ALARM_CATEGORY"
                 content.threadIdentifier = "assisttimer.alarm"
                 let triggerInterval = max(1, interval)
                 let trigger = UNTimeIntervalNotificationTrigger(timeInterval: triggerInterval, repeats: false)
@@ -542,6 +548,16 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             } else {
                 completionHandler([.banner, .sound, .list])
             }
+        }
+    }
+
+    // ★ 通知タップまたは「アラーム停止」ボタン押下時に即座にアラーム消火＆iPhone同期
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        DispatchQueue.main.async {
+            self.stop()
+            completionHandler()
         }
     }
 }

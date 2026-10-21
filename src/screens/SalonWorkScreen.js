@@ -880,7 +880,30 @@ export default function SalonWorkScreen() {
       return;
     }
 
-    // （※ メインタイマーのWatch操作はHomeScreenが一元受信・実行するため、二重トグル防止のためここでは処理しない）
+    // ★ メインタイマーのWatch操作受信時のキャッシュ即時保護（客席同期で古い超過が再送されるのを根絶）
+    if (action === 'MAIN_TIMER_RESET') {
+      const resetTarget = _cachedMainTimerState?.targetTime || 600;
+      updateCachedMainTimerState({
+        ...(_cachedMainTimerState || {}),
+        remainingTime: resetTarget,
+        targetTime: resetTarget,
+        targetEndTimestamp: 0,
+        isRunning: false,
+        isPaused: false,
+        isCountUp: false,
+      });
+      return;
+    }
+    if (action === 'MAIN_TIMER_PAUSE') {
+      updateCachedMainTimerState({
+        ...(_cachedMainTimerState || {}),
+        targetEndTimestamp: 0,
+        isRunning: false,
+        isPaused: true,
+        isCountUp: false,
+      });
+      return;
+    }
 
     // ② Watch側での新規席追加
     if (action === 'ADD_SEAT') {
