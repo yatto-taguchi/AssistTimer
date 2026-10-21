@@ -56,8 +56,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     // ★ 高密度連続TimeSensitive通知オフセット（0秒から5秒・10秒おきに連続投入し、画面オフでも確実に気づけるようにする）
     private let repeatOffsets: [TimeInterval] = [0, 5, 10, 15, 20, 25, 30, 45, 60, 90, 120, 180]
     private let maxNotifications = 60 // watchOS の保留通知上限（64件）未満に抑える
-    // 強めに感じる触覚を交互に鳴らす
-    private let strongHaptics: [WKHapticType] = [.notification, .failure, .retry]
+    // 強めに感じる触覚を交互に鳴らす（最も強烈な .failure と .notification を高密度連打）
+    private let strongHaptics: [WKHapticType] = [.failure, .notification, .failure, .retry]
 
     override init() {
         super.init()
@@ -300,14 +300,14 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         if text != statusText { statusText = text }
     }
 
-    // MARK: - アプリ表示中の強い振動（0.5秒ごと）
+    // MARK: - アプリ表示中の強い振動（0.3秒ごとの超高速マックス連打）
 
     private func updateForegroundHaptics() {
         let shouldVibrate = !ringing.isEmpty && isAppActive
         if shouldVibrate {
             guard hapticTimer == nil else { return }
             playNextHaptic()
-            let t = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            let t = Timer(timeInterval: 0.3, repeats: true) { [weak self] _ in
                 guard let self = self else { return }
                 if self.ringing.isEmpty || !self.isAppActive {
                     self.stopForegroundHaptics()
@@ -340,21 +340,13 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         if sessionStarted { return }
         if let s = session, s.state == .invalid { clearSession() }
 
-        // ★ 直前のセッションが無効化処理中の場合は完了(didInvalidateWith)を待つ（0.3秒後フォールバックあり）
-        if !invalidatingSessions.isEmpty {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.refresh()
-            }
-            return
-        }
-
         // ★ 時刻到達済み（＝まもなく開始する／開始処理中）の予定のセッションは絶対に取り消さない
         if session != nil, let key = sessionKey, acknowledged[key] == nil,
            let ev = events.first(where: { $0.key == key }), ev.date <= now.addingTimeInterval(2) {
             return
         }
 
-        // 鳴動中なのにセッションが無い（アプリを開いた時点で過ぎていた等）→ 1秒後開始で予約し、
+        // 鳴動中なのにセッションが無い（アプリを開いた時点で過ぎていた等）→ 0.2秒後開始で即時予約し、
         // 画面が暗くなっても止めるまで鳴り続けるようにする
         let target: WatchAlarmEvent?
         let startDate: Date
@@ -362,7 +354,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             // 即時鳴動セッションの開始はフォアグラウンド表示中のみ許可
             guard canScheduleSmartAlarm else { return }
             target = r
-            startDate = now.addingTimeInterval(1)
+            startDate = now.addingTimeInterval(0.2)
         } else if let n = events
             .filter({ $0.date > now && acknowledged[$0.key] == nil })
             .min(by: { $0.date < $1.date }) {
@@ -376,16 +368,17 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         if let s = session, let key = sessionKey, key == target?.key, s.state == .scheduled || s.state == .notStarted {
             return // 予約済み
         }
+
+        // ★ 既存の別予定セッションがある場合は即座に無効化
         if session != nil {
             invalidateCurrentSession()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.refresh()
-            }
-            return
         }
+
         guard let t = target, startDate.timeIntervalSince(now) < 36 * 3600 else { return }
         guard canScheduleSmartAlarm else { return }
 
+        // ★ 画面がついている今この瞬間に最速で新規予約（0ミリ秒）。
+        //    前セッションが無効化処理中でも待たずに予約を試行し、手首を下ろしてバックグラウンドになる前のすれ違いを根本防止
         let s = WKExtendedRuntimeSession()
         s.delegate = self
         s.start(at: startDate)
@@ -398,10 +391,10 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private func startNotifyUser(_ s: WKExtendedRuntimeSession) {
         let types = strongHaptics
         var step = 0
-        s.notifyUser(hapticType: .notification) { next in
+        s.notifyUser(hapticType: .failure) { next in
             step += 1
             next.pointee = types[step % types.count]
-            return 0.8
+            return 0.4 // ★ 0.8秒から0.4秒へ半減！止めるまで手首が激しく揺れ続けるマックス振動！
         }
     }
 
