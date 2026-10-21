@@ -41,6 +41,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private var session: WKExtendedRuntimeSession?
     private var sessionKey: String?
     private var sessionStarted = false
+    private var invalidatingSessions: Set<WKExtendedRuntimeSession> = []
     private var lastSessionEnd: String = "-"
     private var notificationAuth: String = "?"
 
@@ -115,9 +116,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     /// 「止める」ボタン
     func stop() {
         acknowledgeRinging(sendToPhone: true)
-        if let s = session, sessionStarted || sessionKey == nil || isKeyDueOrDone(sessionKey) {
-            clearSession()
-            s.invalidate()
+        if session != nil, sessionStarted || sessionKey == nil || isKeyDueOrDone(sessionKey) {
+            invalidateCurrentSession()
         }
         refresh()
     }
@@ -182,12 +182,11 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
 
         // 鳴っている予定または予約中の予定が相手によって止められた・席が終了した → アラームを即時消火
-        if let s = session {
+        if session != nil {
             let keyInvalid = (sessionKey != nil && (!events.contains { $0.key == sessionKey } || acknowledged[sessionKey!] != nil))
             let noEventsAtAll = events.isEmpty && ringing.isEmpty
             if keyInvalid || noEventsAtAll {
-                clearSession()
-                s.invalidate()
+                invalidateCurrentSession()
             }
         }
 
@@ -242,6 +241,14 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         session = nil
         sessionKey = nil
         sessionStarted = false
+    }
+
+    private func invalidateCurrentSession() {
+        guard let s = session else { return }
+        let current = s
+        clearSession()
+        invalidatingSessions.insert(current)
+        current.invalidate()
     }
 
     // 古い記録（12時間以上前）を削除
@@ -318,6 +325,14 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         if sessionStarted { return }
         if let s = session, s.state == .invalid { clearSession() }
 
+        // ★ 直前のセッションが無効化処理中の場合は完了(didInvalidateWith)を待つ（0.3秒後フォールバックあり）
+        if !invalidatingSessions.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.refresh()
+            }
+            return
+        }
+
         // ★ 時刻到達済み（＝まもなく開始する／開始処理中）の予定のセッションは絶対に取り消さない
         if session != nil, let key = sessionKey, acknowledged[key] == nil,
            let ev = events.first(where: { $0.key == key }), ev.date <= now.addingTimeInterval(2) {
@@ -347,9 +362,12 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         if let s = session, let key = sessionKey, key == target?.key, s.state == .scheduled || s.state == .notStarted {
             return // 予約済み
         }
-        if let old = session {
-            clearSession()
-            old.invalidate()
+        if session != nil {
+            invalidateCurrentSession()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.refresh()
+            }
+            return
         }
         guard let t = target, startDate.timeIntervalSince(now) < 36 * 3600 else { return }
 
@@ -390,14 +408,20 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                                 didInvalidateWith reason: WKExtendedRuntimeSessionInvalidationReason,
                                 error: Error?) {
         DispatchQueue.main.async {
-            guard extendedRuntimeSession === self.session else { return }
-            let wasStarted = self.sessionStarted
-            self.clearSession()
+            let wasInvalidating = self.invalidatingSessions.remove(extendedRuntimeSession) != nil
+            let isCurrent = (extendedRuntimeSession === self.session)
+            guard wasInvalidating || isCurrent else { return }
+
+            let wasStarted = self.sessionStarted && isCurrent
+            if isCurrent {
+                self.clearSession()
+            }
             self.lastSessionEnd = self.reasonText(reason, error: error)
             // システムのアラーム画面で「停止」が押された → 止めた扱いにして iPhone にも伝える
             if wasStarted && reason == WKExtendedRuntimeSessionInvalidationReason.none {
                 self.acknowledgeRinging(sendToPhone: true)
             }
+            // ★ 前セッション破棄完了後、残っている次の予定（本タイマーなど）を確実に再スケジュール！
             self.refresh()
         }
     }

@@ -42,6 +42,23 @@ struct SeatTimerItem: Identifiable, Equatable {
     var isMainTimer: Bool = false
     var genre: String? = nil
     
+    // ★ 準備中カウントダウン（iPhone設定連動）
+    var isPreCountingDown: Bool = false
+    var preCountdownSeconds: Int = 0
+    var prepEndTime: Date? = nil
+    var isCountdownConfigEnabled: Bool = false
+    var countdownConfigSeconds: Int = 5
+    
+    // 準備中カウントダウンの残り秒数
+    var prepRemainingSeconds: Int {
+        guard isPreCountingDown else { return 0 }
+        if let end = prepEndTime {
+            let diff = end.timeIntervalSince(Date())
+            return max(0, Int(ceil(diff)))
+        }
+        return max(0, preCountdownSeconds)
+    }
+    
     // 現在の残り秒数（動的計算）
     // ★ iPhone(HomeScreen)の Math.ceil((targetEndTime - now)/1000) と一致させて1秒の表示ズレを完全解消
     var remainingSeconds: Int {
@@ -189,6 +206,15 @@ extension SeatTimerItem {
         self.isMainTimer = (dictionary["isMainTimer"] as? NSNumber)?.boolValue ?? (dictionary["isMainTimer"] as? Bool) ?? (id == "main-timer")
         self.genre = dictionary["genre"] as? String
         self.seatLabel = dictionary["seatLabel"] as? String
+        self.isPreCountingDown = (dictionary["isPreCountingDown"] as? NSNumber)?.boolValue ?? (dictionary["isPreCountingDown"] as? Bool) ?? false
+        self.preCountdownSeconds = (dictionary["preCountdownSeconds"] as? NSNumber)?.intValue ?? (dictionary["preCountdownSeconds"] as? Int) ?? 0
+        self.isCountdownConfigEnabled = (dictionary["isCountdownConfigEnabled"] as? NSNumber)?.boolValue ?? (dictionary["isCountdownConfigEnabled"] as? Bool) ?? false
+        self.countdownConfigSeconds = (dictionary["countdownConfigSeconds"] as? NSNumber)?.intValue ?? (dictionary["countdownConfigSeconds"] as? Int) ?? 5
+        if let prepEndMs = (dictionary["prepEndTimestamp"] as? NSNumber)?.doubleValue ?? (dictionary["prepEndTimestamp"] as? Double), prepEndMs > 0 {
+            self.prepEndTime = Date(timeIntervalSince1970: prepEndMs / 1000.0)
+        } else {
+            self.prepEndTime = nil
+        }
         
         // ★ 00:00席またはアコーディオン収納席はヘルプ・助手を完全クリア（固定残り防止）
         if !self.isRunning && (self.pausedRemainingSeconds <= 0 || self.isCollapsed) {
@@ -430,10 +456,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
         }
         
-        // メインタイマー同期（直近Watchローカル操作中は古いデータによる上書きをブロック）
+        // メインタイマー同期（直近Watchローカル操作中も、iPhoneからの準備中カウントダウンや最新データは確実に反映）
         if let rawMain = data["mainTimer"] as? [String: Any], let parsedMain = SeatTimerItem(dictionary: rawMain) {
             let isRecentlyModifiedOnWatch = Date().timeIntervalSince(self.lastMainTimerLocalActionTime) < self.mainTimerLocalHoldSeconds
-            if !isRecentlyModifiedOnWatch {
+            let payloadTs = (data["timestamp"] as? NSNumber)?.doubleValue ?? 0
+            let localActionTs = self.lastMainTimerLocalActionTime.timeIntervalSince1970 * 1000.0
+            let isNewerThanLocal = payloadTs > localActionTs
+            if !isRecentlyModifiedOnWatch || parsedMain.isPreCountingDown || isNewerThanLocal {
                 self.mainTimer = parsedMain
             }
         }
@@ -499,7 +528,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             fullExtra["actionId"] = "\(action)_\(Int(Date().timeIntervalSince1970 * 1000))"
         }
         if fullExtra["playSoundOnPhone"] == nil {
-            fullExtra["playSoundOnPhone"] = UserDefaults.standard.bool(forKey: "assisttimer.mainTimerPhoneSound")
+            let soundVal = UserDefaults.standard.object(forKey: "assisttimer.mainTimerPhoneSound") as? Bool ?? true
+            fullExtra["playSoundOnPhone"] = soundVal
         }
         sendActionToPhone(action: action, seatId: "main-timer", extra: fullExtra)
     }
@@ -855,7 +885,8 @@ struct ContentView: View {
                     },
                     onToggleMainTimer: {
                         playHaptic(.click)
-                        guard var main = sessionManager.mainTimer else { return }
+                        let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: now.addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
+                        var main = sessionManager.mainTimer ?? defaultMain
                         let willPause = main.isRunning
                         if willPause {
                             main.isRunning = false
@@ -870,7 +901,8 @@ struct ContentView: View {
                     },
                     onResetMainTimer: {
                         playHaptic(.click)
-                        guard var main = sessionManager.mainTimer else { return }
+                        let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: now.addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
+                        var main = sessionManager.mainTimer ?? defaultMain
                         main.isRunning = false
                         main.pausedRemainingSeconds = main.totalSeconds
                         sessionManager.mainTimer = main
@@ -878,7 +910,8 @@ struct ContentView: View {
                     },
                     onSetMainTimerTime: { totalSec in
                         playHaptic(.click)
-                        guard var main = sessionManager.mainTimer else { return }
+                        let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: Date().addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
+                        var main = sessionManager.mainTimer ?? defaultMain
                         main.totalSeconds = totalSec
                         main.pausedRemainingSeconds = totalSec
                         if main.isRunning {
@@ -889,7 +922,8 @@ struct ContentView: View {
                     },
                     onAdjustMainTimer: { deltaSec in
                         playHaptic(.click)
-                        guard var main = sessionManager.mainTimer else { return }
+                        let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: Date().addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
+                        var main = sessionManager.mainTimer ?? defaultMain
                         if main.isRunning {
                             main.targetEndTime = main.targetEndTime.addingTimeInterval(Double(deltaSec))
                         } else {
@@ -900,16 +934,26 @@ struct ContentView: View {
                     },
                     onStartMainTimer: {
                         playHaptic(.click)
-                        guard var main = sessionManager.mainTimer else { return }
-                        main.isRunning = true
-                        let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
-                        main.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
+                        let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: Date().addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
+                        var main = sessionManager.mainTimer ?? defaultMain
+                        let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds)
+                        if isInitialStart && main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
+                            main.isPreCountingDown = true
+                            main.preCountdownSeconds = main.countdownConfigSeconds
+                            main.prepEndTime = Date().addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
+                            main.isRunning = false
+                        } else {
+                            main.isRunning = true
+                            let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
+                            main.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
+                        }
                         sessionManager.mainTimer = main
                         sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START")
                     },
                     onPauseMainTimer: {
                         playHaptic(.click)
-                        guard var main = sessionManager.mainTimer else { return }
+                        let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: Date().addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
+                        var main = sessionManager.mainTimer ?? defaultMain
                         main.isRunning = false
                         main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(Date())))
                         sessionManager.mainTimer = main
@@ -919,60 +963,68 @@ struct ContentView: View {
             }
             // ★ メインタイマー専用操作・時間設定シート（メイン画面のカードタップ用）
             .sheet(isPresented: $showingMainTimerSheet) {
-                if let main = sessionManager.mainTimer {
-                    MainTimerActionSheet(
-                        item: main,
-                        onStart: {
-                            playHaptic(.click)
-                            guard var main = sessionManager.mainTimer else { return }
+                let defaultMain = SeatTimerItem(id: "main-timer", seatNumber: 0, seatLabel: "メインタイマー", isMainTimer: true, creatorName: currentUserName ?? "スタイリスト", totalSeconds: 600, targetEndTime: Date().addingTimeInterval(600), isRunning: false, pausedRemainingSeconds: 600)
+                let currentMain = sessionManager.mainTimer ?? defaultMain
+                MainTimerActionSheet(
+                    item: currentMain,
+                    onStart: {
+                        playHaptic(.click)
+                        var main = sessionManager.mainTimer ?? currentMain
+                        let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds)
+                        if isInitialStart && main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
+                            main.isPreCountingDown = true
+                            main.preCountdownSeconds = main.countdownConfigSeconds
+                            main.prepEndTime = Date().addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
+                            main.isRunning = false
+                        } else {
                             main.isRunning = true
                             let rem = main.pausedRemainingSeconds > 0 ? main.pausedRemainingSeconds : main.totalSeconds
                             main.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
-                            sessionManager.mainTimer = main
-                            sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START")
-                        },
-                        onPause: {
-                            playHaptic(.click)
-                            guard var main = sessionManager.mainTimer else { return }
-                            main.isRunning = false
-                            main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(Date())))
-                            sessionManager.mainTimer = main
-                            sessionManager.sendMainTimerAction(action: "MAIN_TIMER_PAUSE")
-                        },
-                        onReset: {
-                            playHaptic(.click)
-                            guard var main = sessionManager.mainTimer else { return }
-                            main.isRunning = false
-                            main.pausedRemainingSeconds = main.totalSeconds
-                            sessionManager.mainTimer = main
-                            WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
-                            WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                            sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
-                        },
-                        onSetTime: { totalSec in
-                            playHaptic(.click)
-                            guard var main = sessionManager.mainTimer else { return }
-                            main.totalSeconds = totalSec
-                            main.pausedRemainingSeconds = totalSec
-                            if main.isRunning {
-                                main.targetEndTime = Date().addingTimeInterval(TimeInterval(totalSec))
-                            }
-                            sessionManager.mainTimer = main
-                            sessionManager.sendMainTimerSetTime(seconds: totalSec)
-                        },
-                        onAdjust: { deltaSec in
-                            playHaptic(.click)
-                            guard var main = sessionManager.mainTimer else { return }
-                            if main.isRunning {
-                                main.targetEndTime = main.targetEndTime.addingTimeInterval(Double(deltaSec))
-                            } else {
-                                main.pausedRemainingSeconds = max(0, main.pausedRemainingSeconds + deltaSec)
-                            }
-                            sessionManager.mainTimer = main
-                            sessionManager.sendMainTimerAdjust(seconds: deltaSec)
                         }
-                    )
-                }
+                        sessionManager.mainTimer = main
+                        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START")
+                    },
+                    onPause: {
+                        playHaptic(.click)
+                        var main = sessionManager.mainTimer ?? currentMain
+                        main.isRunning = false
+                        main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(Date())))
+                        sessionManager.mainTimer = main
+                        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_PAUSE")
+                    },
+                    onReset: {
+                        playHaptic(.click)
+                        var main = sessionManager.mainTimer ?? currentMain
+                        main.isRunning = false
+                        main.pausedRemainingSeconds = main.totalSeconds
+                        sessionManager.mainTimer = main
+                        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+                        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+                        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
+                    },
+                    onSetTime: { totalSec in
+                        playHaptic(.click)
+                        var main = sessionManager.mainTimer ?? currentMain
+                        main.totalSeconds = totalSec
+                        main.pausedRemainingSeconds = totalSec
+                        if main.isRunning {
+                            main.targetEndTime = Date().addingTimeInterval(TimeInterval(totalSec))
+                        }
+                        sessionManager.mainTimer = main
+                        sessionManager.sendMainTimerSetTime(seconds: totalSec)
+                    },
+                    onAdjust: { deltaSec in
+                        playHaptic(.click)
+                        var main = sessionManager.mainTimer ?? currentMain
+                        if main.isRunning {
+                            main.targetEndTime = main.targetEndTime.addingTimeInterval(Double(deltaSec))
+                        } else {
+                            main.pausedRemainingSeconds = max(0, main.pausedRemainingSeconds + deltaSec)
+                        }
+                        sessionManager.mainTimer = main
+                        sessionManager.sendMainTimerAdjust(seconds: deltaSec)
+                    }
+                )
             }
             // 新規席追加シート
             .sheet(isPresented: $showingAddSeatSheet, onDismiss: {
@@ -2905,7 +2957,9 @@ struct MainTimerActionSheet: View {
         sessionManager.mainTimer ?? item
     }
     
-    @State private var phoneSoundEnabled: Bool = UserDefaults.standard.bool(forKey: "assisttimer.mainTimerPhoneSound")
+    @State private var phoneSoundEnabled: Bool = UserDefaults.standard.object(forKey: "assisttimer.mainTimerPhoneSound") as? Bool ?? true
+    @State private var isCustomPickerOpen: Bool = false
+    @State private var pickerSeconds: Int = 600
     @State private var now = Date()
     let ticker = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
     
@@ -2977,6 +3031,17 @@ struct MainTimerActionSheet: View {
                             .font(.system(size: 32, weight: .black, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(Color(hex: "#FF453A"))
+                    } else if currentItem.isPreCountingDown {
+                        Text("準備中")
+                            .font(.system(size: 11, weight: .heavy))
+                            .foregroundColor(Color(hex: "#FFD60A"))
+                        Text(formatSeconds(currentItem.prepRemainingSeconds))
+                            .font(.system(size: 32, weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(Color(hex: "#FFD60A"))
+                        Text("カウントダウン中...")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundColor(Color(hex: "#FFD60A").opacity(0.85))
                     } else if isRunning {
                         Text(formatSeconds(currentSeconds))
                             .font(.system(size: 32, weight: .black, design: .rounded))
@@ -2994,7 +3059,7 @@ struct MainTimerActionSheet: View {
                 }
                 .padding(.vertical, 2)
                 
-                // ④ メイン操作ボタン（スタート / 一時停止 / リセット）
+                // ④ メイン操作ボタン（スタート / 一時停止 / リセット / 準備中中止）
                 if isOvertime {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
@@ -3004,6 +3069,24 @@ struct MainTimerActionSheet: View {
                             Image(systemName: "stop.circle.fill")
                                 .font(.system(size: 14, weight: .bold))
                             Text("計測終了 / リセット")
+                                .font(.system(size: 13, weight: .bold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(Color(hex: "#FF453A"))
+                        .foregroundColor(.white)
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                } else if currentItem.isPreCountingDown {
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        onPause()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 13, weight: .bold))
+                            Text("カウントダウン中止")
                                 .font(.system(size: 13, weight: .bold))
                         }
                         .frame(maxWidth: .infinity)
@@ -3118,6 +3201,73 @@ struct MainTimerActionSheet: View {
                             }
                             .buttonStyle(.plain)
                         }
+                    }
+                    
+                    // ★ 任意タイム設定（クラウン/手動入力）アコーディオン
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        pickerSeconds = currentItem.totalSeconds > 0 ? currentItem.totalSeconds : 600
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            isCustomPickerOpen.toggle()
+                        }
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: isCustomPickerOpen ? "chevron.up.circle.fill" : "slider.horizontal.3")
+                                .font(.system(size: 10, weight: .bold))
+                            Text(isCustomPickerOpen ? "任意入力を閉じる" : "任意の時間を設定（クラウン）")
+                                .font(.system(size: 9.5, weight: .bold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(isCustomPickerOpen ? Color(hex: "#FFD60A").opacity(0.2) : Color.white.opacity(0.08))
+                        .foregroundColor(isCustomPickerOpen ? Color(hex: "#FFD60A") : .white)
+                        .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(isCustomPickerOpen ? Color(hex: "#FFD60A").opacity(0.6) : Color.white.opacity(0.12), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 2)
+                    
+                    if isCustomPickerOpen {
+                        VStack(spacing: 6) {
+                            Text("デジタルクラウンで分・秒を調整")
+                                .font(.system(size: 8.5))
+                                .foregroundColor(Color(hex: "#8E8E93"))
+                            
+                            CrownMinSecPicker(
+                                totalSeconds: $pickerSeconds,
+                                maxMinutes: 120,
+                                fontSize: 26
+                            )
+                            .padding(.horizontal, 2)
+                            
+                            Button(action: {
+                                WKInterfaceDevice.current().play(.click)
+                                let chosen = max(10, pickerSeconds)
+                                onSetTime(chosen)
+                                withAnimation {
+                                    isCustomPickerOpen = false
+                                }
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 12, weight: .bold))
+                                    Text("\(formatSeconds(pickerSeconds)) に設定する")
+                                        .font(.system(size: 11, weight: .heavy))
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 7)
+                                .background(Color(hex: "#30D158"))
+                                .foregroundColor(.black)
+                                .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(6)
+                        .background(Color.white.opacity(0.06))
+                        .cornerRadius(8)
                     }
                 }
                 
@@ -4817,6 +4967,10 @@ struct ThumbnailMainTimerCard: View {
             // 超過時: 赤 ＆ パルス発光
             let c = Color(hex: "#FF453A")
             return (c, c.opacity(isPulsing ? 0.38 : 0.18), c)
+        } else if item.isPreCountingDown {
+            // 準備カウントダウン中: 黄色
+            let c = Color(hex: "#FFD60A")
+            return (c, c.opacity(0.20), c)
         } else if isRunning {
             if rem <= 60 {
                 // 残り1分以内: 赤
@@ -4879,6 +5033,13 @@ struct ThumbnailMainTimerCard: View {
                             Text("超過")
                                 .font(.system(size: 9.5, weight: .heavy))
                                 .foregroundColor(Color(hex: "#FF453A"))
+                        } else if item.isPreCountingDown {
+                            Circle()
+                                .fill(Color(hex: "#FFD60A"))
+                                .frame(width: 5, height: 5)
+                            Text("準備中")
+                                .font(.system(size: 9.5, weight: .bold))
+                                .foregroundColor(Color(hex: "#FFD60A"))
                         } else if isRunning {
                             Circle()
                                 .fill(stateColor.text)
@@ -4899,7 +5060,14 @@ struct ThumbnailMainTimerCard: View {
                 
                 // 下段: 大きなタイマー数字 ＆ 全体設定分数（改行せず1行で綺麗に収まる）
                 HStack(alignment: .firstTextBaseline) {
-                    if isRunning {
+                    if item.isPreCountingDown {
+                        Text(formatSeconds(item.prepRemainingSeconds))
+                            .font(.system(size: 20, weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(Color(hex: "#FFD60A"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                    } else if isRunning {
                         Text(formatSeconds(rem))
                             .font(.system(size: 20, weight: .black, design: .rounded))
                             .monospacedDigit()

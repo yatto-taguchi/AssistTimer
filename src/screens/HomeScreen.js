@@ -974,14 +974,32 @@ export default function HomeScreen({ navigation }) {
     if (!isFromWatch) {
       setWatchMutedState(false);
     }
-    // ★ Watchからの開始時は、手元ですでに即時スタートしているため、準備カウントをスキップして直ちに本番タイマーを開始する
-    if (!isFromWatch && !isRunning && !isPreCountingDown && remainingTime === targetTime && isCountdownEnabled && countdownSeconds > 0) {
+    // ★ カウントダウン有効時はWatchからの開始でも準備カウントダウンを正常に発動
+    const isInitialStart = (remainingTimeRef.current === targetTime) || (remainingTime === targetTime);
+    if (!isRunning && !isPreCountingDown && isInitialStart && isCountdownEnabled && countdownSeconds > 0) {
       // 初期状態からのスタートでカウントダウン有効の場合、準備カウントダウンを開始
       prepEndTimeRef.current = Date.now() + countdownSeconds * 1000;
       triggeredPrepVoicesRef.current.clear();
       preCountdownTimeRef.current = countdownSeconds;
       setPreCountdownTime(countdownSeconds);
       setIsPreCountingDown(true);
+
+      if (Platform.OS === 'ios') {
+        const prepState = {
+          remainingTime,
+          targetTime,
+          targetEndTimestamp: 0,
+          isRunning: false,
+          isPaused: false,
+          isCountUp: false,
+          genre: selectedCategory || '',
+          isPreCountingDown: true,
+          preCountdownSeconds: countdownSeconds,
+          prepEndTimestamp: prepEndTimeRef.current,
+        };
+        updateCachedMainTimerState(prepState);
+        syncMainTimerToWatch(prepState, { immediate: true });
+      }
 
       // カウント開始時のアナウンス
       if (countdownSeconds === 5 && isPrepVoiceCountdownEnabled) {
@@ -1012,6 +1030,22 @@ export default function HomeScreen({ navigation }) {
         // カウントダウン中ならキャンセル
         setIsPreCountingDown(false);
         prepEndTimeRef.current = null;
+        if (Platform.OS === 'ios') {
+          const cancelState = {
+            remainingTime,
+            targetTime,
+            targetEndTimestamp: 0,
+            isRunning: false,
+            isPaused: false,
+            isCountUp: false,
+            genre: selectedCategory || '',
+            isPreCountingDown: false,
+            preCountdownSeconds: 0,
+            prepEndTimestamp: 0,
+          };
+          updateCachedMainTimerState(cancelState);
+          syncMainTimerToWatch(cancelState, { immediate: true });
+        }
         cancelVibration();
         cheerOverlayRef.current?.dismiss();
         if (voiceSound) {
@@ -1023,7 +1057,7 @@ export default function HomeScreen({ navigation }) {
           // スタート/再開
           if (!isCountUp) {
             targetEndTimeRef.current = Date.now() + remainingTimeRef.current * 1000;
-            if (remainingTimeRef.current === targetTime) {
+            if (remainingTimeRef.current === targetTime || remainingTime === targetTime) {
               triggeredVoicesRef.current.clear();
               lastCheerTriggerTimeRef.current = Date.now();
               isFirstCheerTriggeredRef.current = false;
@@ -1094,6 +1128,9 @@ export default function HomeScreen({ navigation }) {
   const prevIsRunningForWatchRef = useRef(isRunning);
   const prevTargetTimeForWatchRef = useRef(targetTime);
   const prevRemainingTimeForWatchRef = useRef(remainingTime);
+  const prevIsPreCountdownForWatchRef = useRef(isPreCountingDown);
+  const prevIsCountdownConfigEnabledRef = useRef(isCountdownEnabled);
+  const prevCountdownConfigSecondsRef = useRef(countdownSeconds);
 
   useEffect(() => {
     let endMs = null;
@@ -1113,6 +1150,11 @@ export default function HomeScreen({ navigation }) {
       isPaused: !isRunning && remainingTime !== targetTime && !isCountUp,
       isCountUp,
       genre: selectedCategory || '',
+      isPreCountingDown: !!isPreCountingDown,
+      preCountdownSeconds: preCountdownTime || 0,
+      isCountdownConfigEnabled: !!isCountdownEnabled,
+      countdownConfigSeconds: countdownSeconds || 5,
+      prepEndTimestamp: isPreCountingDown ? (prepEndTimeRef.current || (Date.now() + (preCountdownTime || 0) * 1000)) : null,
     };
 
     if (setMainTimerState) {
@@ -1120,22 +1162,27 @@ export default function HomeScreen({ navigation }) {
     }
     updateCachedMainTimerState(newState);
 
-    // ★ Watchへの即時同期: スタート/ストップの切り替わり、設定時間変更、または停止中の秒数変化（リセット等）時に送信
+    // ★ Watchへの即時同期: スタート/ストップの切り替わり、設定時間変更、準備中カウントダウンの開始/終了、設定の変更、または停止中の秒数変化時に送信
     const isStateToggled = prevIsRunningForWatchRef.current !== isRunning;
     const isTargetChanged = prevTargetTimeForWatchRef.current !== targetTime;
-    const isRemainingChangedWhileStopped = !isRunning && prevRemainingTimeForWatchRef.current !== remainingTime;
+    const isPreCountdownToggled = prevIsPreCountdownForWatchRef.current !== isPreCountingDown;
+    const isCountdownConfigToggled = prevIsCountdownConfigEnabledRef.current !== isCountdownEnabled || prevCountdownConfigSecondsRef.current !== countdownSeconds;
+    const isRemainingChangedWhileStopped = !isRunning && !isPreCountingDown && prevRemainingTimeForWatchRef.current !== remainingTime;
 
-    if (isStateToggled || isTargetChanged || isRemainingChangedWhileStopped) {
+    if (isStateToggled || isTargetChanged || isPreCountdownToggled || isCountdownConfigToggled || isRemainingChangedWhileStopped) {
       prevIsRunningForWatchRef.current = isRunning;
       prevTargetTimeForWatchRef.current = targetTime;
       prevRemainingTimeForWatchRef.current = remainingTime;
+      prevIsPreCountdownForWatchRef.current = isPreCountingDown;
+      prevIsCountdownConfigEnabledRef.current = isCountdownEnabled;
+      prevCountdownConfigSecondsRef.current = countdownSeconds;
       if (Platform.OS === 'ios') {
         syncMainTimerToWatch(newState, { immediate: true });
       }
     } else {
       prevRemainingTimeForWatchRef.current = remainingTime;
     }
-  }, [remainingTime, targetTime, isRunning, isCountUp, selectedCategory]);
+  }, [remainingTime, targetTime, isRunning, isCountUp, selectedCategory, isPreCountingDown, preCountdownTime, isCountdownEnabled, countdownSeconds]);
 
   // ★ Watchからのメインタイマー操作の直接受信（サロン画面を開いていなくても即座に操作を受け付ける）
   const toggleTimerRef = useRef(toggleTimer);
@@ -1150,66 +1197,81 @@ export default function HomeScreen({ navigation }) {
   const lastMainActionTimestampRef = useRef(0);
 
   const handleMainTimerActionDispatch = useCallback((action, payload = {}, actionId = null) => {
-    if (actionId) {
-      if (processedMainActionIdsRef.current.has(actionId)) {
+    const rawAction = String(action || '');
+    const cleanAction = rawAction.replace(/^MAIN_TIMER_/, '').toLowerCase(); // 'start', 'pause', 'toggle', 'reset', 'set_time', 'adjust'
+    const dedupeId = actionId || `${cleanAction}_${payload?.timestamp || Date.now()}`;
+
+    if (dedupeId) {
+      if (processedMainActionIdsRef.current.has(dedupeId)) {
         return; // すでに処理済みの同一操作
       }
-      processedMainActionIdsRef.current.add(actionId);
+      processedMainActionIdsRef.current.add(dedupeId);
       if (processedMainActionIdsRef.current.size > 50) {
         const first = processedMainActionIdsRef.current.values().next().value;
         processedMainActionIdsRef.current.delete(first);
       }
     }
 
-    if (action === 'MAIN_TIMER_START' || action === 'start') {
-      const playPhoneSound = payload?.playSoundOnPhone === true;
+    if (cleanAction === 'start') {
+      const playPhoneSound = payload?.playSoundOnPhone !== false;
       setWatchMutedState(!playPhoneSound);
       console.log('[HomeScreen] MAIN_TIMER_START received. playSoundOnPhone:', playPhoneSound, 'isMuted:', !playPhoneSound);
       if (!isRunningRef.current && !isPreCountingDownRef.current && toggleTimerRef.current) {
-        toggleTimerRef.current(true);
+        toggleTimerRef.current(false);
       }
-    } else if (action === 'MAIN_TIMER_PAUSE' || action === 'pause') {
+    } else if (cleanAction === 'pause') {
       if ((isRunningRef.current || isPreCountingDownRef.current) && toggleTimerRef.current) {
-        toggleTimerRef.current(true);
+        toggleTimerRef.current(false);
       }
-    } else if (action === 'MAIN_TIMER_TOGGLE' || action === 'toggle') {
+    } else if (cleanAction === 'toggle') {
       if (toggleTimerRef.current) {
-        toggleTimerRef.current(true);
+        toggleTimerRef.current(false);
       }
-    } else if (action === 'MAIN_TIMER_RESET' || action === 'reset') {
+    } else if (cleanAction === 'reset') {
       setWatchMutedState(false);
       if (resetTimerRef.current) {
         resetTimerRef.current();
       }
-    } else if (action === 'MAIN_TIMER_SET_TIME' || action === 'set_time') {
-      const sec = Number(payload?.totalSeconds);
+    } else if (cleanAction === 'set_time') {
+      const sec = Number(payload?.totalSeconds || payload?.extra?.totalSeconds);
       if (sec > 0 && applyTimeInSecondsRef.current) {
         console.log('[HomeScreen] MAIN_TIMER_SET_TIME applied:', sec);
         applyTimeInSecondsRef.current(sec);
       }
-    } else if (action === 'MAIN_TIMER_ADJUST' || action === 'adjust') {
-      const delta = Number(payload?.secondsToAdd);
+    } else if (cleanAction === 'adjust') {
+      const delta = Number(payload?.secondsToAdd || payload?.extra?.secondsToAdd);
       if (delta) {
         console.log('[HomeScreen] MAIN_TIMER_ADJUST applied:', delta);
+        let nextRem = 0;
         if (isRunningRef.current) {
           if (targetEndTimeRef.current) {
             targetEndTimeRef.current += delta * 1000;
-            const nextRem = Math.max(0, Math.ceil((targetEndTimeRef.current - Date.now()) / 1000));
+            nextRem = Math.max(0, Math.ceil((targetEndTimeRef.current - Date.now()) / 1000));
             remainingTimeRef.current = nextRem;
             setRemainingTime(nextRem);
           }
         } else {
-          const nextRem = Math.max(10, remainingTimeRef.current + delta);
+          nextRem = Math.max(10, remainingTimeRef.current + delta);
           remainingTimeRef.current = nextRem;
           setRemainingTime(nextRem);
           setTargetTime(nextRem);
         }
         if (Platform.OS === 'ios') {
-          syncMainTimerToWatch(null, { immediate: true });
+          const updated = {
+            remainingTime: nextRem,
+            targetTime: isRunningRef.current ? targetTime : nextRem,
+            targetEndTimestamp: isRunningRef.current ? targetEndTimeRef.current : 0,
+            isRunning: isRunningRef.current,
+            isPaused: !isRunningRef.current,
+            isCountUp: false,
+            genre: selectedCategory || '',
+          };
+          updateCachedMainTimerState(updated);
+          syncMainTimerToWatch(updated, { immediate: true });
         }
       }
     }
-  }, [setWatchMutedState]);
+  }, [setWatchMutedState, targetTime, selectedCategory]);
 
   useEffect(() => {
     if (Platform.OS !== 'ios') return undefined;
@@ -1468,7 +1530,17 @@ export default function HomeScreen({ navigation }) {
     setIsEditingFavorites(false);
     setTimeModalVisible(false);
     if (Platform.OS === 'ios') {
-      syncMainTimerToWatch(null, { immediate: true });
+      const updated = {
+        remainingTime: secs,
+        targetTime: secs,
+        targetEndTimestamp: isRunningRef.current ? targetEndTimeRef.current : 0,
+        isRunning: isRunningRef.current,
+        isPaused: !isRunningRef.current,
+        isCountUp: false,
+        genre: selectedCategory || '',
+      };
+      updateCachedMainTimerState(updated);
+      syncMainTimerToWatch(updated, { immediate: true });
     }
   };
 
@@ -1482,19 +1554,7 @@ export default function HomeScreen({ navigation }) {
     const totalSecs = min * 60 + sec;
     
     if (totalSecs > 0) {
-      setTargetTime(totalSecs);
-      remainingTimeRef.current = totalSecs;
-      setRemainingTime(totalSecs);
-      setIsCountUp(false);
-      targetEndTimeRef.current = null;
-      overStartTimeRef.current = null;
-      triggeredVoicesRef.current.clear();
-      triggeredOverVoicesRef.current.clear();
-      isFirstCheerTriggeredRef.current = false;
-      lastCheerTriggerTimeRef.current = 0;
-      nextCheerIntervalMsRef.current = 0;
-      setTimeModalKeypadActive(null);
-      setTimeModalVisible(false);
+      applyTimeInSeconds(totalSecs);
     } else {
       Alert.alert("エラー", "有効な時間を入力してください。");
     }

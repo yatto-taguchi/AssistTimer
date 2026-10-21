@@ -17,10 +17,33 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Audio } from 'expo-av';
 import WatchConnectivity from 'watch-connectivity';
 import { AppContext } from '../utils/AppContext';
 import WatchDiagnosticsBar from '../components/WatchDiagnosticsBar';
 import { setAlarms, stopAlarm, subscribeUserStoppedAlarms } from '../utils/alarmScheduler';
+
+const playTimeUpSound = async () => {
+  try {
+    await Audio.setAudioModeAsync({
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: true,
+      shouldDuckAndroid: true,
+      playThroughEarpieceAndroid: false,
+    });
+    const { sound: newSound } = await Audio.Sound.createAsync(
+      require('../../assets/alarm_digital.wav')
+    );
+    newSound.setOnPlaybackStatusUpdate((status) => {
+      if (status.didJustFinish) {
+        newSound.unloadAsync().catch(() => {});
+      }
+    });
+    await newSound.playAsync();
+  } catch (e) {
+    console.log('[SalonWorkScreen] playTimeUpSound error:', e);
+  }
+};
 
 // サロン施術ステータス定義（呼び出し、コーミング、チェック、シャンプー、その他）
 export const SALON_ACTION_STATUS_OPTIONS = [
@@ -162,6 +185,11 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       pausedRemainingSeconds: pausedRem,
       isCountUp: isCountUp,
       genre: state.genre || '',
+      isPreCountingDown: !!state.isPreCountingDown,
+      preCountdownSeconds: state.preCountdownSeconds || 0,
+      isCountdownConfigEnabled: !!state.isCountdownConfigEnabled,
+      countdownConfigSeconds: state.countdownConfigSeconds || 5,
+      prepEndTimestamp: state.prepEndTimestamp || 0,
     };
 
     // ★ seats キーは絶対に含めない。Watch 側の timers 配列に1ミリも触れさせない！
@@ -545,6 +573,8 @@ export default function SalonWorkScreen() {
   const oneMinuteHelpAlertRef = useRef({});
   // チェックタイマー用アラート重複発火ガード
   const checkAlertedRef = useRef({});
+  // メイン放置タイマー用アラート重複発火ガード
+  const mainTimeupAlertedRef = useRef({});
   // ヘルプ担当指定モーダル用ScrollViewの参照
   const helpModalScrollViewRef = useRef(null);
 
@@ -674,6 +704,16 @@ export default function SalonWorkScreen() {
             // 初回タイムアップ時の強い振動
             if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
               Vibration.vibrate([0, 500, 200, 500, 200, 500]);
+            }
+            if (mainTimeupAlertedRef.current[s.id] !== s.targetEndTimestamp) {
+              mainTimeupAlertedRef.current[s.id] = s.targetEndTimestamp;
+              playTimeUpSound();
+              const mins = s.initialMinutes || Math.round((s.targetSeconds || 600) / 60);
+              Alert.alert(
+                '⏰【放置タイム終了】',
+                `「${s.seatLabel}」の放置タイム（${mins}分）が終了しました！\n確認または次の工程に進んでください。`,
+                [{ text: '確認' }]
+              );
             }
           }
 
@@ -834,101 +874,7 @@ export default function SalonWorkScreen() {
       return;
     }
 
-    // ★ Watchからのメインタイマー操作の即時処理＆同期
-    if (action && action.startsWith('MAIN_TIMER_')) {
-      const actionId = extra?.actionId || `${action}_${Date.now()}`;
-      if (action === 'MAIN_TIMER_START') {
-        const currentTarget = _cachedMainTimerState?.targetTime || 600;
-        const currentRem = (_cachedMainTimerState?.remainingTime > 0) ? _cachedMainTimerState.remainingTime : currentTarget;
-        const targetEnd = Date.now() + currentRem * 1000;
-        const updatedMain = {
-          ..._cachedMainTimerState,
-          isRunning: true,
-          isPaused: false,
-          remainingTime: currentRem,
-          targetEndTimestamp: targetEnd,
-        };
-        updateCachedMainTimerState(updatedMain);
-        if (requestMainTimerAction) {
-          requestMainTimerAction('start', { playSoundOnPhone: extra?.playSoundOnPhone === true }, actionId);
-        }
-        syncMainTimerToWatch(updatedMain, { immediate: true });
-        return;
-      }
-      if (action === 'MAIN_TIMER_PAUSE') {
-        const currentEnd = _cachedMainTimerState?.targetEndTimestamp || 0;
-        const nextRem = currentEnd > Date.now() ? Math.ceil((currentEnd - Date.now()) / 1000) : (_cachedMainTimerState?.remainingTime || 0);
-        const updatedMain = {
-          ..._cachedMainTimerState,
-          isRunning: false,
-          isPaused: true,
-          remainingTime: Math.max(0, nextRem),
-          targetEndTimestamp: 0,
-        };
-        updateCachedMainTimerState(updatedMain);
-        if (requestMainTimerAction) {
-          requestMainTimerAction('pause', null, actionId);
-        }
-        syncMainTimerToWatch(updatedMain, { immediate: true });
-        return;
-      }
-      if (action === 'MAIN_TIMER_RESET') {
-        const targetSec = _cachedMainTimerState?.targetTime || 600;
-        const updatedMain = {
-          ..._cachedMainTimerState,
-          isRunning: false,
-          isPaused: false,
-          remainingTime: targetSec,
-          targetEndTimestamp: 0,
-        };
-        updateCachedMainTimerState(updatedMain);
-        if (requestMainTimerAction) {
-          requestMainTimerAction('reset', null, actionId);
-        }
-        syncMainTimerToWatch(updatedMain, { immediate: true });
-        return;
-      }
-      if (action === 'MAIN_TIMER_SET_TIME') {
-        const totalSec = Number(extra?.totalSeconds) || 600;
-        const updatedMain = {
-          ..._cachedMainTimerState,
-          targetTime: totalSec,
-          remainingTime: totalSec,
-          isRunning: false,
-          isPaused: false,
-          targetEndTimestamp: 0,
-        };
-        updateCachedMainTimerState(updatedMain);
-        if (requestMainTimerAction) {
-          requestMainTimerAction('set_time', { totalSeconds: totalSec }, actionId);
-        }
-        syncMainTimerToWatch(updatedMain, { immediate: true });
-        return;
-      }
-      if (action === 'MAIN_TIMER_ADJUST') {
-        const delta = Number(extra?.secondsToAdd) || 0;
-        if (delta) {
-          let updatedMain = { ..._cachedMainTimerState };
-          if (updatedMain.isRunning && updatedMain.targetEndTimestamp) {
-            const nextEnd = updatedMain.targetEndTimestamp + delta * 1000;
-            const nextRem = Math.max(0, Math.ceil((nextEnd - Date.now()) / 1000));
-            updatedMain.targetEndTimestamp = nextEnd;
-            updatedMain.remainingTime = nextRem;
-          } else {
-            const currentRem = updatedMain.remainingTime || updatedMain.targetTime || 600;
-            const nextRem = Math.max(10, currentRem + delta);
-            updatedMain.remainingTime = nextRem;
-            updatedMain.targetTime = nextRem;
-          }
-          updateCachedMainTimerState(updatedMain);
-          if (requestMainTimerAction) {
-            requestMainTimerAction('adjust', { secondsToAdd: delta }, actionId);
-          }
-          syncMainTimerToWatch(updatedMain, { immediate: true });
-        }
-        return;
-      }
-    }
+    // （※ メインタイマーのWatch操作はHomeScreenが一元受信・実行するため、二重トグル防止のためここでは処理しない）
 
     // ② Watch側での新規席追加
     if (action === 'ADD_SEAT') {
@@ -989,12 +935,13 @@ export default function SalonWorkScreen() {
     // 放置タイム終了のアラーム（kind: 'main'）なら席を停止、チェックアラーム（kind: 'check'）ならチェック完了にする
     if (action === 'STOP_ALARM') {
       if (seatId) {
-        if (extra?.kind === 'main') {
+        const stopKind = String(extra?.kind || message?.kind || '').toLowerCase();
+        if (stopKind === 'main') {
           stopAlarm('salon', `${seatId}-main`);
-        } else if (extra?.kind === 'check') {
+        } else if (stopKind === 'check') {
           stopAlarm('salon', `${seatId}-check`);
         } else {
-          stopAlarm('salon', `${seatId}-main`);
+          // kindが未指定の場合はメインタイマーを誤消火せず、チェックアラームのみ消火する
           stopAlarm('salon', `${seatId}-check`);
         }
       }
@@ -1174,7 +1121,8 @@ export default function SalonWorkScreen() {
           }
           case 'STOP_ALARM': {
             // ★ チェック時間のアラーム停止ならチェックを完了にする（全体タイマーは終了前でも反映）
-            if (extra?.kind === 'check') {
+            const stopKind = String(extra?.kind || message?.kind || '').toLowerCase();
+            if (stopKind === 'check') {
               if (s.checkStatus === 'completed') {
                 hasChanged = false;
                 return s;
@@ -2700,6 +2648,9 @@ export default function SalonWorkScreen() {
       if (checkAlertedRef.current) {
         checkAlertedRef.current[targetSeatId] = false;
       }
+      if (mainTimeupAlertedRef.current) {
+        mainTimeupAlertedRef.current[targetSeatId] = false;
+      }
     }
     setIsSetTimerModalVisible(false);
     setIsEditingExistingTimer(false);
@@ -3119,6 +3070,16 @@ export default function SalonWorkScreen() {
         sourceUser: currentUser,
       },
     });
+
+    if (mainTimeupAlertedRef.current) {
+      mainTimeupAlertedRef.current[seatId] = false;
+    }
+    if (checkAlertedRef.current) {
+      checkAlertedRef.current[seatId] = false;
+    }
+    if (oneMinuteHelpAlertRef.current) {
+      oneMinuteHelpAlertRef.current[seatId] = false;
+    }
 
     // 触覚振動
     if (Platform.OS !== 'web') {
