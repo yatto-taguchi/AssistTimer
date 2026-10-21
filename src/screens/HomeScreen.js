@@ -974,20 +974,27 @@ export default function HomeScreen({ navigation }) {
     if (!isFromWatch) {
       setWatchMutedState(false);
     }
+    const currentIsRunning = isRunningRef.current;
+    const currentIsPreCountdown = isPreCountingDownRef.current;
+    const currentIsCountUp = isCountUpRef.current;
+    const currentRemaining = remainingTimeRef.current;
+    const currentTarget = targetTimeRef.current || targetTime || 600;
+
     // ★ カウントダウン有効時はWatchからの開始でも準備カウントダウンを正常に発動
-    const isInitialStart = (remainingTimeRef.current === targetTime) || (remainingTime === targetTime);
-    if (!isRunning && !isPreCountingDown && isInitialStart && isCountdownEnabled && countdownSeconds > 0) {
+    const isInitialStart = (currentRemaining === currentTarget) || (!currentIsCountUp && currentRemaining >= currentTarget);
+    if (!currentIsRunning && !currentIsPreCountdown && isInitialStart && isCountdownEnabled && countdownSeconds > 0) {
       // 初期状態からのスタートでカウントダウン有効の場合、準備カウントダウンを開始
       prepEndTimeRef.current = Date.now() + countdownSeconds * 1000;
       triggeredPrepVoicesRef.current.clear();
       preCountdownTimeRef.current = countdownSeconds;
       setPreCountdownTime(countdownSeconds);
+      isPreCountingDownRef.current = true;
       setIsPreCountingDown(true);
 
       if (Platform.OS === 'ios') {
         const prepState = {
-          remainingTime,
-          targetTime,
+          remainingTime: currentRemaining,
+          targetTime: currentTarget,
           targetEndTimestamp: 0,
           isRunning: false,
           isPaused: false,
@@ -1026,14 +1033,15 @@ export default function HomeScreen({ navigation }) {
         playVoice('prep_start_generic');
       }
     } else {
-      if (isPreCountingDown) {
+      if (currentIsPreCountdown) {
         // カウントダウン中ならキャンセル
+        isPreCountingDownRef.current = false;
         setIsPreCountingDown(false);
         prepEndTimeRef.current = null;
         if (Platform.OS === 'ios') {
           const cancelState = {
-            remainingTime,
-            targetTime,
+            remainingTime: currentRemaining,
+            targetTime: currentTarget,
             targetEndTimestamp: 0,
             isRunning: false,
             isPaused: false,
@@ -1053,27 +1061,29 @@ export default function HomeScreen({ navigation }) {
         }
       } else {
         // 通常のタイマートグル
-        if (!isRunning) {
+        if (!currentIsRunning) {
           // スタート/再開
-          if (!isCountUp) {
-            targetEndTimeRef.current = Date.now() + remainingTimeRef.current * 1000;
-            if (remainingTimeRef.current === targetTime || remainingTime === targetTime) {
+          isRunningRef.current = true;
+          setIsRunning(true);
+          if (!currentIsCountUp) {
+            targetEndTimeRef.current = Date.now() + currentRemaining * 1000;
+            if (currentRemaining === currentTarget) {
               triggeredVoicesRef.current.clear();
               lastCheerTriggerTimeRef.current = Date.now();
               isFirstCheerTriggeredRef.current = false;
               nextCheerIntervalMsRef.current = 0;
             }
           } else {
-            overStartTimeRef.current = Date.now() - remainingTimeRef.current * 1000;
+            overStartTimeRef.current = Date.now() - currentRemaining * 1000;
           }
-          setIsRunning(true);
         } else {
           // 一時停止
+          isRunningRef.current = false;
+          setIsRunning(false);
           targetEndTimeRef.current = null;
           overStartTimeRef.current = null;
           cancelVibration();
           stopAllAlarms('main');
-          setIsRunning(false);
         }
       }
     }
@@ -1252,10 +1262,13 @@ export default function HomeScreen({ navigation }) {
       setWatchMutedState(!playPhoneSound);
       console.log('[HomeScreen] MAIN_TIMER_START received. playSoundOnPhone:', playPhoneSound, 'isMuted:', !playPhoneSound);
       // 超過中（カウントアップ中）または残り時間が0秒以下の場合はカウントアップ解除＆設定時間にリセットしてから開始
-      if (isCountUpRef.current || isCountUp || remainingTimeRef.current <= 0) {
+      const isFromOvertime = isCountUpRef.current || isCountUp || remainingTimeRef.current <= 0;
+      if (isFromOvertime) {
         isCountUpRef.current = false;
         setIsCountUp(false);
         overStartTimeRef.current = null;
+        isRunningRef.current = false;
+        setIsRunning(false);
         const resetTarget = (targetTimeRef.current && targetTimeRef.current > 0) ? targetTimeRef.current : (targetTime || 600);
         remainingTimeRef.current = resetTarget;
         setRemainingTime(resetTarget);

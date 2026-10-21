@@ -2031,6 +2031,10 @@ Apple Watch の文字盤モジュール（コンプリケーション）をタ�
    - **準備カウントダウン中の一時停止・キャンセルおよびカード常時表示の最適化 (`content.swift`, `SalonWorkScreen.js`)**:
      - `content.swift`: `MainTimerCard.onToggle` および `handleToggleMainTimer` において、`willPause` 判定を `isRunning || isPreCountingDown` に拡張。準備カウントダウン中にWatchからトグルした場合も確実にキャンセルされ、状態が初期化されるよう改善。また未同期時でも `defaultMainTimer()` によりメインタイマーカードが常に表示・操作可能に。
      - `SalonWorkScreen.js`: `syncSeatsToWatch` 内の `mainTimerPayload` に準備カウントダウン関連フィールド（`isPreCountingDown`, `preCountdownSeconds`, `isCountdownConfigEnabled`, `countdownConfigSeconds`, `prepEndTimestamp`）を完全網羅。客席データ同期時にWatch側のカウントダウン設定が消去される不整合を根本解決。
+   - **タイマートグル判定の完全同期的Ref統一によるWatch起動の100%保証 (`HomeScreen.js`)**:
+     - `toggleTimer` 内部におけるタイマー動作・準備中・超過判定を、Reactの非同期State（`isRunning`, `isPreCountingDown`, `isCountUp`）から同期的Ref（`isRunningRef.current`, `isPreCountingDownRef.current`, `isCountUpRef.current`）へ完全統一。
+     - 超過カウントアップ中や停止直後にWatchからスタートシグナルが届いた際、非同期ステート遅延によって「すでに稼働中」と誤認されスタートではなく停止処理が走ってしまう致命的バグを根本解決。
+     - `handleMainTimerActionDispatch('start')` において超過からのリスタート時に `isRunningRef.current = false; setIsRunning(false);` を同期リセットし、`toggleTimer` が100%確実に初期スタート（または準備カウントダウン）として発火することを保証。
 
 
 
