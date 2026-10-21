@@ -48,6 +48,62 @@ struct SeatTimerItem: Identifiable, Equatable {
     var prepEndTime: Date? = nil
     var isCountdownConfigEnabled: Bool = false
     var countdownConfigSeconds: Int = 5
+
+    init(
+        id: String,
+        seatNumber: Int = 0,
+        seatLabel: String? = nil,
+        creatorName: String = "スタイリスト",
+        totalSeconds: Int = 600,
+        targetEndTime: Date = Date().addingTimeInterval(600),
+        isRunning: Bool = false,
+        pausedRemainingSeconds: Int = 600,
+        helpProcess: String = "シャンプー",
+        shampooStaff: String? = nil,
+        isRecruiting: Bool = false,
+        isNoHelpNeeded: Bool = false,
+        status: TreatmentStatus = .normal,
+        checkTotalSeconds: Int? = nil,
+        checkTargetEndTime: Date? = nil,
+        checkStaff: String? = nil,
+        isCheckCompleted: Bool = false,
+        hasAlertedHelpUnassigned: Bool = false,
+        isCollapsed: Bool = false,
+        isMainTimer: Bool = false,
+        genre: String? = nil,
+        isPreCountingDown: Bool = false,
+        preCountdownSeconds: Int = 0,
+        prepEndTime: Date? = nil,
+        isCountdownConfigEnabled: Bool = false,
+        countdownConfigSeconds: Int = 5
+    ) {
+        self.id = id
+        self.seatNumber = seatNumber
+        self.seatLabel = seatLabel
+        self.creatorName = creatorName
+        self.totalSeconds = totalSeconds
+        self.targetEndTime = targetEndTime
+        self.isRunning = isRunning
+        self.pausedRemainingSeconds = pausedRemainingSeconds
+        self.helpProcess = helpProcess
+        self.shampooStaff = shampooStaff
+        self.isRecruiting = isRecruiting
+        self.isNoHelpNeeded = isNoHelpNeeded
+        self.status = status
+        self.checkTotalSeconds = checkTotalSeconds
+        self.checkTargetEndTime = checkTargetEndTime
+        self.checkStaff = checkStaff
+        self.isCheckCompleted = isCheckCompleted
+        self.hasAlertedHelpUnassigned = hasAlertedHelpUnassigned
+        self.isCollapsed = isCollapsed
+        self.isMainTimer = isMainTimer
+        self.genre = genre
+        self.isPreCountingDown = isPreCountingDown
+        self.preCountdownSeconds = preCountdownSeconds
+        self.prepEndTime = prepEndTime
+        self.isCountdownConfigEnabled = isCountdownConfigEnabled
+        self.countdownConfigSeconds = countdownConfigSeconds
+    }
     
     // 準備中カウントダウンの残り秒数
     var prepRemainingSeconds: Int {
@@ -1289,12 +1345,12 @@ struct ContentView: View {
             id: "main-timer",
             seatNumber: 0,
             seatLabel: "メインタイマー",
-            isMainTimer: true,
             creatorName: currentUserName ?? "スタイリスト",
             totalSeconds: 600,
             targetEndTime: Date().addingTimeInterval(600),
             isRunning: false,
-            pausedRemainingSeconds: 600
+            pausedRemainingSeconds: 600,
+            isMainTimer: true
         )
     }
     
