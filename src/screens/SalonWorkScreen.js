@@ -2036,6 +2036,7 @@ export default function SalonWorkScreen() {
         ...s,
         status: 'paused',
         pausedRemainingSeconds: remaining,
+        ...(isZeroRem ? { targetEndTimestamp: null, isOver: false } : {}),
         actionStatus: determinedActionId || null,
         isShampooing: determinedActionId === 'shampoo',
         mainStaffConfirmed: true,
@@ -3376,6 +3377,7 @@ export default function SalonWorkScreen() {
               setSeats((prev) => {
                 const updated = prev.filter((s) => s.id !== seatId);
                 saveSeatsToStorage(updated);
+                syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
                 return updated;
               });
             } else {
@@ -3385,6 +3387,11 @@ export default function SalonWorkScreen() {
                   return {
                     ...s,
                     status: 'idle',
+                    pausedRemainingSeconds: 0,
+                    isOver: false,
+                    isReset: true,
+                    timeUpTimestamp: null,
+                    escalationLevel: 0,
                     colorStaffName: '',
                     assistantStaffName: null,
                     isShampooing: false,
@@ -3400,6 +3407,7 @@ export default function SalonWorkScreen() {
                   };
                 });
                 saveSeatsToStorage(updated);
+                syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
                 return updated;
               });
             }
@@ -3423,6 +3431,7 @@ export default function SalonWorkScreen() {
             setSeats((prev) => {
               const updated = prev.filter((s) => s.id !== seatId);
               saveSeatsToStorage(updated);
+              syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
               return updated;
             });
           },
@@ -3448,6 +3457,7 @@ export default function SalonWorkScreen() {
     setSeats((prev) => {
       const updated = [...prev, newSeat];
       saveSeatsToStorage(updated);
+      syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
       return updated;
     });
     setNewSeatName('');
