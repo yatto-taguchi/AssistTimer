@@ -2028,6 +2028,9 @@ Apple Watch の文字盤モジュール（コンプリケーション）をタ�
    - **「まだ止められていません」などの過剰通知スパム・連打の抑制 (`alarm.swift`)**:
      - `alarm.swift`: `repeatOffsets` を従来の小刻み（15秒・30秒・45秒・60秒・90秒・120秒の7回連打）から `[0, 60, 180]`（到達時・1分後・3分後）の適切な間隔・回数に調整。
      - 短時間でのシステム通知キューのパンク、およびメンバー全員へのアラーム通知スパムを根本防止。
+   - **準備カウントダウン中の一時停止・キャンセルおよびカード常時表示の最適化 (`content.swift`, `SalonWorkScreen.js`)**:
+     - `content.swift`: `MainTimerCard.onToggle` および `handleToggleMainTimer` において、`willPause` 判定を `isRunning || isPreCountingDown` に拡張。準備カウントダウン中にWatchからトグルした場合も確実にキャンセルされ、状態が初期化されるよう改善。また未同期時でも `defaultMainTimer()` によりメインタイマーカードが常に表示・操作可能に。
+     - `SalonWorkScreen.js`: `syncSeatsToWatch` 内の `mainTimerPayload` に準備カウントダウン関連フィールド（`isPreCountingDown`, `preCountdownSeconds`, `isCountdownConfigEnabled`, `countdownConfigSeconds`, `prepEndTimestamp`）を完全網羅。客席データ同期時にWatch側のカウントダウン設定が消去される不整合を根本解決。
 
 
 

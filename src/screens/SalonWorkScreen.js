@@ -270,6 +270,11 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
         pausedRemainingSeconds: pausedRem,
         isCountUp: isCountUp,
         genre: _cachedMainTimerState.genre || '',
+        isPreCountingDown: !!_cachedMainTimerState.isPreCountingDown,
+        preCountdownSeconds: _cachedMainTimerState.preCountdownSeconds || 0,
+        isCountdownConfigEnabled: !!_cachedMainTimerState.isCountdownConfigEnabled,
+        countdownConfigSeconds: _cachedMainTimerState.countdownConfigSeconds || 5,
+        prepEndTimestamp: _cachedMainTimerState.prepEndTimestamp || 0,
       };
     }
 

@@ -1197,57 +1197,61 @@ struct ContentView: View {
             ScrollView {
                 VStack(spacing: 12) {
                     // ★ メインタイマーカード（HomeScreen連動・エメラルドグリーン）
-                    if let main = sessionManager.mainTimer {
-                        MainTimerCard(
-                            item: main,
-                            now: now,
-                            onToggle: {
-                                playHaptic(.click)
-                                let willPause = main.isRunning
-                                if var m = sessionManager.mainTimer {
-                                    if willPause {
-                                        m.isRunning = false
-                                        m.pausedRemainingSeconds = max(0, Int(m.targetEndTime.timeIntervalSince(now)))
-                                    } else {
-                                        let isInitialStart = (m.pausedRemainingSeconds <= 0 || m.pausedRemainingSeconds == m.totalSeconds || m.isOvertime)
-                                        if isInitialStart && m.isCountdownConfigEnabled && m.countdownConfigSeconds > 0 {
-                                            m.isPreCountingDown = true
-                                            m.preCountdownSeconds = m.countdownConfigSeconds
-                                            m.prepEndTime = now.addingTimeInterval(TimeInterval(m.countdownConfigSeconds))
-                                            m.isRunning = false
-                                            m.pausedRemainingSeconds = m.totalSeconds
-                                        } else {
-                                            m.isRunning = true
-                                            let rem = (m.pausedRemainingSeconds > 0 && !m.isOvertime) ? m.pausedRemainingSeconds : m.totalSeconds
-                                            m.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
-                                        }
-                                    }
-                                    sessionManager.mainTimer = m
-                                    WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
-                                    WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                                }
-                                sessionManager.sendMainTimerAction(action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START")
-                            },
-                            onReset: {
-                                playHaptic(.click)
-                                if var m = sessionManager.mainTimer {
+                    // ★ メインタイマーカード（HomeScreen連動・エメラルドグリーン、常に操作可能）
+                    let main = sessionManager.mainTimer ?? defaultMainTimer()
+                    MainTimerCard(
+                        item: main,
+                        now: now,
+                        onToggle: {
+                            playHaptic(.click)
+                            let willPause = main.isRunning || main.isPreCountingDown
+                            var m = sessionManager.mainTimer ?? defaultMainTimer()
+                            if willPause {
+                                m.isRunning = false
+                                m.isPreCountingDown = false
+                                m.preCountdownSeconds = 0
+                                m.prepEndTime = nil
+                                m.pausedRemainingSeconds = max(0, Int(m.targetEndTime.timeIntervalSince(now)))
+                            } else {
+                                let isInitialStart = (m.pausedRemainingSeconds <= 0 || m.pausedRemainingSeconds == m.totalSeconds || m.isOvertime)
+                                if isInitialStart && m.isCountdownConfigEnabled && m.countdownConfigSeconds > 0 {
+                                    m.isPreCountingDown = true
+                                    m.preCountdownSeconds = m.countdownConfigSeconds
+                                    m.prepEndTime = now.addingTimeInterval(TimeInterval(m.countdownConfigSeconds))
                                     m.isRunning = false
                                     m.pausedRemainingSeconds = m.totalSeconds
-                                    sessionManager.mainTimer = m
-                                    WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
-                                    WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+                                } else {
+                                    m.isRunning = true
+                                    let rem = (m.pausedRemainingSeconds > 0 && !m.isOvertime) ? m.pausedRemainingSeconds : m.totalSeconds
+                                    m.targetEndTime = now.addingTimeInterval(TimeInterval(rem))
                                 }
-                                sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
-                            },
-                            onOpenAction: {
-                                showingMainTimerSheet = true
                             }
-                        )
-                        .id("main_timer")
-                    }
+                            sessionManager.mainTimer = m
+                            WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
+                            WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+                            sessionManager.sendMainTimerAction(action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START")
+                        },
+                        onReset: {
+                            playHaptic(.click)
+                            var m = sessionManager.mainTimer ?? defaultMainTimer()
+                            m.isRunning = false
+                            m.isPreCountingDown = false
+                            m.preCountdownSeconds = 0
+                            m.prepEndTime = nil
+                            m.pausedRemainingSeconds = m.totalSeconds
+                            sessionManager.mainTimer = m
+                            WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
+                            WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+                            sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
+                        },
+                        onOpenAction: {
+                            showingMainTimerSheet = true
+                        }
+                    )
+                    .id("main_timer")
                     
-                    if timers.isEmpty && sessionManager.mainTimer == nil {
-                        // ★ 席もメインタイマーも0件の時のプレースホルダー表示
+                    if timers.isEmpty {
+                        // ★ 客席タイマーが0件の時のプレースホルダー表示
                         emptySeatsPlaceholderView
                     } else {
                         // ① 客席タイマーカード一覧
@@ -1384,9 +1388,12 @@ struct ContentView: View {
     private func handleToggleMainTimer() {
         playHaptic(.click)
         var main = sessionManager.mainTimer ?? defaultMainTimer()
-        let willPause = main.isRunning
+        let willPause = main.isRunning || main.isPreCountingDown
         if willPause {
             main.isRunning = false
+            main.isPreCountingDown = false
+            main.preCountdownSeconds = 0
+            main.prepEndTime = nil
             main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(now)))
         } else {
             let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds || main.isOvertime)
@@ -1433,8 +1440,13 @@ struct ContentView: View {
         playHaptic(.click)
         var main = sessionManager.mainTimer ?? defaultMainTimer()
         main.isRunning = false
+        main.isPreCountingDown = false
+        main.preCountdownSeconds = 0
+        main.prepEndTime = nil
         main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(Date())))
         sessionManager.mainTimer = main
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(action: "MAIN_TIMER_PAUSE")
     }
     
@@ -1442,6 +1454,9 @@ struct ContentView: View {
         playHaptic(.click)
         var main = sessionManager.mainTimer ?? defaultMainTimer()
         main.isRunning = false
+        main.isPreCountingDown = false
+        main.preCountdownSeconds = 0
+        main.prepEndTime = nil
         main.pausedRemainingSeconds = main.totalSeconds
         sessionManager.mainTimer = main
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
