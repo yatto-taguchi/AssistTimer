@@ -146,9 +146,11 @@ struct SeatTimerItem: Identifiable, Equatable {
     // 自分に関係している席か判定（作成者 or シャンプー・コーミング等ヘルプ担当 or サブタイマー・チェック担当 or 全員募集中）
     func isRelated(to userName: String) -> Bool {
         let cleanUser = userName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cleanUser.isEmpty { return true }
+        if cleanUser.isEmpty || cleanUser == "スタイリスト" || cleanUser == "スタッフ" { return true }
         
         let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if cName.isEmpty || cName == "スタイリスト" || cName == "スタッフ" { return true }
+        
         let sStaff = (shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let chkStaff = (checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         
@@ -309,8 +311,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     @Published var lastReceivedSeatCount: Int = -1
     @Published var receivedCount: Int = 0
     
-    // ★ Watch 側アラーム音（iPhone の設定画面から同期。初期値 OFF＝振動のみ）
-    @Published var alarmSoundEnabled: Bool = UserDefaults.standard.bool(forKey: "assisttimer.watchAlarmSound")
+    // ★ Watch 側アラーム音（iPhone の設定画面から同期。未設定時はデフォルト true）
+    @Published var alarmSoundEnabled: Bool = (UserDefaults.standard.object(forKey: "assisttimer.watchAlarmSound") as? Bool) ?? true
     
     // ★ 有効化前に行われた操作の保留キュー（有効化完了時に自動送信。メインスレッドでのみ操作）
     private var pendingPayloads: [[String: Any]] = []
@@ -930,7 +932,7 @@ struct ContentView: View {
                     timeActionTargetId = targetId
                 } else if pendingOpenMainTimerSheet {
                     pendingOpenMainTimerSheet = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
                         showingMainTimerSheet = true
                     }
                 }

@@ -63,6 +63,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         armed = (UserDefaults.standard.dictionary(forKey: armedStoreKey) as? [String: Double]) ?? [:]
         acknowledged = (UserDefaults.standard.dictionary(forKey: ackStoreKey) as? [String: Double]) ?? [:]
         UNUserNotificationCenter.current().delegate = self
+        requestAuthorizationIfNeeded()
     }
 
     // MARK: - 外部から呼ぶ
@@ -147,6 +148,12 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         return WKApplication.shared().applicationState == .active
     }
 
+    /// スマートアラーム（WKExtendedRuntimeSession）はフォアグラウンド（active または inactive）の状態で予約可能
+    private var canScheduleSmartAlarm: Bool {
+        let state = WKApplication.shared().applicationState
+        return state == .active || state == .inactive
+    }
+
     private func currentRinging(_ now: Date) -> [WatchAlarmEvent] {
         return events.filter { $0.date <= now && armed[$0.key] != nil && acknowledged[$0.key] == nil }
     }
@@ -162,7 +169,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private func refresh() {
         let now = Date()
         var changed = false
-        for e in events where e.date > now && armed[e.key] == nil {
+        // ★ 終了予定時刻が直近（過去5分以内含む）のイベントを確実に arm 対象とし、0:00到達時の取りこぼしを防止
+        for e in events where armed[e.key] == nil && e.date > now.addingTimeInterval(-300) {
             armed[e.key] = e.date.timeIntervalSince1970
             changed = true
         }
@@ -339,8 +347,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             return
         }
 
-        // start(at:) はアプリ表示中にしか呼べない
-        guard isAppActive else { return }
+        // start(at:) はアプリ表示中（active / inactive）に呼べる
+        guard canScheduleSmartAlarm else { return }
 
         // 鳴動中なのにセッションが無い（アプリを開いた時点で過ぎていた等）→ 1秒後開始で予約し、
         // 画面が暗くなっても止めるまで鳴り続けるようにする
@@ -492,15 +500,18 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 for (i, offset) in offsets.enumerated() {
                     if count >= limit { break }
                     let interval = e.date.addingTimeInterval(offset).timeIntervalSinceNow
-                    if interval <= 1 { continue }
+                    if interval < -60 { continue }
                     let content = UNMutableNotificationContent()
                     content.title = "⏰ \(e.title)"
                     content.body = i == 0
                         ? "タイムアップです。アプリを開いて止めてください。"
                         : "まだ止められていません（\(Int(offset))秒経過）"
-                    content.sound = soundOn ? .default : nil
+                    // ★ watchOS では content.sound を指定しないと触覚（Taptic Engine）の振動が一切鳴らない。
+                    //   消音モード時はシステム側で自動的に「振動のみ」となるため、常に .default を指定して振動を保証する。
+                    content.sound = .default
                     content.threadIdentifier = "assisttimer.alarm"
-                    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
+                    let triggerInterval = max(1, interval)
+                    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: triggerInterval, repeats: false)
                     center.add(UNNotificationRequest(identifier: "\(prefix)\(e.key).\(i)", content: content, trigger: trigger))
                     count += 1
                 }
