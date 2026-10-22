@@ -175,6 +175,33 @@ enum AlarmKitBridge {
     saveRecords(records)
   }
 
+  /// アプリ起動時の初回同期で、過去の残留アラームや一覧に存在しない古い予約を確実に停止・消去する
+  static func cleanupOnSourceInit(source: String, keepKeys: [String]) -> Int {
+    let keepSet = Set(keepKeys)
+    let nowMs = Date().timeIntervalSince1970 * 1000.0
+    recordLock.lock()
+    let records = loadRecords()
+    recordLock.unlock()
+
+    var keysToCancel = Set<String>()
+    if source == "main" && !keepSet.contains("main-timer") {
+      keysToCancel.insert("main-timer")
+    }
+    for (key, ts) in records {
+      if ts <= nowMs {
+        keysToCancel.insert(key)
+      } else if source == "main" && key == "main-timer" && !keepSet.contains(key) {
+        keysToCancel.insert(key)
+      } else if source == "salon" && key != "main-timer" && !keepSet.contains(key) {
+        keysToCancel.insert(key)
+      }
+    }
+    for key in keysToCancel {
+      _ = cancel(key: key)
+    }
+    return keysToCancel.count
+  }
+
   /// 止められた予約を [{ "key": String, "timestamp": Double(ms) }] で返し、記録から消す
   static func takeUserStoppedAlarms() -> [[String: Any]] {
     #if canImport(AlarmKit)

@@ -212,13 +212,14 @@ extension SeatTimerItem {
             self.pausedRemainingSeconds = self.totalSeconds
         }
         
-        // 終了時刻（稼働中かつ有効な未来/過去の絶対時刻があればそれを採用、停止中は残り秒数から安全に算出）
+        // 終了時刻（稼働中かつ有効な未来/過去の絶対時刻があればそれを採用、有効な終了時刻が無ければ停止扱い）
         if let endMs = (dictionary["targetEndTimestamp"] as? NSNumber)?.doubleValue ?? (dictionary["targetEndTimestamp"] as? Double), endMs > 0 {
             self.targetEndTime = Date(timeIntervalSince1970: endMs / 1000.0)
         } else if let endSec = (dictionary["targetEndTime"] as? NSNumber)?.doubleValue ?? (dictionary["targetEndTime"] as? Double), endSec > 0 {
             self.targetEndTime = Date(timeIntervalSince1970: endSec)
         } else {
-            let rem = self.pausedRemainingSeconds > 0 ? self.pausedRemainingSeconds : self.totalSeconds
+            self.isRunning = false
+            let rem = self.pausedRemainingSeconds > 0 ? self.pausedRemainingSeconds : max(60, self.totalSeconds)
             self.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
         }
         
@@ -550,8 +551,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         // メインタイマー同期（直近Watchローカル操作中も、iPhoneからの準備中カウントダウンや最新データは確実に反映）
         var didUpdateMain = false
         if let rawMain = data["mainTimer"] as? [String: Any], var parsedMain = SeatTimerItem(dictionary: rawMain) {
-            // ★ 保存データや古いスナップショットで、すでに30秒以上前に終了している稼働中タイマーは停止として扱う（起動直後のバイブ暴発防止）
-            if isStaleSnapshot && parsedMain.isRunning && parsedMain.targetEndTime < Date().addingTimeInterval(-30) {
+            // ★ 保存データや古いスナップショットで、すでに終了している稼働中タイマーは停止として扱う（起動直後のバイブ暴発防止）
+            if isStaleSnapshot && parsedMain.isRunning && parsedMain.targetEndTime <= Date() {
                 parsedMain.isRunning = false
                 parsedMain.pausedRemainingSeconds = parsedMain.totalSeconds
             }
@@ -633,18 +634,20 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 let nowDate = Date()
                 for i in parsed.indices {
                     let id = parsed[i].id
-                    // 保存データ（applicationContext）や古いスナップショットで、すでに30秒以上前に終了している稼働中席は停止状態に正規化
-                    if isStaleSnapshot && parsed[i].isRunning && parsed[i].targetEndTime < nowDate.addingTimeInterval(-30) {
+                    // 保存データ（applicationContext）や古いスナップショットで、すでに終了している稼働中席は停止状態に正規化
+                    if isStaleSnapshot && parsed[i].isRunning && parsed[i].targetEndTime <= nowDate {
                         parsed[i].isRunning = false
                         parsed[i].pausedRemainingSeconds = 0
                         parsed[i].clearCheck()
                     }
-                    // 既存の同一タイマーで発火済みの「ヘルプ未定アラート」フラグを引き継ぎ、同期のたびに再バイブするのを防止
+                    // 既存の同一タイマーで発火済みの「ヘルプ未定アラート」フラグを引き継ぎ、また初回同期時点ですでに残り180秒以下のタイマーは起動直後にバイブしないよう保護
                     if let prev = self.timers.first(where: { $0.id == id }),
-                       prev.hasAlertedHelpUnassigned,
+                       prev.isRunning,
                        abs(prev.targetEndTime.timeIntervalSince1970 - parsed[i].targetEndTime.timeIntervalSince1970) <= 2 {
-                        parsed[i].hasAlertedHelpUnassigned = true
-                    } else if isStaleSnapshot && parsed[i].isRunning && parsed[i].remainingSeconds <= 180 {
+                        if prev.hasAlertedHelpUnassigned {
+                            parsed[i].hasAlertedHelpUnassigned = true
+                        }
+                    } else if parsed[i].isRunning && parsed[i].remainingSeconds <= 180 {
                         parsed[i].hasAlertedHelpUnassigned = true
                     }
                     guard let stop = localStops[id] else { continue }
@@ -991,6 +994,20 @@ struct ContentView: View {
         )
     }
     
+    // ★ アラーム鳴動時に前面のモーダルシートがアラーム停止画面（alarmOverlay）を覆い隠さないよう全シートを即座に閉じる
+    private func dismissAllSheetsForAlarm() {
+        pendingSelectedSeatId = nil
+        pendingOpenMainTimerSheet = false
+        showingAddSeatSheet = false
+        timeActionTargetId = nil
+        checkActionTargetId = nil
+        shampooActionTargetId = nil
+        selectHelpStaffTargetId = nil
+        selectCheckStaffTargetId = nil
+        showingThumbnailMap = false
+        showingMainTimerSheet = false
+    }
+
     var body: some View {
         ZStack {
             NavigationStack {
@@ -1009,14 +1026,19 @@ struct ContentView: View {
                     alarm.update(timers: timers, mainTimer: newMain, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                     WidgetSync.save(timers: timers, mainTimer: newMain, userName: currentUserName)
                 }
-                .onChange(of: alarm.ringing.isEmpty) { _, isEmpty in
-                    if !isEmpty {
-                        showingAddSeatSheet = false
-                        timeActionTargetId = nil
-                        checkActionTargetId = nil
-                        shampooActionTargetId = nil
-                        selectHelpStaffTargetId = nil
+                .onChange(of: alarm.ringing) { _, newRinging in
+                    if !newRinging.isEmpty {
+                        dismissAllSheetsForAlarm()
+                    }
+                }
+                .onChange(of: showingThumbnailMap) { _, isShowing in
+                    if isShowing && !alarm.ringing.isEmpty {
                         showingThumbnailMap = false
+                    }
+                }
+                .onChange(of: showingMainTimerSheet) { _, isShowing in
+                    if isShowing && !alarm.ringing.isEmpty {
+                        showingMainTimerSheet = false
                     }
                 }
                 .navigationTitle("共有タイマー")
@@ -1052,13 +1074,20 @@ struct ContentView: View {
             }
             // ★ 客席サムネイル・バードビューシート（全タイマー・メインタイマー一覧）
             .sheet(isPresented: $showingThumbnailMap, onDismiss: {
+                guard alarm.ringing.isEmpty else {
+                    pendingSelectedSeatId = nil
+                    pendingOpenMainTimerSheet = false
+                    return
+                }
                 if let targetId = pendingSelectedSeatId {
                     pendingSelectedSeatId = nil
                     timeActionTargetId = targetId
                 } else if pendingOpenMainTimerSheet {
                     pendingOpenMainTimerSheet = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-                        showingMainTimerSheet = true
+                        if alarm.ringing.isEmpty {
+                            showingMainTimerSheet = true
+                        }
                     }
                 }
             }) {
@@ -1150,10 +1179,17 @@ struct ContentView: View {
                     self.mainTimer = initialMain
                 }
                 alarm.update(timers: timers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                // ★ 初回起動時は確実にサロン全体の客席マップ（バードビュー）をオープン
+                // ★ 初回起動時はアラーム鳴動中でない場合のみサロン全体の客席マップ（バードビュー）をオープン
+                //   （アラーム鳴動中にシートを開くと alarmOverlay が覆い隠されて止められなくなるのを防止）
                 if !hasInitialOpenedMap {
                     hasInitialOpenedMap = true
-                    showingThumbnailMap = true
+                    if alarm.ringing.isEmpty {
+                        showingThumbnailMap = true
+                    } else {
+                        dismissAllSheetsForAlarm()
+                    }
+                } else if !alarm.ringing.isEmpty {
+                    dismissAllSheetsForAlarm()
                 }
             }
             .onOpenURL { url in
@@ -2378,7 +2414,7 @@ struct ContentView: View {
     private func checkUnassignedHelpAlerts() {
         for idx in timers.indices {
             let rem = timers[idx].remainingSeconds
-            if timers[idx].isRunning && rem <= 180 && rem > 0 && timers[idx].shampooStaff == nil && !timers[idx].isNoHelpNeeded && !timers[idx].hasAlertedHelpUnassigned {
+            if timers[idx].isRunning && timers[idx].totalSeconds > 180 && rem <= 180 && rem > 0 && timers[idx].shampooStaff == nil && !timers[idx].isNoHelpNeeded && !timers[idx].hasAlertedHelpUnassigned {
                 timers[idx].hasAlertedHelpUnassigned = true
                 showNotification(
                     text: "🚨 【\(timers[idx].displaySeatName)】ヘルプ未定！全員へ通知しました",

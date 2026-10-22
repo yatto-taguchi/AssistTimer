@@ -486,6 +486,7 @@ export default function HomeScreen({ navigation }) {
   }, [voiceSound]);
 
   useEffect(() => {
+    cancelVibration();
     return () => {
       cancelVibration();
       deactivateKeepAwake();
@@ -1196,7 +1197,10 @@ export default function HomeScreen({ navigation }) {
     let endMs = null;
     if (isRunning) {
       if (isCountUp) {
-        endMs = overStartTimeRef.current || (Date.now() - remainingTime * 1000);
+        if (!overStartTimeRef.current) {
+          overStartTimeRef.current = Date.now() - remainingTime * 1000;
+        }
+        endMs = overStartTimeRef.current;
       } else {
         endMs = targetEndTimeRef.current || (Date.now() + remainingTime * 1000);
       }
@@ -1460,7 +1464,10 @@ export default function HomeScreen({ navigation }) {
     let endMs = 0;
     if (isRunning) {
       if (isCountUpRef.current) {
-        endMs = overStartTimeRef.current || (Date.now() - currentRemaining * 1000);
+        if (!overStartTimeRef.current) {
+          overStartTimeRef.current = Date.now() - currentRemaining * 1000;
+        }
+        endMs = overStartTimeRef.current;
       } else {
         endMs = targetEndTimeRef.current || (Date.now() + currentRemaining * 1000);
       }

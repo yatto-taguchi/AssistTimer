@@ -69,9 +69,13 @@ const applyAlarms = async (source, desired, options) => {
   });
 
   let dirty = false;
-  // 初回同期時: 前回セッション（アプリ再起動やTestFlight更新前）のメインタイマー予約が残っていれば消火
+  // 初回同期時: 前回セッション（アプリ再起動やTestFlight更新前）の残留アラームや過去時刻の予約を確実に消火
   if (!initializedSources.has(source)) {
     initializedSources.add(source);
+    const futureKeepKeys = Array.from(desiredMap.values())
+      .filter((d) => d.timestamp > now)
+      .map((d) => String(d.key));
+    AlarmKit.cleanupOnSourceInit(source, futureKeepKeys);
     if (source === 'main' && !desiredMap.has('main-timer')) {
       AlarmKit.cancel('main-timer');
     }

@@ -2222,3 +2222,74 @@ Apple Watch の文字盤モジュール（コンプリケーション）をタ�
 4. **スリープ復帰時タイムスタンプの同期的整合性**:
    - 端末がスリープから復帰した際、古いローカルキャッシュではなく現在時刻（`Date.now()`）から逆算した正確な残り秒数を即座に再描画するよう同期処理を堅牢化。
 
+---
+
+## 32. アプリ起動時・常時バイブレーション暴発の完全根絶およびアラームUI最前面表示保証仕様 (Build 69)
+
+### 32.1. 背景・現場課題の所在
+
+TestFlight Build 68の実機テストにおいて、以下の致命的な不具合・課題が報告された：
+- **アプリを開いた瞬間からずっと手首が激しく振動し続け、止まらない**:
+  「テストフライトしてテストしてみた。もう開けた瞬間ずっと振動してバイブレーションしている。なので、いつ鳴っていて、いつ鳴っていないのかがちょっとわからない状態になっているので、そこを修正する。基本的には鳴らずに、ちゃんとタイムが終了してから鳴るっていうのがタイマーの前提だと思うんだけど、そのあたりを見てください。」
+- **タイマーの大前提崩壊**:
+  本来のタイマーは「カウントダウン中は振動せず静かに計測し、0:00に到達した瞬間（タイム終了時）だけアラーム・振動で知らせる」ものであるが、起動直後から延々と振動し、画面を見ても「止める」ボタンやアラーム画面が見当たらず、何が起きているか把握できない状態に陥っていた。
+
+### 32.2. 原因分析とアーキテクチャ上の4大盲点
+
+1. **Watch側モーダルシートによるアラーム停止UI（`alarmOverlay`）の完全遮蔽 (`content.swift`)**:
+   - `ContentView.onAppear` にて、アプリ起動時に無条件で `showingThumbnailMap = true`（サロン客席マップ）を開くコードが存在した。
+   - アプリ起動時点でアラームイベントが存在または同期されると、`alarm.ringing.isEmpty == false` の状態で客席マップシートが開かれる。
+   - watchOS SwiftUI において `.sheet` は `ContentView` の `ZStack`（および `alarmOverlay`）より手前の別ウィンドウレイヤーに描画されるため、裏で 0.3秒周期の強力振動が鳴り続けているにもかかわらず、画面には通常マップやメインタイマーシートが表示され、赤いアラーム画面および「止める」ボタンが物理的に隠されて押せない状態になっていた。
+   - さらに `.onChange(of: alarm.ringing.isEmpty)` では `showingMainTimerSheet` や `selectCheckStaffTargetId` などの一部シートのクローズが漏れていた。
+
+2. **終了前タイマー・過去タイマーの不正 arm と誤発火 (`alarm.swift`)**:
+   - `WatchAlarmCoordinator.refresh()` において、`for e in events where !isArmed(e.key) && e.date >= now.addingTimeInterval(-5)` という判定が存在した。
+   - `-5秒` のマージンを持たせていたため、すでに終了時刻に達しているタイマーや、終了時刻が欠落して `Date.now()` で初期化されたタイマーが、受信した瞬間に `armed` され、同ループ内の `currentRinging(now)`（`$0.date <= now`）によって即座に鳴動（`ringing`）リストへ投入され振動を開始していた。
+   - `WatchAlarmCoordinator.init()` におけるクリーンアップ基準が `launchCutoff = now - 30` となっていたため、起動前30秒以内に終了した古い予約が消火されずにメモリに残り、起動直後に鳴動していた。
+
+3. **`WKExtendedRuntimeSession`（スマートアラーム）の無条件振動開始と孤立稼働 (`alarm.swift`)**:
+   - `adopt(_:)` および `extendedRuntimeSessionDidStart(_:)` において、`ringing` が空（アラーム対象が実質存在しない）であっても無条件で `startNotifyUser(s)`（0.4秒周期の連続バイブレーション）が開始されていた。
+   - `sessionKey` が `nil` の状態でセッションが立ち上がった場合、`refresh()` の破棄判定（`keyInvalid`）が `false` となり、かつ `events` にタイマーが残っていると `noEventsAtAll` も `false` となるため、セッションが破棄されず手首が激しく揺れ続ける状態が発生していた。
+
+4. **iPhone側および同期データの不安定性 (`SalonWorkScreen.js`, `HomeScreen.js`, `AlarmKitBridge.swift`)**:
+   - `SalonWorkScreen.js` の `formatSeatsPayload` で `s.targetEndTimestamp` が falsy な場合に `Date.now()` をフォールバック値として渡していたため、停止中や未確定の席がWatch側で「今まさに終了した席」として同期される危険があった。
+   - `HomeScreen.js` の超過カウントアップ（`isCountUp == true`）時、`Date.now() - remainingTime * 1000` が毎秒ミリ秒単位で再計算されていたため、終了時刻がドリフトしてWatch側で「新しい別タイマー」と誤判定され再 arm されていた。
+   - iPhone側の `AlarmKit` 予約において、前回セッションで予約されたサロン席の残留アラームがアプリ起動時に一括クリーンアップされていなかった。
+
+---
+
+### 32.3. 修正内容と再発防止アーキテクチャ
+
+#### 1. Watch側: アラーム鳴動時の全シート即時閉鎖と最前面表示の絶対保証 (`content.swift`)
+- **全シート強制消火ヘルパー `dismissAllSheetsForAlarm()` の導入**:
+  - `showingThumbnailMap`, `showingMainTimerSheet`, `showingAddSeatSheet`, 各種操作シート（`timeActionTargetId`, `checkActionTargetId`, `shampooActionTargetId`, `selectHelpStaffTargetId`, `selectCheckStaffTargetId`）および保留遷移IDをすべて一括で `false` / `nil` にリセットする関数を実装。
+- **鳴動状態（`alarm.ringing`）監視の強化**:
+  - `.onChange(of: alarm.ringing)` にて、配列が1件でも鳴動した瞬間に `dismissAllSheetsForAlarm()` を即時発火。
+  - `.onChange(of: showingThumbnailMap)` および `.onChange(of: showingMainTimerSheet)` において、`!alarm.ringing.isEmpty` であればシート表示フラグを即座に `false` に差し戻し、アラーム中にいかなるシートも開かせないよう遮断。
+- **起動時（`.onAppear`）の防護**:
+  - 初回起動時、`alarm.ringing.isEmpty` である場合のみ `showingThumbnailMap = true` を許可。すでに鳴動中であればシートを開かず `dismissAllSheetsForAlarm()` を実行し、赤いアラーム画面を最前面に確実表示。
+
+#### 2. Watch側: タイマー大前提の厳格化とスマートアラーム完全制御 (`alarm.swift`)
+- **未来イベント限定の厳格 arm 判定**:
+  - `refresh()` 内の arm 判定を `e.date >= now.addingTimeInterval(-5)` から **`e.date > now`** へ厳格化。
+  - タイマーが未来（カウントダウン中）である間にWatchが把握した予定のみを `armed` に登録し、過去・終了済みの状態で初めて認識されたタイマーでは絶対に振動させない。
+  - `shouldKeepEvent` においても `targetDate > nowDate` を採用し、過去イベントは「事前に arm 済みかつ未停止」のもののみ保持。
+- **起動時クリーンアップの即時消火**:
+  - `init()` において `launchCutoff = Date().timeIntervalSince1970`（現在時刻）を採用し、起動時点で過去の予定はすべて `acknowledged`（消火済み）に正規化。さらに保留・配信済み通知を `removeAllDeliveredNotifications()` で全消去。
+- **スマートアラーム・セッションの鳴動連動保護**:
+  - `adopt(_:)` および `extendedRuntimeSessionDidStart(_:)` において、`!ringing.isEmpty` を確認した時のみ `startNotifyUser` を発火。
+  - `ringing.isEmpty` の状態では直ちに `invalidateCurrentSession()` を実行。
+  - `refresh()` 内に `runningWithoutRinging`（セッション稼働中かつ鳴動配列が空）および `orphanWithoutRinging`（キー未確定かつ鳴動配列が空）の検知ロジックを追加し、ゴーストセッションを100%自動破棄。
+- **未アサイン通知の暴発防止**:
+  - 初回同期時または起動時に残り3分以下だったタイマーに対し、`hasAlertedHelpUnassigned = true` を事前適用して「ヘルプ未定」通知バイブの起動時誤爆を根絶。
+
+#### 3. iPhone側: 残留アラームの起動時消火と同期タイムスタンプ固定化
+- **`AlarmKitBridge.cleanupOnSourceInit` の新設**:
+  - ネイティブ側（`AlarmKitBridge.swift`）に `cleanupOnSourceInit(source:keepKeys:)` を追加し、アプリ起動時の初回同期で現在時刻以前の古いアラーム予約や一覧に存在しない不要キーを即座にネイティブレベルで cancel / stop。
+- **`SalonWorkScreen.js` のサニタイズと安全なペイロード生成**:
+  - `sanitizeLoadedSeats` において、起動時点で過去のチェックタイマーを `timeup` ではなく `completed` に正規化し、Watch・iPhone双方での起動直後誤鳴動を防止。
+  - `formatSeatsPayload` で `targetEndTimestamp` の `Date.now()` フォールバックを廃止（無効値時は `0` かつ `isRunning: false`）。
+- **`HomeScreen.js` の超過タイムスタンプ固定化**:
+  - カウントアップ中の基準時刻を `overStartTimeRef.current` に固定し、同期のたびにタイムスタンプが変動してWatch側で別タイマーとして誤認される現象を排除。
+  - マウント時に `Vibration.cancel()` を実行し、リロード前の残留振動を即時カット。
+

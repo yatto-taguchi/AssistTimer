@@ -153,12 +153,12 @@ export const sanitizeLoadedSeats = (seatsList) => {
           checkPausedRemainingSeconds: null,
         };
       }
-      // 全体タイマーはまだ未来だが、途中チェックタイマーが起動時点ですでに過去になっている場合はtimeup扱いに更新
+      // 全体タイマーはまだ未来だが、途中チェックタイマーが起動時点ですでに過去になっている場合は完了扱いに正規化（起動直後の誤鳴動防止）
       if (seat.checkStatus === 'running' && seat.checkEndTimestamp && Number(seat.checkEndTimestamp) <= now) {
         didSanitize = true;
         return {
           ...seat,
-          checkStatus: 'timeup',
+          checkStatus: 'completed',
         };
       }
     }
@@ -221,8 +221,9 @@ export const formatSeatsPayload = (seatsList) => {
         if (match) seatNum = parseInt(match[0], 10);
       }
 
-      const isRunning = s.status === 'running';
-      const targetEnd = isRunning ? (s.targetEndTimestamp || Date.now()) : 0;
+      const rawTargetEnd = Number(s.targetEndTimestamp) || 0;
+      const isRunning = s.status === 'running' && rawTargetEnd > 0;
+      const targetEnd = isRunning ? rawTargetEnd : 0;
       const pausedRem = !isRunning
         ? (typeof s.pausedRemainingSeconds === 'number' ? Math.max(0, Math.floor(s.pausedRemainingSeconds)) : 0)
         : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
@@ -752,7 +753,7 @@ export default function SalonWorkScreen() {
           const isNoHelp = s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none';
           const isHelpUndecided = !s.assistantStaffName || s.assistantStaffName.trim() === '';
 
-          if (!isOver && remainingSec <= 60 && remainingSec > 0 && isHelpUndecided && !isNoHelp) {
+          if (!isOver && (s.targetSeconds || 600) > 60 && remainingSec <= 60 && remainingSec > 0 && isHelpUndecided && !isNoHelp) {
             // ★ どの終了時刻に対する通知かを記録（Watch からの再スタート後も自動で再び通知できるように）
             if (oneMinuteHelpAlertRef.current[s.id] !== s.targetEndTimestamp) {
               oneMinuteHelpAlertRef.current[s.id] = s.targetEndTimestamp;

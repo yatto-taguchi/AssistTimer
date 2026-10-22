@@ -48,6 +48,16 @@ export const AlarmKit = {
     try { return !!NativeModule.cancel(String(key)); } catch { return false; }
   },
 
+  // 初回同期時に過去の残留アラームや孤立した予約を一括停止・消去
+  cleanupOnSourceInit: (source, keepKeys = []) => {
+    if (!NativeModule || typeof NativeModule.cleanupOnSourceInit !== 'function') return 0;
+    try {
+      return Number(NativeModule.cleanupOnSourceInit(String(source), Array.isArray(keepKeys) ? keepKeys.map(String) : [])) || 0;
+    } catch {
+      return 0;
+    }
+  },
+
   // ユーザーがアラーム画面で「停止」した予約（鳴る時刻を過ぎて AlarmKit の一覧から消えたもの）を取り出す
   // 戻り値: [{ key, timestamp(ms) }]。一度返したものは記録から消える
   takeUserStoppedAlarms: () => {
