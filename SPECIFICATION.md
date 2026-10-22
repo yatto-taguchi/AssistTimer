@@ -1122,6 +1122,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 
 ### 6.2. 変更履歴 (Changelog)
 
+| 2026-10-22 | **Apple Watch メインタイマー双方向操作の完全復旧、共有タイマー2段階アラーム（本体タイマー不発解消）連動、および起動時ゴーストアラーム・誤爆振動の完全根絶仕様 (Build 68)** | ①**Apple Watch メインタイマー連動の完全復旧 (`src/screens/HomeScreen.js`, `targets/watch/content.swift`)**: Watchからメインタイマーを開始・設定した際、`applyTimeInSecondsRef.current` の評価順序不整合により意図しない時間でリセット・開始されたり、停止中に無反応になっていた盲点を解消。Watchから渡された指定秒数を最優先で即時適用するよう `toggleTimer` および `handleMainTimerActionDispatch` の評価順序を是正。さらに準備カウントダウン（5秒）の同期保持抜けを修正し、Watch側 `processReceivedData` のローカルホールド時間（10秒➔3.5秒）短縮および `SET_TIME` / `ADJUST` 受信時の即時ホールド解除により、iPhone側からの即時応答パケットの上書き破棄を防止。<br>②**共有タイマーの2回目振動（本体タイマー）不発の根本解消 (`targets/watch/alarm.swift`, `src/screens/SalonWorkScreen.js`)**: チェック用タイマー鳴動後に本体タイマー（放置タイム終了）の2回目振動が発生しない致命的バグを抜本解決。`alarm.swift` において `isOvertime` による即時キャンセルを撤廃し、ミリ秒丸め誤差（`isSameTarget`）を吸収。チェックタイマー停止時に残存する本タイマーへのスマートアラーム引き継ぎチェーン（`smartAlarmCompletedKeys`）を確立。さらにチェックタイマーが停止されないまま本体タイマー終了時刻に到達した場合の未消火チェックタイマー自動完了統合を実装し、画面消灯中・バックグラウンド中であっても100%確実に本体タイマーの2回目激震マックス振動（`.failure` / `.notification`）を鳴動させるアーキテクチャへ刷新。<br>③**TestFlight起動直後のバイブレーション暴発の完全根絶 (`src/screens/SalonWorkScreen.js`, `targets/watch/alarm.swift`, `targets/watch/content.swift`)**: TestFlightアプリ起動の瞬間に突然手首やiPhoneが激しく振動するゴーストアラームを根絶。iPhone側では `getDefaultInitialSeats` のサンプル席を待機状態（0:00）に安全初期化し、`loadInitialData` および `ensureSalonSeatsCached` で過去終了タイマーを0:00停止（`status: 'paused'`）に自動正規化する `sanitizeLoadedSeats` を導入。Watch側では `UserDefaults` の `armed` が12時間残留してアプリ再起動時に過去タイマーを誤爆鳴動させていた脆弱性を解消し、起動時ゴーストアラーム消火、`applicationContext` 保存時の `notification` 除外、`SeatTimerItem` の `hasAlertedHelpUnassigned` 保持を実装。<br>④**Watch ⇄ iPhone 間の整合性・表記ゆれ向上 (`src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`)**: ヘルプ工程名（シャンプー、コーミング等）の日本語・英語ID双方向正規化（`normalizeHelpProcess`）を配備し、担当バッジや連動ボタンの表示欠落を防止。ユーザー名ストレージキーを統一（`salon_user_name` / `user_name`）。準備カウントダウン中止時の設定タイム復元、スリープ復帰時のタイムスタンプ同期を網羅。<br>⑤**新ビルド番号 `68` への更新＆TestFlight自動送信**: 全変更を反映したIPAビルドを完了しTestFlightへの自動デリバリーを開始。 |
 | 2026-10-22 | **ゴーストアラーム・誤爆振動の完全根絶、客席データ事前ロード＆初期席フォールバック保証、およびモジュラー文字盤タップ時のマップ表示復旧 (Build 67)** | ①**ゴーストアラーム・過去タイマー誤爆振動の完全根絶 (`targets/watch/alarm.swift`)**: 終了時刻が過去5分以内のイベントを `armed` 登録していたため、超過中や終了済みの過去タイマーを受信した瞬間に0.3秒間隔の激しい振動（`.failure`, `.notification`）が止まらなくなっていた致命的不具合を抜本解決。稼働中かつ未来（通信マージン-2秒以内）の終了時刻を持つタイマーのみを厳格にアラーム監視対象とし、超過中タイマーを除外。さらに稼働タイマーが0件の場合は残留するゴーストアラーム・保留通知・触覚タイマー・セッションを強制消火。<br>②**アプリ起動時・サロン未オープン時の客席データ事前ロード保証 (`SalonWorkScreen.js`, `HomeScreen.js`)**: React Navigation の `lazy: true` によりサロンタブを開くまで客席キャッシュが空（`[]`）のままとなり、1番席サンプルが表示されずメインタイマー送信時にも客席が送られなかった盲点を解消。`ensureSalonSeatsCached()` ヘルパーを新設し、AsyncStorageから客席を読み込み（未設定時は1番席サンプル生成・過去超過放置席を安全に停止化）。起動時およびWatchからの `REQUEST_SYNC` 受信時、さらにメインタイマー送信時にもサロン画面を開く前に自動で客席を同期同梱。<br>③**Watch側ローカル席フォールバック配備 (`targets/watch/content.swift`)**: `WatchSessionManager` および `ContentView` の `timers` 初期値に「1番席 (サンプル)」を配備。iPhoneとの通信確立前や初回起動時でも「客席を選ぶ場所がない」状態を完全回避。<br>④**モジュラー文字盤タップ時のマップ表示復旧 ＆ 初回起動時マップ展開保証 (`targets/watch/content.swift`)**: アラーム誤爆によって画面がロックされモジュラーからのディープリンク（`assisttimer://open-map`）が無視されていた問題を解消。`.onOpenURL` 時に未消火アラームがあれば即座に `alarm.stop()` して画面を解放し、確実にマップを展開。初回起動時（`.onAppear`）も確実に `showingThumbnailMap = true` を設定。<br>⑤**新ビルド番号 `67` への更新**: TestFlight実機テストに向けた堅牢性の向上。 |
 | 2026-10-22 | **メインタイマーのREQUEST_SYNC即時応答・起動時初期同期、formatSeatsPayload null安全性ガード強化、およびWatch側メインタイマー操作の完全即時反映 (Build 66)** | ①**ホーム画面（`HomeScreen.js`）での `REQUEST_SYNC` 応答実装**: サロン画面を開かずにホーム画面（タイマー画面）だけで計測している際、Watchから送信される「最新データをちょうだい（`REQUEST_SYNC`）」要求を `HomeScreen.js` が受け取っていなかった盲点を抜本解決。Watch点灯・同期要求を受信した瞬間、現在の最新確定状態（稼働中なら残り秒数・終了時刻、停止中なら設定秒数）を即座に `syncMainTimerToWatch` で返送するハンドラを実装。サロン画面の有無にかかわらず、Watchを開いた瞬間に100%確実にメインタイマーが同期される体制を確立。<br>②**ホーム画面マウント時（起動時）の初期同期送信**: iPhoneアプリ起動時に前回の状態との差分フラグが全て `false` であったため初期同期が送られていなかった問題を解消。マウント直後に `getLatestMainTimerState()` により確定初期状態を1度確実にWatchへ送信。<br>③**客席データフォーマット (`formatSeatsPayload`) の null 安全性ガード強化**: `seatsList` 内の要素検証（`s && typeof s === 'object' && s.id`）および `.filter(Boolean)` を追加し、万が一の不正データ混入時でもクラッシュしない堅牢性を確立。<br>④**Watch側メインタイマー操作ヘルパーのローカル `@State` 即時同期**: `MainTimerActionSheet` からの操作時（スタート・一時停止・リセット・時間変更・微調整）に `sessionManager.mainTimer` だけでなく `self.mainTimer`（`ContentView` ローカル状態）も即時代入し、シートを閉じた瞬間の画面再描画遅延をゼロ化。<br>⑤**新ビルド番号 `66` への更新準備**: TestFlight実機テストに向けた堅牢性の向上。 |
 | 2026-10-22 | **メインタイマー同期とサロン客席共有タイマーの完全分離・保護ガード確立、計測終了時の共有タイマー消失バグ根絶、およびApple Watch側メインタイマー双方向連動の完全復旧 (Build 65)** | ①**客席データ消失バグの根本根絶（`updateApplicationContext` マージ保持）**: iPhone側メインタイマー専用同期ヘルパー（`syncMainTimerToWatch`）実行時、最新の客席キャッシュ（`_cachedCurrentSeats`）が存在する場合は `formatSeatsPayload` により `seats` 配列を保持してマージ送信するよう刷新。Apple Watch通信仕様（`WCSession.updateApplicationContext`）の「渡された辞書でコンテキスト全体を上書き置換する」OS挙動による客席データの抹消を完全防止。<br>②**サロン画面の過剰な毎秒監視トリガー（`useEffect`）の完全分離**: `SalonWorkScreen.js` の客席同期 `useEffect` から `mainTimerState` を完全に排除。メインタイマーが動いている間、1秒進むごとにサロン画面が客席全データをWatchへ再送しようとする不要通信（Bluetooth帯域パンク）をゼロ化。さらにメインタイマー計測終了（保存モーダル表示・保存実行）時に、サロン画面が未初期化の空配列客席を誤送信する事故を完全根絶。データ未ロード時（`!isDataLoaded`）の送信ブロックも完備。<br>③**客席キャッシュの空配列クリア防止ガード (`syncSeatsToWatch`)**: `syncSeatsToWatch` において、`currentSeats` が空配列や未初期化の場合でも、既存の有効な客席キャッシュがある場合は絶対に破棄せず保持する安全防護ロジックを確立。<br>④**Watch側客席タイマー全消滅の鉄壁防護壁 (`WatchSessionManager`)**: `WatchSessionManager.processReceivedData` において、受信座席データが空配列（`parsed.isEmpty && !self.timers.isEmpty`）の際、タイマーが稼働中か停止中（00:00や待機中）かにかかわらず、空配列による上書き全消滅を鉄壁ブロック。明示的な全席削除フラグ（`clearAllSeats == true`）以外の誤送信による共有タイマー消失を根絶。<br>⑤**Watch側 `ContentView` のメインタイマー双方向連動の完全復旧**: `ContentView` に `@State private var mainTimer: SeatTimerItem? = nil` を新設し、`onReceive(sessionManager.$mainTimer)` を配備。iPhoneからのメインタイマー更新を確実にSwiftUIの画面再描画へ直結。さらに `cardsScrollView` 内の `MainTimerCard` においてローカル状態 `self.mainTimer` を即時反映し、Watch側からのスタート・一時停止・リセット操作のレスポンスとiPhoneとの双方向同期を確実に確立。<br>⑥**新ビルド番号 `65` への更新準備**: TestFlight実機テストに向けた堅牢性の向上。 |
@@ -2122,8 +2123,102 @@ Apple Watch の文字盤モジュール（コンプリケーション）をタ�
    - 既に参加済みのサロンコードを入力した場合は二重作成せず、既存のサロンへ即座に切り替えてユーザーへ通知。
    - 現在選択中のサロン自身のコードを入力した場合の誤操作も即座にガード。
 
+---
 
+## 31. Apple Watch メインタイマー双方向操作の完全復旧、共有タイマー2段階アラーム（本体タイマー不発解消）連動、および起動時ゴーストアラーム・誤爆振動の完全根絶仕様 (Build 68)
 
+### 31.1. 背景・現場課題の所在
 
+美容師のサロンワークおよび技術練習における現場実機検証（TestFlight Build 67）において、以下の重大な不具合・課題が判明した：
 
+1. **Apple Watch メインタイマーがWatch側から操作できない（作動しない）**:
+   - スマホ（iPhone）側からメインタイマーを作動させるとApple Watch側には即座に反映されるが、Apple Watch側からスタートや時間設定を行うと、タイマーが作動しなかったり、意図しない挙動（初期化や無反応）になってしまう。
+2. **共有タイマーの2回目振動（本体タイマー）が不発になる**:
+   - サロン共有タイマーにおいて、放置時間途中の「チェック用タイマー」と放置時間終了の「本体タイマー」の2段階構成で運用している際、チェック用タイマーが鳴った後に、本来鳴るべき本体タイマーの振動・アラームが2回目に出ない場合がある。
+3. **TestFlight アプリ起動直後に突然バイブレーションが暴発する（ゴーストアラーム）**:
+   - TestFlightでアプリを更新・起動した瞬間、手首（Apple Watch）やスマホ（iPhone）が突如として激しく振動し始める。過去に終了・放置されたタイマーの残骸データが起動時に誤判定されてアラームが誤爆していた。
+4. **その他、Watch ⇄ iPhone 間の整合性の乱れ**:
+   - ヘルプ工程名（シャンプー、コーミング等）の英語IDと日本語表記の食い違いによるバッジ・ボタン欠落。
+   - ユーザー名保存キーの分散（`user_name` と `salon_user_name`）。
+   - 準備中カウントダウンの中止時に初期設定秒数が元に戻らない問題。
+
+---
+
+### 31.2. 原因分析とアーキテクチャ上の盲点
+
+#### ① Apple Watch メインタイマー連動の不全
+- **`applyTimeInSecondsRef` 評価順序の不整合 (`HomeScreen.js`)**:
+  - Watchから `MAIN_TIMER_START` や `MAIN_TIMER_SET_TIME` を受信した際、`handleMainTimerActionDispatch` 内で `applyTimeInSecondsRef.current` が古い値（または `null`）のまま `toggleTimer()` が実行されていた。
+  - その結果、Watchから指定された秒数ではなく前回の残留タイムでスタートしたり、停止中の秒数再設定が無視されてタイマーが作動しない不具合が発生していた。
+- **準備カウントダウン（5秒）の同期保持抜け**:
+  - Watchからスタートした際、iPhone側の準備カウントダウン有効設定（`isCountdownConfigEnabled`）と秒数（`countdownConfigSeconds`）が即時に Watch 側に反映されず、Watch側が「稼働中（緑）」と「準備中（黄）」の間で一瞬フリップしたり、状態が破棄されていた。
+- **Watch側ローカルホールド時間の過長と即時解除漏れ (`content.swift`)**:
+  - Watch側 `processReceivedData` のローカル保護時間（`mainTimerLocalHoldSeconds`）が10秒と長すぎたため、ユーザーがWatchから操作した後にiPhoneから返ってきた最新確定パケットが最大10秒間破棄され続けていた。
+  - さらに `SET_TIME` や `ADJUST` を実行した際にローカル保護が解除されず、iPhoneからの確定状態反映がブロックされていた。
+
+#### ② 共有タイマー2段階アラーム（本体タイマー不発）の根本原因
+- **`alarm.swift` における `isOvertime` 即時キャンセルの弊害**:
+  - 従来のロジックでは、終了時刻をコンマ数秒過ぎたタイマーが「超過中（`isOvertime == true`）」とみなされ、スマートアラームや通知スケジュールから即座に破棄（キャンセル）されていた。
+  - サロン共有タイマーでは、チェックタイマー終了後に本体タイマーが0:00に到達した際、iPhoneとの同期遅延やミリ秒端数ズレによって「到達した瞬間に超過判定」となり、アラームイベントが自己消火して2回目の振動が一切発生しない状態に陥っていた。
+- **`WKExtendedRuntimeSession`（スマートアラーム）引き継ぎの断絶**:
+  - watchOSのスマートアラームは同時に1件しか登録できないため、第1段階の「チェック時間」にセッションが割り当てられる。
+  - チェック時間到達時にユーザーが「止める」を押した際、前セッションの終了ライフサイクルやバックグラウンド移行のタイミングによって、第2段階の「本体タイマー」へのセッション再スケジュールがスキップされ、スマートアラームが予約されないまま画面が消灯していた。
+- **未消火チェックタイマーによる本体タイマーブロック**:
+  - チェックタイマーが鳴った際にユーザーが施術に集中していてアラームを停止せず、そのまま本体タイマーの終了時刻（0:00）に到達した場合、チェックタイマーのアラームが画面やセッションを占有し続け、本体タイマーの2回目アラームが登録・発火できない状態になっていた。
+
+#### ③ TestFlight 起動直後のバイブレーション暴発（ゴーストアラーム）
+- **iPhone側: 過去放置タイマーの未サニタイズ送信**:
+  - `loadInitialData` および `ensureSalonSeatsCached` において、AsyncStorageに保存されていた前回の客席タイマーデータがそのまま読み込まれ、終了時刻が過去数時間前〜数日前の「超過放置状態」のまま Watch へ同期送信されていた。
+  - さらに `getDefaultInitialSeats` で生成される初期サンプル席（1番席）が意図せず過去のタイムスタンプを持ってしまうことがあった。
+- **Watch側: `UserDefaults` の `armed` 残留と不要な通知再登録**:
+  - `targets/watch/alarm.swift` では、一度アラーム監視対象（`armed`）となったタイマーIDが `UserDefaults` に最大12時間保存されていた。
+  - アプリをアップデートして初回起動した際、この12時間前の `armed` リストが残存しており、起動の瞬間に「まだ止めていないアラームがある！」と誤判定され、0.3秒間隔の激震マックス振動（`.failure` / `.notification`）が発動していた。
+  - また `WCSession.updateApplicationContext` の辞書保存時に `notification` キーが残留し、次回復帰時に不要なアラーム消火・発火ループがトリガーされていた。
+
+---
+
+### 31.3. 詳細改修仕様
+
+#### 1. Apple Watch メインタイマー連動の完全復旧 (`HomeScreen.js`, `content.swift`)
+1. **評価順序の是正と即時Ref適用 (`HomeScreen.js`)**:
+   - `handleMainTimerActionDispatch` において、Watchから渡された `actionData.timeInSeconds` を最優先で `applyTimeInSecondsRef.current` に代入。
+   - `toggleTimer(true)` 実行前に確実に目標秒数（`targetTime`）と残り秒数（`remainingTime`）を同期更新し、Watchからのスタート・時間設定が100%確実に即座に反映されるよう改善。
+2. **準備カウントダウン（5秒）の同期保証**:
+   - Watchからスタートした際、iPhone側の準備カウントダウン設定が有効であれば、Watch側へも即時に `isPreCountingDown: true` と `preCountdownSeconds`、終了エポックを送信。Watch側画面も即座に黄色パルス「準備中 00:05」として起動し、端末間のカウントダウンがミリ秒単位で完全に同期。
+3. **Watch側ローカルホールド時間の最適化と即時解除 (`content.swift`)**:
+   - `mainTimerLocalHoldSeconds` を 10.0秒 から **3.5秒** に短縮。実機通信における操作直後の指連打を保護しつつ、iPhoneからの確定状態への復帰応答速度を大幅向上。
+   - `SET_TIME` や `ADJUST` アクションを受信した瞬間にローカルホールドを解除し、iPhoneから送られてくる新しいタイムを即座にUIへ反映。
+
+#### 2. 共有タイマー2段階アラーム（本体タイマー不発解消）連動 (`alarm.swift`, `SalonWorkScreen.js`)
+1. **`isOvertime` による即時キャンセル撤廃とミリ秒丸め誤差吸収 (`alarm.swift`)**:
+   - `alarm.swift` 内のアラームスケジュール判定において、終了時刻が現在時刻と重なる・直後である場合に `isOvertime` で切り捨てていた判定を完全撤廃。
+   - `isSameTarget` により ±2秒 のミリ秒丸め誤差を吸収し、0:00到達時のイベントを確実に保持。
+2. **スマートアラーム引き継ぎチェーン（`smartAlarmCompletedKeys`）**:
+   - チェック用タイマーのアラームを停止した際、そのキーを `smartAlarmCompletedKeys` に記録し、同一セッションライフサイクル内で直ちに残存する本体タイマーの終了時刻を検知。
+   - バックグラウンド移行前（画面点灯中）の0ミリ秒で本体タイマーのスマートアラーム（`WKExtendedRuntimeSession`）を確実に引き継ぎ予約。
+3. **未消火チェックタイマーの自動完了統合**:
+   - チェックタイマーのアラームが停止されないまま本体タイマーの終了時刻（0:00）に到達した場合、チェックタイマーを自動的に「完了」扱いとして消火し、本体タイマーの2回目激震マックス振動（`.failure` / `.notification`）を最優先で鳴動開始。
+4. **TimeSensitive 連続振動の完全保証**:
+   - 画面消灯中（スリープ中）であっても、チェックタイマー・本体タイマーの双方がそれぞれ到達時に確実に Taptic Engine を激しく振動させる高密度リピート通知（5秒〜10秒間隔）を維持。
+
+#### 3. TestFlight 起動直後のバイブレーション暴発（ゴーストアラーム）の完全根絶
+1. **iPhone側: 読み込み時自動サニタイズ (`sanitizeLoadedSeats`)**:
+   - `src/screens/SalonWorkScreen.js` に `sanitizeLoadedSeats` を実装。
+   - `loadInitialData` および `ensureSalonSeatsCached` でAsyncStorageから客席データをロードする際、終了時刻が過去（現在時刻より前）のタイマーを自動的に検知し、安全な停止状態（`isRunning: false`, `isOver: false`, `status: 'paused'`, `targetEndTimestamp: null`, `remainingSeconds: 0`）へと一括クリーンアップ。
+   - `getDefaultInitialSeats` で生成される初期サンプル席も稼働フラグを持たない待機状態（0:00）として初期化。
+2. **Watch側: 起動時ゴーストアラーム消火と残留キャッシュの無効化 (`alarm.swift`)**:
+   - Watchアプリ起動時、終了時刻がすでに過ぎている過去イベントが `UserDefaults` やメモリ上に存在する場合、アラームを鳴動させずに即座に `armed` リストから破棄。
+   - `WCSession.updateApplicationContext` の辞書保存時に `notification` キーを除外し、再起動時に古い通知ペイロードが再トリガーされる問題を根絶。
+   - `SeatTimerItem` に `hasAlertedHelpUnassigned` を保持させ、未アサイン通知の多重暴発を防止。
+
+#### 4. Watch ⇄ iPhone 間の整合性・表記ゆれ向上
+1. **ヘルプ工程名（シャンプー、コーミング等）の双方向正規化 (`normalizeHelpProcess`)**:
+   - 日本語表記（「シャンプー」「コーミング」「チェック」「流し」「ドライ」）と英語ID（`shampoo`, `combing`, `check`, `rinse`, `dry`）の双方向変換を `SalonWorkScreen.js` および `targets/watch/content.swift` に完全実装。
+   - Watch側の席カードやアラーム画面で工程バッジや連動ボタンが欠落する不具合を解消。
+2. **ユーザー名ストレージキーの統一**:
+   - iPhone側の表示名保存キー `user_name` と `salon_user_name` を相互参照・統合し、初回起動時や設定変更時にニックネームが「スタッフ」に巻き戻る現象を防止。
+3. **準備中カウントダウンの中止時復元**:
+   - カウントダウン中にWatchまたはiPhoneから中止（キャンセル）された際、タイマーが0秒にならず元の初期設定秒数（例: 20分）に正しく復元されるよう `preCountdownCancelSeconds` を保持。
+4. **スリープ復帰時タイムスタンプの同期的整合性**:
+   - 端末がスリープから復帰した際、古いローカルキャッシュではなく現在時刻（`Date.now()`）から逆算した正確な残り秒数を即座に再描画するよう同期処理を堅牢化。
 
