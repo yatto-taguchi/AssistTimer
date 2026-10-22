@@ -215,12 +215,76 @@ export const formatSeatsPayload = (seatsList) => {
     .filter(Boolean);
 };
 
+// ★ アプリ起動時（サロンタブ未選択時）でも客席キャッシュを確実に用意するヘルパー
+export const ensureSalonSeatsCached = async () => {
+  if (Array.isArray(_cachedCurrentSeats) && _cachedCurrentSeats.length > 0) {
+    return _cachedCurrentSeats;
+  }
+  try {
+    const savedName = await AsyncStorage.getItem('@salon_user_name');
+    const activeUserName = (savedName && savedName.trim()) ? savedName.trim() : 'スタイリスト';
+    _cachedUserName = activeUserName;
+
+    const savedSeatsJson = await AsyncStorage.getItem('@salon_saved_seats');
+    let loadedSeats = getDefaultInitialSeats(activeUserName);
+    if (savedSeatsJson) {
+      try {
+        const parsed = JSON.parse(savedSeatsJson);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          loadedSeats = parsed;
+        }
+      } catch (e) {
+        console.warn('Failed to parse saved seats in ensureSalonSeatsCached', e);
+      }
+    }
+
+    // ★ 安全サニタイズ: 終了時刻が大幅に過去（60秒以上前）の稼働中タイマーは停止状態に正規化し、Watchでのゴーストアラーム誤爆を未然防止
+    const now = Date.now();
+    loadedSeats = loadedSeats.map((seat) => {
+      if (seat && seat.status === 'running' && seat.targetEndTimestamp && seat.targetEndTimestamp < now - 60000) {
+        return {
+          ...seat,
+          status: 'idle',
+          pausedRemainingSeconds: 0,
+          targetEndTimestamp: 0,
+        };
+      }
+      return seat;
+    });
+
+    _cachedCurrentSeats = loadedSeats;
+
+    const savedMembersJson = await AsyncStorage.getItem('@salon_staff_members');
+    if (savedMembersJson) {
+      try {
+        const parsed = JSON.parse(savedMembersJson);
+        if (Array.isArray(parsed)) {
+          _cachedStaffMembers = normalizeStaffMembers(parsed);
+        }
+      } catch (e) {
+        console.warn('Failed to parse saved staff members in ensureSalonSeatsCached', e);
+      }
+    }
+    return loadedSeats;
+  } catch (e) {
+    console.warn('[SalonWorkScreen] ensureSalonSeatsCached failed:', e);
+    const defaultSeats = getDefaultInitialSeats(_cachedUserName || 'スタイリスト');
+    _cachedCurrentSeats = defaultSeats;
+    return defaultSeats;
+  }
+};
+
 // ★ Apple Watchへのメインタイマー専用同期ヘルパー（最新客席キャッシュを保持してコンテキスト上書き消失を完全防止）
 export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
   if (Platform.OS !== 'ios') return;
   try {
     const state = mainState || _cachedMainTimerState;
     if (!state) return;
+
+    // ★ サロンタブをまだ開いていない場合でも、客席キャッシュ（保存データまたは1番席サンプル）を自動事前ロード！
+    if (!Array.isArray(_cachedCurrentSeats) || _cachedCurrentSeats.length === 0) {
+      await ensureSalonSeatsCached();
+    }
 
     const isRunning = !!state.isRunning;
     const isCountUp = isRunning && !!state.isCountUp;

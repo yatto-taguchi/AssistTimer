@@ -290,8 +290,19 @@ import WatchConnectivity
 // MARK: - iPhone (WCSession) 通信マネージャー
 class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     static let shared = WatchSessionManager()
-    
-    @Published var timers: [SeatTimerItem] = []
+    @Published var timers: [SeatTimerItem] = [
+        SeatTimerItem(
+            id: "seat-1",
+            seatNumber: 1,
+            seatLabel: "1番席 (サンプル)",
+            creatorName: "スタイリスト",
+            totalSeconds: 1200,
+            targetEndTime: Date().addingTimeInterval(1200),
+            isRunning: false,
+            pausedRemainingSeconds: 1200,
+            status: .normal
+        )
+    ]
     @Published var mainTimer: SeatTimerItem? = nil
     @Published var members: [String] = []
     @Published var currentUserName: String = "スタイリスト"
@@ -804,8 +815,20 @@ struct ContentView: View {
     @State private var pendingSelectedSeatId: String? = nil
     @State private var pendingOpenMainTimerSheet: Bool = false
     
-    // 客席タイマー一覧（iPhone同期受信データ、初期値は空）
-    @State private var timers: [SeatTimerItem] = []
+    // 客席タイマー一覧（初期値は1番席サンプル、iPhone同期受信時に最新客席へ自動更新）
+    @State private var timers: [SeatTimerItem] = [
+        SeatTimerItem(
+            id: "seat-1",
+            seatNumber: 1,
+            seatLabel: "1番席 (サンプル)",
+            creatorName: "スタイリスト",
+            totalSeconds: 1200,
+            targetEndTime: Date().addingTimeInterval(1200),
+            isRunning: false,
+            pausedRemainingSeconds: 1200,
+            status: .normal
+        )
+    ]
     // メインタイマー（iPhoneホーム画面同期データ）
     @State private var mainTimer: SeatTimerItem? = nil
     
@@ -1052,21 +1075,24 @@ struct ContentView: View {
                     self.mainTimer = initialMain
                 }
                 alarm.update(timers: timers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                if !hasInitialOpenedMap && alarm.ringing.isEmpty {
+                // ★ 初回起動時は確実にサロン全体の客席マップ（バードビュー）をオープン
+                if !hasInitialOpenedMap {
                     hasInitialOpenedMap = true
                     showingThumbnailMap = true
                 }
             }
             .onOpenURL { url in
                 if url.host == "open-map" || url.scheme == "assisttimer" {
-                    if alarm.ringing.isEmpty {
-                        showingAddSeatSheet = false
-                        timeActionTargetId = nil
-                        checkActionTargetId = nil
-                        shampooActionTargetId = nil
-                        selectHelpStaffTargetId = nil
-                        showingThumbnailMap = true
+                    // ★ モジュラー文字盤タップ時: 未消火アラームがあれば即座に消火して画面を解放し、確実にマップを展開
+                    if !alarm.ringing.isEmpty {
+                        alarm.stop()
                     }
+                    showingAddSeatSheet = false
+                    timeActionTargetId = nil
+                    checkActionTargetId = nil
+                    shampooActionTargetId = nil
+                    selectHelpStaffTargetId = nil
+                    showingThumbnailMap = true
                 }
             }
         }

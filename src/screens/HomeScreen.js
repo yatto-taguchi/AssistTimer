@@ -22,7 +22,7 @@ import NewsModal from '../components/NewsModal';
 import { getUnreadNewsCount } from '../data/newsData';
 import { setAlarms, stopAllAlarms } from '../utils/alarmScheduler';
 import WatchConnectivity from 'watch-connectivity';
-import { syncSeatsToWatch, syncMainTimerToWatch, updateCachedMainTimerState } from './SalonWorkScreen';
+import { syncSeatsToWatch, syncMainTimerToWatch, updateCachedMainTimerState, ensureSalonSeatsCached } from './SalonWorkScreen';
 
 const MAIN_ALARM_KEY = 'main-timer';
 
@@ -1438,20 +1438,32 @@ export default function HomeScreen({ navigation }) {
   useEffect(() => {
     if (Platform.OS !== 'ios') return undefined;
 
-    // ★ マウント直後（アプリ起動時）に現在のメインタイマー状態を1度確実にWatchへ送信
-    const initialState = getLatestMainTimerState();
-    updateCachedMainTimerState(initialState);
-    syncMainTimerToWatch(initialState, { immediate: true });
+    // ★ マウント直後（アプリ起動時）に客席キャッシュ（1番席サンプル等）を確実に準備し、メインタイマー＆客席をWatchへ送信
+    ensureSalonSeatsCached().then(() => {
+      const initialState = getLatestMainTimerState();
+      updateCachedMainTimerState(initialState);
+      syncMainTimerToWatch(initialState, { immediate: true });
+    }).catch(() => {
+      const initialState = getLatestMainTimerState();
+      updateCachedMainTimerState(initialState);
+      syncMainTimerToWatch(initialState, { immediate: true });
+    });
 
     const unsubscribe = WatchConnectivity.subscribeActions((payload) => {
       if (!payload || !payload.action) return;
       const { action, actionId } = payload;
 
-      // ★ Watchからの同期要求（REQUEST_SYNC）に対し、サロン画面を開いていなくても即座にメインタイマー最新状態を返送！
+      // ★ Watchからの同期要求（REQUEST_SYNC）に対し、客席データ（1番席サンプル等）とメインタイマー最新状態を即座に同梱返送！
       if (action === 'REQUEST_SYNC') {
-        const latest = getLatestMainTimerState();
-        updateCachedMainTimerState(latest);
-        syncMainTimerToWatch(latest, { immediate: true });
+        ensureSalonSeatsCached().then(() => {
+          const latest = getLatestMainTimerState();
+          updateCachedMainTimerState(latest);
+          syncMainTimerToWatch(latest, { immediate: true });
+        }).catch(() => {
+          const latest = getLatestMainTimerState();
+          updateCachedMainTimerState(latest);
+          syncMainTimerToWatch(latest, { immediate: true });
+        });
         return;
       }
 

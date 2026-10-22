@@ -76,7 +76,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     func update(timers: [SeatTimerItem], mainTimer: SeatTimerItem? = nil, soundOn: Bool, currentUserName: String? = nil) {
         self.soundOn = soundOn
         var list: [WatchAlarmEvent] = []
-        if let m = mainTimer, m.isRunning {
+        let nowDate = Date()
+        // ★ 稼働中かつ「未来の終了時刻」を持つタイマーのみをアラーム対象とする（過去データや超過中タイマーによる誤爆を完全防止）
+        if let m = mainTimer, m.isRunning, !m.isOvertime, m.targetEndTime > nowDate.addingTimeInterval(-3) {
             let mainEpoch = Int(m.targetEndTime.timeIntervalSince1970)
             list.append(WatchAlarmEvent(
                 key: "\(m.id)-main@\(mainEpoch)",
@@ -85,7 +87,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 title: "⏱️ メインタイマー 終了"
             ))
         }
-        for t in timers where t.isRunning {
+        for t in timers where t.isRunning && !t.isOvertime && t.targetEndTime > nowDate.addingTimeInterval(-3) {
             let label = t.displaySeatName
             let mainEpoch = Int(t.targetEndTime.timeIntervalSince1970)
             list.append(WatchAlarmEvent(
@@ -94,7 +96,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 date: t.targetEndTime,
                 title: "\(label) タイム終了"
             ))
-            if !t.isCheckCompleted, let checkEnd = t.checkTargetEndTime, (t.checkTotalSeconds ?? 0) > 0 {
+            if !t.isCheckCompleted, let checkEnd = t.checkTargetEndTime, (t.checkTotalSeconds ?? 0) > 0, checkEnd > nowDate.addingTimeInterval(-3) {
                 let checkEpoch = Int(checkEnd.timeIntervalSince1970)
                 list.append(WatchAlarmEvent(
                     key: "\(t.id)-check@\(checkEpoch)",
@@ -181,13 +183,23 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private func refresh() {
         let now = Date()
         var changed = false
-        // ★ 終了予定時刻が直近（過去5分以内含む）のイベントを確実に arm 対象とし、0:00到達時の取りこぼしを防止
-        for e in events where armed[e.key] == nil && e.date > now.addingTimeInterval(-300) {
+        // ★ 終了予定時刻が未来（わずかな通信マージン-2秒以内）のイベントのみを確実に arm 対象とし、過去タイマーの誤爆を根絶
+        for e in events where armed[e.key] == nil && e.date >= now.addingTimeInterval(-2) {
             armed[e.key] = e.date.timeIntervalSince1970
             changed = true
         }
         if prune(now) { changed = true }
         if changed { persist() }
+
+        // ★ 稼働中のイベントが0件の場合、残留しているゴーストアラーム・保留通知を完全消火
+        if events.isEmpty && !ringing.isEmpty {
+            let ids = ringing.flatMap { k in repeatOffsets.indices.map { "\(notificationPrefix)\(k.key).\($0)" } }
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ids)
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
+            ringing = []
+            stopForegroundHaptics()
+            invalidateCurrentSession()
+        }
 
         let newRinging = currentRinging(now)
         if newRinging != ringing {
