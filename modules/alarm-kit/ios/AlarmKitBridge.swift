@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import UserNotifications
 #if canImport(AlarmKit)
 import AlarmKit
 import ActivityKit
@@ -31,7 +32,7 @@ enum AlarmKitBridge {
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) { return true }
     #endif
-    return false
+    return true
   }
 
   static func authorizationStatus() -> String {
@@ -40,7 +41,19 @@ enum AlarmKitBridge {
       return statusText(AlarmManager.shared.authorizationState)
     }
     #endif
-    return "unavailable"
+    let sema = DispatchSemaphore(value: 0)
+    var result = "notDetermined"
+    UNUserNotificationCenter.current().getNotificationSettings { settings in
+      switch settings.authorizationStatus {
+      case .authorized, .provisional, .ephemeral: result = "authorized"
+      case .denied: result = "denied"
+      case .notDetermined: result = "notDetermined"
+      @unknown default: result = "unknown"
+      }
+      sema.signal()
+    }
+    _ = sema.wait(timeout: .now() + 2.0)
+    return result
   }
 
   static func requestAuthorization() async -> String {
@@ -54,7 +67,12 @@ enum AlarmKitBridge {
       }
     }
     #endif
-    return "unavailable"
+    do {
+      let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
+      return granted ? "authorized" : "denied"
+    } catch {
+      return "error: \(error.localizedDescription)"
+    }
   }
 
   // 戻り値: "ok" / "past" / "denied" / "unavailable" / "error: …"
@@ -64,13 +82,16 @@ enum AlarmKitBridge {
       return await scheduleAlarm(key: key, timestampMs: timestampMs, title: title, soundOn: soundOn)
     }
     #endif
-    return "unavailable"
+    return await scheduleNotificationFallback(key: key, timestampMs: timestampMs, title: title, soundOn: soundOn)
   }
 
   // 予約の取り消し＋鳴っている最中なら停止
   static func cancel(key: String) -> Bool {
     // こちらから取り消した予約は「ユーザーが止めた」と判定しないよう、記録から先に消す
     removeRecord(key: key)
+    let notifId = "assisttimer.fallback.\(key)"
+    UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [notifId])
+    UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notifId])
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) {
       let id = uuid(for: key)
@@ -81,7 +102,48 @@ enum AlarmKitBridge {
       return done
     }
     #endif
-    return false
+    return true
+  }
+
+  private static func scheduleNotificationFallback(key: String, timestampMs: Double, title: String, soundOn: Bool) async -> String {
+    let center = UNUserNotificationCenter.current()
+    let settings = await center.notificationSettings()
+    if settings.authorizationStatus == .notDetermined {
+      _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+    }
+    let updatedSettings = await center.notificationSettings()
+    guard updatedSettings.authorizationStatus == .authorized ||
+          updatedSettings.authorizationStatus == .provisional ||
+          updatedSettings.authorizationStatus == .ephemeral else {
+      return "denied"
+    }
+
+    let notifId = "assisttimer.fallback.\(key)"
+    center.removePendingNotificationRequests(withIdentifiers: [notifId])
+    center.removeDeliveredNotifications(withIdentifiers: [notifId])
+
+    let fireDate = Date(timeIntervalSince1970: timestampMs / 1000.0)
+    let interval = fireDate.timeIntervalSinceNow
+    guard interval > 0.5 else { return "past" }
+
+    let content = UNMutableNotificationContent()
+    content.title = "Assist Timer"
+    content.body = title
+    if soundOn {
+      content.sound = .default
+    }
+    if #available(iOS 15.0, *) {
+      content.interruptionLevel = .timeSensitive
+    }
+
+    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
+    let request = UNNotificationRequest(identifier: notifId, content: content, trigger: trigger)
+    do {
+      try await center.add(request)
+      return "ok"
+    } catch {
+      return "error: \(error.localizedDescription)"
+    }
   }
 
   // MARK: - ユーザーがアラーム画面で「停止」した予約の検出

@@ -69,26 +69,63 @@ const MAX_ACTION_QUEUE = 100;
 const actionQueue = [];
 const actionConsumers = new Set();
 
+const pruneActionQueue = () => {
+  const cutoff = Date.now() - 120000; // 2分以上前の古い保留を整理
+  for (let i = actionQueue.length - 1; i >= 0; i -= 1) {
+    const item = actionQueue[i];
+    if (item.enqueuedAt < cutoff || (actionConsumers.size >= 2 && item.deliveredCount >= actionConsumers.size)) {
+      actionQueue.splice(i, 1);
+    }
+  }
+  updateDiagnostics({ queuedActions: actionQueue.length });
+};
+
 const deliverAction = (payload) => {
-  if (actionConsumers.size === 0) {
-    // 同期要求は何件たまっても結果は同じなので1件だけ保留
-    if (payload.action === 'REQUEST_SYNC' && actionQueue.some((p) => p.action === 'REQUEST_SYNC')) return;
-    actionQueue.push(payload);
+  const deliveredTo = new WeakSet();
+  let deliveredCount = 0;
+
+  actionConsumers.forEach((cb) => {
+    try {
+      cb(payload);
+      deliveredTo.add(cb);
+      deliveredCount += 1;
+    } catch (e) {
+      console.warn('[WatchConnectivity] action handler failed:', e);
+    }
+  });
+
+  // HomeScreen と SalonWorkScreen の両方（2消費者以上）に渡り切るまではキューに保持し、
+  // 遅れてマウント・データ読込完了した画面にも確実に取りこぼしなく届ける
+  if (actionConsumers.size < 2) {
+    if (payload.action === 'REQUEST_SYNC' && actionQueue.some((item) => item.payload.action === 'REQUEST_SYNC')) {
+      return;
+    }
+    actionQueue.push({
+      payload,
+      deliveredTo,
+      deliveredCount,
+      enqueuedAt: Date.now(),
+    });
     if (actionQueue.length > MAX_ACTION_QUEUE) {
       actionQueue.splice(0, actionQueue.length - MAX_ACTION_QUEUE);
     }
-    updateDiagnostics({ queuedActions: actionQueue.length });
-    return;
+    pruneActionQueue();
   }
-  actionConsumers.forEach((cb) => {
-    try { cb(payload); } catch (e) { console.warn('[WatchConnectivity] action handler failed:', e); }
-  });
 };
 
 const handleIncoming = (kind, body) => {
   if (!body) return;
   recordJsReceived(kind, body);
-  if (body.action) deliverAction(body);
+  if (body.action) {
+    // 予備ルート(userInfo/context)で数分〜数時間前の古い操作がアプリ再起動時にまとめて届いた場合は無視（起動直後の勝手な作動・振動を防止）
+    if ((kind === 'userInfo' || kind === 'context') && body.timestamp != null) {
+      const ageMs = Date.now() - Number(body.timestamp);
+      if (Number.isFinite(ageMs) && ageMs > 60000) {
+        return;
+      }
+    }
+    deliverAction(body);
+  }
 };
 
 const EVENT_BODY_KEYS = {
@@ -257,9 +294,9 @@ export const WatchConnectivity = {
         messageResult = '未接続のため即時送信なし';
       }
 
-      // ★ 即時通信（sendMessage）が未接続・失敗時、または相手への通知（タイマー停止・チェック完了）を含む場合は
-      //   バックグラウンドのWatch Extensionを起床させる transferUserInfo を併用して確実に届ける！
-      const needUserInfoFallback = !reachable || messageResult.startsWith('失敗') || !!data?.notification;
+      // ★ 相手への一時通知（タイマー停止・チェック完了）を含む場合で即時通信に失敗した時のみ
+      //   バックグラウンドのWatch Extensionへ transferUserInfo で届ける
+      const needUserInfoFallback = !!data?.notification && (!reachable || messageResult.startsWith('失敗'));
       if (needUserInfoFallback && typeof NativeModule.transferUserInfo === 'function') {
         try {
           await NativeModule.transferUserInfo(data);
@@ -269,7 +306,13 @@ export const WatchConnectivity = {
       }
 
       try {
-        const ok = await NativeModule.updateApplicationContext(data);
+        // ★ 永続保存される applicationContext には一時通知（notification）を含めない
+        //   （Watchアプリを起動するたびに過去の通知バナー＆バイブレーションが再発火するのを防止）
+        const contextPayload = data && typeof data === 'object' ? { ...data } : data;
+        if (contextPayload && typeof contextPayload === 'object' && 'notification' in contextPayload) {
+          delete contextPayload.notification;
+        }
+        const ok = await NativeModule.updateApplicationContext(contextPayload);
         contextResult = ok ? '保存OK' : '保存されず';
       } catch (ctxErr) {
         contextResult = `失敗: ${errorText(ctxErr)}`;
@@ -288,14 +331,21 @@ export const WatchConnectivity = {
     return { messageResult, contextResult };
   },
 
-  // ★ Watchからの操作を受け取る（登録時に保留中の操作を古い順にまとめて渡す）
+  // ★ Watchからの操作を受け取る（登録時に未受領の保留操作を古い順にまとめて渡す）
   // 戻り値: 解除用の関数
   subscribeActions: (callback) => {
     setupGlobalListeners();
     actionConsumers.add(callback);
-    const queued = actionQueue.splice(0, actionQueue.length);
-    updateDiagnostics({ queuedActions: 0 });
-    queued.forEach((payload) => {
+    const pendingForCallback = [];
+    actionQueue.forEach((item) => {
+      if (!item.deliveredTo.has(callback)) {
+        item.deliveredTo.add(callback);
+        item.deliveredCount += 1;
+        pendingForCallback.push(item.payload);
+      }
+    });
+    pruneActionQueue();
+    pendingForCallback.forEach((payload) => {
       try { callback(payload); } catch (e) { console.warn('[WatchConnectivity] action handler failed:', e); }
     });
     return () => {

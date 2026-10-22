@@ -8,6 +8,7 @@ import AlarmKit from 'alarm-kit';
 // 予定: { key: 一意な文字列, timestamp: 鳴らす時刻(ms), title: アラーム画面の表示 }
 
 const scheduledBySource = {}; // source -> Map(key -> { timestamp, title, soundOn, result })
+const initializedSources = new Set();
 let lastResult = '';
 const subscribers = new Set();
 // 予約（async）と停止が前後して「止めたのに予約が残る」ことがないよう、すべての操作を直列化する
@@ -68,6 +69,13 @@ const applyAlarms = async (source, desired, options) => {
   });
 
   let dirty = false;
+  // 初回同期時: 前回セッション（アプリ再起動やTestFlight更新前）のメインタイマー予約が残っていれば消火
+  if (!initializedSources.has(source)) {
+    initializedSources.add(source);
+    if (source === 'main' && !desiredMap.has('main-timer')) {
+      AlarmKit.cancel('main-timer');
+    }
+  }
   // ① 一覧から消えた予定を取り消す
   current.forEach((info, key) => {
     if (desiredMap.has(key)) return;

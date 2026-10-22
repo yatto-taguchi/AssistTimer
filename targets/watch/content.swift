@@ -303,7 +303,17 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             status: .normal
         )
     ]
-    @Published var mainTimer: SeatTimerItem? = nil
+    @Published var mainTimer: SeatTimerItem? = SeatTimerItem(
+        id: "main-timer",
+        seatNumber: 0,
+        seatLabel: "メインタイマー",
+        creatorName: "スタイリスト",
+        totalSeconds: 600,
+        targetEndTime: Date().addingTimeInterval(600),
+        isRunning: false,
+        pausedRemainingSeconds: 600,
+        isMainTimer: true
+    )
     @Published var members: [String] = []
     @Published var currentUserName: String = "スタイリスト"
     // ★ 相手からのリアルタイム操作通知（タイマー停止、チェック完了、シャンプー開始等）
@@ -344,9 +354,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     
     // ★ メインタイマーの直近ローカル操作保護（Watchで操作後、iPhoneからの古いスナップショットによる巻き戻し・超過復活を完全ブロック）
     private var lastMainTimerLocalActionTime: Date = Date.distantPast
-    private var lastMainTimerLocalActionType: String = "" // "RESET", "PAUSE", "START"
+    private var lastMainTimerLocalActionType: String = "" // "RESET", "PAUSE", "START", "SET_TIME", "ADJUST"
     private var lastMainTimerLocalStopEndTime: Double = 0
-    private let mainTimerLocalHoldSeconds: TimeInterval = 10.0
+    private let mainTimerLocalHoldSeconds: TimeInterval = 3.5
     
     func recordMainTimerLocalAction(_ actionType: String = "", endTime: Double = 0) {
         self.lastMainTimerLocalActionTime = Date()
@@ -489,7 +499,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     func processReceivedData(_ data: [String: Any], kind: String = "-") {
         // ★ 古いデータ（後から届いた保存データなど）は無視。
         //   10分以上古い場合は iPhone の時計が変わった可能性があるため受け入れる
-        if let ts = (data["timestamp"] as? NSNumber)?.doubleValue, data["seats"] != nil {
+        if let ts = (data["timestamp"] as? NSNumber)?.doubleValue, (data["seats"] != nil || data["mainTimer"] != nil) {
             if ts < lastPayloadTimestamp && lastPayloadTimestamp - ts < 600_000 {
                 self.lastReceivedKind = "\(kind)(古いデータのため無視)"
                 return
@@ -512,8 +522,14 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             self.members = membersArray
         }
         
+        let payloadTs = (data["timestamp"] as? NSNumber)?.doubleValue ?? (data["timestamp"] as? Double) ?? 0
+        let nowMs = Date().timeIntervalSince1970 * 1000.0
+        let isStaleSnapshot = (kind == "保存データ") || (payloadTs > 0 && nowMs - payloadTs > 60_000)
+
         // ★ 相手からのリアルタイム操作通知（タイマー停止、チェック完了、シャンプー開始等）
-        if let notif = data["notification"] as? [String: Any], let text = notif["text"] as? String, !text.isEmpty {
+        //   保存データ（applicationContext）や15秒以上前の古いデータでは発火させない（アプリ起動直後のバイブ暴発を防止）
+        let isRecentNotif = (kind != "保存データ") && (payloadTs <= 0 || abs(nowMs - payloadTs) <= 15_000)
+        if isRecentNotif, let notif = data["notification"] as? [String: Any], let text = notif["text"] as? String, !text.isEmpty {
             let colorHex = notif["color"] as? String ?? "#30D158"
             let sourceUser = notif["sourceUser"] as? String ?? ""
             if sourceUser.isEmpty || sourceUser != self.currentUserName {
@@ -533,7 +549,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         
         // メインタイマー同期（直近Watchローカル操作中も、iPhoneからの準備中カウントダウンや最新データは確実に反映）
         var didUpdateMain = false
-        if let rawMain = data["mainTimer"] as? [String: Any], let parsedMain = SeatTimerItem(dictionary: rawMain) {
+        if let rawMain = data["mainTimer"] as? [String: Any], var parsedMain = SeatTimerItem(dictionary: rawMain) {
+            // ★ 保存データや古いスナップショットで、すでに30秒以上前に終了している稼働中タイマーは停止として扱う（起動直後のバイブ暴発防止）
+            if isStaleSnapshot && parsedMain.isRunning && parsedMain.targetEndTime < Date().addingTimeInterval(-30) {
+                parsedMain.isRunning = false
+                parsedMain.pausedRemainingSeconds = parsedMain.totalSeconds
+            }
             let isRecentlyModifiedOnWatch = Date().timeIntervalSince(self.lastMainTimerLocalActionTime) < self.mainTimerLocalHoldSeconds
             
             if isRecentlyModifiedOnWatch {
@@ -553,7 +574,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         }
                     }
                 } else if self.lastMainTimerLocalActionType == "PAUSE" {
-                    if !parsedMain.isRunning {
+                    if !parsedMain.isRunning && !parsedMain.isPreCountingDown {
                         self.mainTimer = parsedMain
                         self.lastMainTimerLocalActionTime = Date.distantPast
                         didUpdateMain = true
@@ -564,6 +585,23 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         self.lastMainTimerLocalActionTime = Date.distantPast
                         didUpdateMain = true
                     }
+                } else if self.lastMainTimerLocalActionType == "SET_TIME" {
+                    if parsedMain.totalSeconds == self.mainTimer?.totalSeconds || parsedMain.isRunning || parsedMain.isPreCountingDown {
+                        self.mainTimer = parsedMain
+                        self.lastMainTimerLocalActionTime = Date.distantPast
+                        didUpdateMain = true
+                    }
+                } else if self.lastMainTimerLocalActionType == "ADJUST" {
+                    let curRem = self.mainTimer?.remainingSeconds ?? parsedMain.remainingSeconds
+                    if parsedMain.isRunning != self.mainTimer?.isRunning || abs(curRem - parsedMain.remainingSeconds) <= 5 {
+                        self.mainTimer = parsedMain
+                        self.lastMainTimerLocalActionTime = Date.distantPast
+                        didUpdateMain = true
+                    }
+                } else {
+                    self.mainTimer = parsedMain
+                    self.lastMainTimerLocalActionTime = Date.distantPast
+                    didUpdateMain = true
                 }
             } else {
                 // 通常同期: iPhone側の最新確定データを受容
@@ -595,6 +633,20 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 let nowDate = Date()
                 for i in parsed.indices {
                     let id = parsed[i].id
+                    // 保存データ（applicationContext）や古いスナップショットで、すでに30秒以上前に終了している稼働中席は停止状態に正規化
+                    if isStaleSnapshot && parsed[i].isRunning && parsed[i].targetEndTime < nowDate.addingTimeInterval(-30) {
+                        parsed[i].isRunning = false
+                        parsed[i].pausedRemainingSeconds = 0
+                        parsed[i].clearCheck()
+                    }
+                    // 既存の同一タイマーで発火済みの「ヘルプ未定アラート」フラグを引き継ぎ、同期のたびに再バイブするのを防止
+                    if let prev = self.timers.first(where: { $0.id == id }),
+                       prev.hasAlertedHelpUnassigned,
+                       abs(prev.targetEndTime.timeIntervalSince1970 - parsed[i].targetEndTime.timeIntervalSince1970) <= 2 {
+                        parsed[i].hasAlertedHelpUnassigned = true
+                    } else if isStaleSnapshot && parsed[i].isRunning && parsed[i].remainingSeconds <= 180 {
+                        parsed[i].hasAlertedHelpUnassigned = true
+                    }
                     guard let stop = localStops[id] else { continue }
                     let sameEnd = abs(parsed[i].targetEndTime.timeIntervalSince1970 - stop.end) < 2
                     if parsed[i].isRunning && sameEnd && nowDate.timeIntervalSince(stop.at) < localStopHoldSeconds {
@@ -708,17 +760,22 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     
     // ★ 実際の送信（即時ルート → 失敗時は予備ルート）
     private func deliver(_ payload: [String: Any], session: WCSession) {
+        let action = (payload["action"] as? String) ?? ""
         if session.isReachable {
             lastSendResult = "即時送信中…"
             session.sendMessage(payload, replyHandler: { [weak self] _ in
                 self?.recordSend("iPhone受信OK")
             }, errorHandler: { [weak self] error in
                 print("[WatchSession] sendMessage error: \(error.localizedDescription)")
-                session.transferUserInfo(payload)
+                if action != "REQUEST_SYNC" {
+                    session.transferUserInfo(payload)
+                }
                 self?.recordSend("即時失敗→予備ルート: \(error.localizedDescription)")
             })
         } else {
-            session.transferUserInfo(payload)
+            if action != "REQUEST_SYNC" {
+                session.transferUserInfo(payload)
+            }
             lastSendResult = "iPhone未接続→予備ルートで送信待ち"
         }
     }
@@ -1045,6 +1102,22 @@ struct ContentView: View {
             }
             .onReceive(ticker) { input in
                 now = input
+                // ★ 準備中カウントダウンが0秒に到達したらローカルでも即座に本番タイマー稼働へ移行
+                if var m = self.mainTimer ?? sessionManager.mainTimer,
+                   m.isPreCountingDown,
+                   let prepEnd = m.prepEndTime,
+                   input >= prepEnd {
+                    m.isPreCountingDown = false
+                    m.preCountdownSeconds = 0
+                    m.prepEndTime = nil
+                    m.isRunning = true
+                    let runSec = m.pausedRemainingSeconds > 0 ? m.pausedRemainingSeconds : m.totalSeconds
+                    m.targetEndTime = prepEnd.addingTimeInterval(TimeInterval(runSec))
+                    self.mainTimer = m
+                    sessionManager.mainTimer = m
+                    WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
+                    alarm.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+                }
                 checkUnassignedHelpAlerts()
                 alarm.tick()
             }
@@ -1054,8 +1127,10 @@ struct ContentView: View {
                 }
             }
             .onReceive(sessionManager.$mainTimer) { receivedMain in
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    self.mainTimer = receivedMain
+                if let receivedMain = receivedMain {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        self.mainTimer = receivedMain
+                    }
                 }
             }
             .onReceive(sessionManager.$currentUserName) { receivedName in
@@ -1480,8 +1555,8 @@ struct ContentView: View {
                         now: now,
                         onToggle: {
                             playHaptic(.click)
-                            let willPause = currentMain.isRunning || currentMain.isPreCountingDown
                             var m = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
+                            let willPause = m.isRunning || m.isPreCountingDown
                             if willPause {
                                 m.isRunning = false
                                 m.isPreCountingDown = false
@@ -1506,7 +1581,10 @@ struct ContentView: View {
                             sessionManager.mainTimer = m
                             WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
                             WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                            sessionManager.sendMainTimerAction(action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START")
+                            sessionManager.sendMainTimerAction(
+                                action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START",
+                                extra: willPause ? [:] : ["totalSeconds": m.totalSeconds]
+                            )
                         },
                         onReset: {
                             playHaptic(.click)
@@ -1654,7 +1732,7 @@ struct ContentView: View {
             id: "main-timer",
             seatNumber: 0,
             seatLabel: "メインタイマー",
-            creatorName: currentUserName ?? "スタイリスト",
+            creatorName: currentUserName.isEmpty ? "スタイリスト" : currentUserName,
             totalSeconds: 600,
             targetEndTime: Date().addingTimeInterval(600),
             isRunning: false,
@@ -1668,11 +1746,15 @@ struct ContentView: View {
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         let willPause = main.isRunning || main.isPreCountingDown
         if willPause {
+            if main.isPreCountingDown {
+                main.pausedRemainingSeconds = main.totalSeconds
+            } else {
+                main.pausedRemainingSeconds = max(0, Int(ceil(main.targetEndTime.timeIntervalSince(now))))
+            }
             main.isRunning = false
             main.isPreCountingDown = false
             main.preCountdownSeconds = 0
             main.prepEndTime = nil
-            main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(now)))
         } else {
             let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds || main.isOvertime)
             if isInitialStart && main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
@@ -1691,7 +1773,10 @@ struct ContentView: View {
         sessionManager.mainTimer = main
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-        sessionManager.sendMainTimerAction(action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START")
+        sessionManager.sendMainTimerAction(
+            action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START",
+            extra: willPause ? [:] : ["totalSeconds": main.totalSeconds]
+        )
     }
     
     private func handleStartMainTimer() {
@@ -1713,17 +1798,21 @@ struct ContentView: View {
         sessionManager.mainTimer = main
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START")
+        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START", extra: ["totalSeconds": main.totalSeconds])
     }
     
     private func handlePauseMainTimer() {
         playHaptic(.click)
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
+        if main.isPreCountingDown {
+            main.pausedRemainingSeconds = main.totalSeconds
+        } else {
+            main.pausedRemainingSeconds = max(0, Int(ceil(main.targetEndTime.timeIntervalSince(Date()))))
+        }
         main.isRunning = false
         main.isPreCountingDown = false
         main.preCountdownSeconds = 0
         main.prepEndTime = nil
-        main.pausedRemainingSeconds = max(0, Int(main.targetEndTime.timeIntervalSince(Date())))
         self.mainTimer = main
         sessionManager.mainTimer = main
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
@@ -1751,11 +1840,19 @@ struct ContentView: View {
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         main.totalSeconds = totalSec
         main.pausedRemainingSeconds = totalSec
-        if main.isRunning {
+        if main.isRunning && !main.isOvertime {
+            main.targetEndTime = Date().addingTimeInterval(TimeInterval(totalSec))
+        } else {
+            main.isRunning = false
+            main.isPreCountingDown = false
+            main.preCountdownSeconds = 0
+            main.prepEndTime = nil
             main.targetEndTime = Date().addingTimeInterval(TimeInterval(totalSec))
         }
         self.mainTimer = main
         sessionManager.mainTimer = main
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerSetTime(seconds: totalSec)
     }
     
@@ -1763,12 +1860,18 @@ struct ContentView: View {
         playHaptic(.click)
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         if main.isRunning {
-            main.targetEndTime = main.targetEndTime.addingTimeInterval(Double(deltaSec))
+            let baseEnd = main.isOvertime ? Date() : main.targetEndTime
+            main.targetEndTime = max(Date().addingTimeInterval(5), baseEnd.addingTimeInterval(Double(deltaSec)))
         } else {
-            main.pausedRemainingSeconds = max(0, main.pausedRemainingSeconds + deltaSec)
+            let nextSec = max(10, main.pausedRemainingSeconds + deltaSec)
+            main.pausedRemainingSeconds = nextSec
+            main.totalSeconds = nextSec
+            main.isRunning = false
         }
         self.mainTimer = main
         sessionManager.mainTimer = main
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAdjust(seconds: deltaSec)
     }
     
@@ -1776,7 +1879,7 @@ struct ContentView: View {
     private var thumbnailMapSheetView: some View {
         SeatThumbnailMapSheet(
             timers: timers,
-            mainTimer: sessionManager.mainTimer,
+            mainTimer: self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer(),
             currentUserName: currentUserName,
             now: now,
             onSelectSeat: { selectedSeat in
@@ -1799,8 +1902,7 @@ struct ContentView: View {
     
     @ViewBuilder
     private var mainTimerSheetView: some View {
-        let defaultMain = defaultMainTimer()
-        let currentMain = sessionManager.mainTimer ?? defaultMain
+        let currentMain = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         MainTimerActionSheet(
             item: currentMain,
             onStart: { handleStartMainTimer() },
@@ -2327,6 +2429,11 @@ struct MainTimerCard: View {
     var onOpenAction: (() -> Void)? = nil
     
     private var progressRatio: Double {
+        if item.isPreCountingDown {
+            let total = max(1, item.countdownConfigSeconds)
+            let rem = max(0, item.prepRemainingSeconds)
+            return min(1.0, Double(rem) / Double(total))
+        }
         let total = max(1, item.totalSeconds)
         let rem = max(0, item.remainingSeconds)
         return min(1.0, Double(rem) / Double(total))
@@ -2335,6 +2442,8 @@ struct MainTimerCard: View {
     private var cardBorderColor: Color {
         if item.isOvertime {
             return Color(hex: "#FF453A").opacity(0.6)
+        } else if item.isPreCountingDown {
+            return Color(hex: "#FFD60A").opacity(0.6)
         } else if item.isRunning {
             return Color(hex: "#30D158").opacity(0.55)
         } else {
@@ -2345,6 +2454,8 @@ struct MainTimerCard: View {
     private var cardBackgroundColor: Color {
         if item.isOvertime {
             return Color(hex: "#FF453A").opacity(0.18)
+        } else if item.isPreCountingDown {
+            return Color(hex: "#FFD60A").opacity(0.16)
         } else if item.isRunning {
             return Color(hex: "#30D158").opacity(0.14)
         } else {
@@ -2355,6 +2466,8 @@ struct MainTimerCard: View {
     private var progressGradient: LinearGradient {
         if item.isOvertime {
             return LinearGradient(colors: [Color(hex: "#FF453A"), Color(hex: "#FF6961")], startPoint: .leading, endPoint: .trailing)
+        } else if item.isPreCountingDown {
+            return LinearGradient(colors: [Color(hex: "#FFD60A"), Color(hex: "#FF9F0A")], startPoint: .leading, endPoint: .trailing)
         } else {
             return LinearGradient(colors: [Color(hex: "#30D158"), Color(hex: "#63E6E2")], startPoint: .leading, endPoint: .trailing)
         }
@@ -2365,7 +2478,7 @@ struct MainTimerCard: View {
     
     // 折りたたみ判定: 稼働中なら常に開く。00:00（停止中かつ残り<=0）で手動展開されていない場合は閉じる
     private var isCollapsed: Bool {
-        if item.isRunning { return false }
+        if item.isRunning || item.isPreCountingDown { return false }
         if item.isZero { return !isManuallyExpanded }
         return false
     }
@@ -2487,11 +2600,18 @@ struct MainTimerCard: View {
                             Text("超過")
                                 .font(.system(size: 12, weight: .heavy))
                                 .foregroundColor(Color(hex: "#FF453A"))
+                        } else if item.isPreCountingDown {
+                            Text("準備中")
+                                .font(.system(size: 12, weight: .heavy))
+                                .foregroundColor(Color(hex: "#FFD60A"))
                         }
-                        Text(formatSeconds(abs(item.remainingSeconds)))
+                        Text(formatSeconds(item.isPreCountingDown ? item.prepRemainingSeconds : abs(item.remainingSeconds)))
                             .font(.system(size: 32, weight: .black, design: .rounded))
                             .monospacedDigit()
-                            .foregroundColor(item.isOvertime ? Color(hex: "#FF453A") : Color(hex: "#30D158"))
+                            .foregroundColor(
+                                item.isOvertime ? Color(hex: "#FF453A") :
+                                (item.isPreCountingDown ? Color(hex: "#FFD60A") : Color(hex: "#30D158"))
+                            )
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
                     
@@ -2500,7 +2620,11 @@ struct MainTimerCard: View {
                             .font(.system(size: 9))
                         Text("\(item.totalSeconds / 60)分設定")
                             .font(.system(size: 10, weight: .semibold))
-                        if !item.isRunning {
+                        if item.isPreCountingDown {
+                            Text("• ⏳ カウントダウン中")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(Color(hex: "#FFD60A"))
+                        } else if !item.isRunning {
                             Text("• ⏸️ 停止中")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(Color(hex: "#FF9F0A"))
@@ -2535,16 +2659,17 @@ struct MainTimerCard: View {
             // ③ 下部ボタン群（スタート/一時停止 ＆ リセット）
             HStack(spacing: 8) {
                 Button(action: onToggle) {
+                    let isActive = item.isRunning || item.isPreCountingDown
                     HStack(spacing: 4) {
-                        Image(systemName: item.isRunning ? "pause.fill" : "play.fill")
+                        Image(systemName: isActive ? "pause.fill" : "play.fill")
                             .font(.system(size: 11, weight: .bold))
-                        Text(item.isRunning ? "一時停止" : "スタート")
+                        Text(item.isPreCountingDown ? "中止" : (item.isRunning ? "一時停止" : "スタート"))
                             .font(.system(size: 12, weight: .bold))
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 7)
-                    .background(item.isRunning ? Color(hex: "#FF9F0A").opacity(0.25) : Color(hex: "#30D158").opacity(0.25))
-                    .foregroundColor(item.isRunning ? Color(hex: "#FF9F0A") : Color(hex: "#30D158"))
+                    .background(isActive ? Color(hex: "#FF9F0A").opacity(0.25) : Color(hex: "#30D158").opacity(0.25))
+                    .foregroundColor(isActive ? Color(hex: "#FF9F0A") : Color(hex: "#30D158"))
                     .cornerRadius(8)
                 }
                 .buttonStyle(.plain)
@@ -5317,7 +5442,10 @@ struct SeatThumbnailMapSheet: View {
     }
     
     // サマリー集計（メインタイマーも稼働数に算入）
-    var isMainRunning: Bool { (mainTimer?.isRunning == true) && (mainTimer?.remainingSeconds ?? 0) > 0 }
+    var isMainRunning: Bool {
+        guard let m = mainTimer else { return false }
+        return (m.isRunning && m.remainingSeconds > 0) || m.isPreCountingDown
+    }
     var runningCount: Int {
         timers.filter { $0.isRunning && $0.remainingSeconds > 0 }.count + (isMainRunning ? 1 : 0)
     }

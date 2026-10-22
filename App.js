@@ -118,12 +118,12 @@ function MainTabs() {
       <Tab.Screen 
         name="Home" 
         component={HomeScreen} 
-        options={{ title: 'タイマー' }}
+        options={{ title: 'タイマー', lazy: false }}
       />
       <Tab.Screen 
         name="Salon" 
         component={SalonWorkScreen} 
-        options={{ title: 'サロン' }}
+        options={{ title: 'サロン', lazy: false }}
       />
       <Tab.Screen 
         name="Settings" 
