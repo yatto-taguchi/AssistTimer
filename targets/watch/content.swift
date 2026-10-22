@@ -284,6 +284,45 @@ extension SeatTimerItem {
             self.isNoHelpNeeded = false
         }
     }
+
+    func toDictionary() -> [String: Any] {
+        let statusStr: String
+        switch status {
+        case .shampoo: statusStr = "shampoo"
+        case .combing: statusStr = "combing"
+        case .check: statusStr = "check"
+        case .normal: statusStr = "normal"
+        }
+        var dict: [String: Any] = [
+            "id": id,
+            "seatNumber": seatNumber,
+            "creatorName": creatorName,
+            "totalSeconds": totalSeconds,
+            "targetEndTimestamp": targetEndTime.timeIntervalSince1970 * 1000.0,
+            "isRunning": isRunning,
+            "pausedRemainingSeconds": pausedRemainingSeconds,
+            "helpProcess": helpProcess,
+            "isRecruiting": isRecruiting,
+            "isNoHelpNeeded": isNoHelpNeeded,
+            "actionStatus": statusStr,
+            "isShampooing": (status == .shampoo),
+            "isCheckCompleted": isCheckCompleted,
+            "isCollapsed": isCollapsed,
+            "isMainTimer": isMainTimer,
+            "isPreCountingDown": isPreCountingDown,
+            "preCountdownSeconds": preCountdownSeconds,
+            "isCountdownConfigEnabled": isCountdownConfigEnabled,
+            "countdownConfigSeconds": countdownConfigSeconds
+        ]
+        if let seatLabel = seatLabel { dict["seatLabel"] = seatLabel }
+        if let shampooStaff = shampooStaff { dict["shampooStaff"] = shampooStaff }
+        if let checkTotalSeconds = checkTotalSeconds { dict["checkTotalSeconds"] = checkTotalSeconds }
+        if let checkTargetEndTime = checkTargetEndTime { dict["checkEndTimestamp"] = checkTargetEndTime.timeIntervalSince1970 * 1000.0 }
+        if let checkStaff = checkStaff { dict["checkStaff"] = checkStaff }
+        if let genre = genre { dict["genre"] = genre }
+        if let prepEndTime = prepEndTime { dict["prepEndTimestamp"] = prepEndTime.timeIntervalSince1970 * 1000.0 }
+        return dict
+    }
 }
 
 import WatchConnectivity
@@ -291,6 +330,11 @@ import WatchConnectivity
 // MARK: - iPhone (WCSession) 通信マネージャー
 class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     static let shared = WatchSessionManager()
+    private let savedTimersKey = "assisttimer.watch.savedTimers.v1"
+    private let savedMainTimerKey = "assisttimer.watch.savedMainTimer.v1"
+    private let savedUserNameKey = "assisttimer.watch.savedUserName.v1"
+    private let savedWatchMainEndKey = "assisttimer.watch.watchStartedMainEnd.v1"
+
     @Published var timers: [SeatTimerItem] = [
         SeatTimerItem(
             id: "seat-1",
@@ -303,7 +347,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             pausedRemainingSeconds: 1200,
             status: .normal
         )
-    ]
+    ] {
+        didSet {
+            let raw = timers.map { $0.toDictionary() }
+            UserDefaults.standard.set(raw, forKey: savedTimersKey)
+        }
+    }
     @Published var mainTimer: SeatTimerItem? = SeatTimerItem(
         id: "main-timer",
         seatNumber: 0,
@@ -314,9 +363,23 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         isRunning: false,
         pausedRemainingSeconds: 600,
         isMainTimer: true
-    )
+    ) {
+        didSet {
+            if let m = mainTimer {
+                UserDefaults.standard.set(m.toDictionary(), forKey: savedMainTimerKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: savedMainTimerKey)
+            }
+        }
+    }
     @Published var members: [String] = []
-    @Published var currentUserName: String = "スタイリスト"
+    @Published var currentUserName: String = "スタイリスト" {
+        didSet {
+            if !currentUserName.isEmpty {
+                UserDefaults.standard.set(currentUserName, forKey: savedUserNameKey)
+            }
+        }
+    }
     // ★ 相手からのリアルタイム操作通知（タイマー停止、チェック完了、シャンプー開始等）
     @Published var incomingNotification: (text: String, color: String)? = nil
     // ★ 「iPhoneと即時通信できる状態（isReachable）」のみ true。有効化だけでは true にしない
@@ -349,6 +412,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     private var localStops: [String: (at: Date, end: Double)] = [:]
     private let localStopHoldSeconds: TimeInterval = 60
     
+    // ★ Watch で完了・解除したチェックタイマー（すれ違い通信の古いデータでチェックタイマーが復活し、残りの全体タイマー予約を邪魔するのを防止）
+    private var localCheckClears: [String: (at: Date, checkEnd: Double)] = [:]
+    private let localCheckClearHoldSeconds: TimeInterval = 15
+    
     // ★ Watch 上で収納（計測終了）・展開（スリムバーをタップ）した席。停止中は iPhone の値より優先し、
     //   席が稼働したら消す（同期のたびにカードが勝手に開閉しないようにする）
     private var collapseOverrides: [String: Bool] = [:]
@@ -357,16 +424,78 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     private var lastMainTimerLocalActionTime: Date = Date.distantPast
     private var lastMainTimerLocalActionType: String = "" // "RESET", "PAUSE", "START", "SET_TIME", "ADJUST"
     private var lastMainTimerLocalStopEndTime: Double = 0
-    private let mainTimerLocalHoldSeconds: TimeInterval = 3.5
+    private let mainTimerLocalHoldSeconds: TimeInterval = 8.0
+    // ★ Watch 主導で開始し現在カウントダウン稼働中のメインタイマー終了予定時刻（iPhone スリープ中や SYNC_SEATS 同梱の未開始データによる強制停止を防止）
+    private var watchStartedMainTimerEndTime: Date? = nil {
+        didSet {
+            if let end = watchStartedMainTimerEndTime {
+                UserDefaults.standard.set(end.timeIntervalSince1970, forKey: savedWatchMainEndKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: savedWatchMainEndKey)
+            }
+        }
+    }
     
     func recordMainTimerLocalAction(_ actionType: String = "", endTime: Double = 0) {
         self.lastMainTimerLocalActionTime = Date()
         self.lastMainTimerLocalActionType = actionType
         self.lastMainTimerLocalStopEndTime = endTime
+        let nowEpoch = Date().timeIntervalSince1970
+        if actionType == "START" || (actionType == "SET_TIME" && endTime > nowEpoch) || (actionType == "ADJUST" && endTime > nowEpoch) {
+            if endTime > nowEpoch {
+                self.watchStartedMainTimerEndTime = Date(timeIntervalSince1970: endTime)
+            } else if let cur = self.mainTimer, (cur.isRunning || cur.isPreCountingDown) {
+                self.watchStartedMainTimerEndTime = cur.targetEndTime
+            }
+        } else if actionType == "RESET" || actionType == "PAUSE" || actionType == "SET_TIME" {
+            self.watchStartedMainTimerEndTime = nil
+        }
     }
     
     override init() {
         super.init()
+        let nowDate = Date()
+        if let savedName = UserDefaults.standard.string(forKey: savedUserNameKey), !savedName.isEmpty {
+            self.currentUserName = savedName
+        }
+        let savedWatchEndEpoch = UserDefaults.standard.double(forKey: savedWatchMainEndKey)
+        if savedWatchEndEpoch > nowDate.timeIntervalSince1970 {
+            self.watchStartedMainTimerEndTime = Date(timeIntervalSince1970: savedWatchEndEpoch)
+        }
+        if let rawMain = UserDefaults.standard.dictionary(forKey: savedMainTimerKey),
+           var restoredMain = SeatTimerItem(dictionary: rawMain) {
+            if restoredMain.isPreCountingDown {
+                let prepEnd = restoredMain.prepEndTime ?? nowDate
+                let runSec = restoredMain.pausedRemainingSeconds > 0 ? restoredMain.pausedRemainingSeconds : restoredMain.totalSeconds
+                let mainEnd = prepEnd.addingTimeInterval(TimeInterval(runSec))
+                restoredMain.targetEndTime = mainEnd
+                if prepEnd <= nowDate {
+                    restoredMain.isPreCountingDown = false
+                    restoredMain.preCountdownSeconds = 0
+                    restoredMain.prepEndTime = nil
+                    restoredMain.isRunning = true
+                }
+            }
+            // バックグラウンド起動（adopt）時は直近120秒以内のタイムアップ予定を稼働中のまま保護し、それより古い過去の放置データのみリセットする
+            if restoredMain.isRunning && restoredMain.targetEndTime <= nowDate.addingTimeInterval(-120) {
+                restoredMain.isRunning = false
+                restoredMain.pausedRemainingSeconds = restoredMain.totalSeconds
+            }
+            self.mainTimer = restoredMain
+        }
+        if let rawTimers = UserDefaults.standard.array(forKey: savedTimersKey) as? [[String: Any]] {
+            var restoredTimers = rawTimers.compactMap { SeatTimerItem(dictionary: $0) }
+            if !restoredTimers.isEmpty {
+                for i in restoredTimers.indices {
+                    if restoredTimers[i].isRunning && restoredTimers[i].targetEndTime <= nowDate.addingTimeInterval(-120) {
+                        restoredTimers[i].isRunning = false
+                        restoredTimers[i].pausedRemainingSeconds = 0
+                        restoredTimers[i].clearCheck()
+                    }
+                }
+                self.timers = restoredTimers
+            }
+        }
         if WCSession.isSupported() {
             let session = WCSession.default
             session.delegate = self
@@ -461,6 +590,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         localStops[seatId] = (at: Date(), end: endTime.timeIntervalSince1970)
     }
     
+    // ★ Watch 上でチェック完了・解除したことを記録（メインスレッドで呼ぶ）
+    func markLocalCheckClear(seatId: String, checkEndTime: Date?) {
+        localCheckClears[seatId] = (at: Date(), checkEnd: checkEndTime?.timeIntervalSince1970 ?? 0)
+    }
+    
+    func clearLocalCheckClear(seatId: String) {
+        localCheckClears[seatId] = nil
+    }
+    
     // ★ Watch 上で収納・展開したことを記録（nil = 記録を消す。メインスレッドで呼ぶ）
     func setCollapseOverride(seatId: String, collapsed: Bool?) {
         collapseOverrides[seatId] = collapsed
@@ -478,23 +616,27 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         timers[idx].isRecruiting = false
         timers[idx].isNoHelpNeeded = false
         let snapshot = timers
-        // アラーム処理の途中から呼ばれるため、予定の再計算は次のループで行う
-        DispatchQueue.main.async {
-            WatchAlarmCoordinator.shared.update(timers: snapshot, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled, currentUserName: self.currentUserName)
-            WidgetSync.save(timers: snapshot, mainTimer: self.mainTimer, userName: self.currentUserName)
-        }
+        WatchAlarmCoordinator.shared.update(timers: snapshot, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled, currentUserName: self.currentUserName)
+        WidgetSync.save(timers: snapshot, mainTimer: self.mainTimer, userName: self.currentUserName)
     }
     
-    // ★ チェックタイマーのアラーム「止める」などで、Watch の表示を即座にチェック完了にする
+    // ★ チェックタイマーのアラーム「止める」などで、Watch の表示を即座にチェック完了にし、残りの全体タイマーを新しいタイマーとして入れ直す
     func applyLocalCheckComplete(seatId: String) {
         guard let idx = timers.firstIndex(where: { $0.id == seatId }) else { return }
+        markLocalCheckClear(seatId: seatId, checkEndTime: timers[idx].checkTargetEndTime)
         timers[idx].isCheckCompleted = true
         timers[idx].checkStaff = self.currentUserName
+        timers[idx].checkTargetEndTime = nil
+        timers[idx].checkTotalSeconds = nil
         let snapshot = timers
-        DispatchQueue.main.async {
-            WatchAlarmCoordinator.shared.update(timers: snapshot, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled, currentUserName: self.currentUserName)
-            WidgetSync.save(timers: snapshot, mainTimer: self.mainTimer, userName: self.currentUserName)
-        }
+        WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
+            seatId: seatId,
+            timers: snapshot,
+            mainTimer: self.mainTimer,
+            soundOn: self.alarmSoundEnabled,
+            currentUserName: self.currentUserName
+        )
+        WidgetSync.save(timers: snapshot, mainTimer: self.mainTimer, userName: self.currentUserName)
     }
     
     func processReceivedData(_ data: [String: Any], kind: String = "-") {
@@ -548,20 +690,63 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
         }
         
-        // メインタイマー同期（直近Watchローカル操作中も、iPhoneからの準備中カウントダウンや最新データは確実に反映）
+        // メインタイマー同期（Watch主導の予約時刻を保護しつつ、iPhoneからの最新状態と同期）
         var didUpdateMain = false
         if let rawMain = data["mainTimer"] as? [String: Any], var parsedMain = SeatTimerItem(dictionary: rawMain) {
+            let nowDate = Date()
+            // ★ 準備中カウントダウン中でも本番終了予定時刻を確定させておく（すでに準備終了時刻を過ぎていれば本番稼働へ自動正規化）
+            if parsedMain.isPreCountingDown {
+                let prepEnd = parsedMain.prepEndTime ?? nowDate.addingTimeInterval(TimeInterval(max(1, parsedMain.preCountdownSeconds)))
+                let runSec = parsedMain.pausedRemainingSeconds > 0 ? parsedMain.pausedRemainingSeconds : parsedMain.totalSeconds
+                let mainEnd = prepEnd.addingTimeInterval(TimeInterval(runSec))
+                parsedMain.targetEndTime = mainEnd
+                if prepEnd <= nowDate && mainEnd > nowDate {
+                    parsedMain.isPreCountingDown = false
+                    parsedMain.preCountdownSeconds = 0
+                    parsedMain.prepEndTime = nil
+                    parsedMain.isRunning = true
+                }
+            }
             // ★ 保存データや古いスナップショットで、すでに終了している稼働中タイマーは停止として扱う（起動直後のバイブ暴発防止）
-            if isStaleSnapshot && parsedMain.isRunning && parsedMain.targetEndTime <= Date() {
+            if isStaleSnapshot && parsedMain.isRunning && parsedMain.targetEndTime <= nowDate {
                 parsedMain.isRunning = false
                 parsedMain.pausedRemainingSeconds = parsedMain.totalSeconds
             }
-            let isRecentlyModifiedOnWatch = Date().timeIntervalSince(self.lastMainTimerLocalActionTime) < self.mainTimerLocalHoldSeconds
+            // ★ Watch側ですでに稼働中または準備カウントダウン中のメインタイマーがあり、iPhoneから同一設定時間の稼働データ（往復同期）が返ってきた場合は、
+            //   Watch側で予約済みの targetEndTime / prepEndTime を維持してスマートアラームの破棄・再予約衝突を防止する
+            if let cur = self.mainTimer,
+               (cur.isRunning || cur.isPreCountingDown),
+               (parsedMain.isRunning || parsedMain.isPreCountingDown),
+               cur.totalSeconds == parsedMain.totalSeconds {
+                if abs(cur.targetEndTime.timeIntervalSince(parsedMain.targetEndTime)) <= 15 {
+                    parsedMain.targetEndTime = cur.targetEndTime
+                }
+                if cur.isPreCountingDown && parsedMain.isPreCountingDown,
+                   let curPrep = cur.prepEndTime, let incPrep = parsedMain.prepEndTime,
+                   abs(curPrep.timeIntervalSince(incPrep)) <= 15 {
+                    parsedMain.prepEndTime = curPrep
+                }
+            }
+            // ★ iPhone側が稼働中（isRunning または isPreCountingDown）として追いついたことが確認できたら、Watch単独保護フラグを解除して以降の双方向停止を有効化
+            if parsedMain.isRunning || parsedMain.isPreCountingDown {
+                self.watchStartedMainTimerEndTime = nil
+            }
+            let isRecentlyModifiedOnWatch = nowDate.timeIntervalSince(self.lastMainTimerLocalActionTime) < self.mainTimerLocalHoldSeconds
+            let isWatchOwnedActive: Bool = {
+                guard let watchEnd = self.watchStartedMainTimerEndTime,
+                      watchEnd > nowDate,
+                      let cur = self.mainTimer,
+                      (cur.isRunning || cur.isPreCountingDown) else { return false }
+                let msgType = (data["type"] as? String) ?? ""
+                let isUnstartedInitial = !parsedMain.isRunning && !parsedMain.isPreCountingDown && parsedMain.pausedRemainingSeconds == parsedMain.totalSeconds
+                // iPhoneがスリープ中・未反映のまま送られてきた SYNC_SEATS 同梱データや保存データ、未開始初期スナップショットによる強制停止を完全ブロック
+                return msgType == "SYNC_SEATS" || isStaleSnapshot || isUnstartedInitial
+            }()
             
             if isRecentlyModifiedOnWatch {
                 // ★ ローカルでリセットした場合: iPhone側が停止完了（isRunning == false）を返すまでリセット状態を死守し、超過のゾンビ復活を完全ブロック
                 if self.lastMainTimerLocalActionType == "RESET" {
-                    if !parsedMain.isRunning && (parsedMain.targetEndTime <= Date() || parsedMain.pausedRemainingSeconds == parsedMain.totalSeconds || parsedMain.pausedRemainingSeconds == 0) {
+                    if !parsedMain.isRunning && (parsedMain.targetEndTime <= nowDate || parsedMain.pausedRemainingSeconds == parsedMain.totalSeconds || parsedMain.pausedRemainingSeconds == 0) {
                         self.mainTimer = parsedMain
                         self.lastMainTimerLocalActionTime = Date.distantPast
                         didUpdateMain = true
@@ -606,8 +791,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     self.lastMainTimerLocalActionTime = Date.distantPast
                     didUpdateMain = true
                 }
+            } else if isWatchOwnedActive {
+                // ★ Watch主導で開始した稼働中メインタイマーは、iPhoneが追いつく前の未開始データやSYNC_SEATS同梱データで上書き停止させない
+                didUpdateMain = false
             } else {
-                // 通常同期: iPhone側の最新確定データを受容
+                // 通常同期: iPhone側で明示的にリセット・一時停止された場合（pausedRemainingSeconds > 0 で停止）はWatchのアラームも消火
+                if !parsedMain.isRunning && !parsedMain.isPreCountingDown && parsedMain.pausedRemainingSeconds > 0 {
+                    if let cur = self.mainTimer, (cur.isRunning || cur.isPreCountingDown || WatchAlarmCoordinator.shared.isMainTimerRingingOrDue) {
+                        WatchAlarmCoordinator.shared.acknowledgeMainTimer()
+                    }
+                }
                 self.mainTimer = parsedMain
                 didUpdateMain = true
             }
@@ -642,15 +835,39 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         parsed[i].pausedRemainingSeconds = 0
                         parsed[i].clearCheck()
                     }
-                    // 既存の同一タイマーで発火済みの「ヘルプ未定アラート」フラグを引き継ぎ、また初回同期時点ですでに残り180秒以下のタイマーは起動直後にバイブしないよう保護
-                    if let prev = self.timers.first(where: { $0.id == id }),
-                       prev.isRunning,
-                       abs(prev.targetEndTime.timeIntervalSince1970 - parsed[i].targetEndTime.timeIntervalSince1970) <= 2 {
-                        if prev.hasAlertedHelpUnassigned {
-                            parsed[i].hasAlertedHelpUnassigned = true
+                    // ★ 既存の同一タイマーがWatchで稼働中の場合、往復同期による数秒のズレで終了予定時刻が書き換わってスマートアラームが破棄されるのを防ぐ
+                    if let prev = self.timers.first(where: { $0.id == id }), prev.isRunning, parsed[i].isRunning {
+                        if prev.totalSeconds == parsed[i].totalSeconds,
+                           abs(prev.targetEndTime.timeIntervalSince(parsed[i].targetEndTime)) <= 15 {
+                            parsed[i].targetEndTime = prev.targetEndTime
+                            if prev.hasAlertedHelpUnassigned {
+                                parsed[i].hasAlertedHelpUnassigned = true
+                            }
+                        }
+                        if !prev.isCheckCompleted && !parsed[i].isCheckCompleted,
+                           prev.checkTotalSeconds == parsed[i].checkTotalSeconds,
+                           let prevChk = prev.checkTargetEndTime,
+                           let newChk = parsed[i].checkTargetEndTime,
+                           abs(prevChk.timeIntervalSince(newChk)) <= 15 {
+                            parsed[i].checkTargetEndTime = prevChk
                         }
                     } else if parsed[i].isRunning && parsed[i].remainingSeconds <= 180 {
                         parsed[i].hasAlertedHelpUnassigned = true
+                    }
+                    // ★ Watch で完了・解除したチェックタイマーが、すれ違いの古い通信パケットで復活するのを15秒間ブロック
+                    if let chkClear = localCheckClears[id] {
+                        let incomingChkEnd = parsed[i].checkTargetEndTime?.timeIntervalSince1970 ?? 0
+                        let sameCheck = (chkClear.checkEnd <= 0) || (incomingChkEnd > 0 && abs(incomingChkEnd - chkClear.checkEnd) < 15)
+                        if !parsed[i].isCheckCompleted && parsed[i].checkTargetEndTime != nil && sameCheck && nowDate.timeIntervalSince(chkClear.at) < localCheckClearHoldSeconds {
+                            parsed[i].isCheckCompleted = true
+                            parsed[i].checkTargetEndTime = nil
+                            parsed[i].checkTotalSeconds = nil
+                            if parsed[i].checkStaff == nil {
+                                parsed[i].checkStaff = self.currentUserName
+                            }
+                        } else if parsed[i].isCheckCompleted || parsed[i].checkTargetEndTime == nil || nowDate.timeIntervalSince(chkClear.at) >= localCheckClearHoldSeconds {
+                            localCheckClears[id] = nil
+                        }
                     }
                     guard let stop = localStops[id] else { continue }
                     let sameEnd = abs(parsed[i].targetEndTime.timeIntervalSince1970 - stop.end) < 2
@@ -690,7 +907,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     // ★ メインタイマー専用の操作送信（携帯の音出力フラグおよび一意なactionIdを付与）
     func sendMainTimerAction(action: String, extra: [String: Any] = [:]) {
         let clean = action.replacingOccurrences(of: "MAIN_TIMER_", with: "")
-        let endTime = self.mainTimer?.targetEndTime.timeIntervalSince1970 ?? 0
+        let isActive = (self.mainTimer?.isRunning == true || self.mainTimer?.isPreCountingDown == true)
+        let endTime = isActive ? (self.mainTimer?.targetEndTime.timeIntervalSince1970 ?? 0) : 0
         recordMainTimerLocalAction(clean, endTime: endTime)
         var fullExtra = extra
         if fullExtra["actionId"] == nil {
@@ -699,6 +917,14 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         if fullExtra["playSoundOnPhone"] == nil {
             let soundVal = UserDefaults.standard.object(forKey: "assisttimer.mainTimerPhoneSound") as? Bool ?? true
             fullExtra["playSoundOnPhone"] = soundVal
+        }
+        if let m = self.mainTimer, (m.isRunning || m.isPreCountingDown) {
+            if fullExtra["targetEndTimestamp"] == nil {
+                fullExtra["targetEndTimestamp"] = m.targetEndTime.timeIntervalSince1970 * 1000.0
+            }
+            if m.isPreCountingDown, let prepEnd = m.prepEndTime, fullExtra["prepEndTimestamp"] == nil {
+                fullExtra["prepEndTimestamp"] = prepEnd.timeIntervalSince1970 * 1000.0
+            }
         }
         sendActionToPhone(action: action, seatId: "main-timer", extra: fullExtra)
     }
@@ -846,7 +1072,7 @@ struct ContentView: View {
     @ObservedObject private var alarm = WatchAlarmCoordinator.shared
     
     // ログイン中の自ユーザー名（サロン設定・iPhone同期）
-    @State private var currentUserName: String = "スタイリスト"
+    @State private var currentUserName: String = WatchSessionManager.shared.currentUserName
     
     // 新規席追加シートフラグ
     @State private var showingAddSeatSheet = false
@@ -877,22 +1103,10 @@ struct ContentView: View {
     @State private var pendingSelectedSeatId: String? = nil
     @State private var pendingOpenMainTimerSheet: Bool = false
     
-    // 客席タイマー一覧（初期値は1番席サンプル、iPhone同期受信時に最新客席へ自動更新）
-    @State private var timers: [SeatTimerItem] = [
-        SeatTimerItem(
-            id: "seat-1",
-            seatNumber: 1,
-            seatLabel: "1番席 (サンプル)",
-            creatorName: "スタイリスト",
-            totalSeconds: 1200,
-            targetEndTime: Date().addingTimeInterval(1200),
-            isRunning: false,
-            pausedRemainingSeconds: 1200,
-            status: .normal
-        )
-    ]
-    // メインタイマー（iPhoneホーム画面同期データ）
-    @State private var mainTimer: SeatTimerItem? = nil
+    // 客席タイマー一覧（永続化データから即座に復元し、バックグラウンド再起動時の予定消滅を防止）
+    @State private var timers: [SeatTimerItem] = WatchSessionManager.shared.timers
+    // メインタイマー（永続化データから即座に復元）
+    @State private var mainTimer: SeatTimerItem? = WatchSessionManager.shared.mainTimer
     
     // ★ タイム確定時などの自動スクロール用ステート
     @State private var scrollToSeatId: String? = nil
@@ -1390,15 +1604,26 @@ struct ContentView: View {
                     switch ringingInfo.action {
                     case .check(let isCheckOnly):
                         Button(action: {
-                            alarm.stop()
+                            alarm.stop(sendToPhone: false)
                             WKInterfaceDevice.current().play(.success)
                             if let idx = timers.firstIndex(where: { $0.id == ringingInfo.item.id }) {
                                 if isCheckOnly {
-                                    // ★ チェックタイマーのみ停止・完了（全体のタイマーは止まらない！）
+                                    // ★ チェックタイマーのみ停止・完了（全体のタイマーは止まらない！残りの全体タイマーを新しいタイマーとして入れ直す）
+                                    sessionManager.markLocalCheckClear(seatId: ringingInfo.item.id, checkEndTime: timers[idx].checkTargetEndTime)
                                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                                         timers[idx].isCheckCompleted = true
                                         timers[idx].checkStaff = currentUserName
+                                        timers[idx].checkTargetEndTime = nil
+                                        timers[idx].checkTotalSeconds = nil
                                     }
+                                    sessionManager.timers = timers
+                                    WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
+                                        seatId: ringingInfo.item.id,
+                                        timers: timers,
+                                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                                        soundOn: sessionManager.alarmSoundEnabled,
+                                        currentUserName: currentUserName
+                                    )
                                     sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: ringingInfo.item.id)
                                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                                     showNotification(
@@ -1407,13 +1632,18 @@ struct ContentView: View {
                                     )
                                 } else {
                                     // ★ 全体タイマーのチェック: 全体のタイマーも止まる
+                                    sessionManager.markLocalCheckClear(seatId: ringingInfo.item.id, checkEndTime: timers[idx].checkTargetEndTime)
                                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                                         timers[idx].isRunning = false
                                         timers[idx].pausedRemainingSeconds = 0
                                         timers[idx].isCheckCompleted = true
                                         timers[idx].checkStaff = currentUserName
+                                        timers[idx].checkTargetEndTime = nil
+                                        timers[idx].checkTotalSeconds = nil
                                     }
+                                    sessionManager.timers = timers
                                     sessionManager.markLocalStop(seatId: ringingInfo.item.id, endTime: ringingInfo.item.targetEndTime)
+                                    WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                                     sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: ringingInfo.item.id, extra: ["expectedEnd": ringingInfo.item.expectedEndMs])
                                     sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: ringingInfo.item.id)
                                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
@@ -1450,7 +1680,7 @@ struct ContentView: View {
                         
                     case .shampoo(let label):
                         Button(action: {
-                            alarm.stop()
+                            alarm.stop(sendToPhone: false)
                             WKInterfaceDevice.current().play(.success)
                             if let idx = timers.firstIndex(where: { $0.id == ringingInfo.item.id }) {
                                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
@@ -1460,7 +1690,9 @@ struct ContentView: View {
                                     timers[idx].shampooStaff = currentUserName
                                     timers[idx].isRecruiting = false
                                 }
+                                sessionManager.timers = timers
                                 sessionManager.markLocalStop(seatId: ringingInfo.item.id, endTime: ringingInfo.item.targetEndTime)
+                                WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                                 sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: ringingInfo.item.id, extra: ["expectedEnd": ringingInfo.item.expectedEndMs, "isCompleted": true])
                                 WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                                 showNotification(
@@ -1494,7 +1726,7 @@ struct ContentView: View {
                     case .custom(let label):
                         let iconName = (ringingInfo.item.helpProcess == "コーミング") ? "comb.fill" : "sparkles"
                         Button(action: {
-                            alarm.stop()
+                            alarm.stop(sendToPhone: false)
                             WKInterfaceDevice.current().play(.success)
                             if let idx = timers.firstIndex(where: { $0.id == ringingInfo.item.id }) {
                                 let process = ringingInfo.item.helpProcess
@@ -1505,7 +1737,9 @@ struct ContentView: View {
                                     timers[idx].shampooStaff = currentUserName
                                     timers[idx].isRecruiting = false
                                 }
+                                sessionManager.timers = timers
                                 sessionManager.markLocalStop(seatId: ringingInfo.item.id, endTime: ringingInfo.item.targetEndTime)
+                                WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                                 sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: ringingInfo.item.id, extra: ["expectedEnd": ringingInfo.item.expectedEndMs, "isCompleted": true])
                                 WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                                 showNotification(
@@ -1606,14 +1840,17 @@ struct ContentView: View {
                                 } else {
                                     m.pausedRemainingSeconds = max(0, Int(ceil(m.targetEndTime.timeIntervalSince(now))))
                                 }
+                                WatchAlarmCoordinator.shared.acknowledgeMainTimer()
                             } else {
                                 let isInitialStart = (m.pausedRemainingSeconds <= 0 || m.pausedRemainingSeconds == m.totalSeconds || m.isOvertime)
                                 if isInitialStart && m.isCountdownConfigEnabled && m.countdownConfigSeconds > 0 {
+                                    let prepEnd = now.addingTimeInterval(TimeInterval(m.countdownConfigSeconds))
                                     m.isPreCountingDown = true
                                     m.preCountdownSeconds = m.countdownConfigSeconds
-                                    m.prepEndTime = now.addingTimeInterval(TimeInterval(m.countdownConfigSeconds))
+                                    m.prepEndTime = prepEnd
                                     m.isRunning = false
                                     m.pausedRemainingSeconds = m.totalSeconds
+                                    m.targetEndTime = prepEnd.addingTimeInterval(TimeInterval(m.totalSeconds))
                                 } else {
                                     m.isRunning = true
                                     let rem = (m.pausedRemainingSeconds > 0 && !m.isOvertime) ? m.pausedRemainingSeconds : m.totalSeconds
@@ -1639,6 +1876,7 @@ struct ContentView: View {
                             m.pausedRemainingSeconds = m.totalSeconds
                             self.mainTimer = m
                             sessionManager.mainTimer = m
+                            WatchAlarmCoordinator.shared.acknowledgeMainTimer()
                             WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
                             WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                             sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
@@ -1799,14 +2037,17 @@ struct ContentView: View {
             main.isPreCountingDown = false
             main.preCountdownSeconds = 0
             main.prepEndTime = nil
+            WatchAlarmCoordinator.shared.acknowledgeMainTimer()
         } else {
             let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds || main.isOvertime)
             if isInitialStart && main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
+                let prepEnd = now.addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
                 main.isPreCountingDown = true
                 main.preCountdownSeconds = main.countdownConfigSeconds
-                main.prepEndTime = now.addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
+                main.prepEndTime = prepEnd
                 main.isRunning = false
                 main.pausedRemainingSeconds = main.totalSeconds
+                main.targetEndTime = prepEnd.addingTimeInterval(TimeInterval(main.totalSeconds))
             } else {
                 main.isRunning = true
                 let rem = (main.pausedRemainingSeconds > 0 && !main.isOvertime) ? main.pausedRemainingSeconds : main.totalSeconds
@@ -1828,11 +2069,13 @@ struct ContentView: View {
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds || main.isOvertime)
         if isInitialStart && main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
+            let prepEnd = Date().addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
             main.isPreCountingDown = true
             main.preCountdownSeconds = main.countdownConfigSeconds
-            main.prepEndTime = Date().addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
+            main.prepEndTime = prepEnd
             main.isRunning = false
             main.pausedRemainingSeconds = main.totalSeconds
+            main.targetEndTime = prepEnd.addingTimeInterval(TimeInterval(main.totalSeconds))
         } else {
             main.isRunning = true
             let rem = (main.pausedRemainingSeconds > 0 && !main.isOvertime) ? main.pausedRemainingSeconds : main.totalSeconds
@@ -1860,6 +2103,7 @@ struct ContentView: View {
         main.prepEndTime = nil
         self.mainTimer = main
         sessionManager.mainTimer = main
+        WatchAlarmCoordinator.shared.acknowledgeMainTimer()
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(action: wasOvertime ? "MAIN_TIMER_RESET" : "MAIN_TIMER_PAUSE")
@@ -1875,6 +2119,7 @@ struct ContentView: View {
         main.pausedRemainingSeconds = main.totalSeconds
         self.mainTimer = main
         sessionManager.mainTimer = main
+        WatchAlarmCoordinator.shared.acknowledgeMainTimer()
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
@@ -1890,10 +2135,12 @@ struct ContentView: View {
         if shouldAutoStart {
             // ★ タイム入力時に即座にカウントダウンを開始（客席タイマーと統一された直感的UX）
             if main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
+                let prepEnd = Date().addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
                 main.isPreCountingDown = true
                 main.preCountdownSeconds = main.countdownConfigSeconds
-                main.prepEndTime = Date().addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
+                main.prepEndTime = prepEnd
                 main.isRunning = false
+                main.targetEndTime = prepEnd.addingTimeInterval(TimeInterval(totalSec))
             } else {
                 main.isRunning = true
                 main.isPreCountingDown = false
@@ -1926,6 +2173,10 @@ struct ContentView: View {
             main.pausedRemainingSeconds = nextSec
             main.totalSeconds = nextSec
             main.isRunning = false
+            if main.isPreCountingDown {
+                let prepEnd = main.prepEndTime ?? Date().addingTimeInterval(TimeInterval(max(1, main.preCountdownSeconds)))
+                main.targetEndTime = prepEnd.addingTimeInterval(TimeInterval(nextSec))
+            }
         }
         self.mainTimer = main
         sessionManager.mainTimer = main
@@ -1982,12 +2233,19 @@ struct ContentView: View {
                 withAnimation {
                     timers.append(newSeat)
                 }
+                sessionManager.timers = timers
+                WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+                WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
                 var extra: [String: Any] = [
                     "seatNumber": newSeat.seatNumber,
-                    "totalSeconds": newSeat.totalSeconds
+                    "totalSeconds": newSeat.totalSeconds,
+                    "targetEndTimestamp": newSeat.targetEndTime.timeIntervalSince1970 * 1000.0
                 ]
                 if let checkSec = newSeat.checkTotalSeconds {
                     extra["checkTotalSeconds"] = checkSec
+                    if let checkEnd = newSeat.checkTargetEndTime {
+                        extra["checkEndTimestamp"] = checkEnd.timeIntervalSince1970 * 1000.0
+                    }
                 }
                 sessionManager.sendActionToPhone(action: "ADD_SEAT", seatId: newSeat.id, extra: extra)
                 showNotification(text: "📤 \(newSeat.displaySeatName)を新規作成しました", color: Color(hex: "#0A84FF"))
@@ -2082,11 +2340,22 @@ struct ContentView: View {
                 onAdjust: { deltaSec in
                     triggerScroll(to: item.id)
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
-                        timers[idx].targetEndTime = timers[idx].targetEndTime.addingTimeInterval(Double(deltaSec))
+                        let newEnd = timers[idx].targetEndTime.addingTimeInterval(Double(deltaSec))
+                        timers[idx].targetEndTime = newEnd
                         timers[idx].pausedRemainingSeconds += deltaSec
                         timers[idx].isCollapsed = false
+                        sessionManager.timers = timers
                         sessionManager.setCollapseOverride(seatId: item.id, collapsed: false)
-                        sessionManager.sendActionToPhone(action: "ADJUST_TIME", seatId: item.id, extra: ["secondsToAdd": deltaSec])
+                        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
+                        sessionManager.sendActionToPhone(
+                            action: "ADJUST_TIME",
+                            seatId: item.id,
+                            extra: [
+                                "secondsToAdd": deltaSec,
+                                "targetEndTimestamp": newEnd.timeIntervalSince1970 * 1000.0
+                            ]
+                        )
                         let deltaText = formatDeltaString(deltaSec)
                         showNotification(text: "⏱️ \(item.displaySeatName): \(deltaText)しました", color: Color(hex: "#0A84FF"))
                     }
@@ -2098,7 +2367,10 @@ struct ContentView: View {
                         timers[idx].pausedRemainingSeconds = 0
                         // ★ チェックタイマーも解除（Q3）
                         timers[idx].clearCheck()
+                        sessionManager.timers = timers
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
+                        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
                         sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         showNotification(text: "⏹️ \(item.displaySeatName)のタイマーを止めました", color: Color(hex: "#30D158"))
                     }
@@ -2134,8 +2406,12 @@ struct ContentView: View {
                             timers[idx].pausedRemainingSeconds = 0
                             timers[idx].isCheckCompleted = true
                             timers[idx].checkStaff = currentUserName
+                            timers[idx].checkTargetEndTime = nil
+                            timers[idx].checkTotalSeconds = nil
                         }
+                        sessionManager.timers = timers
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
+                        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                         sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
                         WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
@@ -2154,28 +2430,39 @@ struct ContentView: View {
                         let m = sec / 60
                         let s = sec % 60
                         let timeStr = s > 0 ? "\(m)分\(s)秒" : "\(m)分"
+                        let startBase = Date()
+                        let mainEnd = startBase.addingTimeInterval(Double(sec))
+                        let checkEnd = (validCheckSec != nil && validCheckSec! > 0) ? startBase.addingTimeInterval(Double(validCheckSec!)) : nil
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].totalSeconds = sec
-                            timers[idx].targetEndTime = Date().addingTimeInterval(Double(sec))
+                            timers[idx].targetEndTime = mainEnd
                             timers[idx].pausedRemainingSeconds = sec
                             timers[idx].isRunning = true
                             timers[idx].status = .normal
                             timers[idx].isCollapsed = false
                             
                             // ★ 途中チェックタイマーの設定または解除
-                            if let chk = validCheckSec, chk > 0 {
+                            if let chk = validCheckSec, chk > 0, let cEnd = checkEnd {
                                 timers[idx].checkTotalSeconds = chk
-                                timers[idx].checkTargetEndTime = Date().addingTimeInterval(Double(chk))
+                                timers[idx].checkTargetEndTime = cEnd
                                 timers[idx].checkStaff = nil
                                 timers[idx].isCheckCompleted = false
                             } else {
                                 timers[idx].clearCheck()
                             }
                         }
+                        sessionManager.timers = timers
+                        sessionManager.clearLocalCheckClear(seatId: item.id)
                         sessionManager.setCollapseOverride(seatId: item.id, collapsed: nil)
-                        var extraPayload: [String: Any] = ["targetSeconds": sec]
-                        if let chk = validCheckSec, chk > 0 {
+                        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
+                        var extraPayload: [String: Any] = [
+                            "targetSeconds": sec,
+                            "targetEndTimestamp": mainEnd.timeIntervalSince1970 * 1000.0
+                        ]
+                        if let chk = validCheckSec, chk > 0, let cEnd = checkEnd {
                             extraPayload["checkTotalSeconds"] = chk
+                            extraPayload["checkEndTimestamp"] = cEnd.timeIntervalSince1970 * 1000.0
                         }
                         sessionManager.sendActionToPhone(action: "START_TIMER", seatId: item.id, extra: extraPayload)
                         
@@ -2202,8 +2489,19 @@ struct ContentView: View {
             },
             onCompleteCheck: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
                     timers[idx].isCheckCompleted = true
                     timers[idx].checkStaff = currentUserName
+                    timers[idx].checkTargetEndTime = nil
+                    timers[idx].checkTotalSeconds = nil
+                    sessionManager.timers = timers
+                    WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
+                        seatId: item.id,
+                        timers: timers,
+                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                        soundOn: sessionManager.alarmSoundEnabled,
+                        currentUserName: currentUserName
+                    )
                     sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(text: "✅ チェック完了を全員へ通知しました", color: Color(hex: "#30D158"))
@@ -2211,8 +2509,17 @@ struct ContentView: View {
             },
             onCancelCheck: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
                     timers[idx].checkTargetEndTime = nil
                     timers[idx].checkTotalSeconds = nil
+                    sessionManager.timers = timers
+                    WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
+                        seatId: item.id,
+                        timers: timers,
+                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                        soundOn: sessionManager.alarmSoundEnabled,
+                        currentUserName: currentUserName
+                    )
                     sessionManager.sendActionToPhone(action: "CANCEL_CHECK", seatId: item.id)
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     playHaptic(.click)
@@ -2337,11 +2644,22 @@ struct ContentView: View {
             },
             onStartCheck: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
                     timers[idx].status = .normal
                     timers[idx].isCheckCompleted = true
                     timers[idx].checkStaff = currentUserName
+                    timers[idx].checkTargetEndTime = nil
+                    timers[idx].checkTotalSeconds = nil
                     timers[idx].helpProcess = ""
                     timers[idx].isRecruiting = false
+                    sessionManager.timers = timers
+                    WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
+                        seatId: item.id,
+                        timers: timers,
+                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                        soundOn: sessionManager.alarmSoundEnabled,
+                        currentUserName: currentUserName
+                    )
                     sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
@@ -2352,11 +2670,22 @@ struct ContentView: View {
             },
             onFinishCheck: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
                     timers[idx].status = .normal
                     timers[idx].isCheckCompleted = true
                     timers[idx].checkStaff = currentUserName
+                    timers[idx].checkTargetEndTime = nil
+                    timers[idx].checkTotalSeconds = nil
                     timers[idx].helpProcess = ""
                     timers[idx].isRecruiting = false
+                    sessionManager.timers = timers
+                    WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
+                        seatId: item.id,
+                        timers: timers,
+                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                        soundOn: sessionManager.alarmSoundEnabled,
+                        currentUserName: currentUserName
+                    )
                     sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(

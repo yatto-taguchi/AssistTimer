@@ -322,12 +322,18 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
     }
 
     const isRunning = !!state.isRunning;
+    const isPreCountingDown = !!state.isPreCountingDown;
     const isCountUp = isRunning && !!state.isCountUp;
+    const prepEnd = isPreCountingDown
+      ? (state.prepEndTimestamp || (Date.now() + (state.preCountdownSeconds || state.countdownConfigSeconds || 5) * 1000))
+      : 0;
     const targetEnd = isRunning
       ? (state.targetEndTimestamp || (
           isCountUp ? Date.now() - (state.remainingTime || 0) * 1000 : Date.now() + (state.remainingTime || 0) * 1000
         ))
-      : 0;
+      : (isPreCountingDown
+          ? (state.targetEndTimestamp || (prepEnd + (state.targetTime || state.remainingTime || 600) * 1000))
+          : 0);
     
     const pausedRem = !isRunning
       ? (state.remainingTime != null ? Math.max(0, state.remainingTime) : (state.targetTime || 600))
@@ -345,11 +351,11 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       pausedRemainingSeconds: pausedRem,
       isCountUp: isCountUp,
       genre: state.genre || '',
-      isPreCountingDown: !!state.isPreCountingDown,
+      isPreCountingDown: isPreCountingDown,
       preCountdownSeconds: state.preCountdownSeconds || 0,
       isCountdownConfigEnabled: !!state.isCountdownConfigEnabled,
       countdownConfigSeconds: state.countdownConfigSeconds || 5,
-      prepEndTimestamp: state.prepEndTimestamp || 0,
+      prepEndTimestamp: isPreCountingDown ? prepEnd : (state.prepEndTimestamp || 0),
     };
 
     const flatMembers = Array.isArray(_cachedStaffMembers)
@@ -418,12 +424,18 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
     let mainTimerPayload = null;
     if (_cachedMainTimerState) {
       const isRunning = !!_cachedMainTimerState.isRunning;
+      const isPreCountingDown = !!_cachedMainTimerState.isPreCountingDown;
       const isCountUp = isRunning && !!_cachedMainTimerState.isCountUp;
+      const prepEnd = isPreCountingDown
+        ? (_cachedMainTimerState.prepEndTimestamp || (Date.now() + (_cachedMainTimerState.preCountdownSeconds || _cachedMainTimerState.countdownConfigSeconds || 5) * 1000))
+        : 0;
       const targetEnd = isRunning
         ? (_cachedMainTimerState.targetEndTimestamp || (
             isCountUp ? Date.now() - (_cachedMainTimerState.remainingTime || 0) * 1000 : Date.now() + (_cachedMainTimerState.remainingTime || 0) * 1000
           ))
-        : 0;
+        : (isPreCountingDown
+            ? (_cachedMainTimerState.targetEndTimestamp || (prepEnd + (_cachedMainTimerState.targetTime || _cachedMainTimerState.remainingTime || 600) * 1000))
+            : 0);
       
       const pausedRem = !isRunning
         ? (_cachedMainTimerState.remainingTime != null ? Math.max(0, _cachedMainTimerState.remainingTime) : (_cachedMainTimerState.targetTime || 600))
@@ -441,11 +453,11 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
         pausedRemainingSeconds: pausedRem,
         isCountUp: isCountUp,
         genre: _cachedMainTimerState.genre || '',
-        isPreCountingDown: !!_cachedMainTimerState.isPreCountingDown,
+        isPreCountingDown: isPreCountingDown,
         preCountdownSeconds: _cachedMainTimerState.preCountdownSeconds || 0,
         isCountdownConfigEnabled: !!_cachedMainTimerState.isCountdownConfigEnabled,
         countdownConfigSeconds: _cachedMainTimerState.countdownConfigSeconds || 5,
-        prepEndTimestamp: _cachedMainTimerState.prepEndTimestamp || 0,
+        prepEndTimestamp: isPreCountingDown ? prepEnd : (_cachedMainTimerState.prepEndTimestamp || 0),
       };
     }
 
@@ -1039,35 +1051,53 @@ export default function SalonWorkScreen() {
           isPreCountingDown: false,
         });
       } else if (action === 'MAIN_TIMER_START') {
-        const incomingTotal = Number(extra?.totalSeconds || message?.totalSeconds || extra?.seconds || message?.seconds || 0);
-        const curTarget = incomingTotal > 0 ? incomingTotal : (_cachedMainTimerState?.targetTime || 600);
-        const curRem = _cachedMainTimerState?.remainingTime != null ? _cachedMainTimerState.remainingTime : curTarget;
-        const targetEnd = Date.now() + curRem * 1000;
-        updateCachedMainTimerState({
-          ...(_cachedMainTimerState || {}),
-          remainingTime: curRem,
-          targetTime: curTarget,
-          targetEndTimestamp: targetEnd,
-          isRunning: true,
-          isPaused: false,
-          isCountUp: false,
-          isPreCountingDown: false,
-        });
+        if (!_cachedMainTimerState?.isRunning && !_cachedMainTimerState?.isPreCountingDown) {
+          const incomingTotal = Number(extra?.totalSeconds || message?.totalSeconds || extra?.seconds || message?.seconds || 0);
+          const curTarget = incomingTotal > 0 ? incomingTotal : (_cachedMainTimerState?.targetTime || 600);
+          const curRem = _cachedMainTimerState?.remainingTime != null ? _cachedMainTimerState.remainingTime : curTarget;
+          const incomingPrepEnd = Number(extra?.prepEndTimestamp || message?.prepEndTimestamp || 0);
+          const incomingTargetEnd = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || 0);
+          const isPrep = incomingPrepEnd > Date.now();
+          const defaultEnd = isPrep ? (incomingPrepEnd + curTarget * 1000) : (Date.now() + curRem * 1000);
+          const targetEnd = (incomingTargetEnd > Date.now() && Math.abs(incomingTargetEnd - defaultEnd) <= 15000)
+            ? incomingTargetEnd
+            : defaultEnd;
+          updateCachedMainTimerState({
+            ...(_cachedMainTimerState || {}),
+            remainingTime: curRem,
+            targetTime: curTarget,
+            targetEndTimestamp: targetEnd,
+            isRunning: !isPrep,
+            isPaused: false,
+            isCountUp: false,
+            isPreCountingDown: isPrep,
+            prepEndTimestamp: isPrep ? incomingPrepEnd : 0,
+          });
+        }
       } else if (action === 'MAIN_TIMER_SET_TIME') {
         const incomingSec = Number(extra?.totalSeconds || message?.totalSeconds || extra?.seconds || message?.seconds || 0);
         if (incomingSec > 0) {
           const autoStart = extra?.autoStart === true || message?.autoStart === true;
-          const targetEnd = autoStart ? (Date.now() + incomingSec * 1000) : 0;
-          updateCachedMainTimerState({
-            ...(_cachedMainTimerState || {}),
-            remainingTime: incomingSec,
-            targetTime: incomingSec,
-            targetEndTimestamp: targetEnd,
-            isRunning: autoStart,
-            isPaused: !autoStart,
-            isCountUp: false,
-            isPreCountingDown: false,
-          });
+          if (!autoStart || (!_cachedMainTimerState?.isRunning && !_cachedMainTimerState?.isPreCountingDown)) {
+            const incomingPrepEnd = Number(extra?.prepEndTimestamp || message?.prepEndTimestamp || 0);
+            const incomingTargetEnd = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || 0);
+            const isPrep = autoStart && incomingPrepEnd > Date.now();
+            const defaultEnd = autoStart ? (isPrep ? (incomingPrepEnd + incomingSec * 1000) : (Date.now() + incomingSec * 1000)) : 0;
+            const targetEnd = autoStart
+              ? ((incomingTargetEnd > Date.now() && Math.abs(incomingTargetEnd - defaultEnd) <= 15000) ? incomingTargetEnd : defaultEnd)
+              : 0;
+            updateCachedMainTimerState({
+              ...(_cachedMainTimerState || {}),
+              remainingTime: incomingSec,
+              targetTime: incomingSec,
+              targetEndTimestamp: targetEnd,
+              isRunning: autoStart && !isPrep,
+              isPaused: !autoStart,
+              isCountUp: false,
+              isPreCountingDown: isPrep,
+              prepEndTimestamp: isPrep ? incomingPrepEnd : 0,
+            });
+          }
         }
       } else if (action === 'MAIN_TIMER_ADJUST') {
         const delta = Number(extra?.secondsToAdd || message?.secondsToAdd || 0);
@@ -1106,8 +1136,16 @@ export default function SalonWorkScreen() {
         : null;
       // ★ 安全ガード: チェック時間は全体タイムより短い場合のみ有効
       const checkSec = (rawCheckSec && rawCheckSec < totalSec) ? rawCheckSec : null;
-      const targetEnd = Date.now() + totalSec * 1000;
-      const checkEnd = checkSec ? Date.now() + checkSec * 1000 : null;
+      const defaultTargetEnd = Date.now() + totalSec * 1000;
+      const incomingTargetEnd = Number(extra?.targetEndTimestamp || 0);
+      const targetEnd = (incomingTargetEnd > Date.now() && Math.abs(incomingTargetEnd - defaultTargetEnd) <= 15000)
+        ? incomingTargetEnd
+        : defaultTargetEnd;
+      const defaultCheckEnd = checkSec ? Date.now() + checkSec * 1000 : null;
+      const incomingCheckEnd = Number(extra?.checkEndTimestamp || 0);
+      const checkEnd = checkSec
+        ? ((incomingCheckEnd > Date.now() && Math.abs(incomingCheckEnd - defaultCheckEnd) <= 15000) ? incomingCheckEnd : defaultCheckEnd)
+        : null;
 
       const newSeatObj = {
         id: seatId || String(Date.now()),
@@ -1305,11 +1343,15 @@ export default function SalonWorkScreen() {
             };
           }
           case 'COMPLETE_CHECK': {
+            stopAlarm('salon', `${seatId}-check`);
             const prevHist = s.history || [];
             const chkStaff = watchUser || s.checkStaffName || 'スタッフ';
             return {
               ...s,
+              isCheckCompleted: true,
               checkStatus: 'completed',
+              checkEndTimestamp: null,
+              checkTargetSeconds: null,
               checkStaffName: chkStaff,
               history: [
                 ...prevHist,
@@ -1323,6 +1365,7 @@ export default function SalonWorkScreen() {
             };
           }
           case 'CANCEL_CHECK': {
+            stopAlarm('salon', `${seatId}-check`);
             return {
               ...s,
               checkTargetSeconds: null,
@@ -1377,7 +1420,10 @@ export default function SalonWorkScreen() {
               const chkStaff = watchUser || s.checkStaffName || 'スタッフ';
               return {
                 ...s,
+                isCheckCompleted: true,
                 checkStatus: 'completed',
+                checkEndTimestamp: null,
+                checkTargetSeconds: null,
                 checkStaffName: chkStaff,
                 history: [
                   ...prevHist,
@@ -1404,7 +1450,16 @@ export default function SalonWorkScreen() {
               : null;
             // ★ 安全ガード: チェック時間は全体タイムより短い場合のみ有効
             const checkSec = (rawCheckSec && rawCheckSec < targetSec) ? rawCheckSec : null;
-            const checkEnd = checkSec ? Date.now() + checkSec * 1000 : null;
+            const defaultTargetEnd = Date.now() + targetSec * 1000;
+            const incomingTargetEnd = Number(extra?.targetEndTimestamp || 0);
+            const targetEnd = (incomingTargetEnd > Date.now() && Math.abs(incomingTargetEnd - defaultTargetEnd) <= 15000)
+              ? incomingTargetEnd
+              : defaultTargetEnd;
+            const defaultCheckEnd = checkSec ? Date.now() + checkSec * 1000 : null;
+            const incomingCheckEnd = Number(extra?.checkEndTimestamp || 0);
+            const checkEnd = checkSec
+              ? ((incomingCheckEnd > Date.now() && Math.abs(incomingCheckEnd - defaultCheckEnd) <= 15000) ? incomingCheckEnd : defaultCheckEnd)
+              : null;
             const prevHistory = s.history || [];
             const historyText = checkSec
               ? `Apple Watchからタイマー開始 (${Math.round(targetSec / 60)}分 / チェック${Math.round(checkSec / 60)}分)`
@@ -1422,7 +1477,7 @@ export default function SalonWorkScreen() {
               status: 'running',
               targetSeconds: targetSec,
               initialMinutes: Math.round(targetSec / 60),
-              targetEndTimestamp: Date.now() + targetSec * 1000,
+              targetEndTimestamp: targetEnd,
               pausedRemainingSeconds: null,
               colorStaffName: watchUser || s.colorStaffName,
               // ★ Watch から指定された途中チェック（サブタイマー）を反映
@@ -1464,7 +1519,11 @@ export default function SalonWorkScreen() {
               };
             }
             const currentEnd = s.targetEndTimestamp || Date.now();
-            const newEnd = Math.max(Date.now(), currentEnd) + secondsToAdd * 1000;
+            const computedEnd = Math.max(Date.now(), currentEnd) + secondsToAdd * 1000;
+            const incomingEnd = Number(extra?.targetEndTimestamp || 0);
+            const newEnd = (incomingEnd > Date.now() && Math.abs(incomingEnd - computedEnd) <= 15000)
+              ? incomingEnd
+              : computedEnd;
             return {
               ...s,
               status: 'running',
@@ -2621,6 +2680,7 @@ export default function SalonWorkScreen() {
 
   // ★ ユーザー指定: 席のチェックタイマー停止・完了（タイマー設定者へ通知送信）
   const handleCompleteCheck = (seatId) => {
+    stopAlarm('salon', `${seatId}-check`);
     const targetSeat = seats.find((s) => s.id === seatId);
     const nowStr = getCurrentTimeFormatted();
     const currentUser = (userName || 'スタッフ').trim();
@@ -2639,7 +2699,10 @@ export default function SalonWorkScreen() {
       };
       return {
         ...s,
+        isCheckCompleted: true,
         checkStatus: 'completed',
+        checkEndTimestamp: null,
+        checkTargetSeconds: null,
         history: [...prevHistory, historyItem],
       };
     });

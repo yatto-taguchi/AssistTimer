@@ -722,13 +722,14 @@ export default function HomeScreen({ navigation }) {
 
         if (diffMs <= 0) {
           clearInterval(interval);
+          const finishedPrepEnd = prepEndTimeRef.current || now;
           prepEndTimeRef.current = null;
           isPreCountingDownRef.current = false;
           setIsPreCountingDown(false);
           cheerOverlayRef.current?.dismiss(); // 準備中のやまいもが残っていればスッと消去
-          // カウントダウン終了後、メインタイマー開始
+          // カウントダウン終了後、メインタイマー開始（準備開始時に予約した finishedPrepEnd + finalTarget * 1000 と完全一致させる）
           const finalTarget = targetTimeRef.current || targetTime || 600;
-          targetEndTimeRef.current = now + finalTarget * 1000;
+          targetEndTimeRef.current = finishedPrepEnd + finalTarget * 1000;
           triggeredVoicesRef.current.clear();
           remainingTimeRef.current = finalTarget;
           setRemainingTime(finalTarget);
@@ -991,7 +992,7 @@ export default function HomeScreen({ navigation }) {
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
-  const toggleTimer = (isFromWatch = false) => {
+  const toggleTimer = (isFromWatch = false, watchTiming = null) => {
     const fromWatch = isFromWatch === true;
     if (!fromWatch) {
       setWatchMutedState(false);
@@ -1008,7 +1009,16 @@ export default function HomeScreen({ navigation }) {
     const cfgCountdownSec = countdownSecondsRef.current || countdownSeconds || 5;
     if (!currentIsRunning && !currentIsPreCountdown && isInitialStart && cfgCountdownEnabled && cfgCountdownSec > 0) {
       // 初期状態からのスタートでカウントダウン有効の場合、準備カウントダウンを開始
-      prepEndTimeRef.current = Date.now() + cfgCountdownSec * 1000;
+      const defaultPrepEndMs = Date.now() + cfgCountdownSec * 1000;
+      const incomingPrepEndMs = Number(watchTiming?.prepEndTimestamp || 0);
+      prepEndTimeRef.current = (incomingPrepEndMs > Date.now() && Math.abs(incomingPrepEndMs - defaultPrepEndMs) <= 15000)
+        ? incomingPrepEndMs
+        : defaultPrepEndMs;
+      const defaultMainEndMs = prepEndTimeRef.current + currentTarget * 1000;
+      const incomingMainEndMs = Number(watchTiming?.targetEndTimestamp || 0);
+      const effectivePrepMainEndMs = (incomingMainEndMs > Date.now() && Math.abs(incomingMainEndMs - defaultMainEndMs) <= 15000)
+        ? incomingMainEndMs
+        : defaultMainEndMs;
       triggeredPrepVoicesRef.current.clear();
       preCountdownTimeRef.current = cfgCountdownSec;
       setPreCountdownTime(cfgCountdownSec);
@@ -1019,7 +1029,7 @@ export default function HomeScreen({ navigation }) {
         const prepState = {
           remainingTime: currentRemaining,
           targetTime: currentTarget,
-          targetEndTimestamp: 0,
+          targetEndTimestamp: effectivePrepMainEndMs,
           isRunning: false,
           isPaused: false,
           isCountUp: false,
@@ -1102,7 +1112,11 @@ export default function HomeScreen({ navigation }) {
           isRunningRef.current = true;
           setIsRunning(true);
           if (!currentIsCountUp) {
-            targetEndTimeRef.current = Date.now() + currentRemaining * 1000;
+            const defaultEndMs = Date.now() + currentRemaining * 1000;
+            const incomingEndMs = Number(watchTiming?.targetEndTimestamp || 0);
+            targetEndTimeRef.current = (incomingEndMs > Date.now() && Math.abs(incomingEndMs - defaultEndMs) <= 15000)
+              ? incomingEndMs
+              : defaultEndMs;
             if (currentRemaining === currentTarget) {
               triggeredVoicesRef.current.clear();
               lastCheerTriggerTimeRef.current = Date.now();
@@ -1239,6 +1253,9 @@ export default function HomeScreen({ navigation }) {
       } else {
         endMs = targetEndTimeRef.current || (Date.now() + remainingTime * 1000);
       }
+    } else if (isPreCountingDown) {
+      const prepEnd = prepEndTimeRef.current || (Date.now() + (preCountdownTime || 0) * 1000);
+      endMs = prepEnd + (targetTime || 600) * 1000;
     }
 
     const newState = {
@@ -1339,6 +1356,10 @@ export default function HomeScreen({ navigation }) {
       const playPhoneSound = payload?.playSoundOnPhone !== false;
       setWatchMutedState(!playPhoneSound);
       console.log('[HomeScreen] MAIN_TIMER_START received. playSoundOnPhone:', playPhoneSound, 'isMuted:', !playPhoneSound);
+      const watchTiming = {
+        targetEndTimestamp: Number(payload?.targetEndTimestamp || payload?.extra?.targetEndTimestamp || 0),
+        prepEndTimestamp: Number(payload?.prepEndTimestamp || payload?.extra?.prepEndTimestamp || 0),
+      };
       // Watch側で設定されたtotalSecondsまたはsecondsが同梱されていれば開始前に同期反映
       const incomingTotal = Number(payload?.totalSeconds || payload?.seconds || payload?.extra?.totalSeconds || payload?.extra?.seconds || 0);
       const isFromOvertime = isCountUpRef.current || isCountUp || remainingTimeRef.current <= 0;
@@ -1363,7 +1384,7 @@ export default function HomeScreen({ navigation }) {
         setRemainingTime(resetTarget);
       }
       if (!isRunningRef.current && !isPreCountingDownRef.current && toggleTimerRef.current) {
-        toggleTimerRef.current(true); // ★ Watch主導フラグ(isFromWatch=true)を正しく伝達
+        toggleTimerRef.current(true, watchTiming); // ★ Watch主導フラグおよびWatch側の予定時刻を伝達
       }
       if (Platform.OS === 'ios') {
         // toggleTimer内で準備カウントダウンが発動した場合は、toggleTimer側がprepStateを送信済みのため二重・矛盾送信を抑制
@@ -1473,6 +1494,10 @@ export default function HomeScreen({ navigation }) {
         console.log('[HomeScreen] MAIN_TIMER_SET_TIME applied:', sec, 'autoStart:', autoStart, 'playSoundOnPhone:', playPhoneSound);
 
         if (autoStart) {
+          const watchTiming = {
+            targetEndTimestamp: Number(payload?.targetEndTimestamp || payload?.extra?.targetEndTimestamp || 0),
+            prepEndTimestamp: Number(payload?.prepEndTimestamp || payload?.extra?.prepEndTimestamp || 0),
+          };
           // ★ タイム入力＋即時スタート: 既存の稼働・超過・準備カウントダウン・アラーム音を一旦クリーンにしてから新タイムで直ちに開始！
           cancelVibration();
           stopAllAlarms('main');
@@ -1493,7 +1518,7 @@ export default function HomeScreen({ navigation }) {
 
           // 直ちにタイマー（または準備カウントダウン）を開始
           if (toggleTimerRef.current) {
-            toggleTimerRef.current(true);
+            toggleTimerRef.current(true, watchTiming);
           }
 
           // 準備カウントダウンでない通常スタート時は、確定した稼働状態（isRunning: true）を即座にWatchへ返信
@@ -1530,7 +1555,11 @@ export default function HomeScreen({ navigation }) {
         if (isRunningRef.current) {
           const wasOverOrRinging = isCountUpRef.current || triggeredVoicesRef.current.has('alarm');
           const baseEnd = (!isCountUpRef.current && targetEndTimeRef.current) ? targetEndTimeRef.current : Date.now();
-          targetEndTimeRef.current = Math.max(Date.now() + 5000, baseEnd + delta * 1000);
+          const computedEnd = Math.max(Date.now() + 5000, baseEnd + delta * 1000);
+          const incomingEndMs = Number(payload?.targetEndTimestamp || payload?.extra?.targetEndTimestamp || 0);
+          targetEndTimeRef.current = (incomingEndMs > Date.now() && Math.abs(incomingEndMs - computedEnd) <= 15000)
+            ? incomingEndMs
+            : computedEnd;
           isCountUpRef.current = false;
           setIsCountUp(false);
           overStartTimeRef.current = null;
@@ -1560,10 +1589,16 @@ export default function HomeScreen({ navigation }) {
         }
         if (Platform.OS === 'ios') {
           const finalTargetSec = isRunningRef.current ? targetTimeRef.current : nextRem;
+          const prepEndMs = isPreCountingDownRef.current
+            ? (prepEndTimeRef.current || (Date.now() + (preCountdownTimeRef.current || countdownSecondsRef.current || 5) * 1000))
+            : null;
+          const adjustedEndMs = isRunningRef.current
+            ? targetEndTimeRef.current
+            : (isPreCountingDownRef.current && prepEndMs ? (prepEndMs + finalTargetSec * 1000) : 0);
           const updated = {
             remainingTime: nextRem,
             targetTime: finalTargetSec,
-            targetEndTimestamp: isRunningRef.current ? targetEndTimeRef.current : 0,
+            targetEndTimestamp: adjustedEndMs,
             isRunning: isRunningRef.current,
             isPaused: !isRunningRef.current && !isPreCountingDownRef.current && nextRem !== finalTargetSec,
             isCountUp: false,
@@ -1572,7 +1607,7 @@ export default function HomeScreen({ navigation }) {
             preCountdownSeconds: preCountdownTimeRef.current || 0,
             isCountdownConfigEnabled: !!isCountdownEnabledRef.current,
             countdownConfigSeconds: countdownSecondsRef.current || 5,
-            prepEndTimestamp: isPreCountingDownRef.current ? prepEndTimeRef.current : null,
+            prepEndTimestamp: prepEndMs,
           };
           if (setMainTimerState) {
             setMainTimerState(updated);
@@ -1604,6 +1639,9 @@ export default function HomeScreen({ navigation }) {
         currentRemaining = Math.max(0, Math.ceil((endMs - Date.now()) / 1000));
       }
       remainingTimeRef.current = currentRemaining;
+    } else if (isPreCountingDownRef.current) {
+      const prepEnd = prepEndTimeRef.current || (Date.now() + (preCountdownTimeRef.current || countdownSecondsRef.current || 5) * 1000);
+      endMs = prepEnd + currentTarget * 1000;
     }
     return {
       remainingTime: currentRemaining,

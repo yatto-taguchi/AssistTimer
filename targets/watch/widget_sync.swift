@@ -33,7 +33,7 @@ enum WidgetSync {
         let prevStates = defaults.dictionary(forKey: prevStatesKey) as? [String: [Double]] // id: [isRunning(0/1), endEpoch]
         if let prev = prevStates {
             var touched: String?
-            for t in allItems where t.isRunning {
+            for t in allItems where (t.isRunning || t.isPreCountingDown) {
                 let end = t.targetEndTime.timeIntervalSince1970.rounded()
                 if let p = prev[t.id], p.count == 2 {
                     let wasRunning = p[0] > 0.5
@@ -55,7 +55,8 @@ enum WidgetSync {
         }
         var newStates: [String: [Double]] = [:]
         for t in allItems {
-            newStates[t.id] = [t.isRunning ? 1 : 0, t.targetEndTime.timeIntervalSince1970.rounded()]
+            let active = t.isRunning || t.isPreCountingDown
+            newStates[t.id] = [active ? 1 : 0, t.targetEndTime.timeIntervalSince1970.rounded()]
         }
         defaults.set(newStates, forKey: prevStatesKey)
         if let id = lastTouchedId {
@@ -67,13 +68,14 @@ enum WidgetSync {
         // ── コンプリケーション用の要約 ──
         var seats: [[String: Any]] = []
         if let m = mainTimer {
+            let mActive = m.isRunning || m.isPreCountingDown
             seats.append([
                 "id": m.id,
                 "seatNumber": 0,
                 "seatLabel": "メインタイマー",
                 "isMainTimer": true,
-                "endEpoch": m.isRunning ? m.targetEndTime.timeIntervalSince1970.rounded() : 0,
-                "isRunning": m.isRunning,
+                "endEpoch": mActive ? m.targetEndTime.timeIntervalSince1970.rounded() : 0,
+                "isRunning": mActive,
                 "pausedRemaining": m.pausedRemainingSeconds,
                 "related": true,
                 "totalSeconds": m.totalSeconds,
