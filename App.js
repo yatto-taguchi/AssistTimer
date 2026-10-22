@@ -61,6 +61,7 @@ function MainTabs() {
           </Animated.View>
         )}
         screenOptions={({ route }) => ({
+          lazy: false, // ★ 起動時にHomeScreenとSalonWorkScreenの両方を確実にマウントし、Watch双方向同期を常時稼働
           headerShown: false,
           tabBarActiveTintColor: isEcoMode ? '#888' : '#007AFF', // 選択中を明るいグレーに
           tabBarInactiveTintColor: isEcoMode ? '#333' : '#8E8E93', // 非選択中もうっすら見えるように

@@ -31,6 +31,9 @@ const safeAddListener = (eventName, callback) => {
   return { remove: () => {} };
 };
 
+// ★ applicationContext 永続保存用の最新客席スナップショット（メインタイマー単独同期時のコンテキスト上書き消失防止）
+let lastSyncedSeats = null;
+
 // ★ 診断用ストア（画面の通信状態表示で使用）
 const diagnostics = {
   lastSendAt: 0,
@@ -272,7 +275,12 @@ export const WatchConnectivity = {
   // 結果は診断ストアに記録し、画面の通信状態表示で確認できる
   syncData: async (data) => {
     if (!NativeModule || Platform.OS !== 'ios') return null;
-    const seatCount = data && Array.isArray(data.seats) ? data.seats.length : null;
+    if (data && Array.isArray(data.seats)) {
+      lastSyncedSeats = data.seats;
+    }
+    const seatCount = data && Array.isArray(data.seats)
+      ? data.seats.length
+      : (Array.isArray(lastSyncedSeats) ? lastSyncedSeats.length : diagnostics.lastSendSeatCount);
     let messageResult = '';
     let contextResult = '';
     try {
@@ -285,6 +293,8 @@ export const WatchConnectivity = {
 
       if (reachable) {
         try {
+          // ★ リアルタイム送信（sendMessage）は渡された data をそのまま送る
+          //   （メインタイマー同期時は seats を含めないことで Watch 側の稼働中客席タイマーを絶対保護）
           await NativeModule.sendMessage(data);
           messageResult = '即時OK';
         } catch (sendErr) {
@@ -307,10 +317,16 @@ export const WatchConnectivity = {
 
       try {
         // ★ 永続保存される applicationContext には一時通知（notification）を含めない
-        //   （Watchアプリを起動するたびに過去の通知バナー＆バイブレーションが再発火するのを防止）
+        //   また、WCSession.updateApplicationContext は辞書全体を置換するため、
+        //   メインタイマー単独同期（data.seats 未指定）時も前回保存済みの lastSyncedSeats を引き継いで客席消失を防ぐ
         const contextPayload = data && typeof data === 'object' ? { ...data } : data;
-        if (contextPayload && typeof contextPayload === 'object' && 'notification' in contextPayload) {
-          delete contextPayload.notification;
+        if (contextPayload && typeof contextPayload === 'object') {
+          if ('notification' in contextPayload) {
+            delete contextPayload.notification;
+          }
+          if (!Array.isArray(contextPayload.seats) && Array.isArray(lastSyncedSeats)) {
+            contextPayload.seats = lastSyncedSeats;
+          }
         }
         const ok = await NativeModule.updateApplicationContext(contextPayload);
         contextResult = ok ? '保存OK' : '保存されず';

@@ -2293,3 +2293,85 @@ TestFlight Build 68の実機テストにおいて、以下の致命的な不具�
   - カウントアップ中の基準時刻を `overStartTimeRef.current` に固定し、同期のたびにタイムスタンプが変動してWatch側で別タイマーとして誤認される現象を排除。
   - マウント時に `Vibration.cancel()` を実行し、リロード前の残留振動を即時カット。
 
+---
+
+## 33. メインタイマー同期・即時カウント開始・客席タイマー誤消火完全根絶仕様 (Build 70)
+
+### 33.1. 背景・現場課題の所在
+
+実機テスト（TestFlight）において報告された以下の重大な不具合を完全に解消：
+1. **メインタイマー終了時に全客席タイマーが終了してしまう**:
+   Watchからメインタイマーのタイムを終了（リセット）した際、稼働していたサロン客席の全タイマーが巻き添えで強制停止・消火されてしまう。
+2. **タイム入力しても反映されない / カウントが始まらない**:
+   Watchのメインタイマー画面でクイック分ボタンやクラウン入力で時間を設定しても、停止状態のままカウントが始まらず、シートも閉じないため直感的な操作ができない。また、サロン画面滞在中にWatchからタイムを変更してもiPhone側に反映されず元の時間に戻ってしまう。
+3. **Watch ⇄ iPhone 間のメインタイマー操作の競合・二重配信**:
+   Watchからの操作が2系統で受信され、重複排除キーの不整合による動作不良や、多重パケット送信によるパケット逆転が発生していた。
+
+### 33.2. 根本原因と改修内容
+
+#### 1. 客席データ（seats）の不要な巻き込み送信の完全撤廃 (`SalonWorkScreen.js`)
+- **`syncMainTimerToWatch` からの客席キャッシュ同梱を撤廃**:
+  - メインタイマーの同期関数において、`watchPayload.seats = formatSeatsPayload(_cachedCurrentSeats)` が含まれていたため、メインタイマーのリセット時に停止状態の客席キャッシュがWatchへ送られ、Watch上で動いていた客席タイマーが上書き消火されていた。
+  - メインタイマー同期時は `seats` キーを含めず、純粋に `mainTimer` のみを送信するように改修。Watch側は `seats` キーが無い場合、既存の客席タイマーを維持したままメインタイマーのみを安全更新するため、客席タイマーの巻き添え停止が100%防止された。
+
+#### 2. アラーム停止時のメインタイマーと客席タイマーの完全分離 (`alarm.swift`)
+- **`acknowledgeRinging` の分岐厳格化**:
+  - アラーム消火時、対象が `main-timer` の場合はメインタイマーのリセットと `STOP_ALARM`（kind: "main"）のみを発行し、客席の `applyLocalStop` や客席用 `STOP_ALARM` には絶対に触れないよう完全分離。客席タイマーのアラームとメインタイマーのアラームの相互干渉を遮断。
+
+#### 3. タイム入力時の即時カウント開始と自動シートクローズ (`content.swift`, `HomeScreen.js`, `SalonWorkScreen.js`)
+- **Watch側 `handleSetMainTimerTime` の即時スタート対応 (`content.swift`)**:
+  - `handleSetMainTimerTime(totalSec:autoStart:)` を導入。クイック分ボタン（1分〜30分）タップ時およびクラウン決定時に、時間を設定すると同時に即座にタイマーを開始（`isRunning = true`）し、シートを自動で閉じる（`dismiss()`）直感的なUXを実装。
+- **Watch側 `processReceivedData` のホールドガード厳密化 (`content.swift`)**:
+  - `SET_TIME` ホールド中、iPhone側から古い秒数や途中の停止パケット（`isRunning: false`）が届いた場合は上書きをブロックし、`parsedMain.totalSeconds == self.mainTimer?.totalSeconds && (!localNeedsActive || incomingIsActive)` が満たされた確定稼働パケットのみを受容。
+  - 超過（カウントアップ）中の「計測終了 / リセット」ボタン押下時にも自動で `dismiss()` して一覧画面へ戻るよう統一。
+- **iPhone側 `HomeScreen.js` の逆流停止防止（`skipWatchSync`）とクリーン再スタート**:
+  - `applyTimeInSeconds(secs, { skipWatchSync: true })` を導入。`set_time`（`autoStart: true`）受信時は、既存の稼働・超過・準備カウントダウン・アラーム音を一旦クリーンにし、途中の停止状態（`isRunning: false`）をWatchへ誤送信せずに `toggleTimer(true)` で即座に新タイムで開始。確定した稼働状態（`isRunning: true`）のみをWatchへ返信することで、Watch側のカウントダウンが逆流パケットで停止する現象を100%根絶。
+  - `playSoundOnPhone` 設定も `set_time` 受信時に反映し、消音設定を厳守。
+- **iPhone側 `App.js` の `lazy: false` による起動時からの常時双方向同期**:
+  - `Tab.Navigator` の `screenOptions` に `lazy: false` を設定し、アプリ起動直後からサロンタブを開く前であっても `HomeScreen` と `SalonWorkScreen` の両方を確実にマウント。起動直後からのWatch客席操作・同期要求にも100%即時応答。
+- **iPhone側 `SalonWorkScreen.js` での操作受信完全網羅と二重転送排除**:
+  - `MAIN_TIMER_SET_TIME`, `MAIN_TIMER_START`, `MAIN_TIMER_ADJUST` の受信処理を追加し、サロン画面滞在中でもメインタイマーのキャッシュが即座に最新タイム・稼働状態へ更新されるように対応。
+  - `HomeScreen` 自身が `WatchConnectivity.subscribeActions` を直接購読しているため、`SalonWorkScreen` 側ではメインタイマーのキャッシュ更新とアラーム停止のみを行い、`requestMainTimerAction` による二重転送を排除。
+- **非アクティブ・バックグラウンド時の同期精度向上**:
+  - `getLatestMainTimerState` において、`isRunning` 時は現在時刻（`Date.now()`）から逆算して最新の秒数を返すよう堅牢化。
+
+
+
+---
+
+### 33.3. 多角的再調査と再発防止アーキテクチャの全方位強化
+
+#### 1. `watch-connectivity` の永続コンテキスト補完キャッシュ (`modules/watch-connectivity/index.js`)
+- **課題**: メインタイマー同期時に客席データ（`seats`）を除外したことで客席タイマーの誤消火は防げたが、Watch再起動時やアプリ復帰時に呼び出される `updateApplicationContext`（永続コンテキスト）からも `seats` が欠落し、Watchの再起動・再接続時に客席タイマーが消失したり、診断パネルの送信席数カウントが0にリセットされる副作用が生じる懸念があった。
+- **対策**:
+  - `modules/watch-connectivity/index.js` に `lastSyncedSeats` キャッシュを導入。
+  - 即時メッセージ送信（`sendMessage`）では `seats` を含めずそのまま送信して客席タイマーの上書きを防ぎつつ、永続保存用の `updateApplicationContext` にのみ `lastSyncedSeats` を自動補完して保存。Watch再起動時の客席維持と診断バーの送信席数表示を完璧に両立。
+
+#### 2. 音声・アラーム音の Stale Closure 解消と停止の確実化 (`HomeScreen.js`)
+- **課題**: `sound` / `voiceSound` の React State のみを参照して停止していたため、タイマー更新のクロージャタイミングによって古い `null` や古いサウンドインスタンスが参照され、アラーム停止操作後も音が鳴り止まない現象が発生し得た。
+- **対策**:
+  - `soundRef` および `voiceSoundRef` を導入し、常に最新の音声インスタンスを同期保持。
+  - タイマー停止時（`toggleTimer`）、リセット時（`resetTimer`）、タイム変更確定時（`applyTimeInSeconds`）、記録保存モーダル展開時（`handleOpenSaveModal` / `handleOpenSaveInTimeModal`）のすべてで `soundRef.current` および `voiceSoundRef.current` の停止（`stopAsync()`）を呼び出すよう統一。
+
+#### 3. タッチイベント引数の厳格判定による誤ミュート防止 (`HomeScreen.js`)
+- **課題**: JSX の `onPress={toggleTimer}` / `onPress={resetTimer}` において、React Native の `GestureResponderEvent`（オブジェクト＝truthy）が第1引数 `isFromWatch` に渡ってしまい、iPhone画面での通常停止操作であるにもかかわらず「Watchからの操作」と判定されて消音解除や練習中断記録がスキップされるバグが存在した。
+- **対策**:
+  - `toggleTimer` および `resetTimer` の先頭で `isFromWatch === true` / `isFromSave === true` の厳密真偽値判定を適用。
+  - JSX 側の `onPress` を `() => toggleTimer(false)` / `() => resetTimer(false)` に明示化。
+
+#### 4. 超過時間（カウントアップ）停止・時間微調整の全方位統一 (`content.swift`, `HomeScreen.js`, `SalonWorkScreen.js`)
+- **課題**: タイム終了後の超過時間（カウントアップ）中に停止操作が行われた際、一時停止（秒数保持）とするか設定時間へのリセットとするかの挙動が端末・画面によって異なり、Watch側で不自然なプラス秒数が残る原因となっていた。また、超過中に時間微調整（adjust）を行った場合に鳴動中アラームが消えなかったり、延長後の再到達時にアラームが鳴らない問題があった。
+- **対策**:
+  - 超過中（`isCountUp == true`）に停止操作された場合は、設定時間（`totalSeconds` / `targetTime`）に戻して待機状態にリセット停止する仕様に Watch・iPhone 間で完全統一。Watchカード上のボタン表示も超過中は「一時停止」ではなく「終了」に統一。
+  - 時間微調整（adjust）時、超過中またはアラーム鳴動後だった場合は即座に振動・音・アラームを停止。さらに延長によって再び未来時刻となった秒数（300秒, 180秒, 60秒, 30秒, 10秒, 5秒）の音声コールフラグおよび0秒アラーム発火フラグを `triggeredVoicesRef` から自動削除し、延長後のカウントダウン再到達時に確実にアラーム・音声が再鳴動するよう設計。
+
+#### 5. サロン画面上部「メインタイマー連動ウィジェット」の同期向上 (`SalonWorkScreen.js`)
+- **課題**: メインタイマーが準備カウントダウン中（`isPreCountingDown == true`）の際、`isRunning` が `false` であるためサロン画面のウィジェットでは「待機中」「スタート」と表示され、本番設定時間のまま止まって見えていた。また、空席アサイン時のフォールバック値が一部 1200秒（20分）になっていた。
+- **対策**:
+  - ウィジェットにおいて `isPreCountingDown` 中は「メインタイマー (準備カウント中)」と表示し、準備残り秒数（`preCountdownSeconds`）を表示、ボタンも「一時停止」に連動。超過中は「終了」ボタンに統一。
+  - 空席・フリー枠へのメインタイマーアサイン時、超過中や残り0秒以下の場合は設定時間（`targetTime`）を使用し、フォールバック初期値を 180秒（3分）に統一。
+
+#### 6. Watch 購読リスナーの不要な再登録および二重送信の防止 (`HomeScreen.js`)
+- **課題**: `getLatestMainTimerState` の `useCallback` 依存配列に `[targetTime, selectedCategory]` が指定されており、それを参照するマウント時 `useEffect` が時間変更やジャンル変更のたびに再実行され、Watch リスナーの解除・再登録および `syncMainTimerToWatch` の二重送信が発生していた。
+- **対策**:
+  - `getLatestMainTimerState` 内の参照を `targetTimeRef.current` および `selectedCategoryRef.current` に統一し、`useCallback` の依存配列を `[]` に固定。マウント時のみ一度だけクリーンにリスナーが登録され、通信の多重化・パケット逆転を根本防止。

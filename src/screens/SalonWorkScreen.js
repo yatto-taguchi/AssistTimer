@@ -365,10 +365,9 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       mainTimer: mainTimerPayload,
     };
 
-    // ★ 客席キャッシュが存在する場合は保持して送信し、WCSession のコンテキスト上書きによる客席全滅を絶対防止！
-    if (Array.isArray(_cachedCurrentSeats) && _cachedCurrentSeats.length > 0) {
-      watchPayload.seats = formatSeatsPayload(_cachedCurrentSeats);
-    }
+    // ★ 安全設計: メインタイマー同期時は客席（seats）キーを含めない。
+    //   Watch側は seats キーが無い場合、既存の客席タイマーを維持したままメインタイマーのみを安全更新するため、
+    //   客席タイマーの上書き停止・強制消火を完全に防止できる。
 
     WatchConnectivity.syncData(watchPayload).catch(() => {});
   } catch (e) {
@@ -1015,6 +1014,7 @@ export default function SalonWorkScreen() {
     // ★ メインタイマーのWatch操作受信時のキャッシュ即時保護＆HomeScreenへの確実な転送
     if (action.startsWith('MAIN_TIMER_')) {
       if (action === 'MAIN_TIMER_RESET') {
+        stopAlarm('main', 'main-timer');
         const resetTarget = _cachedMainTimerState?.targetTime || 600;
         updateCachedMainTimerState({
           ...(_cachedMainTimerState || {}),
@@ -1027,18 +1027,73 @@ export default function SalonWorkScreen() {
           isPreCountingDown: false,
         });
       } else if (action === 'MAIN_TIMER_PAUSE') {
+        const wasOverOrZero = !!_cachedMainTimerState?.isCountUp || (_cachedMainTimerState?.remainingTime != null && _cachedMainTimerState.remainingTime <= 0);
+        const resetTarget = _cachedMainTimerState?.targetTime || 600;
         updateCachedMainTimerState({
           ...(_cachedMainTimerState || {}),
+          remainingTime: wasOverOrZero ? resetTarget : (_cachedMainTimerState?.remainingTime ?? resetTarget),
           targetEndTimestamp: 0,
           isRunning: false,
-          isPaused: true,
+          isPaused: !wasOverOrZero,
           isCountUp: false,
           isPreCountingDown: false,
         });
+      } else if (action === 'MAIN_TIMER_START') {
+        const incomingTotal = Number(extra?.totalSeconds || message?.totalSeconds || extra?.seconds || message?.seconds || 0);
+        const curTarget = incomingTotal > 0 ? incomingTotal : (_cachedMainTimerState?.targetTime || 600);
+        const curRem = _cachedMainTimerState?.remainingTime != null ? _cachedMainTimerState.remainingTime : curTarget;
+        const targetEnd = Date.now() + curRem * 1000;
+        updateCachedMainTimerState({
+          ...(_cachedMainTimerState || {}),
+          remainingTime: curRem,
+          targetTime: curTarget,
+          targetEndTimestamp: targetEnd,
+          isRunning: true,
+          isPaused: false,
+          isCountUp: false,
+          isPreCountingDown: false,
+        });
+      } else if (action === 'MAIN_TIMER_SET_TIME') {
+        const incomingSec = Number(extra?.totalSeconds || message?.totalSeconds || extra?.seconds || message?.seconds || 0);
+        if (incomingSec > 0) {
+          const autoStart = extra?.autoStart === true || message?.autoStart === true;
+          const targetEnd = autoStart ? (Date.now() + incomingSec * 1000) : 0;
+          updateCachedMainTimerState({
+            ...(_cachedMainTimerState || {}),
+            remainingTime: incomingSec,
+            targetTime: incomingSec,
+            targetEndTimestamp: targetEnd,
+            isRunning: autoStart,
+            isPaused: !autoStart,
+            isCountUp: false,
+            isPreCountingDown: false,
+          });
+        }
+      } else if (action === 'MAIN_TIMER_ADJUST') {
+        const delta = Number(extra?.secondsToAdd || message?.secondsToAdd || 0);
+        if (delta && _cachedMainTimerState) {
+          const isRunning = !!_cachedMainTimerState.isRunning;
+          if (isRunning) {
+            const baseEnd = _cachedMainTimerState.targetEndTimestamp || Date.now();
+            const newEnd = Math.max(Date.now() + 5000, baseEnd + delta * 1000);
+            const nextRem = Math.max(0, Math.ceil((newEnd - Date.now()) / 1000));
+            updateCachedMainTimerState({
+              ..._cachedMainTimerState,
+              remainingTime: nextRem,
+              targetEndTimestamp: newEnd,
+            });
+          } else {
+            const nextRem = Math.max(10, (_cachedMainTimerState.remainingTime || _cachedMainTimerState.targetTime || 600) + delta);
+            updateCachedMainTimerState({
+              ..._cachedMainTimerState,
+              remainingTime: nextRem,
+              targetTime: nextRem,
+            });
+          }
+        }
       }
-      if (requestMainTimerAction) {
-        requestMainTimerAction(action, message, message.actionId || `${action}_${message.timestamp || Date.now()}`);
-      }
+      // ★ HomeScreen自身が WatchConnectivity.subscribeActions で直接受信して処理するため、
+      //   ここでの requestMainTimerAction による二重転送は行わない（二重実行・トグル反転を防止）
       return;
     }
 
@@ -1102,9 +1157,17 @@ export default function SalonWorkScreen() {
     if (action === 'STOP_ALARM') {
       if (seatId === 'main-timer' || seatId === '-1' || Number(seatId) === -1) {
         stopAlarm('main', 'main-timer');
-        if (requestMainTimerAction) {
-          requestMainTimerAction('MAIN_TIMER_RESET', message, message.actionId || `stop_alarm_${Date.now()}`);
-        }
+        const resetTarget = _cachedMainTimerState?.targetTime || 600;
+        updateCachedMainTimerState({
+          ...(_cachedMainTimerState || {}),
+          remainingTime: resetTarget,
+          targetTime: resetTarget,
+          targetEndTimestamp: 0,
+          isRunning: false,
+          isPaused: false,
+          isCountUp: false,
+          isPreCountingDown: false,
+        });
         return;
       }
       if (seatId) {
@@ -3698,8 +3761,10 @@ export default function SalonWorkScreen() {
 
   // メインタイマーを空席にアサイン
   const handleAssignMainTimerToSeat = (seatId) => {
-    const remaining = mainTimerState?.remainingTime || 1200;
-    const target = mainTimerState?.targetTime || 1200;
+    const target = mainTimerState?.targetTime || 180;
+    const remaining = (!mainTimerState?.isCountUp && mainTimerState?.remainingTime > 0)
+      ? mainTimerState.remainingTime
+      : target;
     const endTs = Date.now() + remaining * 1000;
 
     setSeats((prev) =>
@@ -3724,8 +3789,10 @@ export default function SalonWorkScreen() {
 
   // メインタイマーを席に割り当てずにセット（席指定なし・フリータイマーとしてサロンボードに追加）
   const handleAssignMainTimerWithoutSeat = () => {
-    const remaining = mainTimerState?.remainingTime ?? 180;
-    const target = mainTimerState?.targetTime ?? 180;
+    const target = mainTimerState?.targetTime || 180;
+    const remaining = (!mainTimerState?.isCountUp && mainTimerState?.remainingTime > 0)
+      ? mainTimerState.remainingTime
+      : target;
     const endTs = Date.now() + remaining * 1000;
     const genreText = mainTimerState?.genre ? ` (${mainTimerState.genre})` : '';
 
@@ -3848,8 +3915,8 @@ export default function SalonWorkScreen() {
         style={[
           styles.mainTimerWidget,
           {
-            backgroundColor: mainTimerState?.isRunning ? theme.accentLight : theme.cardBg,
-            borderColor: mainTimerState?.isRunning ? theme.accentBorder : theme.cardBorder,
+            backgroundColor: (mainTimerState?.isRunning || mainTimerState?.isPreCountingDown) ? theme.accentLight : theme.cardBg,
+            borderColor: (mainTimerState?.isRunning || mainTimerState?.isPreCountingDown) ? theme.accentBorder : theme.cardBorder,
           },
         ]}
       >
@@ -3857,13 +3924,15 @@ export default function SalonWorkScreen() {
         <View style={styles.mainTimerHeaderRow}>
           <View style={styles.mainTimerBadgeRow}>
             <Ionicons
-              name={mainTimerState?.isRunning ? 'timer' : 'timer-outline'}
+              name={(mainTimerState?.isRunning || mainTimerState?.isPreCountingDown) ? 'timer' : 'timer-outline'}
               size={15}
-              color={mainTimerState?.isRunning ? theme.accent : theme.textSecondary}
+              color={(mainTimerState?.isRunning || mainTimerState?.isPreCountingDown) ? theme.accent : theme.textSecondary}
               style={{ marginRight: 5 }}
             />
-            <Text style={[styles.mainTimerLabel, { color: mainTimerState?.isRunning ? theme.accent : theme.textPrimary }]}>
-              {mainTimerState?.isRunning
+            <Text style={[styles.mainTimerLabel, { color: (mainTimerState?.isRunning || mainTimerState?.isPreCountingDown) ? theme.accent : theme.textPrimary }]}>
+              {mainTimerState?.isPreCountingDown
+                ? 'メインタイマー (準備カウント中)'
+                : mainTimerState?.isRunning
                 ? 'メインタイマー稼働中'
                 : mainTimerState?.isPaused
                 ? 'メインタイマー (一時停止)'
@@ -3892,14 +3961,18 @@ export default function SalonWorkScreen() {
                 {
                   color: mainTimerState?.isCountUp
                     ? theme.danger
-                    : mainTimerState?.isRunning
+                    : (mainTimerState?.isRunning || mainTimerState?.isPreCountingDown)
                     ? theme.accent
                     : theme.textPrimary,
                 },
               ]}
             >
               {mainTimerState?.isCountUp ? '+' : ''}
-              {formatSec(mainTimerState?.remainingTime ?? 180)}
+              {formatSec(
+                mainTimerState?.isPreCountingDown
+                  ? (mainTimerState?.preCountdownSeconds ?? 0)
+                  : (mainTimerState?.remainingTime ?? 180)
+              )}
             </Text>
           </TouchableOpacity>
 
@@ -3908,24 +3981,28 @@ export default function SalonWorkScreen() {
               style={[
                 styles.mainTimerBtn,
                 {
-                  backgroundColor: mainTimerState?.isRunning ? theme.warningLight : theme.accent,
-                  borderColor: mainTimerState?.isRunning ? theme.warning : theme.accent,
+                  backgroundColor: (mainTimerState?.isRunning || mainTimerState?.isPreCountingDown) ? theme.warningLight : theme.accent,
+                  borderColor: (mainTimerState?.isRunning || mainTimerState?.isPreCountingDown) ? theme.warning : theme.accent,
                 },
               ]}
               onPress={() => requestMainTimerAction('toggle')}
             >
               <Ionicons
-                name={mainTimerState?.isRunning ? 'pause' : 'play'}
+                name={(mainTimerState?.isRunning || mainTimerState?.isPreCountingDown) ? 'pause' : 'play'}
                 size={13}
-                color={mainTimerState?.isRunning ? theme.warning : '#FFFFFF'}
+                color={(mainTimerState?.isRunning || mainTimerState?.isPreCountingDown) ? theme.warning : '#FFFFFF'}
               />
               <Text
                 style={[
                   styles.mainTimerBtnText,
-                  { color: mainTimerState?.isRunning ? theme.warning : '#FFFFFF' },
+                  { color: (mainTimerState?.isRunning || mainTimerState?.isPreCountingDown) ? theme.warning : '#FFFFFF' },
                 ]}
               >
-                {mainTimerState?.isRunning ? '一時停止' : 'スタート'}
+                {mainTimerState?.isRunning && mainTimerState?.isCountUp
+                  ? '終了'
+                  : (mainTimerState?.isRunning || mainTimerState?.isPreCountingDown)
+                  ? '一時停止'
+                  : 'スタート'}
               </Text>
             </TouchableOpacity>
 
@@ -5852,7 +5929,7 @@ export default function SalonWorkScreen() {
             </View>
 
             <Text style={[styles.proModalSubText, { color: theme.textSecondary, marginBottom: 14 }]}>
-              現在のメインタイマー（{formatSec(mainTimerState?.remainingTime ?? 180)}）をセットしてサロンボードで稼働開始します。
+              現在のメインタイマー（{formatSec((!mainTimerState?.isCountUp && mainTimerState?.remainingTime > 0) ? mainTimerState.remainingTime : (mainTimerState?.targetTime || 180))}）をセットしてサロンボードで稼働開始します。
             </Text>
 
             {/* ★ ユーザー指定: 席に割り当てずにセットするボタン */}

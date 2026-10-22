@@ -284,10 +284,14 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             !ringing.contains(where: { isSameTarget(key1: $0.key, key2: nr.key) })
         }
         if newRinging != ringing {
-            // 鳴っていたのに消えた予定（相手が止めた・完了した）があれば保留・配信通知も即座に消火
-            let removedKeys = ringing.filter { r in !newRinging.contains(where: { isSameTarget(key1: $0.key, key2: r.key) }) }.map { $0.key }
-            if !removedKeys.isEmpty {
-                let ids = removedKeys.flatMap { k in repeatOffsets.indices.map { "\(notificationPrefix)\(k).\($0)" } }
+            // 鳴っていたのに消えた予定（相手が止めた・完了した・時間を再設定/延長した）があれば消火済み記録＆保留・配信通知も即座に消火
+            let removedEvents = ringing.filter { r in !newRinging.contains(where: { isSameTarget(key1: $0.key, key2: r.key) }) }
+            if !removedEvents.isEmpty {
+                for ev in removedEvents {
+                    acknowledged[ev.key] = ev.date.timeIntervalSince1970
+                }
+                persist()
+                let ids = removedEvents.flatMap { ev in repeatOffsets.indices.map { "\(notificationPrefix)\(ev.key).\($0)" } }
                 UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ids)
                 UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ids)
             }
@@ -343,29 +347,38 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             let mainSeatIds = Set(targets.filter { $0.key.contains("-main@") }.map { $0.seatId })
             let seatIds = Set(targets.map { $0.seatId })
             for id in seatIds {
-                let isMain = mainSeatIds.contains(id)
-                var extra: [String: Any] = ["kind": isMain ? "main" : "check"]
-                if isMain, let mainEvent = targets.first(where: { $0.seatId == id && $0.key.contains("-main@") }) {
-                    // ★ 鳴っていたタイマーの終了時刻。iPhone は席の終了時刻と照合し、別のタイマーなら止めない
-                    extra["expectedEnd"] = mainEvent.date.timeIntervalSince1970 * 1000.0
-                    WatchSessionManager.shared.applyLocalStop(seatId: id)
-                    if id == "main-timer" || id == WatchSessionManager.shared.mainTimer?.id {
-                        if var m = WatchSessionManager.shared.mainTimer {
-                            m.isRunning = false
-                            m.pausedRemainingSeconds = m.totalSeconds
-                            WatchSessionManager.shared.mainTimer = m
-                        }
-                        WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_RESET")
+                let isMainTimer = (id == "main-timer" || id == WatchSessionManager.shared.mainTimer?.id)
+                if isMainTimer {
+                    // ★ メインタイマーのアラーム消火: メインタイマーのみを安全にリセットし、客席タイマーには絶対に触れない！
+                    if var m = WatchSessionManager.shared.mainTimer {
+                        m.isRunning = false
+                        m.isPreCountingDown = false
+                        m.preCountdownSeconds = 0
+                        m.prepEndTime = nil
+                        m.pausedRemainingSeconds = m.totalSeconds
+                        WatchSessionManager.shared.mainTimer = m
+                        WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: m, userName: WatchSessionManager.shared.currentUserName)
                     }
-                } else if !isMain {
-                    // ★ チェック時間アラームの停止: Watch側でも即座にチェック完了を反映
-                    WatchSessionManager.shared.applyLocalCheckComplete(seatId: id)
+                    // MAIN_TIMER_RESET 1本に統合（iPhone側でアラーム消火とタイマーリセットの両方を即時実行し、時間差の二重リセットを防止）
+                    WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_RESET")
+                } else {
+                    // ★ サロン客席タイマーのアラーム消火
+                    let isMain = mainSeatIds.contains(id)
+                    var extra: [String: Any] = ["kind": isMain ? "main" : "check"]
+                    if isMain, let mainEvent = targets.first(where: { $0.seatId == id && $0.key.contains("-main@") }) {
+                        // 鳴っていたタイマーの終了時刻。iPhone は席の終了時刻と照合し、別のタイマーなら止めない
+                        extra["expectedEnd"] = mainEvent.date.timeIntervalSince1970 * 1000.0
+                        WatchSessionManager.shared.applyLocalStop(seatId: id)
+                    } else if !isMain {
+                        // チェック時間アラームの停止: Watch側でも即座にチェック完了を反映
+                        WatchSessionManager.shared.applyLocalCheckComplete(seatId: id)
+                    }
+                    WatchSessionManager.shared.sendActionToPhone(
+                        action: "STOP_ALARM",
+                        seatId: id,
+                        extra: extra
+                    )
                 }
-                WatchSessionManager.shared.sendActionToPhone(
-                    action: "STOP_ALARM",
-                    seatId: id,
-                    extra: extra
-                )
             }
         }
     }

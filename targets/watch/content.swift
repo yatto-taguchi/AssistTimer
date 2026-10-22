@@ -587,7 +587,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         didUpdateMain = true
                     }
                 } else if self.lastMainTimerLocalActionType == "SET_TIME" {
-                    if parsedMain.totalSeconds == self.mainTimer?.totalSeconds || parsedMain.isRunning || parsedMain.isPreCountingDown {
+                    let localNeedsActive = (self.mainTimer?.isRunning == true || self.mainTimer?.isPreCountingDown == true)
+                    let incomingIsActive = (parsedMain.isRunning || parsedMain.isPreCountingDown)
+                    if parsedMain.totalSeconds == self.mainTimer?.totalSeconds && (!localNeedsActive || incomingIsActive) {
                         self.mainTimer = parsedMain
                         self.lastMainTimerLocalActionTime = Date.distantPast
                         didUpdateMain = true
@@ -701,9 +703,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         sendActionToPhone(action: action, seatId: "main-timer", extra: fullExtra)
     }
     
-    // ★ メインタイマーの設定時間変更を送信
-    func sendMainTimerSetTime(seconds: Int) {
-        sendMainTimerAction(action: "MAIN_TIMER_SET_TIME", extra: ["totalSeconds": seconds])
+    // ★ メインタイマーの設定時間変更を送信（即時スタート対応）
+    func sendMainTimerSetTime(seconds: Int, autoStart: Bool = true) {
+        sendMainTimerAction(action: "MAIN_TIMER_SET_TIME", extra: ["totalSeconds": seconds, "autoStart": autoStart])
     }
     
     // ★ メインタイマーの秒数増減を送信
@@ -1592,13 +1594,18 @@ struct ContentView: View {
                         onToggle: {
                             playHaptic(.click)
                             var m = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
+                            let wasOvertime = m.isOvertime
                             let willPause = m.isRunning || m.isPreCountingDown
                             if willPause {
                                 m.isRunning = false
                                 m.isPreCountingDown = false
                                 m.preCountdownSeconds = 0
                                 m.prepEndTime = nil
-                                m.pausedRemainingSeconds = max(0, Int(m.targetEndTime.timeIntervalSince(now)))
+                                if wasOvertime {
+                                    m.pausedRemainingSeconds = m.totalSeconds
+                                } else {
+                                    m.pausedRemainingSeconds = max(0, Int(ceil(m.targetEndTime.timeIntervalSince(now))))
+                                }
                             } else {
                                 let isInitialStart = (m.pausedRemainingSeconds <= 0 || m.pausedRemainingSeconds == m.totalSeconds || m.isOvertime)
                                 if isInitialStart && m.isCountdownConfigEnabled && m.countdownConfigSeconds > 0 {
@@ -1618,7 +1625,7 @@ struct ContentView: View {
                             WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
                             WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                             sessionManager.sendMainTimerAction(
-                                action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START",
+                                action: willPause ? (wasOvertime ? "MAIN_TIMER_RESET" : "MAIN_TIMER_PAUSE") : "MAIN_TIMER_START",
                                 extra: willPause ? [:] : ["totalSeconds": m.totalSeconds]
                             )
                         },
@@ -1780,9 +1787,10 @@ struct ContentView: View {
     private func handleToggleMainTimer() {
         playHaptic(.click)
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
+        let wasOvertime = main.isOvertime
         let willPause = main.isRunning || main.isPreCountingDown
         if willPause {
-            if main.isPreCountingDown {
+            if main.isPreCountingDown || wasOvertime {
                 main.pausedRemainingSeconds = main.totalSeconds
             } else {
                 main.pausedRemainingSeconds = max(0, Int(ceil(main.targetEndTime.timeIntervalSince(now))))
@@ -1810,7 +1818,7 @@ struct ContentView: View {
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(
-            action: willPause ? "MAIN_TIMER_PAUSE" : "MAIN_TIMER_START",
+            action: willPause ? (wasOvertime ? "MAIN_TIMER_RESET" : "MAIN_TIMER_PAUSE") : "MAIN_TIMER_START",
             extra: willPause ? [:] : ["totalSeconds": main.totalSeconds]
         )
     }
@@ -1840,7 +1848,8 @@ struct ContentView: View {
     private func handlePauseMainTimer() {
         playHaptic(.click)
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
-        if main.isPreCountingDown {
+        let wasOvertime = main.isOvertime
+        if main.isPreCountingDown || wasOvertime {
             main.pausedRemainingSeconds = main.totalSeconds
         } else {
             main.pausedRemainingSeconds = max(0, Int(ceil(main.targetEndTime.timeIntervalSince(Date()))))
@@ -1853,7 +1862,7 @@ struct ContentView: View {
         sessionManager.mainTimer = main
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-        sessionManager.sendMainTimerAction(action: "MAIN_TIMER_PAUSE")
+        sessionManager.sendMainTimerAction(action: wasOvertime ? "MAIN_TIMER_RESET" : "MAIN_TIMER_PAUSE")
     }
     
     private func handleResetMainTimer() {
@@ -1871,13 +1880,27 @@ struct ContentView: View {
         sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET")
     }
     
-    private func handleSetMainTimerTime(totalSec: Int) {
+    private func handleSetMainTimerTime(totalSec: Int, autoStart: Bool = true) {
         playHaptic(.click)
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         main.totalSeconds = totalSec
         main.pausedRemainingSeconds = totalSec
-        if main.isRunning && !main.isOvertime {
-            main.targetEndTime = Date().addingTimeInterval(TimeInterval(totalSec))
+        
+        let shouldAutoStart = autoStart || main.isRunning
+        if shouldAutoStart {
+            // ★ タイム入力時に即座にカウントダウンを開始（客席タイマーと統一された直感的UX）
+            if main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
+                main.isPreCountingDown = true
+                main.preCountdownSeconds = main.countdownConfigSeconds
+                main.prepEndTime = Date().addingTimeInterval(TimeInterval(main.countdownConfigSeconds))
+                main.isRunning = false
+            } else {
+                main.isRunning = true
+                main.isPreCountingDown = false
+                main.preCountdownSeconds = 0
+                main.prepEndTime = nil
+                main.targetEndTime = Date().addingTimeInterval(TimeInterval(totalSec))
+            }
         } else {
             main.isRunning = false
             main.isPreCountingDown = false
@@ -1889,7 +1912,7 @@ struct ContentView: View {
         sessionManager.mainTimer = main
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-        sessionManager.sendMainTimerSetTime(seconds: totalSec)
+        sessionManager.sendMainTimerSetTime(seconds: totalSec, autoStart: shouldAutoStart)
     }
     
     private func handleAdjustMainTimer(deltaSec: Int) {
@@ -2697,9 +2720,9 @@ struct MainTimerCard: View {
                 Button(action: onToggle) {
                     let isActive = item.isRunning || item.isPreCountingDown
                     HStack(spacing: 4) {
-                        Image(systemName: isActive ? "pause.fill" : "play.fill")
+                        Image(systemName: item.isOvertime ? "stop.fill" : (isActive ? "pause.fill" : "play.fill"))
                             .font(.system(size: 11, weight: .bold))
-                        Text(item.isPreCountingDown ? "中止" : (item.isRunning ? "一時停止" : "スタート"))
+                        Text(item.isPreCountingDown ? "中止" : (item.isOvertime ? "終了" : (item.isRunning ? "一時停止" : "スタート")))
                             .font(.system(size: 12, weight: .bold))
                     }
                     .frame(maxWidth: .infinity)
@@ -3562,7 +3585,7 @@ struct MainTimerActionSheet: View {
     
     var currentSeconds: Int {
         if isRunning {
-            return max(0, Int(currentItem.targetEndTime.timeIntervalSince(now)))
+            return max(0, Int(ceil(currentItem.targetEndTime.timeIntervalSince(now))))
         } else if isOvertime {
             return abs(min(0, Int(currentItem.targetEndTime.timeIntervalSince(now))))
         } else {
@@ -3655,6 +3678,7 @@ struct MainTimerActionSheet: View {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
                         onReset()
+                        dismiss()
                     }) {
                         HStack(spacing: 4) {
                             Image(systemName: "stop.circle.fill")
@@ -3729,6 +3753,7 @@ struct MainTimerActionSheet: View {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
                         onStart()
+                        dismiss()
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: "play.fill")
@@ -3778,6 +3803,7 @@ struct MainTimerActionSheet: View {
                                 WKInterfaceDevice.current().play(.click)
                                 pickerSeconds = m * 60
                                 onSetTime(m * 60)
+                                dismiss()
                             }) {
                                 Text("\(m)分")
                                     .font(.system(size: 11, weight: isSelected ? .heavy : .bold))
@@ -3842,6 +3868,7 @@ struct MainTimerActionSheet: View {
                                 withAnimation {
                                     isCustomPickerOpen = false
                                 }
+                                dismiss()
                             }) {
                                 HStack(spacing: 4) {
                                     Image(systemName: "checkmark.circle.fill")
@@ -5731,7 +5758,8 @@ struct ThumbnailMainTimerCard: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
                     } else {
-                        Text(formatSeconds(item.totalSeconds))
+                        let pausedSec = item.pausedRemainingSeconds > 0 ? item.pausedRemainingSeconds : item.totalSeconds
+                        Text(formatSeconds(pausedSec))
                             .font(.system(size: 20, weight: .bold, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(Color(hex: "#8E8E93"))
