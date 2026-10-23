@@ -405,7 +405,7 @@ struct ComplicationView: View {
                     checkTimerRow(seat: seat, checkEnd: checkEnd)
                 }
             } else {
-                Text("待機中")
+                Text("00:00")
                     .font(.system(size: 20, weight: .bold, design: .rounded))
                 Text("稼働中のタイマーなし")
                     .font(.system(size: 10))
@@ -562,7 +562,7 @@ struct ComplicationView: View {
             if let seat = entry.seat {
                 Text("\(seat.isMainTimer ? "メインタイマー" : "\(seat.seatNumber)番席") \(isOver ? "超過" : "残り") \(seat.endDate, style: .timer)")
             } else {
-                Text("AssistTimer 待機中")
+                Text("AssistTimer 00:00")
             }
         }
         .containerBackground(for: .widget) { Color.clear }
@@ -576,7 +576,7 @@ struct ComplicationView: View {
                 if let seat = entry.seat {
                     Text("\(seat.isMainTimer ? "メイン" : "\(seat.seatNumber)番") \(seat.endDate, style: .timer)")
                 } else {
-                    Text("待機中")
+                    Text("00:00")
                 }
             }
         .containerBackground(for: .widget) { Color.clear }

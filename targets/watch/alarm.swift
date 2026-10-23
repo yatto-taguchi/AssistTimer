@@ -208,7 +208,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             list.append(existingRingingMain)
         } else if mainTimer != nil,
                   let existingDueMain = events.first(where: { $0.seatId == "main-timer" && !isAcknowledged($0.key) && isArmed($0.key) }),
-                  existingDueMain.date <= nowDate.addingTimeInterval(5) {
+                  existingDueMain.date > nowDate.addingTimeInterval(-10800) {
             // ★ iPhone側またはWatch側がカウントアップOFFで0秒到達と同時に isRunning: false を設定した場合でも、
             //   Watch側の終了時刻直前〜直後であればイベントを消さずに確実に鳴動させる
             list.append(existingDueMain)
@@ -577,8 +577,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                         m.isPreCountingDown = false
                         m.preCountdownSeconds = 0
                         m.prepEndTime = nil
-                        m.pausedRemainingSeconds = m.totalSeconds
-                        m.targetEndTime = Date().addingTimeInterval(TimeInterval(m.totalSeconds))
+                        m.pausedRemainingSeconds = 0
+                        m.targetEndTime = Date()
                         WatchSessionManager.shared.mainTimer = m
                         WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: m, userName: WatchSessionManager.shared.currentUserName)
                     }

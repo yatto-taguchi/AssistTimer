@@ -337,7 +337,7 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
           : 0);
     
     const pausedRem = !isRunning
-      ? (state.remainingTime != null ? Math.max(0, state.remainingTime) : (state.targetTime || 600))
+      ? (state.isPaused ? (state.remainingTime != null ? Math.max(0, state.remainingTime) : (state.targetTime || 600)) : 0)
       : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
     const mainTimerPayload = {
@@ -358,6 +358,8 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       isCountdownConfigEnabled: !!state.isCountdownConfigEnabled,
       countdownConfigSeconds: state.countdownConfigSeconds || 5,
       prepEndTimestamp: isPreCountingDown ? prepEnd : (state.prepEndTimestamp || 0),
+      isPaused: !!state.isPaused,
+      explicitStop: !!state.explicitStop,
     };
 
     const flatMembers = Array.isArray(_cachedStaffMembers)
@@ -443,7 +445,7 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
             : 0);
       
       const pausedRem = !isRunning
-        ? (_cachedMainTimerState.remainingTime != null ? Math.max(0, _cachedMainTimerState.remainingTime) : (_cachedMainTimerState.targetTime || 600))
+        ? (_cachedMainTimerState.isPaused ? (_cachedMainTimerState.remainingTime != null ? Math.max(0, _cachedMainTimerState.remainingTime) : (_cachedMainTimerState.targetTime || 600)) : 0)
         : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
       mainTimerPayload = {
@@ -464,6 +466,8 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
         isCountdownConfigEnabled: !!_cachedMainTimerState.isCountdownConfigEnabled,
         countdownConfigSeconds: _cachedMainTimerState.countdownConfigSeconds || 5,
         prepEndTimestamp: isPreCountingDown ? prepEnd : (_cachedMainTimerState.prepEndTimestamp || 0),
+        isPaused: !!_cachedMainTimerState.isPaused,
+        explicitStop: !!_cachedMainTimerState.explicitStop,
       };
     }
 
@@ -1308,6 +1312,9 @@ export default function SalonWorkScreen() {
 
     if (!seatId) return;
 
+    if (['FINISH_MEASURE', 'RESET_ZERO', 'STOP_TIMER'].includes(action)) {
+      stopAlarm('salon', `${seatId}-main`);
+    }
     // ★ Watch からの「止める」系操作で共通の停止状態（Watch の表示と同じ 0:00 の停止）
     const stopSeat = (s, label) => {
       const staff = watchUser || userName || 'スタッフ';
@@ -1459,6 +1466,7 @@ export default function SalonWorkScreen() {
             };
           }
           case 'RESET_ZERO': {
+            return { ...stopSeat(s, 'タイマーを止める'), collapsedAtEnd: s.targetEndTimestamp || Date.now() };
             // ★ iPhone 自身のリセットと同じ状態にする。以前は status: 'stopped' にしていたため、
             //   iPhone の席カードが「稼働中」扱いで超過時間を数え続けていた
             return {
@@ -1485,12 +1493,12 @@ export default function SalonWorkScreen() {
             };
           }
           case 'STOP_TIMER': {
-            return stopSeat(s, 'タイマー停止');
+            return { ...stopSeat(s, 'タイマーを止める'), collapsedAtEnd: s.targetEndTimestamp || Date.now() };
           }
           case 'FINISH_MEASURE': {
             // ★ 以前は未対応だったため、Watch で計測終了しても次の同期で「超過」に戻っていた
             // ★ カードの収納は、停止している間だけ保つ（再スタートで自動的に解除）
-            return { ...stopSeat(s, '計測終了'), collapsedAtEnd: s.targetEndTimestamp || Date.now() };
+            return { ...stopSeat(s, 'タイマーを止める'), collapsedAtEnd: s.targetEndTimestamp || Date.now() };
           }
           case 'STOP_ALARM': {
             // ★ チェック時間のアラーム停止ならチェックを完了にする（全体タイマーは終了前でも反映）
@@ -1642,20 +1650,21 @@ export default function SalonWorkScreen() {
       const actor = (watchUser || 'スタッフ').trim();
       switch (action) {
         case 'STOP_TIMER':
-          watchNotif = { text: `⏹️ ${actor}が【${seatLabel}】のタイマーを停止しました`, color: '#FF9500', sourceUser: actor };
+        case 'RESET_ZERO':
+          watchNotif = { text: `⏹️ ${actor}が【${seatLabel}】のタイマーを止めました`, color: '#30D158', sourceUser: actor };
           break;
         case 'STOP_ALARM':
           if (extra?.kind === 'check') {
             watchNotif = { text: `✅ ${actor}が【${seatLabel}】のチェックを完了しました`, color: '#30D158', sourceUser: actor };
           } else {
-            watchNotif = { text: `🔕 ${actor}が【${seatLabel}】のアラームを停止しました`, color: '#FF9500', sourceUser: actor };
+            watchNotif = { text: `⏹️ ${actor}が【${seatLabel}】のタイマーを止めました`, color: '#30D158', sourceUser: actor };
           }
           break;
         case 'COMPLETE_CHECK':
           watchNotif = { text: `✅ ${actor}が【${seatLabel}】のチェックを完了しました`, color: '#30D158', sourceUser: actor };
           break;
         case 'FINISH_MEASURE':
-          watchNotif = { text: `🏁 ${actor}が【${seatLabel}】の計測を終了しました`, color: '#30D158', sourceUser: actor };
+          watchNotif = { text: `⏹️ ${actor}が【${seatLabel}】のタイマーを止めました`, color: '#30D158', sourceUser: actor };
           break;
         case 'ENTER_HELP':
           watchNotif = { text: `🤝 ${actor}が【${seatLabel}】のヘルプ対応を開始しました`, color: '#30D158', sourceUser: actor };
@@ -4142,7 +4151,7 @@ export default function SalonWorkScreen() {
                 ? 'メインタイマー稼働中'
                 : mainTimerState?.isPaused
                 ? 'メインタイマー (一時停止)'
-                : 'メインタイマー (待機中)'}
+                : 'メインタイマー (00:00)'}
             </Text>
             {mainTimerState?.genre ? (
               <View style={[styles.mainTimerGenrePill, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}>
@@ -4205,7 +4214,7 @@ export default function SalonWorkScreen() {
                 ]}
               >
                 {mainTimerState?.isRunning && mainTimerState?.isCountUp
-                  ? '終了'
+                  ? 'タイマーを止める'
                   : (mainTimerState?.isRunning || mainTimerState?.isPreCountingDown)
                   ? '一時停止'
                   : 'スタート'}
@@ -4216,7 +4225,7 @@ export default function SalonWorkScreen() {
               style={[styles.mainTimerBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
               onPress={() => requestMainTimerAction('reset')}
             >
-              <Text style={[styles.mainTimerBtnText, { color: theme.textSecondary }]}>リセット</Text>
+              <Text style={[styles.mainTimerBtnText, { color: theme.textSecondary }]}>タイマーを止める</Text>
             </TouchableOpacity>
 
             {/* タイムを空席またはフリー枠にセットするショートカット */}
@@ -4452,7 +4461,7 @@ export default function SalonWorkScreen() {
                       ]}
                     >
                       {isZeroPaused
-                        ? '待機中'
+                        ? '00:00'
                         : item.assistantStaffName === 'ヘルプなし'
                         ? 'ヘルプなし'
                         : item.assistantStaffName
@@ -6792,7 +6801,7 @@ export default function SalonWorkScreen() {
                         >
                           {targetHelpActionInfo
                             ? `タイマーを止めて${targetHelpActionInfo.label}する`
-                            : 'タイマーを止める。'}
+                            : 'タイマーを止める'}
                         </Text>
                       </TouchableOpacity>
 
