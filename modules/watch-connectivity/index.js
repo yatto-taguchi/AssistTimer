@@ -1,5 +1,5 @@
 import { EventEmitter, requireNativeModule } from 'expo-modules-core';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 
 let NativeModule = null;
 let emitter = null;
@@ -100,8 +100,20 @@ const deliverAction = (payload) => {
   // HomeScreen と SalonWorkScreen の両方（2消費者以上）に渡り切るまではキューに保持し、
   // 遅れてマウント・データ読込完了した画面にも確実に取りこぼしなく届ける
   if (actionConsumers.size < 2) {
-    if (payload.action === 'REQUEST_SYNC' && actionQueue.some((item) => item.payload.action === 'REQUEST_SYNC')) {
-      return;
+    if (payload.action === 'REQUEST_SYNC') {
+      const existingIdx = actionQueue.findIndex((item) => item.payload.action === 'REQUEST_SYNC');
+      if (existingIdx !== -1) {
+        // 新しいREQUEST_SYNC（特にwatchMainTimerActive付き）で古い保留を更新
+        if (payload.watchMainTimerActive || !actionQueue[existingIdx].payload.watchMainTimerActive) {
+          actionQueue[existingIdx] = {
+            payload,
+            deliveredTo,
+            deliveredCount,
+            enqueuedAt: Date.now(),
+          };
+        }
+        return;
+      }
     }
     actionQueue.push({
       payload,
@@ -116,8 +128,21 @@ const deliverAction = (payload) => {
   }
 };
 
-const handleIncoming = (kind, body) => {
+const processedEventSeqs = new Set();
+const markEventSeqProcessed = (seq) => {
+  if (seq == null) return true;
+  if (processedEventSeqs.has(seq)) return false;
+  processedEventSeqs.add(seq);
+  if (processedEventSeqs.size > 300) {
+    const first = processedEventSeqs.values().next().value;
+    processedEventSeqs.delete(first);
+  }
+  return true;
+};
+
+const handleIncoming = (kind, body, seq = null) => {
   if (!body) return;
+  if (!markEventSeqProcessed(seq)) return;
   recordJsReceived(kind, body);
   if (body.action) {
     // 予備ルート(userInfo/context)で数分〜数時間前の古い操作がアプリ再起動時にまとめて届いた場合は無視（起動直後の勝手な作動・振動を防止）
@@ -137,25 +162,42 @@ const EVENT_BODY_KEYS = {
   onUserInfoReceived: ['userInfo', 'userInfo'],
 };
 
+const drainPendingNativeEvents = () => {
+  if (!NativeModule || typeof NativeModule.takePendingEvents !== 'function') return;
+  try {
+    const pending = NativeModule.takePendingEvents() || [];
+    pending.forEach((ev) => {
+      const keys = ev && EVENT_BODY_KEYS[ev.name];
+      if (keys) {
+        const seq = ev._eventSeq ?? (ev.body && ev.body._eventSeq) ?? null;
+        handleIncoming(keys[0], ev.body && ev.body[keys[1]], seq);
+      }
+    });
+  } catch (e) {
+    console.warn('[WatchConnectivity] takePendingEvents failed:', e);
+  }
+};
+
 let globalListenersReady = false;
 const setupGlobalListeners = () => {
   if (globalListenersReady || !NativeModule) return;
   globalListenersReady = true;
   Object.entries(EVENT_BODY_KEYS).forEach(([eventName, [kind, key]]) => {
-    safeAddListener(eventName, (event) => handleIncoming(kind, event && event[key]));
+    safeAddListener(eventName, (event) => {
+      const seq = event && event._eventSeq != null ? event._eventSeq : null;
+      handleIncoming(kind, event && event[key], seq);
+    });
   });
-  // ネイティブ側で JS 準備前に保留していた受信を回収（リスナー登録後に呼ぶので間に届いた分も漏れない）
+  // ネイティブ側で保留していた受信を即時回収＋1秒周期およびフォアグラウンド復帰時に取りこぼしを定期回収
+  drainPendingNativeEvents();
+  setInterval(drainPendingNativeEvents, 1000);
   try {
-    if (typeof NativeModule.takePendingEvents === 'function') {
-      const pending = NativeModule.takePendingEvents() || [];
-      pending.forEach((ev) => {
-        const keys = ev && EVENT_BODY_KEYS[ev.name];
-        if (keys) handleIncoming(keys[0], ev.body && ev.body[keys[1]]);
-      });
-    }
-  } catch (e) {
-    console.warn('[WatchConnectivity] takePendingEvents failed:', e);
-  }
+    AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        drainPendingNativeEvents();
+      }
+    });
+  } catch {}
 };
 
 if (Platform.OS === 'ios') {

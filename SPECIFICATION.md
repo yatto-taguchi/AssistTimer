@@ -2436,3 +2436,55 @@ TestFlight Build 68の実機テストにおいて、以下の致命的な不具�
   - 待機席スリムバー、停止中スリムバー、稼働中カードヘッダーの席名バッジにタップ導線（鉛筆アイコン ✏️）を新設。
   - タイマー稼働中であっても計測を止めることなく、いつでも席名変更モーダル（`isRenameSeatModalVisible`）から自由な席名（例: 1番席、個室VIP、セット面3等）を入力・プリセット選択して即座に保存可能に。
   - 変更時はローカル保存（`saveSeatsToStorage`）に加え `syncSeatsToWatch` および Supabase リアルタイム更新を即時発動し、手元の Apple Watch および文字盤コンプリケーションへ1秒以内に新席名を完全同期。
+
+### 33.6. タイム終了後・超過カウントアップ維持仕様およびWatch・スマホ双方向完全連動仕様 (Build 73)
+
+#### 1. タイム終了通知・スマートアラーム消火時の超過カウントアップ自動終了防止と画面遷移仕様 (`targets/watch/alarm.swift`, `targets/watch/content.swift`)
+- **背景・課題**:
+  - 放置タイム終了時に Watch や iPhone で通知やスマートアラームが鳴動した際、「開く」や「アラーム停止」を押すとタイマーが勝手に `00:00` にリセットされ、現場で「放置終了から何分超過したか（例: +01:30）」を把握できない問題が発生していた。
+- **確定仕様**:
+  - **通知「開く」・スマートアラーム消火時の画面遷移**:
+    - タイム終了後の通知タップ「開く」（`UNNotificationDefaultActionIdentifier`）またはスマートアラーム画面の「閉じる / 開く」時、アラーム音・振動および全画面オーバーレイ（`alarmOverlay`）のみを即座に消火する。
+    - タイマー本体は `00:00` にリセットせず、Watch の一覧画面（`cardsScrollView`）最上部に赤色の超過カウントアップ（`超過 +00:xx`）カードを直接表示する。
+  - **超過終了の確定契機**:
+    - 超過中のタイマーが `00:00` に戻るのは、ユーザーが一覧画面のカードをタップして詳細操作シート（`OvertimeActionSheet` / `MainTimerActionSheet`）を開き、明示的に「タイム終了（止める）」「シャンプーに入る」「チェックに入る」「タイムリセット」を選択した時のみとする。
+    - 超過カード操作シート（`OvertimeActionSheet`）の「シャンプーに入る」「00:00にリセット」「計測終了」ボタン押下時、即座に `sessionManager.timers`、アラーム（`WatchAlarmCoordinator`）、文字盤コンプリケーション（`WidgetSync`）へ停止・状態クリアを確実に反映する。
+
+#### 2. 途中チェック時間（`-check@`）と本放置タイマー（`-main@`）の消火・引き継ぎの分離仕様 (`targets/watch/alarm.swift`)
+- **背景・課題**:
+  - 前述の「勝手に00:00に戻さない」対応に伴い、通知やスマートアラームから開いた際の `sendToPhone` フラグが `false` になったことで、途中チェック時間（`-check@`）のアラーム完了処理（`applyLocalCheckComplete` および `STOP_ALARM kind: check`）までスキップされ、後半の本放置タイマーが再予約されない問題が発生していた。
+- **確定仕様**:
+  - `acknowledgeRinging(sendToPhone:completeCheckIfNeeded:)` において、本放置・メインタイマー（`-main@`）と途中チェック時間（`-check@`）の分岐を明確に分離。
+  - **途中チェック（`-check@`）**: 通知の「開く」やスマートアラーム消火時であっても、客席タイマー自体は稼働のままチェック完了（`isCheckCompleted = true`）とし、即座に `STOP_ALARM (kind: check)` を送信して後半の本放置タイマー用スマートアラーム（第2段階）をゼロから再スケジュール（`restartRemainingTimerAfterCheck`）。
+  - **本放置・メインタイマー（`-main@`）**: アプリ内で明示的に「止める / タイム終了 / シャンプーに入る」を選んだ場合（`sendToPhone == true`）のみリセット処理を実行。
+
+#### 3. Watchから開始したメインタイマーの即時連動およびクラッシュ防止仕様 (`targets/watch/content.swift`, `modules/watch-connectivity`)
+- **背景・課題**:
+  - Watch 側でメインタイマーに時間をセットした瞬間、モーダルシートの破棄（`dismiss`）アニメーション中に SwiftUI の View ツリーが即座に再評価されて画面が落ちる（クラッシュする）現象が発生していた。
+  - また、Watch 側でメインタイマーを起動しても iPhone 側に連動しない現象が発生していた。
+- **確定仕様**:
+  - `PendingSheetActionBox` による非リアクティブ遅延実行機構を導入し、`MainTimerActionSheet` 閉鎖完了（0.45秒後）に親画面の `@State` / アクション送信を発動することでクラッシュを完全根絶。
+  - ネイティブモジュール（`ExpoWatchConnectivityModule.swift`）に連番付きイベントキュー（`_eventSeq`）および `drainPendingNativeEvents()` を導入し、JS側リスナーが未準備の間に届いた操作イベントも取りこぼしなく順次回収。
+  - Watch 側送信ヘルパー（`deliver`）において、メインタイマー操作時は即時ルート（`sendMessage`）に加え、1.2秒以内に応答がなければ予備ルート（`transferUserInfo`）も自動併用。
+
+#### 4. Watch・スマホ間の同期（`REQUEST_SYNC`）における超過タイマー保護および停止済みタイマー誤復活防止仕様 (`targets/watch/content.swift`, `src/screens/HomeScreen.js`, `src/screens/SalonWorkScreen.js`)
+- **背景・課題**:
+  - Watch 側で `requestSyncFromPhone()` を呼んだ際、すでに iPhone 側でタイマーを停止していた場合でも、Watch がスリープから目覚めた時の `m.isRunning` により `watchMainTimerActive: true` を送ってしまい、iPhone 側のタイマーがゾンビのように復活する問題があった。
+  - Watch 単独で開始したメインタイマーが超過中に入った後に iPhone と同期した場合、iPhone 側が過去の終了時刻を破棄して最初からフル時間で再カウントダウンを開始してしまう問題があった。
+- **確定仕様**:
+  - Watch 側の `requestSyncFromPhone()` では、`watchStartedMainTimerEndTime != nil`（Watch 発で未同期のタイマーが存在する場合）のみ `watchMainTimerActive = true` を送信。iPhone 側が一度稼働に追いついた後はフラグをクリアし、iPhone 側での停止が Watch へ正しく伝搬するように保護。
+  - iPhone 側（`HomeScreen.js`、`SalonWorkScreen.js`）で Watch からのメインタイマーを受け取る際、終了時刻が直近3時間以内の過去（`incomingTargetEnd <= Date.now()`）である場合は、最初からカウントダウンし直さず、そのまま超過カウントアップ状態（`isCountUp: true`、`overStartTimeRef = incomingTargetEnd`）として正確に合流。
+
+#### 5. 準備カウントダウン（`isPreCountingDown`）から超過へのバックグラウンド跨ぎ正規化仕様 (`targets/watch/content.swift`, `src/screens/HomeScreen.js`)
+- **背景・課題**:
+  - 準備カウントダウン中に iPhone がスリープし、本放置タイマーの終了時刻まで跨いで復帰した場合、状態が「稼働中」のまま止まり超過カウントアップに遷移しないケースがあった。また Watch 側でも `if prepEnd <= nowDate && mainEnd > nowDate` となっていたため本タイマー終了後も「準備中 00:00」で停止していた。
+- **確定仕様**:
+  - Watch 側（`content.swift`）の `processReceivedData` で `if prepEnd <= nowDate` に統一し、本タイマー終了後も確実に稼働中・超過へ移行。
+  - iPhone 側（`HomeScreen.js`）の `AppState` リスナーおよび `getLatestMainTimerState` で、準備カウントダウンと本タイマー終了時刻を跨いでいた場合は即座に超過カウントアップ（`isCountUp: true`）へ遷移・返送する正規化処理を実装。
+
+#### 6. iPhoneアプリ再起動（コールドスタート）時のゴーストアラート暴発防止仕様 (`src/screens/SalonWorkScreen.js`)
+- **背景・課題**:
+  - 超過カウント中の席がある状態で iPhone アプリを完全終了・再起動した際、AsyncStorage に `timeUpTimestamp` が保存されておらず、またメモリ内の `mainTimeupAlertedRef` が空のため、起動した瞬間に「⏰【放置タイム終了】」のポップアップとチャイム・バイブが鳴り直してしまう問題があった。
+- **確定仕様**:
+  - `SalonWorkScreen.js` のタイマー監視ループ内で、タイム終了状態更新時に `saveSeatsToStorage(updated)` を即時実行。
+  - アプリ起動時の `loadInitialData` において、読み込み時点で終了時刻を過ぎている席（超過中）に対し、`mainTimeupAlertedRef.current[s.id] = s.targetEndTimestamp`、`s.timeUpTimestamp`、および経過秒数に応じた `escalationLevel` をあらかじめ記録。アプリ再起動時にポップアップや音が再暴発せず、静かに超過カウント表示（`+00:xx`）だけを継続。

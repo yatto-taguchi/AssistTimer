@@ -127,18 +127,19 @@ export const getDefaultInitialSeats = (staffName = 'スタイリスト') => [
   },
 ];
 
-// ★ アプリ起動時（TestFlightアップデート後や再起動時）に、すでに終了時刻を過ぎている古い稼働中タイマーを
-//   停止状態へ正規化し、開いた瞬間にバイブレーションやアラートが暴発するのを確実に防ぐ共通サニタイズ関数
+// ★ アプリ起動時（TestFlightアップデート後や再起動時）に、3時間以上経過している古い放置タイマーのみ
+//   停止状態へ正規化し、進行中の超過カウントアップ（超過 00:01...）は通知「開く」やアプリ起動で勝手に00:00へ戻らないよう保護する共通サニタイズ関数
 export const sanitizeLoadedSeats = (seatsList) => {
   if (!Array.isArray(seatsList)) return { seats: [], didSanitize: false };
   const now = Date.now();
+  const abandonedCutoff = now - 3 * 3600 * 1000; // 3時間以内の超過カウントアップは維持
   let didSanitize = false;
   const seats = seatsList.map((seat) => {
     if (!seat || typeof seat !== 'object') return seat;
     if (seat.status === 'running') {
       const endTs = Number(seat.targetEndTimestamp) || 0;
-      // 起動時点ですでに終了時刻を過ぎている（または終了時刻が無効な）タイマーは0:00停止状態へ正規化
-      if (endTs <= now) {
+      // 終了時刻が無効、または3時間以上前の古い放置タイマーのみ0:00停止状態へ正規化（超過カウントアップ中は保護）
+      if (endTs <= 0 || endTs <= abandonedCutoff) {
         didSanitize = true;
         return {
           ...seat,
@@ -917,7 +918,11 @@ export default function SalonWorkScreen() {
           return s;
         });
 
-        return hasChanges ? updated : prevSeats;
+        if (hasChanges) {
+          saveSeatsToStorage(updated);
+          return updated;
+        }
+        return prevSeats;
       });
     }, 500);
 
@@ -1020,6 +1025,35 @@ export default function SalonWorkScreen() {
 
     // ① 同期リクエスト (Watch側から「最新の客席データをちょうだい」と要求された時)
     if (action === 'REQUEST_SYNC') {
+      const rawActive = extra?.watchMainTimerActive ?? message?.watchMainTimerActive;
+      const hasActiveWatchMain = rawActive === true || rawActive === 1 || rawActive === 'true';
+      if (hasActiveWatchMain && !_cachedMainTimerState?.isRunning && !_cachedMainTimerState?.isPreCountingDown) {
+        const nowMs = Date.now();
+        const incomingSec = Number(extra?.totalSeconds || message?.totalSeconds || 600);
+        const incomingPrepEnd = Number(extra?.prepEndTimestamp || message?.prepEndTimestamp || 0);
+        const incomingTargetEnd = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || 0);
+        const isPrep = incomingPrepEnd > nowMs;
+        const isOvertime = !isPrep && incomingTargetEnd > nowMs - 3 * 3600 * 1000 && incomingTargetEnd <= nowMs;
+        const targetEnd = (incomingTargetEnd > nowMs || isOvertime)
+          ? incomingTargetEnd
+          : (isPrep ? (incomingPrepEnd + incomingSec * 1000) : (nowMs + incomingSec * 1000));
+        const syncedRem = isPrep
+          ? incomingSec
+          : (isOvertime
+            ? Math.max(0, Math.floor((nowMs - targetEnd) / 1000))
+            : Math.max(1, Math.ceil((targetEnd - nowMs) / 1000)));
+        updateCachedMainTimerState({
+          ...(_cachedMainTimerState || {}),
+          remainingTime: syncedRem,
+          targetTime: incomingSec,
+          targetEndTimestamp: targetEnd,
+          isRunning: !isPrep,
+          isPaused: false,
+          isCountUp: isOvertime,
+          isPreCountingDown: isPrep,
+          prepEndTimestamp: isPrep ? incomingPrepEnd : 0,
+        });
+      }
       setSeats((currentSeats) => {
         syncSeatsToWatch(currentSeats, userName, staffMembers, { immediate: true });
         return currentSeats;
@@ -1063,12 +1097,15 @@ export default function SalonWorkScreen() {
           const incomingTargetEnd = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || 0);
           const isPrep = incomingPrepEnd > Date.now();
           const defaultEnd = isPrep ? (incomingPrepEnd + curTarget * 1000) : (Date.now() + curRem * 1000);
-          const targetEnd = (incomingTargetEnd > Date.now() && Math.abs(incomingTargetEnd - defaultEnd) <= 15000)
+          const targetEnd = (incomingTargetEnd > Date.now() && incomingTargetEnd <= Date.now() + (curTarget + 3600) * 1000)
             ? incomingTargetEnd
             : defaultEnd;
+          const syncedRem = (!isPrep && incomingTargetEnd > Date.now())
+            ? Math.max(1, Math.ceil((targetEnd - Date.now()) / 1000))
+            : curRem;
           updateCachedMainTimerState({
             ...(_cachedMainTimerState || {}),
-            remainingTime: curRem,
+            remainingTime: syncedRem,
             targetTime: curTarget,
             targetEndTimestamp: targetEnd,
             isRunning: !isPrep,
@@ -1081,27 +1118,29 @@ export default function SalonWorkScreen() {
       } else if (action === 'MAIN_TIMER_SET_TIME') {
         const incomingSec = Number(extra?.totalSeconds || message?.totalSeconds || extra?.seconds || message?.seconds || 0);
         if (incomingSec > 0) {
-          const autoStart = extra?.autoStart === true || message?.autoStart === true;
-          if (!autoStart || (!_cachedMainTimerState?.isRunning && !_cachedMainTimerState?.isPreCountingDown)) {
-            const incomingPrepEnd = Number(extra?.prepEndTimestamp || message?.prepEndTimestamp || 0);
-            const incomingTargetEnd = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || 0);
-            const isPrep = autoStart && incomingPrepEnd > Date.now();
-            const defaultEnd = autoStart ? (isPrep ? (incomingPrepEnd + incomingSec * 1000) : (Date.now() + incomingSec * 1000)) : 0;
-            const targetEnd = autoStart
-              ? ((incomingTargetEnd > Date.now() && Math.abs(incomingTargetEnd - defaultEnd) <= 15000) ? incomingTargetEnd : defaultEnd)
-              : 0;
-            updateCachedMainTimerState({
-              ...(_cachedMainTimerState || {}),
-              remainingTime: incomingSec,
-              targetTime: incomingSec,
-              targetEndTimestamp: targetEnd,
-              isRunning: autoStart && !isPrep,
-              isPaused: !autoStart,
-              isCountUp: false,
-              isPreCountingDown: isPrep,
-              prepEndTimestamp: isPrep ? incomingPrepEnd : 0,
-            });
-          }
+          const rawAuto = extra?.autoStart ?? message?.autoStart;
+          const incomingTargetEnd = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || 0);
+          const autoStart = rawAuto === true || rawAuto === 1 || rawAuto === 'true' || (rawAuto == null && incomingTargetEnd > Date.now());
+          const incomingPrepEnd = Number(extra?.prepEndTimestamp || message?.prepEndTimestamp || 0);
+          const isPrep = autoStart && incomingPrepEnd > Date.now();
+          const defaultEnd = autoStart ? (isPrep ? (incomingPrepEnd + incomingSec * 1000) : (Date.now() + incomingSec * 1000)) : 0;
+          const targetEnd = autoStart
+            ? ((incomingTargetEnd > Date.now() && incomingTargetEnd <= Date.now() + (incomingSec + 3600) * 1000) ? incomingTargetEnd : defaultEnd)
+            : 0;
+          const syncedRem = (autoStart && !isPrep && targetEnd > Date.now())
+            ? Math.max(1, Math.ceil((targetEnd - Date.now()) / 1000))
+            : incomingSec;
+          updateCachedMainTimerState({
+            ...(_cachedMainTimerState || {}),
+            remainingTime: syncedRem,
+            targetTime: incomingSec,
+            targetEndTimestamp: targetEnd,
+            isRunning: autoStart && !isPrep,
+            isPaused: !autoStart,
+            isCountUp: false,
+            isPreCountingDown: isPrep,
+            prepEndTimestamp: isPrep ? incomingPrepEnd : 0,
+          });
         }
       } else if (action === 'MAIN_TIMER_ADJUST') {
         const delta = Number(extra?.secondsToAdd || message?.secondsToAdd || 0);
@@ -1126,8 +1165,11 @@ export default function SalonWorkScreen() {
           }
         }
       }
-      // ★ HomeScreen自身が WatchConnectivity.subscribeActions で直接受信して処理するため、
-      //   ここでの requestMainTimerAction による二重転送は行わない（二重実行・トグル反転を防止）
+      // ★ HomeScreen の直接購読に加えて Context 経由でも同一 actionId で橋渡し（HomeScreen 側の processedMainActionIdsRef で1回のみ実行保証）
+      const resolvedActionId = message.actionId || extra?.actionId || `${action}_${Math.round(Number(message.timestamp || Date.now()))}`;
+      if (requestMainTimerAction) {
+        requestMainTimerAction(action, message, resolvedActionId);
+      }
       return;
     }
 
@@ -1600,41 +1642,11 @@ export default function SalonWorkScreen() {
     });
   };
 
-  // ★ iPhone のアラーム画面（AlarmKit）で「停止」が押された → 放置タイム終了のアラームなら席も 0:00 で停止（Q5）
-  //   key: "<席ID>-main" / "<席ID>-check"、timestamp: そのアラームの鳴る時刻(ms)
-  const handleUserStoppedAlarms = (stopped) => {
-    if (!Array.isArray(stopped) || stopped.length === 0) return;
-    const mainStops = new Map();
-    stopped.forEach((a) => {
-      const key = String(a?.key || '');
-      if (!key.endsWith('-main')) return; // チェック時間のアラームは音を止めるだけ
-      mainStops.set(key.slice(0, -'-main'.length), Number(a.timestamp));
-    });
-    if (mainStops.size === 0) return;
-    setSeats((prevSeats) => {
-      let hasChanged = false;
-      const staff = userName || 'スタッフ';
-      const updated = prevSeats.map((s) => {
-        if (!mainStops.has(String(s.id))) return s;
-        const alarmTime = mainStops.get(String(s.id));
-        // 同じタイマーのアラームだった時だけ止める（その後にタイム再入力・延長していたら何もしない）
-        if (s.status !== 'running' || !s.targetEndTimestamp || !Number.isFinite(alarmTime)) return s;
-        if (Math.abs(Number(s.targetEndTimestamp) - alarmTime) > 2000) return s;
-        hasChanged = true;
-        return buildStoppedSeat(s, staff, `${staff} アラーム停止（iPhone）`);
-      });
-      if (!hasChanged) return prevSeats;
-      saveSeatsToStorage(updated);
-      syncSeatsToWatch(updated, userName, staffMembers, {
-        immediate: true,
-        notification: {
-          text: `🔕 ${staff}がアラームを停止しました`,
-          color: '#FF9500',
-          sourceUser: staff,
-        },
-      });
-      return updated;
-    });
+  // ★ iPhone のアラーム画面（AlarmKit）や通知から「開く」・閉じるが押された場合:
+  //   システムのアラーム音・通知のみが消火され、超過カウントアップ（超過 00:01...）は自動終了させない！
+  //   アプリ内で「タイマーを止める」「シャンプーに入る」「施術終了」「リセット」等を明示的に選んだ時のみ 00:00 に戻る仕様。
+  const handleUserStoppedAlarms = (_stopped) => {
+    // 超過カウントアップを継続するため、席データの 0:00 リセット（buildStoppedSeat）は行わない
   };
   const handleUserStoppedAlarmsRef = useRef(null);
   handleUserStoppedAlarmsRef.current = handleUserStoppedAlarms;
@@ -1797,9 +1809,26 @@ export default function SalonWorkScreen() {
           checkAlertedRef.current[s.id] = s.checkEndTimestamp;
         }
         if (s.status === 'running' && s.targetEndTimestamp) {
-          const remSec = Math.floor((Number(s.targetEndTimestamp) - launchNow) / 1000);
+          const endMs = Number(s.targetEndTimestamp);
+          const remSec = Math.floor((endMs - launchNow) / 1000);
           if (remSec <= 60) {
             oneMinuteHelpAlertRef.current[s.id] = s.targetEndTimestamp;
+          }
+          // ★ 起動時点ですでにタイム終了（超過カウントアップ中）の席は、起動直後にタイム終了ポップアップやチャイムが再暴発しないよう記録しつつ超過表示を継続
+          if (endMs <= launchNow) {
+            mainTimeupAlertedRef.current[s.id] = s.targetEndTimestamp;
+            if (!s.timeUpTimestamp) {
+              s.timeUpTimestamp = s.targetEndTimestamp;
+            }
+            const elapsedOverSec = Math.floor((launchNow - endMs) / 1000);
+            if (elapsedOverSec >= 180) {
+              s.escalationLevel = Math.max(s.escalationLevel || 0, 3);
+              escalatedAlertRef.current[s.id] = true;
+            } else if (elapsedOverSec >= 60) {
+              s.escalationLevel = Math.max(s.escalationLevel || 0, 2);
+            } else if (elapsedOverSec >= 30) {
+              s.escalationLevel = Math.max(s.escalationLevel || 0, 1);
+            }
           }
         }
       });

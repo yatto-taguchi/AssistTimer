@@ -13,9 +13,10 @@ public class ExpoWatchConnectivityModule: Module {
   fileprivate var lastNativeReceivedKind: String = ""
   fileprivate var lastNativeReceivedAction: String = ""
 
-  // ★ JSの受信準備が整う前に届いたWatchからの受信を保留（取りこぼし防止）
+  // ★ JSの受信準備が整う前およびイベント取りこぼし防止用の受信キュー（連番管理）
   private let eventLock = NSLock()
   private var jsReady: Bool = false
+  private var nextEventSeq: Int = 0
   private var pendingEvents: [[String: Any]] = []
   private let maxPendingEvents = 100
 
@@ -241,17 +242,21 @@ public class ExpoWatchConnectivityModule: Module {
   }
 
   fileprivate func dispatchEvent(_ name: String, _ body: [String: Any]) {
+    let cleanBody = self.sanitizeDictionary(body)
     eventLock.lock()
-    if !jsReady {
-      pendingEvents.append(["name": name, "body": body])
-      if pendingEvents.count > maxPendingEvents {
-        pendingEvents.removeFirst(pendingEvents.count - maxPendingEvents)
-      }
-      eventLock.unlock()
-      return
+    nextEventSeq += 1
+    let seq = nextEventSeq
+    var taggedBody = cleanBody
+    taggedBody["_eventSeq"] = seq
+    pendingEvents.append(["name": name, "body": taggedBody, "_eventSeq": seq])
+    if pendingEvents.count > maxPendingEvents {
+      pendingEvents.removeFirst(pendingEvents.count - maxPendingEvents)
     }
+    let ready = jsReady
     eventLock.unlock()
-    sendEvent(name, body)
+    if ready {
+      sendEvent(name, taggedBody)
+    }
   }
 
   fileprivate func activationStateText(_ state: WCSessionActivationState) -> String {
