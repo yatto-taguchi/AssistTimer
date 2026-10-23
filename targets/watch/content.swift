@@ -1395,31 +1395,41 @@ struct ContentView: View {
                     self.mainTimer = initialMain
                 }
                 alarm.update(timers: timers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                // ★ 初回起動時はアラーム鳴動中でない場合のみサロン全体の客席マップ（バードビュー）をオープン
-                //   （アラーム鳴動中にシートを開くと alarmOverlay が覆い隠されて止められなくなるのを防止）
-                if !hasInitialOpenedMap {
-                    hasInitialOpenedMap = true
-                    if alarm.ringing.isEmpty {
-                        showingThumbnailMap = true
-                    } else {
-                        dismissAllSheetsForAlarm()
-                    }
-                } else if !alarm.ringing.isEmpty {
+                // ★ 初回起動時はアラーム鳴動中でない限り、メイン画面（cardsScrollView）を直接表示
+                //   起動直後にモーダルシートを開かないことで watchOS 10 のブラックアウトを完全根絶
+                if !alarm.ringing.isEmpty {
                     dismissAllSheetsForAlarm()
                 }
             }
             .onOpenURL { url in
-                if url.host == "open-map" || url.scheme == "assisttimer" {
-                    // ★ モジュラー文字盤タップ時: 未消火アラームがあれば即座に消火して画面を解放し、確実にマップを展開
-                    if !alarm.ringing.isEmpty {
-                        alarm.stop()
+                // ★ モジュラー文字盤タップ時: 未消火アラームがあれば即座に消火して画面を解放
+                if !alarm.ringing.isEmpty {
+                    alarm.stop()
+                }
+                // 開いている余計なシートを閉じてメインカード画面を確実に表示
+                showingThumbnailMap = false
+                showingMainTimerSheet = false
+                showingAddSeatSheet = false
+                timeActionTargetId = nil
+                checkActionTargetId = nil
+                shampooActionTargetId = nil
+                selectHelpStaffTargetId = nil
+                selectCheckStaffTargetId = nil
+
+                if url.host == "open-map" {
+                    // 明示的にマップを求められた場合のみシートを開く
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        if alarm.ringing.isEmpty {
+                            showingThumbnailMap = true
+                        }
                     }
-                    showingAddSeatSheet = false
-                    timeActionTargetId = nil
-                    checkActionTargetId = nil
-                    shampooActionTargetId = nil
-                    selectHelpStaffTargetId = nil
-                    showingThumbnailMap = true
+                } else if url.host == "main" {
+                    triggerScroll(to: "main_timer")
+                } else if url.host == "seat",
+                          let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                          let seatId = components.queryItems?.first(where: { $0.name == "id" })?.value,
+                          !seatId.isEmpty {
+                    triggerScroll(to: seatId)
                 }
             }
         }

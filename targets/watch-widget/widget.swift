@@ -404,7 +404,13 @@ struct ComplicationView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .widgetURL(URL(string: "assisttimer://open-map")!)
+        .widgetURL({
+            if let seat = entry.seat {
+                return seat.isMainTimer ? URL(string: "assisttimer://main")! : URL(string: "assisttimer://seat?id=\(seat.id)")!
+            } else {
+                return URL(string: "assisttimer://open")!
+            }
+        }())
         .containerBackground(for: .widget) { Color.clear }
     }
 

@@ -677,6 +677,10 @@ export default function SalonWorkScreen() {
   const [timerSetupMode, setTimerSetupMode] = useState('default'); // 'default' | 'new' (新しく測る) | 'additional' (追加タイム)
   // ★ ユーザー指定: タイム設定モーダルでの席名変更ステート
   const [isEditingSeatLabel, setIsEditingSeatLabel] = useState(false);
+  // ★ 席名ダイレクト変更モーダル用ステート（待機席・稼働席・停止中席いつでも変更可能）
+  const [isRenameSeatModalVisible, setIsRenameSeatModalVisible] = useState(false);
+  const [renameTargetSeat, setRenameTargetSeat] = useState(null);
+  const [renameSeatLabelInput, setRenameSeatLabelInput] = useState('');
 
   // ★ 放置タイムのお気に入りパネル用ステート（全体タイム＋チェックタイムのペアも保存可能）
   const [favoritePresets, setFavoritePresets] = useState([
@@ -2244,9 +2248,55 @@ export default function SalonWorkScreen() {
       setSeats((prev) => {
         const updated = prev.map((s) => (s.id === targetSeatId ? { ...s, seatLabel: trimmed } : s));
         saveSeatsToStorage(updated);
+        syncSeatsToWatch(updated);
         return updated;
       });
     }
+  };
+
+  // ★ 席名ダイレクト変更モーダルを開く（カードヘッダー・スリムバーからいつでも開ける）
+  const handleOpenSeatRenameModal = (seat) => {
+    if (!seat) return;
+    setRenameTargetSeat(seat);
+    const cleanLabel = (seat.seatLabel || '').replace(/^[🪑⌚️⏱️]\s*/, '').trim();
+    setRenameSeatLabelInput(cleanLabel);
+    setIsRenameSeatModalVisible(true);
+  };
+
+  // ★ 席名変更の確定保存（ローカル保存・Watch同期・Supabaseリアルタイム同期）
+  const handleSaveSeatRename = async () => {
+    if (!renameTargetSeat) return;
+    const trimmed = (renameSeatLabelInput || '').trim();
+    const finalLabel = trimmed || `${renameTargetSeat.seatNumber || 1}番席`;
+
+    const updatedSeats = seats.map((s) => {
+      if (s.id === renameTargetSeat.id) {
+        return { ...s, seatLabel: finalLabel };
+      }
+      return s;
+    });
+
+    setSeats(updatedSeats);
+    saveSeatsToStorage(updatedSeats);
+    syncSeatsToWatch(updatedSeats);
+
+    if (currentWorkspaceId && currentWorkspaceId !== 'free-mode' && supabaseRef.current) {
+      try {
+        await supabaseRef.current
+          .from('salon_timers')
+          .update({
+            seat_label: finalLabel,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', renameTargetSeat.id);
+      } catch (e) {
+        console.warn('Supabase update seat_label failed:', e);
+      }
+    }
+
+    setIsRenameSeatModalVisible(false);
+    setRenameTargetSeat(null);
+    setRenameSeatLabelInput('');
   };
 
   // 待機席タップ → タイム設定モーダルを開く（新規設定）
@@ -4152,11 +4202,19 @@ export default function SalonWorkScreen() {
                 activeOpacity={0.7}
               >
                 <View style={styles.idleRowLeft}>
-                    <View style={[styles.idleSeatBadge, { backgroundColor: theme.inputBg }]}>
-                      <Text style={[styles.idleSeatBadgeText, { color: theme.textPrimary }]}>
-                        ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
-                      </Text>
-                    </View>
+                  <TouchableOpacity
+                    style={[styles.idleSeatBadge, { backgroundColor: theme.inputBg, flexDirection: 'row', alignItems: 'center' }]}
+                    onPress={(e) => {
+                      e.stopPropagation();
+                      handleOpenSeatRenameModal(item);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.idleSeatBadgeText, { color: theme.textPrimary }]}>
+                      ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
+                    </Text>
+                    <Ionicons name="pencil" size={11} color={theme.accent} style={{ marginLeft: 4 }} />
+                  </TouchableOpacity>
                   <Text style={[styles.idleStatusText, { color: theme.textTertiary }]}>
                     空席・待機中
                   </Text>
@@ -4218,11 +4276,19 @@ export default function SalonWorkScreen() {
               >
                 {/* 左側: 席ラベル ＆ 停止時タイム（最後に入れられたタイム） */}
                 <View style={styles.pausedRowLeft}>
-                  <View style={[styles.pausedSeatBadge, { backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7' }]}>
+                  <TouchableOpacity
+                    style={[styles.pausedSeatBadge, { backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7', flexDirection: 'row', alignItems: 'center' }]}
+                    onPress={(e) => {
+                      e.stopPropagation();
+                      handleOpenSeatRenameModal(item);
+                    }}
+                    activeOpacity={0.7}
+                  >
                     <Text style={[styles.pausedSeatBadgeText, { color: theme.textPrimary }]}>
                       ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
                     </Text>
-                  </View>
+                    <Ionicons name="pencil" size={11} color={theme.accent} style={{ marginLeft: 4 }} />
+                  </TouchableOpacity>
                   <View style={styles.pausedTimeContainer}>
                     <Text style={[styles.pausedTimeText, { color: theme.warning }]}>
                       ⏸️ {timeString}
@@ -4363,11 +4429,16 @@ export default function SalonWorkScreen() {
               {/* カード上段: 席名 ＆ タイマー作成者 ＆ 状態ステータスバッジ（放置中 / 停止中 / タイム超過 / ヘルプ未定 等） ＆ 折りたたみボタン */}
               <View style={styles.cardHeader}>
                 <View style={styles.cardHeaderLeft}>
-                  <View style={[styles.seatLabelContainer, item.isFreeTimer && { backgroundColor: theme.accentLight }]}>
+                  <TouchableOpacity
+                    style={[styles.seatLabelContainer, item.isFreeTimer && { backgroundColor: theme.accentLight }, { flexDirection: 'row', alignItems: 'center' }]}
+                    onPress={() => handleOpenSeatRenameModal(item)}
+                    activeOpacity={0.7}
+                  >
                     <Text style={[styles.seatLabelText, { color: item.isFreeTimer ? theme.accent : theme.textPrimary }]}>
                       ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
                     </Text>
-                  </View>
+                    <Ionicons name="pencil" size={11} color={theme.accent} style={{ marginLeft: 4 }} />
+                  </TouchableOpacity>
 
                   {/* ★ ユーザー指定: 1番席の右の所にタイマー作成者の名前を表示（絵文字は📝） */}
                   {item.colorStaffName ? (
@@ -8015,6 +8086,103 @@ export default function SalonWorkScreen() {
                 onPress={handleSaveMemberCustomNickname}
               >
                 <Text style={styles.modalButtonPrimaryText}>保存する</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ★ 席名変更モーダル（カード・スリムバーからいつでも変更可能） */}
+      <Modal
+        visible={isRenameSeatModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsRenameSeatModalVisible(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalOverlay}
+        >
+          <View style={[styles.modalContent, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, maxWidth: 360 }]}>
+            <View style={styles.modalHeaderRow}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Ionicons name="pencil" size={18} color={theme.accent} style={{ marginRight: 6 }} />
+                <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>席名の変更</Text>
+              </View>
+              <TouchableOpacity onPress={() => setIsRenameSeatModalVisible(false)}>
+                <Ionicons name="close" size={24} color={theme.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={{ fontSize: 12, color: theme.textSecondary, marginBottom: 10, lineHeight: 17 }}>
+              現在の席名: 【{renameTargetSeat?.seatLabel?.replace(/^[🪑⌚️⏱️]\s*/, '') || '席'}】{'\n'}
+              サロンボードおよびApple Watchに表示される席名を変更できます。（※タイマーは停止せず計測を継続します）
+            </Text>
+
+            <TextInput
+              style={[
+                styles.modalInput,
+                {
+                  backgroundColor: theme.inputBg,
+                  color: theme.textPrimary,
+                  borderColor: theme.accent,
+                  borderWidth: 1.5,
+                  marginBottom: 10,
+                  fontSize: 16,
+                  fontWeight: '600',
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  borderRadius: 10,
+                },
+              ]}
+              placeholder="例: 1番席、個室VIP、セット面3"
+              placeholderTextColor={theme.textTertiary}
+              value={renameSeatLabelInput}
+              onChangeText={setRenameSeatLabelInput}
+              maxLength={20}
+              autoFocus
+              selectTextOnFocus
+              returnKeyType="done"
+              onSubmitEditing={handleSaveSeatRename}
+            />
+
+            {/* 定番の席名クイックチップ */}
+            <View style={{ marginBottom: 16 }}>
+              <Text style={{ fontSize: 11, color: theme.textTertiary, marginBottom: 6 }}>よく使う席名（タップで入力）:</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                {['1番席', '2番席', '3番席', '4番席', '5番席', 'セット面', '個室', 'VIP席', 'シャンプー台'].map((preset) => (
+                  <TouchableOpacity
+                    key={preset}
+                    style={{
+                      paddingHorizontal: 8,
+                      paddingVertical: 5,
+                      borderRadius: 6,
+                      backgroundColor: isEcoMode ? '#2C2C2E' : '#EFF6FF',
+                      borderWidth: 1,
+                      borderColor: renameSeatLabelInput === preset ? theme.accent : (isEcoMode ? '#3C3C3E' : '#BFDBFE'),
+                    }}
+                    onPress={() => setRenameSeatLabelInput(preset)}
+                  >
+                    <Text style={{ fontSize: 11.5, color: renameSeatLabelInput === preset ? theme.accent : theme.textPrimary, fontWeight: renameSeatLabelInput === preset ? '700' : '500' }}>
+                      {preset}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TouchableOpacity
+                style={[styles.proxyCancelBtn, { flex: 1, backgroundColor: isEcoMode ? '#2C2C2E' : '#E5E5EA' }]}
+                onPress={() => setIsRenameSeatModalVisible(false)}
+              >
+                <Text style={[styles.proxyCancelBtnText, { color: theme.textPrimary }]}>キャンセル</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButtonPrimary, { flex: 1, backgroundColor: theme.accent, marginTop: 0 }]}
+                onPress={handleSaveSeatRename}
+              >
+                <Text style={styles.modalButtonPrimaryText}>変更を保存</Text>
               </TouchableOpacity>
             </View>
           </View>
