@@ -2542,3 +2542,43 @@ TestFlight Build 68の実機テストにおいて、以下の致命的な不具�
   - スマホ側で最後の1席を削除して全席が0件になった際、キャッシュフォールバック処理によりウォッチ側に削除前の古い席が残ってしまう問題があった。
 - **確定仕様**:
   - `syncSeatsToWatch` および `handleDeleteSeat` で `forceEmpty: true` を指定した場合はキャッシュへのフォールバックをバイパスし、確実に `clearAllSeats: true` を送信してウォッチ側の席情報を完全消去。
+
+### 33.8. メインタイマー終了時振動の確実化、停止・リセット後のゾンビ復活完全根絶、および分・秒トグル調整UI統一仕様 (Build 75)
+
+#### 1. メインタイマー終了時の振動・アラーム発火の確実化 (`src/screens/HomeScreen.js`, `targets/watch/content.swift`, `targets/watch/alarm.swift`)
+- **背景・課題**:
+  1. Watch側からメインタイマーの時間設定（`MAIN_TIMER_SET_TIME`）のみを行い、その後iPhone側からスタートした場合に `isWatchMuted`（iPhone消音フラグ）が `true` のまま残り、iPhone側でタイムアップ時の振動・アラームが発火しないケースがあった。またサロンワーク画面からメインタイマーを開始した際にも `playSoundOnPhone` 未指定により消音扱いになっていた。
+  2. カウントアップOFF（`isCountUpEnabled == false`）の設定時に、メインタイマーが `00:00` に到達した瞬間にiPhoneから `isRunning: false, remainingTime: 0` の停止同期がWatchへ届くと、Watch側の1秒周期 `alarm.tick()` より先に `m.isRunning = false` となってしまい、Watch側のタイムアップ振動（`startContinuousAlarm`）がスキップされる競合が発生していた。
+  3. `targets/watch/alarm.swift` の `startContinuousAlarm` において、同一ID（`main-timer`）の既存モニターを置き換える際に `stopContinuousAlarm` を呼んでいたため、直前にスケジュールされたローカル通知やバックグラウンド通知までキャンセルされていた。
+- **確定仕様**:
+  - **iPhone側の振動・消音フラグ制御 (`src/screens/HomeScreen.js`, `src/screens/SalonWorkScreen.js`)**:
+    - iPhone本体側からのスタート・時間変更操作（`toggleTimer`、`applyTimeInSeconds`、およびサロン画面の `handleApplyMainTimerEditModal`）では常に `isWatchMuted = false`（音声・振動有効）にリセット。
+    - Watch主導スタート時（`isWatchMuted == true`）であっても、iPhone本体側のタイムアップ触覚振動（`triggerStrongFinishVibration()`）はミュートせず確実に発火させる。
+  - **Watch側のカウントアップOFF時タイムアップ振動発火保証 (`targets/watch/content.swift`, `targets/watch/alarm.swift`)**:
+    - `processReceivedData` において、カウントアップOFFのメインタイマーが直前までWatch側で稼働しており、iPhoneからタイムアップ到達（`rawRemaining <= 0` または終了予定時刻到達）による停止パケットを受信した場合は、`m.isRunning = false` に更新する直前に `WatchAlarmManager.shared.startContinuousAlarm` を直接発火。
+    - `alarm.swift` の `startContinuousAlarm` では、既存モニターのタイマー無効化（`inv.invalidate()`）のみを行い、スケジュール済み通知やアラームセッションを誤って消去しない安全構造に分離。
+
+#### 2. 「計測終了」「リセット」押下後のタイマーゾンビ化（勝手な再稼働・超過復活）完全根絶 (`modules/watch-connectivity/index.js`, `src/screens/HomeScreen.js`, `src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`)
+- **背景・課題**:
+  1. iPhoneのホーム画面で「計測終了」または「タイム内終了」を押して記録保存モーダル（`saveModalVisible`）を開いた際、`remainingTime` や `isCountUp` が超過状態のまま保持されていたため、保存モーダル表示中や閉じた直後の同期タイミングで超過状態が再計算・再送される隙間があった。
+  2. WCSessionの即時通信（`sendMessage`）と予備キュー通信（`transferUserInfo` / `updateApplicationContext`）の時間差により、すでに停止・リセットしたタイマーの古い `MAIN_TIMER_START` や `REQUEST_SYNC (watchMainTimerActive: true)` が後から到着してタイマーを再稼働させてしまうケースがあった。
+- **確定仕様**:
+  - **記録保存モーダル起動時の即時クリーンリセット & スナップショット退避 (`src/screens/HomeScreen.js`)**:
+    - `handleOpenSaveModal` / `handleOpenSaveInTimeModal` を押した瞬間に、保存用の計測結果（`targetTime`, `isCountUp`, `remainingTime`）を `saveModalSnapshot` に退避し、タイマー本体の状態は即座に待機状態（`isRunning: false, isCountUp: false, remainingTime: targetTime, targetEndTimestamp: 0`）へ初期化してWatchへ即時送信（モーダル終了・キャンセル時は `setSaveModalSnapshot(null)` で解放）。
+  - **停止済みタイマーID・終了時刻（`stoppedEndTimestamp`）の双方向ブラックリスト遮断 (`modules/watch-connectivity/index.js`, `targets/watch/content.swift`)**:
+    - iPhone・Watch双方で「計測終了」「リセット」「一時停止」が行われた際、そのタイマーの `targetEndTimestamp` を停止済み履歴（`stoppedMainTimerRecords` / `stoppedSeatTimerRecords` / Watch側 `lastLocalMainStopAt`）へ記録し、未送信キュー内の古い開始系アクションを一括パージ。
+    - 通信層（`modules/watch-connectivity/index.js`）において、停止済み `targetEndTimestamp` と一致する遅延 `MAIN_TIMER_START` / `SET_TIME` / `ADJUST` や `REQUEST_SYNC`（`body.targetEndTimestamp` / `body.extra.targetEndTimestamp` 含有）を完全遮断。
+
+#### 3. メインタイマーの分・秒トグル調整UI統一仕様（共有タイマー同等・サブタイマーなし） (`src/screens/HomeScreen.js`, `src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`)
+- **確定仕様**:
+  - **サロンワーク画面 (`src/screens/SalonWorkScreen.js`)**:
+    - 最上部のメインタイマーウィジェットの数字部分をタップすると、共有タイマーと同じ分・秒トグル調整モーダル（`isMainTimerEditModalVisible`）が起動（稼働中は `targetEndTimestamp` から現在の正確な残り秒数を初期表示）。
+    - クイック分選択ピル（`1分, 3分, 5分, 7分, 10分, 15分, 20分, 30分`）、分単位トグル（`-5分, -1分, +1分, +5分`）、秒単位トグル（`-30秒, -10秒, +10秒, +30秒`）、およびお気に入りチップを搭載し、**途中チェック（サブタイマー）設定は非搭載**。
+    - 「設定のみ」ボタンと「開始する（稼働中は変更を適用）」ボタンで即座に反映可能。
+  - **ホーム画面 (`src/screens/HomeScreen.js`)**:
+    - タイマー円内の数字タップ時、稼働中で操作ボタンがフェードアウトしている場合はまず操作ボタンを3秒間再表示し、操作ボタン表示中または停止中のタップで「タイマー時間の設定モーダル」を起動。
+    - モーダル内に共有タイマーと同じ分単位トグル（`-5分, -1分, +1分, +5分`）、秒単位トグル（`-30秒, -10秒, +10秒, +30秒`）、クイック分ピルを搭載（サブタイマーなし、確定ボタンは従来通り「決定」の1ボタン構成）。
+  - **Apple Watch画面 (`targets/watch/content.swift`)**:
+    - `MainTimerActionSheet` を共有タイマーの `TimeActionSheet` と統一された2モード構成（標準操作画面 ＆ 任意タイム設定統合画面）へ刷新（サブタイマーなし）。
+    - 標準操作画面では `+1分 / +3分 / +5分` および `-5分 / -1分 / -30秒 / +30秒` を何回でも連続タップして累積調整し、「✓ 確定」で即座に反映（超過中のマイナス下限ガードおよび通常時の10秒下限ガード付き）。
+    - 「タイム再入力。」から遷移する任意タイム設定画面では、Digital Crown無段階調整に加え、分トグル（`00:00, -5分, -1分, +1分, +5分`）・秒トグル（`-30秒, -10秒, +10秒, +30秒`）・定番タイムクイックパネルを完備。

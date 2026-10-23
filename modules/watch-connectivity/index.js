@@ -145,6 +145,104 @@ const markEventSeqProcessed = (seq) => {
 };
 
 let lastMainTimerActionTimestamp = 0;
+let lastLocalMainTimerStopAt = 0;
+const stoppedMainTimerRecords = []; // [{ endTs, stoppedAt }]
+const lastLocalSeatStopAt = new Map(); // seatKey -> timestamp
+const stoppedSeatTimerRecords = new Map(); // seatKey -> [{ endTs, stoppedAt }]
+const STOP_HOLD_MS = 4 * 3600 * 1000; // 4時間保持（Watch側の3時間スナップショット保持より長くする）
+
+const pruneStoppedRecords = () => {
+  const cutoff = Date.now() - STOP_HOLD_MS;
+  for (let i = stoppedMainTimerRecords.length - 1; i >= 0; i -= 1) {
+    if (stoppedMainTimerRecords[i].stoppedAt < cutoff) {
+      stoppedMainTimerRecords.splice(i, 1);
+    }
+  }
+  stoppedSeatTimerRecords.forEach((list, key) => {
+    const filtered = list.filter((r) => r.stoppedAt >= cutoff);
+    if (filtered.length === 0) {
+      stoppedSeatTimerRecords.delete(key);
+    } else {
+      stoppedSeatTimerRecords.set(key, filtered);
+    }
+  });
+};
+
+const isMainTimerEndStopped = (endTs) => {
+  const num = Number(endTs || 0);
+  if (!num || num <= 0) return false;
+  pruneStoppedRecords();
+  return stoppedMainTimerRecords.some((r) => r.endTs > 0 && Math.abs(r.endTs - num) < 15000);
+};
+
+const isSeatTimerEndStopped = (seatId, endTs) => {
+  const num = Number(endTs || 0);
+  if (seatId == null || !num || num <= 0) return false;
+  pruneStoppedRecords();
+  const list = stoppedSeatTimerRecords.get(String(seatId));
+  if (!list) return false;
+  return list.some((r) => r.endTs > 0 && Math.abs(r.endTs - num) < 15000);
+};
+
+const notifyLocalStopOrReset = (seatId, stoppedEndTimestamp = 0) => {
+  const now = Date.now();
+  const endTs = Number(stoppedEndTimestamp || 0);
+  const isMain =
+    seatId === 'main-timer' ||
+    seatId === '-1' ||
+    Number(seatId) === -1;
+
+  pruneStoppedRecords();
+
+  if (isMain) {
+    lastLocalMainTimerStopAt = now;
+    if (now > lastMainTimerActionTimestamp) {
+      lastMainTimerActionTimestamp = now;
+    }
+    if (endTs > 0) {
+      stoppedMainTimerRecords.push({ endTs, stoppedAt: now });
+    }
+    // キュー内の古いメインタイマー開始・時間変更アクションや、古い稼働中REQUEST_SYNCを無害化
+    for (let i = actionQueue.length - 1; i >= 0; i -= 1) {
+      const p = actionQueue[i].payload;
+      if (!p) continue;
+      if (
+        p.action === 'MAIN_TIMER_START' ||
+        p.action === 'MAIN_TIMER_SET_TIME' ||
+        p.action === 'MAIN_TIMER_ADJUST'
+      ) {
+        actionQueue.splice(i, 1);
+      } else if (p.action === 'REQUEST_SYNC' && (p.watchMainTimerActive || p.extra?.watchMainTimerActive)) {
+        actionQueue[i].payload = {
+          ...p,
+          watchMainTimerActive: false,
+          watchMainTimerStopped: true,
+          extra: p.extra ? { ...p.extra, watchMainTimerActive: false, watchMainTimerStopped: true } : p.extra,
+        };
+      }
+    }
+  } else if (seatId != null) {
+    const key = String(seatId);
+    lastLocalSeatStopAt.set(key, now);
+    if (endTs > 0) {
+      const list = stoppedSeatTimerRecords.get(key) || [];
+      list.push({ endTs, stoppedAt: now });
+      stoppedSeatTimerRecords.set(key, list);
+    }
+    for (let i = actionQueue.length - 1; i >= 0; i -= 1) {
+      const p = actionQueue[i].payload;
+      if (!p) continue;
+      if (
+        String(p.seatId) === key &&
+        (p.action === 'START_TIMER' || p.action === 'SET_TIME' || p.action === 'ADJUST_TIME' || p.action === 'RESTART_TIMER')
+      ) {
+        actionQueue.splice(i, 1);
+      }
+    }
+  }
+  updateDiagnostics({ queuedActions: actionQueue.length });
+};
+
 const STOP_OR_FINISH_ACTIONS = new Set([
   'MAIN_TIMER_RESET',
   'MAIN_TIMER_PAUSE',
@@ -166,9 +264,49 @@ const handleIncoming = (kind, body, seq = null) => {
     const isMainAction =
       actionStr.startsWith('MAIN_TIMER_') ||
       (actionStr === 'STOP_ALARM' && (body.seatId === 'main-timer' || body.seatId === '-1' || Number(body.seatId) === -1));
+    const targetEndTs = Number(body.targetEndTimestamp || body.extra?.targetEndTimestamp || 0);
 
-    // ★ メインタイマー操作の順序逆転防止:
-    //   sendMessage（即時）で後から押された RESET 等が先に届き、transferUserInfo（予備）でその前の START 等が遅れて届いた場合は無視する
+    // ★ Watchから届いた停止・リセット・計測終了も即座に停止履歴へ登録し、遅延STARTパケットを遮断
+    if (actionStr === 'MAIN_TIMER_RESET') {
+      notifyLocalStopOrReset('main-timer', targetEndTs);
+    } else if (
+      (actionStr === 'STOP_TIMER' || actionStr === 'FINISH_MEASURE' || actionStr === 'RESET_ZERO') &&
+      body.seatId != null
+    ) {
+      notifyLocalStopOrReset(body.seatId, targetEndTs);
+    }
+
+    // ★ メインタイマー操作の順序逆転・ゾンビ復活防止:
+    //   1) 既に停止・計測終了・リセット済みの targetEndTimestamp と一致する開始系は破棄
+    //   2) ローカル停止時刻より前のタイムスタンプを持つ開始系は破棄
+    //   3) sendMessage（即時）で後から押された RESET 等が先に届き、transferUserInfo（予備）でその前の START 等が遅れて届いた場合は無視する
+    if (
+      actionStr === 'MAIN_TIMER_START' ||
+      actionStr === 'MAIN_TIMER_SET_TIME' ||
+      actionStr === 'MAIN_TIMER_ADJUST'
+    ) {
+      if (targetEndTs > 0 && isMainTimerEndStopped(targetEndTs)) {
+        return;
+      }
+      if (ts > 0 && lastLocalMainTimerStopAt > 0 && ts <= lastLocalMainTimerStopAt + 500) {
+        return;
+      }
+    }
+
+    if (
+      (actionStr === 'START_TIMER' || actionStr === 'SET_TIME' || actionStr === 'ADJUST_TIME' || actionStr === 'RESTART_TIMER') &&
+      body.seatId != null
+    ) {
+      const seatKey = String(body.seatId);
+      if (targetEndTs > 0 && isSeatTimerEndStopped(seatKey, targetEndTs)) {
+        return;
+      }
+      const lastSeatStop = lastLocalSeatStopAt.get(seatKey) || 0;
+      if (ts > 0 && lastSeatStop > 0 && ts <= lastSeatStop + 500) {
+        return;
+      }
+    }
+
     if (isMainAction && ts > 0) {
       if (ts < lastMainTimerActionTimestamp - 200) {
         return;
@@ -178,20 +316,47 @@ const handleIncoming = (kind, body, seq = null) => {
       }
     }
 
+    // ★ REQUEST_SYNC に含まれる watchMainTimerActive が既に停止済みのタイマーを指している場合は無害化
+    let payloadToDeliver = body;
+    const hasWatchActive = Boolean(body.watchMainTimerActive || body.extra?.watchMainTimerActive);
+    if (actionStr === 'REQUEST_SYNC' && hasWatchActive) {
+      const watchEndTs = Number(
+        body.targetEndTimestamp ||
+        body.extra?.targetEndTimestamp ||
+        body.watchMainTimerTargetEnd ||
+        body.extra?.watchMainTimerTargetEnd ||
+        0
+      );
+      const isStoppedMain =
+        (watchEndTs > 0 && isMainTimerEndStopped(watchEndTs)) ||
+        (ts > 0 && lastLocalMainTimerStopAt > 0 && ts <= lastLocalMainTimerStopAt + 1000);
+      if (isStoppedMain) {
+        payloadToDeliver = {
+          ...body,
+          watchMainTimerActive: false,
+          extra: body.extra ? { ...body.extra, watchMainTimerActive: false } : body.extra,
+        };
+      }
+    }
+
     // 予備ルート(userInfo/context)で古い操作がアプリ再起動時にまとめて届いた場合のフィルタリング:
     // - 停止・終了・リセット系（STOP_OR_FINISH_ACTIONS）はiPhoneスリープ中の操作を確実に取り込むため最大3時間まで有効
-    // - それ以外の開始系操作は60秒以内（ただし未終了の有効なtargetEndTimestampを持つMAIN_TIMER開始は3時間以内）のみ有効
+    // - それ以外の開始系操作は60秒以内（ただし未終了かつ未停止の有効なtargetEndTimestampを持つMAIN_TIMER開始は3時間以内）のみ有効
     if ((kind === 'userInfo' || kind === 'context') && ts > 0) {
       const ageMs = Date.now() - ts;
       const isStopOrFinish = STOP_OR_FINISH_ACTIONS.has(actionStr);
-      const targetEndTs = Number(body.targetEndTimestamp || body.extra?.targetEndTimestamp || 0);
-      const hasActiveMainEnd = isMainAction && targetEndTs > Date.now() - 3 * 3600 * 1000;
+      const hasActiveMainEnd =
+        isMainAction &&
+        !isStopOrFinish &&
+        targetEndTs > Date.now() - 3 * 3600 * 1000 &&
+        !isMainTimerEndStopped(targetEndTs) &&
+        (lastLocalMainTimerStopAt === 0 || ts > lastLocalMainTimerStopAt + 500);
       const maxAgeMs = (isStopOrFinish || hasActiveMainEnd) ? 3 * 3600 * 1000 : 60000;
       if (Number.isFinite(ageMs) && ageMs > maxAgeMs) {
         return;
       }
     }
-    deliverAction(body);
+    deliverAction(payloadToDeliver);
   }
 };
 
@@ -302,6 +467,11 @@ export const WatchConnectivity = {
     diagnosticsSubscribers.add(callback);
     return () => diagnosticsSubscribers.delete(callback);
   },
+
+  notifyLocalStopOrReset,
+  isMainTimerEndStopped,
+  isSeatTimerEndStopped,
+  getLastLocalMainTimerStopAt: () => lastLocalMainTimerStopAt,
 
   activate: async () => {
     if (!NativeModule || Platform.OS !== 'ios') {

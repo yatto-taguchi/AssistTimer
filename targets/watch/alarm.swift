@@ -179,6 +179,21 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             }
             let mainEpoch = Int(finalMainEnd.timeIntervalSince1970)
             let mainKey = "\(m.id)-main@\(mainEpoch)"
+            // ★ カウントダウン中（未来の終了時刻）のメインタイマーは即座にarm登録し、過去の古い消火履歴と衝突していた場合はクリアして確実に鳴動させる
+            if finalMainEnd > nowDate.addingTimeInterval(-2) {
+                if armed[mainKey] == nil {
+                    armed[mainKey] = finalMainEnd.timeIntervalSince1970
+                    ackChanged = true
+                }
+            }
+            if finalMainEnd > nowDate.addingTimeInterval(2) {
+                let staleAckKeys = acknowledged.keys.filter { isSameTarget(key1: $0, key2: mainKey) }
+                if !staleAckKeys.isEmpty {
+                    for k in staleAckKeys { acknowledged.removeValue(forKey: k) }
+                    ackChanged = true
+                }
+                smartAlarmCompletedKeys = smartAlarmCompletedKeys.filter { !isSameTarget(key1: $0, key2: mainKey) }
+            }
             if shouldKeepEvent(mainKey, finalMainEnd) {
                 list.append(WatchAlarmEvent(
                     key: mainKey,
@@ -212,6 +227,20 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             }
             let mainEpoch = Int(finalSeatEnd.timeIntervalSince1970)
             let mainKey = "\(t.id)-main@\(mainEpoch)"
+            if finalSeatEnd > nowDate.addingTimeInterval(-2) {
+                if armed[mainKey] == nil {
+                    armed[mainKey] = finalSeatEnd.timeIntervalSince1970
+                    ackChanged = true
+                }
+            }
+            if finalSeatEnd > nowDate.addingTimeInterval(2) {
+                let staleAckKeys = acknowledged.keys.filter { isSameTarget(key1: $0, key2: mainKey) }
+                if !staleAckKeys.isEmpty {
+                    for k in staleAckKeys { acknowledged.removeValue(forKey: k) }
+                    ackChanged = true
+                }
+                smartAlarmCompletedKeys = smartAlarmCompletedKeys.filter { !isSameTarget(key1: $0, key2: mainKey) }
+            }
             if shouldKeepEvent(mainKey, finalSeatEnd) {
                 list.append(WatchAlarmEvent(
                     key: mainKey,
@@ -230,6 +259,20 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 }
                 let checkEpoch = Int(finalCheckEnd.timeIntervalSince1970)
                 let checkKey = "\(t.id)-check@\(checkEpoch)"
+                if finalCheckEnd > nowDate.addingTimeInterval(-2) {
+                    if armed[checkKey] == nil {
+                        armed[checkKey] = finalCheckEnd.timeIntervalSince1970
+                        ackChanged = true
+                    }
+                }
+                if finalCheckEnd > nowDate.addingTimeInterval(2) {
+                    let staleAckKeys = acknowledged.keys.filter { isSameTarget(key1: $0, key2: checkKey) }
+                    if !staleAckKeys.isEmpty {
+                        for k in staleAckKeys { acknowledged.removeValue(forKey: k) }
+                        ackChanged = true
+                    }
+                    smartAlarmCompletedKeys = smartAlarmCompletedKeys.filter { !isSameTarget(key1: $0, key2: checkKey) }
+                }
                 // ★ 本体タイマーがすでに終了時刻（0:00）に到達している場合、未消火のチェックタイマーが本体アラームを塞がないよう自動で引き継ぐ
                 if finalSeatEnd <= nowDate && finalCheckEnd < finalSeatEnd {
                     if !isAcknowledged(checkKey) {

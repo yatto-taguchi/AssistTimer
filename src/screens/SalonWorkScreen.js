@@ -351,7 +351,7 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       isRunning: isRunning,
       pausedRemainingSeconds: pausedRem,
       isCountUp: isCountUp,
-      isCountUpEnabled: !!state.isCountUpEnabled,
+      isCountUpEnabled: state.isCountUpEnabled !== undefined ? !!state.isCountUpEnabled : true,
       genre: state.genre || '',
       isPreCountingDown: isPreCountingDown,
       preCountdownSeconds: state.preCountdownSeconds || 0,
@@ -457,7 +457,7 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
         isRunning: isRunning,
         pausedRemainingSeconds: pausedRem,
         isCountUp: isCountUp,
-        isCountUpEnabled: !!_cachedMainTimerState.isCountUpEnabled,
+        isCountUpEnabled: _cachedMainTimerState.isCountUpEnabled !== undefined ? !!_cachedMainTimerState.isCountUpEnabled : true,
         genre: _cachedMainTimerState.genre || '',
         isPreCountingDown: isPreCountingDown,
         preCountdownSeconds: _cachedMainTimerState.preCountdownSeconds || 0,
@@ -609,6 +609,9 @@ export default function SalonWorkScreen() {
   const [isAddHistoryModalVisible, setIsAddHistoryModalVisible] = useState(false);
   const [addHistoryTargetSeat, setAddHistoryTargetSeat] = useState(null);
   const [inputHistoryText, setInputHistoryText] = useState('');
+
+  // メインタイマー時間設定モーダル（共有タイマーと同じ分・秒トグルUI・サブタイマーなし）
+  const [isMainTimerEditModalVisible, setIsMainTimerEditModalVisible] = useState(false);
 
   // 現在時刻HH:MMフォーマットヘルパー
   const getCurrentTimeFormatted = () => {
@@ -1039,6 +1042,7 @@ export default function SalonWorkScreen() {
       const hasStoppedWatchMain = rawStopped === true || rawStopped === 1 || rawStopped === 'true';
       if (hasStoppedWatchMain && (_cachedMainTimerState?.isRunning || _cachedMainTimerState?.isPreCountingDown || _cachedMainTimerState?.isCountUp)) {
         stopAlarm('main', 'main-timer');
+        WatchConnectivity.notifyLocalStopOrReset('main-timer', _cachedMainTimerState?.targetEndTimestamp || 0);
         const resetTarget = _cachedMainTimerState?.targetTime || 600;
         updateCachedMainTimerState({
           ...(_cachedMainTimerState || {}),
@@ -1060,10 +1064,12 @@ export default function SalonWorkScreen() {
           const incomingSec = Number(extra?.totalSeconds || message?.totalSeconds || 600);
           const incomingPrepEnd = Number(extra?.prepEndTimestamp || message?.prepEndTimestamp || 0);
           const incomingTargetEnd = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || 0);
+          const isStoppedTarget = WatchConnectivity.isMainTimerEndStopped(incomingTargetEnd);
+          const isRecentlyStopped = nowMs - WatchConnectivity.getLastLocalMainTimerStopAt() < 15000;
           const isPrep = incomingPrepEnd > nowMs;
           const isPast = !isPrep && incomingTargetEnd > nowMs - 3 * 3600 * 1000 && incomingTargetEnd <= nowMs;
           const isOvertime = isPast && allowCountUp;
-          if (!(isPast && !allowCountUp)) {
+          if (!isStoppedTarget && !isRecentlyStopped && !(isPast && !allowCountUp)) {
             const targetEnd = (incomingTargetEnd > nowMs || isOvertime)
               ? incomingTargetEnd
               : (isPrep ? (incomingPrepEnd + incomingSec * 1000) : (nowMs + incomingSec * 1000));
@@ -2492,6 +2498,7 @@ export default function SalonWorkScreen() {
     };
 
     // タイマーを一時停止状態にし、指定されたステータスに変更、確認フラグをON（緑色シグナルへ移行）、停止者を記録、履歴追記
+    WatchConnectivity.notifyLocalStopOrReset(seat.id, seat.targetEndTimestamp || 0);
     const updatedSeats = seats.map((s) => {
       if (s.id !== seat.id) return s;
       const remaining = Math.max(0, Math.floor((s.targetEndTimestamp - Date.now()) / 1000));
@@ -2697,25 +2704,48 @@ export default function SalonWorkScreen() {
     );
   };
 
-  // メインタイマーウィジェットの数字部分を押した時
+  // メインタイマーウィジェットの数字部分を押した時（共有タイマーと同じ分・秒トグル設定モーダルを開く・サブタイマーなし）
   const handlePressMainTimerDigits = () => {
-    Alert.alert(
-      '時間変更しますか？',
-      'メインタイマーの時間を変更しますか？\n（画面上部の「タイマー」タブにて詳細な時間変更が可能です）',
-      [
-        { text: 'キャンセル', style: 'cancel' },
+    const nowMs = Date.now();
+    let baseSec = mainTimerState?.targetTime || 600;
+    if (mainTimerState?.isRunning && !mainTimerState?.isCountUp && mainTimerState?.targetEndTimestamp > nowMs) {
+      baseSec = Math.max(10, Math.ceil((mainTimerState.targetEndTimestamp - nowMs) / 1000));
+    } else if (!mainTimerState?.isCountUp && mainTimerState?.remainingTime > 0) {
+      baseSec = mainTimerState.remainingTime;
+    }
+    setModalTargetMinutes(Math.floor(baseSec / 60));
+    setModalTargetSeconds(baseSec % 60);
+    setIsAddingFavorite(false);
+    setNewFavoriteLabel('');
+    setIsMainTimerEditModalVisible(true);
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate(25);
+    }
+  };
+
+  // メインタイマー時間変更モーダルから時間を適用・開始する
+  const handleApplyMainTimerEditModal = (autoStart = false) => {
+    const mins = Number(modalTargetMinutes) || 0;
+    const secs = Number(modalTargetSeconds) || 0;
+    const totalSeconds = Math.max(10, mins * 60 + secs);
+    setIsMainTimerEditModalVisible(false);
+    if (requestMainTimerAction) {
+      requestMainTimerAction(
+        'MAIN_TIMER_SET_TIME',
         {
-          text: '変更する',
-          onPress: () => {
-            if (idleSeats.length > 0) {
-              setIsAssignMainTimerModalVisible(true);
-            } else {
-              Alert.alert('時間設定について', '上部ナビゲーションの「タイマー」タブを開くと、テンキーやお気に入りから自由に時間変更できます。');
-            }
-          },
+          totalSeconds,
+          seconds: totalSeconds,
+          autoStart,
+          playSoundOnPhone: true,
+          fromPhone: true,
+          timestamp: Date.now(),
         },
-      ]
-    );
+        `salon_main_set_${Date.now()}`
+      );
+    }
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate(40);
+    }
   };
 
   // お気に入りタイマーの保存
@@ -3483,6 +3513,7 @@ export default function SalonWorkScreen() {
   const handleExecuteResetSeatTimer = (seatId) => {
     const seat = seats.find((s) => s.id === seatId);
     if (!seat) return;
+    WatchConnectivity.notifyLocalStopOrReset(seatId, seat.targetEndTimestamp || 0);
 
     const currentUser = (userName || 'スタッフ').trim();
     const nowStr = getCurrentTimeFormatted();
@@ -3842,6 +3873,7 @@ export default function SalonWorkScreen() {
           text: isFree ? '終了して削除' : '終了して空席に戻す',
           style: isFree ? 'destructive' : 'default',
           onPress: () => {
+            WatchConnectivity.notifyLocalStopOrReset(seatId, targetSeat?.targetEndTimestamp || 0);
             if (isFree) {
               setSeats((prev) => {
                 const updated = prev.filter((s) => s.id !== seatId);
@@ -6196,6 +6228,244 @@ export default function SalonWorkScreen() {
             </ScrollView>
           </View>
         </View>
+      </Modal>
+
+      {/* ④-B メインタイマー時間設定モーダル（共有タイマーと同じ分・秒トグルUI・サブタイマーなし） */}
+      <Modal
+        visible={isMainTimerEditModalVisible}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setIsMainTimerEditModalVisible(false)}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalOverlay}
+        >
+          <View style={[styles.modalCard, { backgroundColor: theme.cardBg }]}>
+            <View style={styles.modalHeader}>
+              <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>
+                メインタイマー 時間設定
+              </Text>
+              <TouchableOpacity onPress={() => setIsMainTimerEditModalVisible(false)}>
+                <Ionicons name="close" size={24} color={theme.textSecondary} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+              {/* 見出し＆カスタム数値直接入力ボックス */}
+              <View style={styles.timeSectionHeader}>
+                <Text style={[styles.inputLabel, { color: theme.textSecondary, marginTop: 0, marginBottom: 0 }]}>
+                  タイマー時間
+                </Text>
+
+                <View style={styles.customTimeInputRow}>
+                  <TextInput
+                    style={[
+                      styles.customTimeTextInput,
+                      {
+                        backgroundColor: theme.inputBg,
+                        color: theme.textPrimary,
+                        borderColor: theme.accent,
+                      },
+                    ]}
+                    keyboardType="number-pad"
+                    maxLength={3}
+                    value={modalTargetMinutes !== '' && modalTargetMinutes !== undefined && modalTargetMinutes !== null ? String(modalTargetMinutes) : ''}
+                    onChangeText={(val) => {
+                      const clean = val.replace(/[^0-9]/g, '');
+                      setModalTargetMinutes(clean === '' ? '' : parseInt(clean, 10));
+                      setModalTargetSeconds(0);
+                    }}
+                    placeholder="0"
+                    placeholderTextColor={theme.textTertiary}
+                    selectTextOnFocus={true}
+                  />
+                  <Text style={[styles.customTimeUnitText, { color: theme.textPrimary }]}>分</Text>
+                  <View style={[styles.timeCurrentBadge, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder, marginLeft: 6 }]}>
+                    <Text style={[styles.timeCurrentBadgeText, { color: theme.accent }]}>
+                      現在: {formatModalTargetTime(modalTargetMinutes, modalTargetSeconds)}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* クイック選択ピル（1分、3分、5分、7分、10分、15分、20分、30分） */}
+              <View style={styles.timePillRow}>
+                {[1, 3, 5, 7, 10, 15, 20, 30].map((min) => {
+                  const isPillSelected = Number(modalTargetMinutes) === min && (Number(modalTargetSeconds) || 0) === 0;
+                  return (
+                    <TouchableOpacity
+                      key={min}
+                      style={[
+                        styles.timePill,
+                        {
+                          backgroundColor: isPillSelected ? theme.accent : theme.inputBg,
+                          borderColor: isPillSelected ? theme.accent : theme.cardBorder,
+                        },
+                      ]}
+                      onPress={() => handleSelectQuickMinute(min)}
+                    >
+                      <Text
+                        style={[
+                          styles.timePillText,
+                          { color: isPillSelected ? '#FFFFFF' : theme.textPrimary },
+                        ]}
+                      >
+                        {min}分
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              {/* 1分・5分単位の微調整ボタンバー（-5分, -1分, +1分, +5分） */}
+              <View style={styles.timeAdjustBar}>
+                <TouchableOpacity
+                  style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                  onPress={() => handleAdjustTargetMinutes(-5)}
+                >
+                  <Text style={[styles.timeAdjustBtnText, { color: theme.textPrimary }]}>-5分</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                  onPress={() => handleAdjustTargetMinutes(-1)}
+                >
+                  <Text style={[styles.timeAdjustBtnText, { color: theme.textPrimary }]}>-1分</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                  onPress={() => handleAdjustTargetMinutes(1)}
+                >
+                  <Text style={[styles.timeAdjustBtnText, { color: theme.textPrimary }]}>+1分</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                  onPress={() => handleAdjustTargetMinutes(5)}
+                >
+                  <Text style={[styles.timeAdjustBtnText, { color: theme.textPrimary }]}>+5分</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* 10秒・30秒単位の微調整ボタンバー（-30秒, -10秒, +10秒, +30秒） */}
+              <View style={[styles.timeAdjustBar, { marginTop: 4, marginBottom: 8 }]}>
+                <TouchableOpacity
+                  style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                  onPress={() => handleAdjustTargetSeconds(-30)}
+                >
+                  <Text style={[styles.timeAdjustBtnText, { color: theme.textSecondary }]}>-30秒</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                  onPress={() => handleAdjustTargetSeconds(-10)}
+                >
+                  <Text style={[styles.timeAdjustBtnText, { color: theme.textSecondary }]}>-10秒</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                  onPress={() => handleAdjustTargetSeconds(10)}
+                >
+                  <Text style={[styles.timeAdjustBtnText, { color: theme.accent }]}>+10秒</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.timeAdjustBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
+                  onPress={() => handleAdjustTargetSeconds(30)}
+                >
+                  <Text style={[styles.timeAdjustBtnText, { color: theme.accent }]}>+30秒</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* お気に入りパネル（サブタイマー表示なし） */}
+              <View style={[styles.favPanelContainer, { backgroundColor: isEcoMode ? '#1C1C1E' : '#F7F8FC', borderColor: theme.cardBorder }]}>
+                <View style={styles.favPanelHeaderRow}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                    <Ionicons name="star" size={14} color="#FFB800" />
+                    <Text style={[styles.favPanelTitle, { color: theme.textPrimary }]}>お気に入りパネル</Text>
+                  </View>
+                </View>
+
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.favChipsScroll}
+                >
+                  {favoritePresets.map((fav) => {
+                    const isSelected =
+                      Number(modalTargetMinutes) === fav.minutes &&
+                      (Number(modalTargetSeconds) || 0) === (fav.seconds || 0);
+                    return (
+                      <View
+                        key={fav.id}
+                        style={[
+                          styles.favChipWrapper,
+                          {
+                            backgroundColor: isSelected ? theme.accent : (isEcoMode ? '#28282B' : '#FFFFFF'),
+                            borderColor: isSelected ? theme.accent : theme.cardBorder,
+                          },
+                        ]}
+                      >
+                        <TouchableOpacity
+                          style={styles.favChipPressable}
+                          onPress={() => {
+                            setModalTargetMinutes(fav.minutes);
+                            setModalTargetSeconds(fav.seconds || 0);
+                            if (Platform.OS !== 'web') Vibration.vibrate(25);
+                          }}
+                        >
+                          <Ionicons
+                            name="star"
+                            size={12}
+                            color={isSelected ? '#FFFFFF' : '#FFB800'}
+                            style={{ marginRight: 3 }}
+                          />
+                          <Text
+                            style={[
+                              styles.favChipMinutes,
+                              { color: isSelected ? '#FFFFFF' : theme.textPrimary },
+                            ]}
+                          >
+                            {formatModalTargetTime(fav.minutes, fav.seconds || 0)}
+                          </Text>
+                          {fav.label ? (
+                            <Text
+                              style={[
+                                styles.favChipLabel,
+                                { color: isSelected ? '#FFFFFF' : theme.textSecondary },
+                              ]}
+                              numberOfLines={1}
+                            >
+                              {fav.label}
+                            </Text>
+                          ) : null}
+                        </TouchableOpacity>
+                      </View>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: 10, marginTop: 18 }}>
+                <TouchableOpacity
+                  style={[styles.submitButton, { flex: 1, backgroundColor: isEcoMode ? '#2C2C2E' : '#E5E7EB', marginTop: 0 }]}
+                  onPress={() => handleApplyMainTimerEditModal(false)}
+                >
+                  <Text style={[styles.submitButtonText, { color: theme.textPrimary }]}>時間をセット</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.submitButton, { flex: 1.3, backgroundColor: theme.accent, marginTop: 0 }]}
+                  onPress={() => handleApplyMainTimerEditModal(true)}
+                >
+                  <Text style={styles.submitButtonText}>開始する</Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ⑤ 新規席マスター追加モーダル */}

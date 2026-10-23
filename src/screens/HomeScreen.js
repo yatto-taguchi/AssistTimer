@@ -88,6 +88,7 @@ export default function HomeScreen({ navigation }) {
 
   // 記録・保存用State
   const [saveModalVisible, setSaveModalVisible] = useState(false);
+  const [saveModalSnapshot, setSaveModalSnapshot] = useState(null);
   const [saveIsFavorite, setSaveIsFavorite] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState('');
   const [savedCategories, setSavedCategories] = useState(['カット', 'カラー', 'ワインディング', 'アップスタイル']);
@@ -211,7 +212,8 @@ export default function HomeScreen({ navigation }) {
   useEffect(() => {
     if (saveModalVisible) {
       const timer = setTimeout(() => {
-        const isOver = isCountUp && !forceTargetTime;
+        const snapIsCountUp = saveModalSnapshot ? saveModalSnapshot.isCountUp : isCountUp;
+        const isOver = snapIsCountUp && !forceTargetTime;
         if (isOver) {
           saveModalCheerRef.current?.trigger('overtime_start', 0.65);
         } else {
@@ -220,7 +222,7 @@ export default function HomeScreen({ navigation }) {
       }, 350);
       return () => clearTimeout(timer);
     }
-  }, [saveModalVisible, isCountUp, forceTargetTime]);
+  }, [saveModalVisible, saveModalSnapshot, isCountUp, forceTargetTime]);
 
   // スタート前カウントダウン用State
   const [isPreCountingDown, setIsPreCountingDown] = useState(false);
@@ -267,8 +269,8 @@ export default function HomeScreen({ navigation }) {
   }, [homeQuickStats?.todaySessions]);
 
   // バイブレーション制御ヘルパー（強度およびタイミング個別設定対応）
+  // ※ Watch側の「携帯の音 OFF（isWatchMuted）」は音声・アラーム音のみをミュートし、バイブレーションは設定に従い常に作動させる
   const triggerVibration = (type) => {
-    if (isWatchMutedRef.current) return;
     if (!isVibrationEnabled) return;
     try {
       if (type === 'finish') {
@@ -411,11 +413,11 @@ export default function HomeScreen({ navigation }) {
 
   // 初回起動時のサウンドロード等と再生用関数
   const playAlarm = async () => {
+    triggerVibration('finish');
     if (isWatchMutedRef.current) {
       console.log('[HomeScreen] Alarm sound suppressed (Watch muted)');
       return;
     }
-    triggerVibration('finish');
     if (!isAlarmSoundEnabled || alarmSoundType === 'none') {
       console.log('Alarm sound is muted or set to none (silent)');
       return;
@@ -1086,6 +1088,14 @@ export default function HomeScreen({ navigation }) {
     } else {
       if (currentIsPreCountdown) {
         // カウントダウン中ならキャンセル
+        const stoppedPrepMainEnd = prepEndTimeRef.current
+          ? (prepEndTimeRef.current + currentTarget * 1000)
+          : (targetEndTimeRef.current || 0);
+        if (stoppedPrepMainEnd > 0) {
+          lastResetTargetEndRef.current = stoppedPrepMainEnd;
+        }
+        lastMainTimerResetAtRef.current = Date.now();
+        WatchConnectivity.notifyLocalStopOrReset('main-timer', stoppedPrepMainEnd);
         isPreCountingDownRef.current = false;
         setIsPreCountingDown(false);
         prepEndTimeRef.current = null;
@@ -1180,6 +1190,12 @@ export default function HomeScreen({ navigation }) {
         } else {
           // 一時停止（超過中または残り0秒以下で停止した場合は設定時間へ戻し、Watch側の00:00折りたたみを防止）
           const wasOverOrZero = currentIsCountUp || currentRemaining <= 0;
+          const stoppedEndTs = targetEndTimeRef.current || overStartTimeRef.current || 0;
+          if (stoppedEndTs > 0) {
+            lastResetTargetEndRef.current = stoppedEndTs;
+          }
+          lastMainTimerResetAtRef.current = Date.now();
+          WatchConnectivity.notifyLocalStopOrReset('main-timer', stoppedEndTs);
           isRunningRef.current = false;
           setIsRunning(false);
           isCountUpRef.current = false;
@@ -1238,6 +1254,7 @@ export default function HomeScreen({ navigation }) {
       lastResetTargetEndRef.current = overStartTimeRef.current;
     }
     lastMainTimerResetAtRef.current = Date.now();
+    WatchConnectivity.notifyLocalStopOrReset('main-timer', lastResetTargetEndRef.current || 0);
     targetEndTimeRef.current = null;
     prepEndTimeRef.current = null;
     overStartTimeRef.current = null;
@@ -1581,8 +1598,9 @@ export default function HomeScreen({ navigation }) {
       const hasValidEnd = incomingEndTs > Date.now() - 3 * 3600 * 1000;
       const autoStart = rawAuto === true || rawAuto === 1 || rawAuto === 'true' || (rawAuto == null && hasValidEnd);
       if (sec > 0 && applyTimeInSecondsRef.current) {
+        const isFromPhone = payload?.fromPhone === true;
         const rawSound = payload?.playSoundOnPhone ?? payload?.extra?.playSoundOnPhone;
-        const playPhoneSound = !(rawSound === false || rawSound === 0 || rawSound === 'false');
+        const playPhoneSound = isFromPhone || !(rawSound === false || rawSound === 0 || rawSound === 'false');
         setWatchMutedState(!playPhoneSound);
         console.log('[HomeScreen] MAIN_TIMER_SET_TIME applied:', sec, 'autoStart:', autoStart, 'playSoundOnPhone:', playPhoneSound);
 
@@ -1607,11 +1625,11 @@ export default function HomeScreen({ navigation }) {
           overStartTimeRef.current = null;
 
           // 途中の停止状態（isRunning: false）をWatchへ誤送信しないよう skipWatchSync: true で秒数をセット
-          applyTimeInSecondsRef.current(sec, { skipWatchSync: true });
+          applyTimeInSecondsRef.current(sec, { skipWatchSync: true, fromWatch: !isFromPhone });
 
           // 直ちにタイマー（または準備カウントダウン）を開始
           if (toggleTimerRef.current) {
-            toggleTimerRef.current(true, watchTiming);
+            toggleTimerRef.current(!isFromPhone, watchTiming);
           }
 
           // 準備カウントダウンでない通常スタート・超過合流時は、確定した稼働状態を即座にWatchへ返信
@@ -1644,7 +1662,7 @@ export default function HomeScreen({ navigation }) {
             syncMainTimerToWatch(startState, { immediate: true });
           }
         } else {
-          applyTimeInSecondsRef.current(sec);
+          applyTimeInSecondsRef.current(sec, { fromWatch: !isFromPhone });
         }
       }
     } else if (cleanAction === 'adjust') {
@@ -1857,8 +1875,12 @@ export default function HomeScreen({ navigation }) {
           const incomingEndTs = Number(payload?.targetEndTimestamp || payload?.extra?.targetEndTimestamp || 0);
           const incomingPrepTs = Number(payload?.prepEndTimestamp || payload?.extra?.prepEndTimestamp || 0);
           const nowMs = Date.now();
-          const isSameAsLastReset = lastResetTargetEndRef.current > 0 && incomingEndTs > 0 && Math.abs(incomingEndTs - lastResetTargetEndRef.current) <= 5000;
-          const isRecentlyReset = nowMs - lastMainTimerResetAtRef.current < 10000;
+          const isSameAsLastReset =
+            (lastResetTargetEndRef.current > 0 && incomingEndTs > 0 && Math.abs(incomingEndTs - lastResetTargetEndRef.current) <= 15000) ||
+            WatchConnectivity.isMainTimerEndStopped(incomingEndTs);
+          const isRecentlyReset =
+            nowMs - lastMainTimerResetAtRef.current < 15000 ||
+            nowMs - WatchConnectivity.getLastLocalMainTimerStopAt() < 15000;
           const isExpiredWithoutCountUp = !isCountUpEnabledRef.current && incomingEndTs > 0 && incomingEndTs <= nowMs && incomingPrepTs <= nowMs;
           if (
             hasActiveWatchMain &&
@@ -1972,17 +1994,66 @@ export default function HomeScreen({ navigation }) {
 
   // ---- 時間設定機能 ----
   const handleOpenTimeModal = () => {
-    if (isRunning || isPreCountingDown) return;
-    const m = Math.floor(targetTime / 60);
-    const s = targetTime % 60;
-    setManualInputMinStr(m > 0 ? m.toString() : '');
-    setManualInputSecStr(s > 0 ? s.toString() : '');
+    if (isPreCountingDown) {
+      showControls(true);
+      return;
+    }
+    // 稼働中で操作ボタン・タブバーが自動非表示になっている時は、まず操作ボタンを3秒間再表示する（表示中または停止中のタップで時間設定モーダルを起動）
+    if (isRunning && !controlsVisible) {
+      showControls(true);
+      return;
+    }
+    const baseSecs = (isRunning && !isCountUp && remainingTime > 0) ? remainingTime : targetTime;
+    const m = Math.floor(baseSecs / 60);
+    const s = baseSecs % 60;
+    setManualInputMinStr(m > 0 ? m.toString() : '0');
+    setManualInputSecStr(s > 0 ? s.toString() : '0');
     setTimeModalKeypadActive(null);
     setCountdownKeypadActive(null);
     setIsKeypadNewInput(true);
     setIsEditingFavorites(false);
     setTimeModalMode('time');
     setTimeModalVisible(true);
+  };
+
+  // ★ 共有タイマーと同じ分・秒トグル調整ヘルパー（サブタイマーなし）
+  const handleQuickSelectTimeModalMinute = (min) => {
+    setManualInputMinStr(String(min));
+    setManualInputSecStr('0');
+    setTimeModalKeypadActive(null);
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate(25);
+    }
+  };
+
+  const handleAdjustTimeModalMinutes = (deltaMin) => {
+    const curMin = parseInt(manualInputMinStr, 10) || 0;
+    const curSec = parseInt(manualInputSecStr, 10) || 0;
+    const currentTotal = curMin * 60 + curSec;
+    const nextTotal = Math.max(10, Math.min(999 * 60, currentTotal + deltaMin * 60));
+    const nextMin = Math.floor(nextTotal / 60);
+    const nextSec = nextTotal % 60;
+    setManualInputMinStr(String(nextMin));
+    setManualInputSecStr(String(nextSec));
+    setTimeModalKeypadActive(null);
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate(25);
+    }
+  };
+
+  const handleAdjustTimeModalSeconds = (deltaSec) => {
+    const curMin = parseInt(manualInputMinStr, 10) || 0;
+    const curSec = parseInt(manualInputSecStr, 10) || 0;
+    const currentTotal = curMin * 60 + curSec;
+    const nextTotal = Math.max(10, Math.min(999 * 60, currentTotal + deltaSec));
+    const nextMin = Math.floor(nextTotal / 60);
+    const nextSec = nextTotal % 60;
+    setManualInputMinStr(String(nextMin));
+    setManualInputSecStr(String(nextSec));
+    setTimeModalKeypadActive(null);
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate(25);
+    }
   };
 
   // ---- お気に入りタイマー時間管理 ----
@@ -2150,6 +2221,9 @@ export default function HomeScreen({ navigation }) {
   };
 
   const applyTimeInSeconds = (secs, options = {}) => {
+    if (!options?.fromWatch && !options?.skipWatchSync) {
+      setWatchMutedState(false);
+    }
     cancelVibration();
     stopAllAlarms('main');
     if (soundRef.current) {
@@ -2332,10 +2406,23 @@ export default function HomeScreen({ navigation }) {
 
   // ---- 記録・保存機能 ----
   const handleOpenSaveModal = () => {
+    const snapTarget = targetTimeRef.current || targetTime || 600;
+    const snapIsCountUp = !!isCountUpRef.current || !!isCountUp;
+    const snapRem = remainingTimeRef.current ?? remainingTime ?? 0;
+    setSaveModalSnapshot({
+      targetTime: snapTarget,
+      isCountUp: snapIsCountUp,
+      remainingTime: snapRem,
+    });
+    setWatchMutedState(false);
     isRunningRef.current = false;
     isPreCountingDownRef.current = false;
+    isCountUpRef.current = false;
     setIsRunning(false); // タイマーを止める
     setIsPreCountingDown(false);
+    setIsCountUp(false);
+    remainingTimeRef.current = snapTarget;
+    setRemainingTime(snapTarget);
     cancelVibration();
     stopAllAlarms('main');
     if (soundRef.current) {
@@ -2354,9 +2441,13 @@ export default function HomeScreen({ navigation }) {
       lastResetTargetEndRef.current = overStartTimeRef.current;
     }
     lastMainTimerResetAtRef.current = Date.now();
+    WatchConnectivity.notifyLocalStopOrReset('main-timer', lastResetTargetEndRef.current || 0);
     targetEndTimeRef.current = null;
     prepEndTimeRef.current = null;
     overStartTimeRef.current = null;
+    triggeredVoicesRef.current.clear();
+    triggeredPrepVoicesRef.current.clear();
+    triggeredOverVoicesRef.current.clear();
     setForceTargetTime(false);
     if (!selectedCategory && lastUsedCategory) {
       setSelectedCategory(lastUsedCategory); // ホームで未設定の場合のみ前回のカテゴリをセット
@@ -2368,8 +2459,8 @@ export default function HomeScreen({ navigation }) {
     // ★ 保存モーダル表示中もWatchへは停止（待機状態）として即座に同期し、超過カウントの復活・続き表示を防止
     if (Platform.OS === 'ios') {
       const stoppedState = {
-        remainingTime: targetTime,
-        targetTime: targetTime,
+        remainingTime: snapTarget,
+        targetTime: snapTarget,
         targetEndTimestamp: 0,
         isRunning: false,
         isPaused: false,
@@ -2382,16 +2473,32 @@ export default function HomeScreen({ navigation }) {
         countdownConfigSeconds: countdownSeconds || 5,
         prepEndTimestamp: null,
       };
+      if (setMainTimerState) {
+        setMainTimerState(stoppedState);
+      }
       updateCachedMainTimerState(stoppedState);
       syncMainTimerToWatch(stoppedState, { immediate: true });
     }
   };
 
   const handleOpenSaveInTimeModal = () => {
+    const snapTarget = targetTimeRef.current || targetTime || 600;
+    const snapIsCountUp = !!isCountUpRef.current || !!isCountUp;
+    const snapRem = remainingTimeRef.current ?? remainingTime ?? 0;
+    setSaveModalSnapshot({
+      targetTime: snapTarget,
+      isCountUp: snapIsCountUp,
+      remainingTime: snapRem,
+    });
+    setWatchMutedState(false);
     isRunningRef.current = false;
     isPreCountingDownRef.current = false;
+    isCountUpRef.current = false;
     setIsRunning(false); // タイマーを止める
     setIsPreCountingDown(false);
+    setIsCountUp(false);
+    remainingTimeRef.current = snapTarget;
+    setRemainingTime(snapTarget);
     cancelVibration();
     stopAllAlarms('main');
     if (soundRef.current) {
@@ -2410,9 +2517,13 @@ export default function HomeScreen({ navigation }) {
       lastResetTargetEndRef.current = overStartTimeRef.current;
     }
     lastMainTimerResetAtRef.current = Date.now();
+    WatchConnectivity.notifyLocalStopOrReset('main-timer', lastResetTargetEndRef.current || 0);
     targetEndTimeRef.current = null;
     prepEndTimeRef.current = null;
     overStartTimeRef.current = null;
+    triggeredVoicesRef.current.clear();
+    triggeredPrepVoicesRef.current.clear();
+    triggeredOverVoicesRef.current.clear();
     setForceTargetTime(true); // 時間内に終わったことにしてターゲットタイムを記録する
     if (!selectedCategory && lastUsedCategory) {
       setSelectedCategory(lastUsedCategory); // ホームで未設定の場合のみ前回のカテゴリをセット
@@ -2424,8 +2535,8 @@ export default function HomeScreen({ navigation }) {
     // ★ 保存モーダル表示中もWatchへは停止（待機状態）として即座に同期
     if (Platform.OS === 'ios') {
       const stoppedState = {
-        remainingTime: targetTime,
-        targetTime: targetTime,
+        remainingTime: snapTarget,
+        targetTime: snapTarget,
         targetEndTimestamp: 0,
         isRunning: false,
         isPaused: false,
@@ -2438,6 +2549,9 @@ export default function HomeScreen({ navigation }) {
         countdownConfigSeconds: countdownSeconds || 5,
         prepEndTimestamp: null,
       };
+      if (setMainTimerState) {
+        setMainTimerState(stoppedState);
+      }
       updateCachedMainTimerState(stoppedState);
       syncMainTimerToWatch(stoppedState, { immediate: true });
     }
@@ -2506,15 +2620,18 @@ export default function HomeScreen({ navigation }) {
       }
     }
 
-    // 経過秒数の計算
-    let duration = isCountUp ? targetTime + remainingTime : targetTime - remainingTime;
+    // 経過秒数の計算（保存モーダル起動時にキャプチャしたスナップショットを優先使用）
+    const snapTarget = saveModalSnapshot?.targetTime ?? targetTime;
+    const snapIsCountUp = saveModalSnapshot ? saveModalSnapshot.isCountUp : isCountUp;
+    const snapRem = saveModalSnapshot ? saveModalSnapshot.remainingTime : remainingTime;
+    let duration = snapIsCountUp ? snapTarget + snapRem : snapTarget - snapRem;
     
     if (forceTargetTime) {
-      duration = targetTime; // タイム内に入って終了した場合はターゲットタイムをそのまま記録
+      duration = snapTarget; // タイム内に入って終了した場合はターゲットタイムをそのまま記録
     }
     
     // タイム内達成判定（タイム内ボタン押下またはカウントアップ前終了）
-    const isCompletedInTime = forceTargetTime || !isCountUp;
+    const isCompletedInTime = forceTargetTime || !snapIsCountUp;
 
     let finalTags = [...selectedTags];
     if (saveIsFavorite && !finalTags.includes('お気に入り')) {
@@ -2542,6 +2659,7 @@ export default function HomeScreen({ navigation }) {
     
     // モーダルを閉じ、タイマーをリセットする（保存によるリセットのため中断カウントは行わない）
     setSaveModalVisible(false);
+    setSaveModalSnapshot(null);
     setPhotoUris([]);
     setSaveIsFavorite(false);
     resetTimer(true);
@@ -3051,7 +3169,7 @@ export default function HomeScreen({ navigation }) {
               isEcoMode={isEcoMode}
             />
           )}
-          {/* インジケーター内部全体の円形タップ領域（時間設定モーダル呼出） */}
+          {/* インジケーター内部全体の円形タップ領域（時間設定モーダル呼出・稼働中ボタン非表示時はボタン再表示） */}
           <TouchableOpacity
             style={[
               styles.timerTouchArea,
@@ -3062,7 +3180,6 @@ export default function HomeScreen({ navigation }) {
               }
             ]}
             onPress={handleOpenTimeModal}
-            disabled={isRunning || isPreCountingDown}
             activeOpacity={0.7}
           >
             <View style={styles.timeTextContainer} pointerEvents="none">
@@ -3174,11 +3291,14 @@ export default function HomeScreen({ navigation }) {
           {/* 計測時間の詳細表示 */}
           <View style={{ backgroundColor: isEcoMode ? '#333' : '#F2F2F7', padding: 15, borderRadius: 10, width: '100%', marginBottom: 20, alignItems: 'center' }}>
             {(() => {
-              let actualDuration = isCountUp ? targetTime + remainingTime : targetTime - remainingTime;
-              if (forceTargetTime) actualDuration = targetTime;
+              const snapTarget = saveModalSnapshot?.targetTime ?? targetTime;
+              const snapIsCountUp = saveModalSnapshot ? saveModalSnapshot.isCountUp : isCountUp;
+              const snapRem = saveModalSnapshot ? saveModalSnapshot.remainingTime : remainingTime;
+              let actualDuration = snapIsCountUp ? snapTarget + snapRem : snapTarget - snapRem;
+              if (forceTargetTime) actualDuration = snapTarget;
               
-              const isOver = isCountUp && !forceTargetTime;
-              const overSeconds = isCountUp && !forceTargetTime ? remainingTime : 0;
+              const isOver = snapIsCountUp && !forceTargetTime;
+              const overSeconds = snapIsCountUp && !forceTargetTime ? snapRem : 0;
               
               const m = Math.floor(actualDuration / 60);
               const s = actualDuration % 60;
@@ -3353,6 +3473,7 @@ export default function HomeScreen({ navigation }) {
             style={[styles.resetButton, {marginTop: 15, padding: 15, borderRadius: 10}]} 
             onPress={() => {
               setSaveModalVisible(false);
+              setSaveModalSnapshot(null);
               setSaveIsFavorite(false);
               resetTimer(true);
             }}
@@ -3498,14 +3619,114 @@ export default function HomeScreen({ navigation }) {
                   </View>
                 </View>
 
-                {/* テンキー非展開時の決定ボタン */}
+                {/* ★ 共有タイマーと同じ分・秒トグル調整バー ＆ クイック選択ピル（サブタイマーなし） */}
                 {!timeModalKeypadActive && (
-                  <TouchableOpacity 
-                    style={[styles.applyButton, { alignSelf: 'center', minWidth: 120, marginTop: 10, marginBottom: 14, paddingVertical: 10 }]} 
-                    onPress={handleManualApply}
-                  >
-                    <Text style={styles.applyButtonText}>決定</Text>
-                  </TouchableOpacity>
+                  <View style={{ width: '100%', marginTop: 10 }}>
+                    {/* クイック選択ピル（1分、3分、5分、7分、10分、15分、20分、30分） */}
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8, justifyContent: 'center' }}>
+                      {[1, 3, 5, 7, 10, 15, 20, 30].map((min) => {
+                        const isPillSelected =
+                          (parseInt(manualInputMinStr, 10) || 0) === min &&
+                          (parseInt(manualInputSecStr, 10) || 0) === 0;
+                        return (
+                          <TouchableOpacity
+                            key={min}
+                            activeOpacity={0.7}
+                            style={{
+                              paddingHorizontal: 11,
+                              paddingVertical: 6,
+                              borderRadius: 16,
+                              borderWidth: 1,
+                              backgroundColor: isPillSelected
+                                ? '#007AFF'
+                                : (isEcoMode ? '#2C2C2E' : '#F2F2F7'),
+                              borderColor: isPillSelected
+                                ? '#007AFF'
+                                : (isEcoMode ? '#3A3A3C' : '#E0E0E5'),
+                            }}
+                            onPress={() => handleQuickSelectTimeModalMinute(min)}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 13,
+                                fontWeight: isPillSelected ? '700' : '600',
+                                color: isPillSelected ? '#FFFFFF' : (isEcoMode ? '#FFFFFF' : '#1C1C1E'),
+                              }}
+                            >
+                              {min}分
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+
+                    {/* 1分・5分単位の微調整トグルバー（-5分, -1分, +1分, +5分） */}
+                    <View style={{ flexDirection: 'row', gap: 6, marginBottom: 6 }}>
+                      {[-5, -1, 1, 5].map((deltaMin) => (
+                        <TouchableOpacity
+                          key={`min-${deltaMin}`}
+                          activeOpacity={0.7}
+                          style={{
+                            flex: 1,
+                            paddingVertical: 8,
+                            borderRadius: 8,
+                            borderWidth: 1,
+                            alignItems: 'center',
+                            backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7',
+                            borderColor: isEcoMode ? '#3A3A3C' : '#E0E0E5',
+                          }}
+                          onPress={() => handleAdjustTimeModalMinutes(deltaMin)}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 13,
+                              fontWeight: '700',
+                              color: deltaMin > 0 ? '#007AFF' : (isEcoMode ? '#E5E5EA' : '#1C1C1E'),
+                            }}
+                          >
+                            {deltaMin > 0 ? `+${deltaMin}分` : `${deltaMin}分`}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+
+                    {/* 10秒・30秒単位の微調整トグルバー（-30秒, -10秒, +10秒, +30秒） */}
+                    <View style={{ flexDirection: 'row', gap: 6, marginBottom: 10 }}>
+                      {[-30, -10, 10, 30].map((deltaSec) => (
+                        <TouchableOpacity
+                          key={`sec-${deltaSec}`}
+                          activeOpacity={0.7}
+                          style={{
+                            flex: 1,
+                            paddingVertical: 8,
+                            borderRadius: 8,
+                            borderWidth: 1,
+                            alignItems: 'center',
+                            backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7',
+                            borderColor: isEcoMode ? '#3A3A3C' : '#E0E0E5',
+                          }}
+                          onPress={() => handleAdjustTimeModalSeconds(deltaSec)}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 13,
+                              fontWeight: '700',
+                              color: deltaSec > 0 ? '#007AFF' : (isEcoMode ? '#AEAEB2' : '#636366'),
+                            }}
+                          >
+                            {deltaSec > 0 ? `+${deltaSec}秒` : `${deltaSec}秒`}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+
+                    <TouchableOpacity 
+                      style={[styles.applyButton, { alignSelf: 'center', width: '100%', marginTop: 2, marginBottom: 14, paddingVertical: 11 }]} 
+                      onPress={handleManualApply}
+                    >
+                      <Text style={styles.applyButtonText}>決定</Text>
+                    </TouchableOpacity>
+                  </View>
                 )}
 
                 {timeModalKeypadActive ? (
