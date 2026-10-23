@@ -79,6 +79,7 @@ enum WidgetSync {
                 "pausedRemaining": m.pausedRemainingSeconds,
                 "related": true,
                 "totalSeconds": m.totalSeconds,
+                "isCountUpEnabled": m.isCountUpEnabled,
                 "isCheckCompleted": true
             ])
         }

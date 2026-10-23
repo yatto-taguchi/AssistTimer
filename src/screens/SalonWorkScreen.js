@@ -351,6 +351,7 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       isRunning: isRunning,
       pausedRemainingSeconds: pausedRem,
       isCountUp: isCountUp,
+      isCountUpEnabled: !!state.isCountUpEnabled,
       genre: state.genre || '',
       isPreCountingDown: isPreCountingDown,
       preCountdownSeconds: state.preCountdownSeconds || 0,
@@ -387,13 +388,16 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
   if (Platform.OS !== 'ios') return;
   try {
     let validSeats = null;
-    if (Array.isArray(currentSeats) && currentSeats.length > 0) {
+    if (options.forceEmpty) {
+      validSeats = [];
+      _cachedCurrentSeats = [];
+    } else if (Array.isArray(currentSeats) && currentSeats.length > 0) {
       _cachedCurrentSeats = currentSeats;
       validSeats = currentSeats;
     } else if (Array.isArray(_cachedCurrentSeats) && _cachedCurrentSeats.length > 0) {
       // currentSeats が空配列や未初期化でも、既存の有効な客席キャッシュがあるなら絶対に消さず保持！
       validSeats = _cachedCurrentSeats;
-    } else if (options.forceEmpty || (currentSeats !== null && Array.isArray(currentSeats) && _cachedCurrentSeats.length === 0)) {
+    } else if (currentSeats !== null && Array.isArray(currentSeats) && _cachedCurrentSeats.length === 0) {
       validSeats = [];
       _cachedCurrentSeats = [];
     }
@@ -453,6 +457,7 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
         isRunning: isRunning,
         pausedRemainingSeconds: pausedRem,
         isCountUp: isCountUp,
+        isCountUpEnabled: !!_cachedMainTimerState.isCountUpEnabled,
         genre: _cachedMainTimerState.genre || '',
         isPreCountingDown: isPreCountingDown,
         preCountdownSeconds: _cachedMainTimerState.preCountdownSeconds || 0,
@@ -487,6 +492,9 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
     // ★ 客席データが有効な場合のみ seats を追加。未指定（null）の時は seats を含めず客席タイマーを保護
     if (validSeats !== null) {
       watchPayload.seats = formatSeatsPayload(validSeats);
+      if (options.forceEmpty && validSeats.length === 0) {
+        watchPayload.clearAllSeats = true;
+      }
     }
 
     if (options.immediate || options.notification) {
@@ -729,6 +737,8 @@ export default function SalonWorkScreen() {
   const mainTimeupAlertedRef = useRef({});
   // ヘルプ担当指定モーダル用ScrollViewの参照
   const helpModalScrollViewRef = useRef(null);
+  // チェック担当指定モーダル用ScrollViewの参照
+  const checkStaffModalScrollViewRef = useRef(null);
 
   // ★ Apple Watch と連動中か（ペアリング済み＋Watchアプリ導入済み）
   const [watchLinked, setWatchLinked] = useState(false);
@@ -1025,34 +1035,56 @@ export default function SalonWorkScreen() {
 
     // ① 同期リクエスト (Watch側から「最新の客席データをちょうだい」と要求された時)
     if (action === 'REQUEST_SYNC') {
-      const rawActive = extra?.watchMainTimerActive ?? message?.watchMainTimerActive;
-      const hasActiveWatchMain = rawActive === true || rawActive === 1 || rawActive === 'true';
-      if (hasActiveWatchMain && !_cachedMainTimerState?.isRunning && !_cachedMainTimerState?.isPreCountingDown) {
-        const nowMs = Date.now();
-        const incomingSec = Number(extra?.totalSeconds || message?.totalSeconds || 600);
-        const incomingPrepEnd = Number(extra?.prepEndTimestamp || message?.prepEndTimestamp || 0);
-        const incomingTargetEnd = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || 0);
-        const isPrep = incomingPrepEnd > nowMs;
-        const isOvertime = !isPrep && incomingTargetEnd > nowMs - 3 * 3600 * 1000 && incomingTargetEnd <= nowMs;
-        const targetEnd = (incomingTargetEnd > nowMs || isOvertime)
-          ? incomingTargetEnd
-          : (isPrep ? (incomingPrepEnd + incomingSec * 1000) : (nowMs + incomingSec * 1000));
-        const syncedRem = isPrep
-          ? incomingSec
-          : (isOvertime
-            ? Math.max(0, Math.floor((nowMs - targetEnd) / 1000))
-            : Math.max(1, Math.ceil((targetEnd - nowMs) / 1000)));
+      const rawStopped = extra?.watchMainTimerStopped ?? message?.watchMainTimerStopped;
+      const hasStoppedWatchMain = rawStopped === true || rawStopped === 1 || rawStopped === 'true';
+      if (hasStoppedWatchMain && (_cachedMainTimerState?.isRunning || _cachedMainTimerState?.isPreCountingDown || _cachedMainTimerState?.isCountUp)) {
+        stopAlarm('main', 'main-timer');
+        const resetTarget = _cachedMainTimerState?.targetTime || 600;
         updateCachedMainTimerState({
           ...(_cachedMainTimerState || {}),
-          remainingTime: syncedRem,
-          targetTime: incomingSec,
-          targetEndTimestamp: targetEnd,
-          isRunning: !isPrep,
+          remainingTime: resetTarget,
+          targetTime: resetTarget,
+          targetEndTimestamp: 0,
+          isRunning: false,
           isPaused: false,
-          isCountUp: isOvertime,
-          isPreCountingDown: isPrep,
-          prepEndTimestamp: isPrep ? incomingPrepEnd : 0,
+          isCountUp: false,
+          isPreCountingDown: false,
+          prepEndTimestamp: 0,
         });
+      } else {
+        const rawActive = extra?.watchMainTimerActive ?? message?.watchMainTimerActive;
+        const hasActiveWatchMain = rawActive === true || rawActive === 1 || rawActive === 'true';
+        if (hasActiveWatchMain && !_cachedMainTimerState?.isRunning && !_cachedMainTimerState?.isPreCountingDown) {
+          const nowMs = Date.now();
+          const allowCountUp = !!_cachedMainTimerState?.isCountUpEnabled;
+          const incomingSec = Number(extra?.totalSeconds || message?.totalSeconds || 600);
+          const incomingPrepEnd = Number(extra?.prepEndTimestamp || message?.prepEndTimestamp || 0);
+          const incomingTargetEnd = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || 0);
+          const isPrep = incomingPrepEnd > nowMs;
+          const isPast = !isPrep && incomingTargetEnd > nowMs - 3 * 3600 * 1000 && incomingTargetEnd <= nowMs;
+          const isOvertime = isPast && allowCountUp;
+          if (!(isPast && !allowCountUp)) {
+            const targetEnd = (incomingTargetEnd > nowMs || isOvertime)
+              ? incomingTargetEnd
+              : (isPrep ? (incomingPrepEnd + incomingSec * 1000) : (nowMs + incomingSec * 1000));
+            const syncedRem = isPrep
+              ? incomingSec
+              : (isOvertime
+                ? Math.max(0, Math.floor((nowMs - targetEnd) / 1000))
+                : Math.max(1, Math.ceil((targetEnd - nowMs) / 1000)));
+            updateCachedMainTimerState({
+              ...(_cachedMainTimerState || {}),
+              remainingTime: syncedRem,
+              targetTime: incomingSec,
+              targetEndTimestamp: targetEnd,
+              isRunning: !isPrep,
+              isPaused: false,
+              isCountUp: isOvertime,
+              isPreCountingDown: isPrep,
+              prepEndTimestamp: isPrep ? incomingPrepEnd : 0,
+            });
+          }
+        }
       }
       setSeats((currentSeats) => {
         syncSeatsToWatch(currentSeats, userName, staffMembers, { immediate: true });
@@ -1136,7 +1168,7 @@ export default function SalonWorkScreen() {
             targetTime: incomingSec,
             targetEndTimestamp: targetEnd,
             isRunning: autoStart && !isPrep,
-            isPaused: !autoStart,
+            isPaused: false,
             isCountUp: false,
             isPreCountingDown: isPrep,
             prepEndTimestamp: isPrep ? incomingPrepEnd : 0,
@@ -3868,7 +3900,7 @@ export default function SalonWorkScreen() {
             setSeats((prev) => {
               const updated = prev.filter((s) => s.id !== seatId);
               saveSeatsToStorage(updated);
-              syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
+              syncSeatsToWatch(updated, userName, staffMembers, { immediate: true, forceEmpty: updated.length === 0 });
               return updated;
             });
           },
@@ -5044,7 +5076,10 @@ export default function SalonWorkScreen() {
           }
         }}
       >
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalOverlay}
+        >
           <View style={[styles.modalCard, { backgroundColor: theme.cardBg }]}>
             <View style={styles.modalHeader}>
               {switcherSubView === 'inviteCode' ? (
@@ -5497,7 +5532,7 @@ export default function SalonWorkScreen() {
               </ScrollView>
             )}
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ② 招待コードで参加モーダル */}
@@ -5507,7 +5542,10 @@ export default function SalonWorkScreen() {
         animationType="fade"
         onRequestClose={() => setIsJoinCodeModalVisible(false)}
       >
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalOverlay}
+        >
           <View style={[styles.modalCard, { backgroundColor: theme.cardBg }]}>
             <View style={styles.modalHeader}>
               <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>招待コードで参加</Text>
@@ -5516,33 +5554,42 @@ export default function SalonWorkScreen() {
               </TouchableOpacity>
             </View>
 
-            <Text style={[styles.inputLabel, { color: theme.textSecondary }]}>6桁の招待コード</Text>
-            <TextInput
-              style={[styles.textInput, { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.cardBorder }]}
-              placeholder="例: 738-921"
-              placeholderTextColor={theme.textTertiary}
-              value={inputInviteCode}
-              onChangeText={setInputInviteCode}
-              autoCapitalize="characters"
-            />
-
-            <Text style={[styles.inputLabel, { color: theme.textSecondary }]}>サロンの表示名 (任意)</Text>
-            <TextInput
-              style={[styles.textInput, { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.cardBorder }]}
-              placeholder="例: 表参道店、2Fチームなど"
-              placeholderTextColor={theme.textTertiary}
-              value={inputSalonName}
-              onChangeText={setInputSalonName}
-            />
-
-            <TouchableOpacity
-              style={[styles.submitButton, { backgroundColor: theme.accent }]}
-              onPress={handleJoinByCode}
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              bounces={false}
             >
-              <Text style={styles.submitButtonText}>サロンに参加する</Text>
-            </TouchableOpacity>
+              <Text style={[styles.inputLabel, { color: theme.textSecondary }]}>6桁の招待コード</Text>
+              <TextInput
+                style={[styles.textInput, { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.cardBorder }]}
+                placeholder="例: 738-921"
+                placeholderTextColor={theme.textTertiary}
+                value={inputInviteCode}
+                onChangeText={setInputInviteCode}
+                autoCapitalize="characters"
+                returnKeyType="next"
+              />
+
+              <Text style={[styles.inputLabel, { color: theme.textSecondary }]}>サロンの表示名 (任意)</Text>
+              <TextInput
+                style={[styles.textInput, { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.cardBorder }]}
+                placeholder="例: 表参道店、2Fチームなど"
+                placeholderTextColor={theme.textTertiary}
+                value={inputSalonName}
+                onChangeText={setInputSalonName}
+                returnKeyType="done"
+                onSubmitEditing={handleJoinByCode}
+              />
+
+              <TouchableOpacity
+                style={[styles.submitButton, { backgroundColor: theme.accent }]}
+                onPress={handleJoinByCode}
+              >
+                <Text style={styles.submitButtonText}>サロンに参加する</Text>
+              </TouchableOpacity>
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ③ 待機席のタイム設定モーダル */}
@@ -5552,7 +5599,10 @@ export default function SalonWorkScreen() {
         animationType="slide"
         onRequestClose={() => setIsSetTimerModalVisible(false)}
       >
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalOverlay}
+        >
           <View style={[styles.modalCard, { backgroundColor: theme.cardBg }]}>
             <View style={styles.modalHeader}>
               {isEditingSeatLabel ? (
@@ -5630,7 +5680,7 @@ export default function SalonWorkScreen() {
               </TouchableOpacity>
             </View>
 
-            <ScrollView showsVerticalScrollIndicator={false}>
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               {/* 放置タイム設定（直接入力 ＆ クイックピル ＆ 微調整 ＆ お気に入りパネル） */}
               <View style={styles.timeSettingHeaderRow}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -6070,7 +6120,7 @@ export default function SalonWorkScreen() {
               </TouchableOpacity>
             </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ④ メインタイマーを空席に割り当てるモーダル */}
@@ -6155,7 +6205,15 @@ export default function SalonWorkScreen() {
         animationType="fade"
         onRequestClose={() => setIsAddSeatModalVisible(false)}
       >
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalOverlay}
+        >
+          <TouchableOpacity
+            style={{ flex: 1 }}
+            activeOpacity={1}
+            onPress={() => setIsAddSeatModalVisible(false)}
+          />
           <View style={[styles.modalCard, { backgroundColor: theme.cardBg }]}>
             <View style={styles.modalHeader}>
               <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>新しい席を追加</Text>
@@ -6164,23 +6222,59 @@ export default function SalonWorkScreen() {
               </TouchableOpacity>
             </View>
 
-            <Text style={[styles.inputLabel, { color: theme.textSecondary }]}>席の名前・番号</Text>
-            <TextInput
-              style={[styles.textInput, { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.cardBorder }]}
-              placeholder="例: 6番席, 個室B, セット面C"
-              placeholderTextColor={theme.textTertiary}
-              value={newSeatName}
-              onChangeText={setNewSeatName}
-            />
-
-            <TouchableOpacity
-              style={[styles.submitButton, { backgroundColor: theme.accent }]}
-              onPress={handleAddNewSeatMaster}
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              bounces={false}
             >
-              <Text style={styles.submitButtonText}>席を追加する</Text>
-            </TouchableOpacity>
+              <Text style={[styles.inputLabel, { color: theme.textSecondary }]}>席の名前・番号</Text>
+              <TextInput
+                style={[styles.textInput, { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.accent, borderWidth: 1.5 }]}
+                placeholder="例: 6番席, 個室B, セット面C"
+                placeholderTextColor={theme.textTertiary}
+                value={newSeatName}
+                onChangeText={setNewSeatName}
+                maxLength={20}
+                autoFocus={true}
+                selectTextOnFocus={true}
+                returnKeyType="done"
+                onSubmitEditing={handleAddNewSeatMaster}
+              />
+
+              {/* 定番の席名クイックチップ */}
+              <View style={{ marginTop: 10, marginBottom: 4 }}>
+                <Text style={{ fontSize: 11, color: theme.textTertiary, marginBottom: 6 }}>よく使う席名（タップで入力）:</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                  {[`${seats.length + 1}番席`, 'セット面', '個室', 'VIP席', 'シャンプー台'].map((preset) => (
+                    <TouchableOpacity
+                      key={preset}
+                      style={{
+                        paddingHorizontal: 9,
+                        paddingVertical: 5,
+                        borderRadius: 6,
+                        backgroundColor: isEcoMode ? '#2C2C2E' : '#EFF6FF',
+                        borderWidth: 1,
+                        borderColor: newSeatName === preset ? theme.accent : (isEcoMode ? '#3C3C3E' : '#BFDBFE'),
+                      }}
+                      onPress={() => setNewSeatName(preset)}
+                    >
+                      <Text style={{ fontSize: 11.5, color: newSeatName === preset ? theme.accent : theme.textPrimary, fontWeight: newSeatName === preset ? '700' : '500' }}>
+                        {preset}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+
+              <TouchableOpacity
+                style={[styles.submitButton, { backgroundColor: theme.accent, marginTop: 12 }]}
+                onPress={handleAddNewSeatMaster}
+              >
+                <Text style={styles.submitButtonText}>席を追加する</Text>
+              </TouchableOpacity>
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ⑥ PROサロンプラン案内モーダル */}
@@ -6879,6 +6973,10 @@ export default function SalonWorkScreen() {
         animationType="fade"
         onRequestClose={() => setIsHelpAssignModalVisible(false)}
       >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={{ flex: 1 }}
+        >
         <TouchableOpacity
           style={styles.actionModalOverlay}
           activeOpacity={1}
@@ -7141,6 +7239,17 @@ export default function SalonWorkScreen() {
                       placeholderTextColor={theme.textTertiary}
                       value={helpInputStaffName}
                       onChangeText={setHelpInputStaffName}
+                      returnKeyType="done"
+                      onFocus={() => {
+                        setTimeout(() => {
+                          helpModalScrollViewRef.current?.scrollToEnd({ animated: true });
+                        }, 150);
+                      }}
+                      onSubmitEditing={() => {
+                        if (helpInputStaffName.trim()) {
+                          handleAssignAssistant(helpInputStaffName, selectedHelpAction);
+                        }
+                      }}
                     />
                     <TouchableOpacity
                       style={[
@@ -7186,6 +7295,7 @@ export default function SalonWorkScreen() {
             </ScrollView>
           </View>
         </TouchableOpacity>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ⑧-B ★ ユーザー指定: チェック担当スタッフ指定・変更モーダル */}
@@ -7195,6 +7305,10 @@ export default function SalonWorkScreen() {
         animationType="fade"
         onRequestClose={() => setIsCheckStaffModalVisible(false)}
       >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={{ flex: 1 }}
+        >
         <TouchableOpacity
           style={styles.actionModalOverlay}
           activeOpacity={1}
@@ -7219,6 +7333,7 @@ export default function SalonWorkScreen() {
             </View>
 
             <ScrollView
+              ref={checkStaffModalScrollViewRef}
               showsVerticalScrollIndicator={true}
               style={{ width: '100%' }}
               contentContainerStyle={{ paddingBottom: 16 }}
@@ -7314,6 +7429,17 @@ export default function SalonWorkScreen() {
                   placeholderTextColor={theme.textTertiary}
                   value={inputCheckStaffName}
                   onChangeText={setInputCheckStaffName}
+                  returnKeyType="done"
+                  onFocus={() => {
+                    setTimeout(() => {
+                      checkStaffModalScrollViewRef.current?.scrollToEnd({ animated: true });
+                    }, 150);
+                  }}
+                  onSubmitEditing={() => {
+                    if (inputCheckStaffName.trim()) {
+                      handleAssignCheckStaff(checkStaffTargetSeat?.id, inputCheckStaffName);
+                    }
+                  }}
                 />
                 <TouchableOpacity
                   style={[
@@ -7372,6 +7498,7 @@ export default function SalonWorkScreen() {
             </ScrollView>
           </View>
         </TouchableOpacity>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ⑨ 施術工程・ステータス選択モーダル（呼び出し、コーミング、チェック、シャンプー、その他、解除） */}
@@ -7480,6 +7607,10 @@ export default function SalonWorkScreen() {
         animationType="fade"
         onRequestClose={() => setIsEditCommentModalVisible(false)}
       >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={{ flex: 1 }}
+        >
         <TouchableOpacity
           style={styles.actionModalOverlay}
           activeOpacity={1}
@@ -7550,6 +7681,7 @@ export default function SalonWorkScreen() {
             </View>
           </View>
         </TouchableOpacity>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ⑩ 第三者・代理確認モーダル */}
@@ -7702,6 +7834,10 @@ export default function SalonWorkScreen() {
         animationType="fade"
         onRequestClose={() => setIsAddHistoryModalVisible(false)}
       >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={{ flex: 1 }}
+        >
         <TouchableOpacity
           style={styles.actionModalOverlay}
           activeOpacity={1}
@@ -7772,6 +7908,12 @@ export default function SalonWorkScreen() {
                 placeholderTextColor={theme.textTertiary}
                 value={inputHistoryText}
                 onChangeText={setInputHistoryText}
+                returnKeyType="done"
+                onSubmitEditing={() => {
+                  if (inputHistoryText.trim()) {
+                    handleConfirmAddHistory(inputHistoryText);
+                  }
+                }}
               />
               <TouchableOpacity
                 style={[
@@ -7797,6 +7939,7 @@ export default function SalonWorkScreen() {
             </TouchableOpacity>
           </View>
         </TouchableOpacity>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* ★ 共有スタッフメンバー管理モーダル */}

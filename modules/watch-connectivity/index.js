@@ -103,8 +103,12 @@ const deliverAction = (payload) => {
     if (payload.action === 'REQUEST_SYNC') {
       const existingIdx = actionQueue.findIndex((item) => item.payload.action === 'REQUEST_SYNC');
       if (existingIdx !== -1) {
-        // 新しいREQUEST_SYNC（特にwatchMainTimerActive付き）で古い保留を更新
-        if (payload.watchMainTimerActive || !actionQueue[existingIdx].payload.watchMainTimerActive) {
+        // 新しいREQUEST_SYNC（特にwatchMainTimerActiveまたはwatchMainTimerStopped付き）で古い保留を更新
+        if (
+          payload.watchMainTimerStopped ||
+          payload.watchMainTimerActive ||
+          !actionQueue[existingIdx].payload.watchMainTimerActive
+        ) {
           actionQueue[existingIdx] = {
             payload,
             deliveredTo,
@@ -140,15 +144,50 @@ const markEventSeqProcessed = (seq) => {
   return true;
 };
 
+let lastMainTimerActionTimestamp = 0;
+const STOP_OR_FINISH_ACTIONS = new Set([
+  'MAIN_TIMER_RESET',
+  'MAIN_TIMER_PAUSE',
+  'STOP_TIMER',
+  'FINISH_MEASURE',
+  'RESET_ZERO',
+  'STOP_ALARM',
+  'COMPLETE_CHECK',
+  'ENTER_HELP',
+]);
+
 const handleIncoming = (kind, body, seq = null) => {
   if (!body) return;
   if (!markEventSeqProcessed(seq)) return;
   recordJsReceived(kind, body);
   if (body.action) {
-    // 予備ルート(userInfo/context)で数分〜数時間前の古い操作がアプリ再起動時にまとめて届いた場合は無視（起動直後の勝手な作動・振動を防止）
-    if ((kind === 'userInfo' || kind === 'context') && body.timestamp != null) {
-      const ageMs = Date.now() - Number(body.timestamp);
-      if (Number.isFinite(ageMs) && ageMs > 60000) {
+    const actionStr = String(body.action);
+    const ts = body.timestamp != null ? Number(body.timestamp) : 0;
+    const isMainAction =
+      actionStr.startsWith('MAIN_TIMER_') ||
+      (actionStr === 'STOP_ALARM' && (body.seatId === 'main-timer' || body.seatId === '-1' || Number(body.seatId) === -1));
+
+    // ★ メインタイマー操作の順序逆転防止:
+    //   sendMessage（即時）で後から押された RESET 等が先に届き、transferUserInfo（予備）でその前の START 等が遅れて届いた場合は無視する
+    if (isMainAction && ts > 0) {
+      if (ts < lastMainTimerActionTimestamp - 200) {
+        return;
+      }
+      if (ts > lastMainTimerActionTimestamp) {
+        lastMainTimerActionTimestamp = ts;
+      }
+    }
+
+    // 予備ルート(userInfo/context)で古い操作がアプリ再起動時にまとめて届いた場合のフィルタリング:
+    // - 停止・終了・リセット系（STOP_OR_FINISH_ACTIONS）はiPhoneスリープ中の操作を確実に取り込むため最大3時間まで有効
+    // - それ以外の開始系操作は60秒以内（ただし未終了の有効なtargetEndTimestampを持つMAIN_TIMER開始は3時間以内）のみ有効
+    if ((kind === 'userInfo' || kind === 'context') && ts > 0) {
+      const ageMs = Date.now() - ts;
+      const isStopOrFinish = STOP_OR_FINISH_ACTIONS.has(actionStr);
+      const targetEndTs = Number(body.targetEndTimestamp || body.extra?.targetEndTimestamp || 0);
+      const hasActiveMainEnd = isMainAction && targetEndTs > Date.now() - 3 * 3600 * 1000;
+      const maxAgeMs = (isStopOrFinish || hasActiveMainEnd) ? 3 * 3600 * 1000 : 60000;
+      if (Number.isFinite(ageMs) && ageMs > maxAgeMs) {
         return;
       }
     }

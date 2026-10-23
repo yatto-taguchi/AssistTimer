@@ -191,10 +191,10 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             // ★ メインタイマーが0秒に到達して鳴動している間は、iPhoneから自動停止（isRunning: false）が届いても
             //   ユーザーが明示的に止めるまで鳴動イベントを保持する
             list.append(existingRingingMain)
-        } else if let m = mainTimer, m.pausedRemainingSeconds == 0,
+        } else if mainTimer != nil,
                   let existingDueMain = events.first(where: { $0.seatId == "main-timer" && !isAcknowledged($0.key) && isArmed($0.key) }),
                   existingDueMain.date <= nowDate.addingTimeInterval(5) {
-            // ★ iPhone側がカウントアップOFFで0秒到達と同時に isRunning: false, pausedRemainingSeconds: 0 を送ってきた場合でも、
+            // ★ iPhone側またはWatch側がカウントアップOFFで0秒到達と同時に isRunning: false を設定した場合でも、
             //   Watch側の終了時刻直前〜直後であればイベントを消さずに確実に鳴動させる
             list.append(existingDueMain)
         }
@@ -523,18 +523,23 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         for id in seatIds {
             let isMainTimer = (id == "main-timer" || id == WatchSessionManager.shared.mainTimer?.id)
             if isMainTimer {
-                if sendToPhone {
+                let isCountUpDisabled = (WatchSessionManager.shared.mainTimer?.isCountUpEnabled == false)
+                if sendToPhone || isCountUpDisabled {
                     // ★ メインタイマーのアラーム消火: メインタイマーのみを安全にリセットし、客席タイマーには絶対に触れない！
+                    //   カウントアップOFFの時は通知の「開く」やスマートアラーム消火でも確実に待機（終了）状態へ戻す。
+                    let stoppedEnd = targets.first(where: { $0.seatId == id })?.date.timeIntervalSince1970
+                        ?? (WatchSessionManager.shared.mainTimer?.targetEndTime.timeIntervalSince1970 ?? 0)
                     if var m = WatchSessionManager.shared.mainTimer {
                         m.isRunning = false
                         m.isPreCountingDown = false
                         m.preCountdownSeconds = 0
                         m.prepEndTime = nil
                         m.pausedRemainingSeconds = m.totalSeconds
+                        m.targetEndTime = Date().addingTimeInterval(TimeInterval(m.totalSeconds))
                         WatchSessionManager.shared.mainTimer = m
                         WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: m, userName: WatchSessionManager.shared.currentUserName)
                     }
-                    WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_RESET")
+                    WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_RESET", stoppedEndTime: stoppedEnd)
                 }
             } else {
                 // ★ サロン客席タイマーのアラーム消火
@@ -1015,7 +1020,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     }
                 }
             }
-            self.stop(sendToPhone: false)
+            let shouldSendStopToPhone = (response.actionIdentifier == "STOP_ACTION")
+            self.stop(sendToPhone: shouldSendStopToPhone)
             completionHandler()
         }
     }

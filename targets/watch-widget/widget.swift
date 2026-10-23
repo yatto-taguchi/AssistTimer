@@ -29,6 +29,7 @@ struct ComplicationSeat {
     let pausedRemaining: Int
     let related: Bool
     let totalSeconds: Int
+    let isCountUpEnabled: Bool
     let creatorName: String?
     let isNoHelpNeeded: Bool
     let currentUserName: String?
@@ -125,6 +126,7 @@ enum ComplicationData {
             let isCheckComp = (d["isCheckCompleted"] as? NSNumber)?.boolValue ?? (d["isCheckCompleted"] as? Bool) ?? false
             let creator = d["creatorName"] as? String
             let isNoHelp = (d["isNoHelpNeeded"] as? NSNumber)?.boolValue ?? (d["isNoHelpNeeded"] as? Bool) ?? false
+            let isCountUpEnabled = (d["isCountUpEnabled"] as? NSNumber)?.boolValue ?? (d["isCountUpEnabled"] as? Bool) ?? !isMain
             
             return ComplicationSeat(
                 id: id,
@@ -136,6 +138,7 @@ enum ComplicationData {
                 pausedRemaining: (d["pausedRemaining"] as? NSNumber)?.intValue ?? 0,
                 related: (d["related"] as? NSNumber)?.boolValue ?? false,
                 totalSeconds: (d["totalSeconds"] as? NSNumber)?.intValue ?? (d["totalSeconds"] as? Int) ?? 600,
+                isCountUpEnabled: isCountUpEnabled,
                 creatorName: creator,
                 isNoHelpNeeded: isNoHelp,
                 currentUserName: currentUserName,
@@ -155,7 +158,8 @@ enum ComplicationData {
     /// ②自分のカウントダウン中 → ③カウントダウン中 → ④自分の超過中 → ⑤超過中（それぞれ終了が近い順）
     /// ※ 以前は終了が一番近い席を選んでいたため、放置された超過席がずっと表示されていた
     static func pick(from snapshot: ComplicationSnapshot, at date: Date) -> ComplicationSeat? {
-        let running = snapshot.seats.filter { $0.isRunning }
+        // カウントアップOFFのメインタイマーは終了時刻（endDate）に到達した時点で稼働終了とみなす
+        let running = snapshot.seats.filter { $0.isRunning && ($0.isCountUpEnabled || $0.endDate > date) }
         if let id = snapshot.lastTouchedId, let touched = running.first(where: { $0.id == id }) {
             return touched
         }
@@ -174,10 +178,11 @@ enum ComplicationData {
     }
 
     static func entry(at date: Date, snapshot: ComplicationSnapshot) -> ComplicationEntry {
-        ComplicationEntry(
+        let activeCount = snapshot.seats.filter { $0.isRunning && ($0.isCountUpEnabled || $0.endDate > date) }.count
+        return ComplicationEntry(
             date: date,
             seat: pick(from: snapshot, at: date),
-            runningCount: snapshot.seats.filter { $0.isRunning }.count
+            runningCount: activeCount
         )
     }
 }
@@ -197,6 +202,7 @@ struct ComplicationProvider: TimelineProvider {
                 pausedRemaining: 0,
                 related: true,
                 totalSeconds: 15 * 60,
+                isCountUpEnabled: true,
                 creatorName: "スタイリスト",
                 isNoHelpNeeded: false,
                 currentUserName: "スタイリスト",
@@ -283,16 +289,19 @@ struct ComplicationView: View {
     }
 
     var body: some View {
-        switch family {
-        case .accessoryCircular:
-            circular
-        case .accessoryInline:
-            inline
-        case .accessoryCorner:
-            corner
-        default:
-            rectangular
+        Group {
+            switch family {
+            case .accessoryCircular:
+                circular
+            case .accessoryInline:
+                inline
+            case .accessoryCorner:
+                corner
+            default:
+                rectangular
+            }
         }
+        .widgetURL(URL(string: "assisttimer://open-map")!)
     }
 
     // モジュラー文字盤の大きい枠
@@ -404,13 +413,7 @@ struct ComplicationView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .widgetURL({
-            if let seat = entry.seat {
-                return seat.isMainTimer ? URL(string: "assisttimer://main")! : URL(string: "assisttimer://seat?id=\(seat.id)")!
-            } else {
-                return URL(string: "assisttimer://open")!
-            }
-        }())
+        .widgetURL(URL(string: "assisttimer://open-map")!)
         .containerBackground(for: .widget) { Color.clear }
     }
 

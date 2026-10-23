@@ -1122,6 +1122,8 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 
 ### 6.2. 変更履歴 (Changelog)
 
+| 2026-10-23 | **Watchモジュラー（コンプリケーション）タップ時の客席マップ一覧起動、スマホ席追加および全入力モーダルのキーボード被り防止、文字盤メインタイマー終了判定（カウントアップOFF時）、および最終席削除同期仕様 (Build 74)** | ①**Watchモジュラータップ時の客席マップ一覧直接起動 ＆ watchOS 10起動競合根絶 (`targets/watch-widget/widget.swift`, `targets/watch/content.swift`)**: 全コンプリケーション（モジュラー・長方形・円形・インライン・コーナー）の `.widgetURL` を `assisttimer://open-map` に統一。watchOS 10 のモーダルシート描画衝突による起動時ブラックアウトや多重シート競合を物理的に根絶するため、`SeatThumbnailMapSheet`（サロン客席マップ）をモーダル `.sheet` ではなく `NavigationStack` 内のメインビューとしてインラインで直接描画（`if showingThumbnailMap { thumbnailMapSheetView } else { cardsScrollView }`）するアーキテクチャに刷新。`showingThumbnailMap = true` をデフォルトとし、起動時および文字盤タップ時（過去キャッシュURL含む）に100%確実にサロン客席マップ一覧を開く挙動を確立。一覧上部に「リスト」表示への切り替えボタン、および一覧下部に「＋ 新しい席を追加」ボタンを新設。<br>②**スマホ（サロン画面）「新しい席を追加」および全テキスト入力モーダルのキーボード被り防止 (`src/screens/SalonWorkScreen.js`)**: 画面下部配置モーダルにおいてソフトウェアキーボード展開時に入力欄や決定ボタンが隠れてしまう不具合を抜本解決。「新しい席を追加」モーダル（`isAddSeatModalVisible`）に `KeyboardAvoidingView`（iOS: `padding`, Android: `height`）と `ScrollView`（`keyboardShouldPersistTaps="handled"`）を配備し、`autoFocus={true}`、`selectTextOnFocus={true}`、`returnKeyType="done"` を設定してキーボード完了での即時席追加を可能に。直下にワンタップ候補チップ（`${seats.length + 1}番席`、`セット面`、`個室`、`VIP席`、`シャンプー台`）を新設。さらにサロン切替・新規作成、招待コード、タイマー時間、ヘルプ担当、チェック担当、施術メモ、施術履歴の全テキスト入力モーダルに `KeyboardAvoidingView` とフォーカス時自動スクロールを完全適用。<br>③**文字盤コンプリケーションにおけるメインタイマー終了判定およびカウントアップOFF時の「超過」誤表示防止 (`targets/watch-widget/widget.swift`, `targets/watch/widget_sync.swift`)**: `WidgetSync.save` にてメインタイマーの `isCountUpEnabled` を App Group 共有データへ永続化し、`ComplicationSeat` に `isCountUpEnabled` を追加。カウントアップOFF（`isCountUpEnabled == false`）のメインタイマーは `endDate` 到達時点で稼働終了と判定し、文字盤上で不要な「超過 +00:01...」表示を行わず正しく終了状態（00:00）を表示。<br>④**スマホ側で最後の1席を削除した際のWatch側同期整合性 (`src/screens/SalonWorkScreen.js`)**: `syncSeatsToWatch` および `handleDeleteSeat` で `forceEmpty: true` 指定時はキャッシュへのフォールバックをバイパスし、確実に `clearAllSeats: true` を送信してウォッチ側の席情報を完全消去。<br>⑤**新ビルド番号 `74` への更新＆TestFlight自動送信**: 全変更を反映したIPAビルドを完了しTestFlightへの自動デリバリーを開始。 |
+| 2026-10-23 | **タイム終了後・超過カウントアップ維持仕様およびWatch・スマホ双方向完全連動仕様 (Build 73)** | ①**通知「開く」・スマートアラーム消火時の超過カウントアップ自動終了防止 (`targets/watch/alarm.swift`, `targets/watch/content.swift`)**: 放置タイム終了時の通知タップ「開く」またはスマートアラーム「閉じる / 開く」時、音・振動・全画面オーバーレイのみを消火し、タイマー本体は勝手に00:00にリセットせず一覧画面最上部に赤色超過カウントアップ（`超過 +00:xx`）を直接表示。ユーザーが詳細シートから明示的に終了・リセット・施術移行を選んだ時のみ超過を終了。<br>②**途中チェック時間（`-check@`）と本放置タイマー（`-main@`）の消火・引き継ぎの完全分離 (`targets/watch/alarm.swift`)**: チェックタイマー消火時は客席稼働のままチェック完了とし、即座に `STOP_ALARM (kind: check)` を送って本放置タイマー用スマートアラームを再スケジュール。<br>③**Watchメインタイマー操作時のクラッシュ防止 ＆ 即時連動 (`targets/watch/content.swift`, `modules/watch-connectivity`)**: `PendingSheetActionBox` による非リアクティブ遅延実行によりシート破棄アニメーション中のクラッシュを根絶。ネイティブイベントキュー（`_eventSeq`）および `drainPendingNativeEvents()` を導入。<br>④**Watch・スマホ間の同期（`REQUEST_SYNC`）における超過タイマー保護および停止済みタイマー誤復活防止 (`targets/watch/content.swift`, `src/screens/HomeScreen.js`, `src/screens/SalonWorkScreen.js`)**: 過去3時間以内の終了タイマーを受け取った際は最初からカウントダウンし直さず超過カウントアップへ正確に合流。Watch発未同期フラグによる停止済みタイマーの誤復活を遮断。<br>⑤**準備カウントダウンから超過へのバックグラウンド跨ぎ正規化 ＆ コールドスタート時ゴーストアラート暴発防止 (`targets/watch/content.swift`, `src/screens/HomeScreen.js`, `src/screens/SalonWorkScreen.js`)**: 準備カウントと本タイマー終了時刻を跨いでスリープ復帰した場合の超過遷移保証、およびアプリ再起動時に過去終了席のアラームが再暴発しないよう初期化ガードを配備。<br>⑥**新ビルド番号 `73` への更新＆TestFlight自動送信**: 全変更を反映したIPAビルドを完了しTestFlightへの自動デリバリーを開始。 |
 | 2026-10-23 | **Watch文字盤タップ時ブラックアウト根絶・直接カードジャンプ、およびスマホからの客席名ダイレクト変更・即時同期仕様 (Build 72)** | ①**Watch文字盤（モジュラー）タップ時のブラックアウト根絶 ＆ 対象席直接ジャンプ (`targets/watch/content.swift`, `targets/watch-widget/widget.swift`, `targets/watch/Info.plist`)**: アプリ起動時（`onAppear`）および文字盤URL受信時（`onOpenURL`）の客席マップモーダルシート自動展開（`showingThumbnailMap = true`）を完全撤廃。watchOS 10 のモーダルシート描画衝突による画面ブラックアウトを物理的に根絶し、起動時は常にメイン画面（`cardsScrollView`）を直接表示。さらに文字盤コンプリケーションから対象席ID付きURL（`assisttimer://seat?id=\(seat.id)`）を発行し、文字盤で見ていたタイマーカードへ直接スムーズに自動スクロールする快適UXを実装。`Info.plist` に `CFBundleURLTypes`（`assisttimer`）を公式登録。<br>②**スマホ（iPhone）からの客席名ダイレクト変更モーダル新設 (`src/screens/SalonWorkScreen.js`)**: 待機席スリムバー、停止中スリムバー、稼働中カードヘッダーの席名バッジにタップ導線（鉛筆アイコン ✏️）を新設。タイマー稼働中であっても計測を止めることなく、いつでも席名変更モーダル（`isRenameSeatModalVisible`）から自由な席名（例: 1番席、個室VIP、セット面3等）を入力・プリセット選択して即座に保存可能に。変更時はローカル保存（`saveSeatsToStorage`）に加え `syncSeatsToWatch` および Supabase リアルタイム更新を即時発動し、手元の Apple Watch および文字盤コンプリケーションへ1秒以内に新席名を完全同期。<br>③**新ビルド番号 `72` への更新＆TestFlight自動送信**: 全変更を反映したIPAビルドを完了しTestFlightへの自動デリバリーを開始。 |
 | 2026-10-23 | **watchOSバックグラウンドペナルティ警告の完全根絶、Apple Watchメインタイマー自己完結予約、および共有タイマー（チェックタイマー完了時）の残り本体タイマー新規入れ直しリレー方式実装 (Build 71)** | ①**watchOSシステム警告（「スケジュールされたアラームを再生できませんでした」）の完全根絶 (`targets/watch/alarm.swift`)**: `events` および `sessionKey` を `UserDefaults` に永続化し、バックグラウンド起動時（`adopt(_:)`）にイベントが空になる問題を解消。またスマートアラーム（`WKExtendedRuntimeSession`）の時刻到達時（`extendedRuntimeSessionDidStart`）に0.1秒等のシステム早期起動が発生しても `forceRingingKeys` により即座に鳴動状態へ移行して `startNotifyUser` を必ず呼び出す仕組み（`activateSessionRingingAndNotify`）を導入。さらに稼働中セッション（`.running`）を破棄する際、`notifyUser` 未実行のセッションには破棄直前に最低1回の `notifyUser(hapticType: .click, repeatHandler: nil)` を保証する `safeInvalidateSession` を実装し、watchOSによるバックグラウンド実行権剥奪警告を100%根絶。<br>②**セッション破棄と新規予約の直列化（`.sessionInProgress` 衝突の解消） (`targets/watch/alarm.swift`)**: 非同期な `invalidate()` と同一ターンで新規 `start(at:)` を呼ぶことによる `.sessionInProgress` エラーを防ぐため、`invalidatingSessions` 追跡と `scheduleRetryAfterInvalidation`（破棄完了コールバック連動＋0.35秒フォールバック）による直列化を実装。<br>③**Watchメインタイマーの自己完結予約＆往復同期による予約時刻ズレ防止 (`targets/watch/alarm.swift`, `targets/watch/content.swift`, `src/screens/HomeScreen.js`)**: 準備カウントダウン（5秒等）有効時でもスタートボタンを押した瞬間に本番終了時刻（`prepEnd + totalSeconds`）でスマートアラーム＆ローカル通知を即時予約。Watch操作時に確定した `targetEndTimestamp` / `prepEndTimestamp` をiPhoneへ渡し、iPhoneからの往復同期（±15秒以内）でWatchの予約時刻が上書き・再予約されないよう保護。さらにiPhone側がカウントアップOFFで0秒到達時に自動停止（`isRunning: false, pausedRemainingSeconds: 0`）を送ってきた場合でも、Watchのアラームを消火せずユーザーが止めるまで鳴動を維持。<br>④**共有タイマー（チェックタイマー＋本体タイマー）の「新規入れ直しリレー方式」実装 (`targets/watch/alarm.swift`, `targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**: チェックタイマー終了・完了（またはキャンセル）時に、チェックタイマー情報（`checkTargetEndTime = nil`, `checkTotalSeconds = nil`）を完全消去し、`restartRemainingTimerAfterCheck` によって前セッションの破棄完了を待ってから残りの全体タイマーを「チェックなしの新しい単独タイマー」としてクリーンに入れ直すリレー方式を実装。<br>⑤**Watchコールドスタート時の初期値によるアラーム自己消去の防止 ＆ 時刻精度同期 (`targets/watch/content.swift`, `targets/watch/alarm.swift`, `targets/watch/widget_sync.swift`, `src/screens/HomeScreen.js`)**: `WatchSessionManager` の `timers`、`mainTimer`、`currentUserName`、`watchStartedMainTimerEndTime` を `UserDefaults` に常時永続化し、起動時・バックグラウンド再起動（`adopt`）時に即時復元して停止中初期値によるアラーム消火を根絶。`applyLocalCheckComplete` / `applyLocalStop` を同期実行として 0ms `refresh()` 先行を保証。`removeForceRinging` の ±5秒許容化とカスタムオーバーレイからの重複送信防止。`HomeScreen.js` の予約タイムスタンプ（`prepEnd + targetTime * 1000`）完全一致、`WidgetSync` の準備カウントダウン即時反映。<br>⑥**新ビルド番号 `71` への更新＆TestFlight自動送信**: 全変更を反映したIPAビルドを完了しTestFlightへの自動デリバリーを開始。 |
 | 2026-10-22 | **メインタイマー同期・即時開始・客席誤消火完全防止、超過時リセット停止統一、および通信重複排除仕様 (Build 70)** | ①**客席タイマー誤消火防止 ＆ 永続コンテキスト補完 (`SalonWorkScreen.js`, `modules/watch-connectivity/index.js`)**: `syncMainTimerToWatch` から客席データ（`seats`）の巻き込み送信を撤廃し、メインタイマーリセットによる稼働中客席の上書き消火を完全根絶。さらに `lastSyncedSeats` キャッシュを新設し、永続保存用 `updateApplicationContext` にのみ客席を自動補完してWatch再起動時の席消失・診断バー席数リセットを防止。<br>②**タイム入力時の即時カウント開始 ＆ シート自動クローズ (`content.swift`, `HomeScreen.js`)**: Watchクイック分ボタン・クラウン決定時に即座にタイマーを開始（`autoStart: true`）し、シートを自動 `dismiss()`。iPhone側は `skipWatchSync: true` で途中の停止パケット逆流を防ぎ、新タイムで即座に開始して確定稼働パケットのみを返信する安定アーキテクチャを確立。<br>③**アラーム消火処理の完全分離 (`alarm.swift`, `SalonWorkScreen.js`)**: `acknowledgeRinging` でメインタイマー（`main-timer`）と客席タイマーの消火処理を完全分離し、`MAIN_TIMER_RESET` による客席停止の誤発火を遮断。<br>④**超過中停止 ＆ 時間微調整の全方位統一 (`content.swift`, `HomeScreen.js`, `SalonWorkScreen.js`)**: 超過中（カウントアップ中）の停止操作を設定時間（`targetTime`）へのリセット停止に統一し、Watchボタンも「終了」と表示。微調整（adjust）時は超過中・鳴動中アラームを即時停止し、再到達時に確実に鳴るようコール済みフラグを再計算。<br>⑤**サロン画面ウィジェット連動 ＆ 通信重複排除 (`SalonWorkScreen.js`, `HomeScreen.js`)**: サロン画面上部ウィジェットの準備カウントダウン表示連動、空席アサイン時の180秒フォールバック統一。`getLatestMainTimerState` の依存配列最適化により、設定時間変更時のWatchリスナー再登録および二重送信を完全排除。<br>⑥**新ビルド番号 `70` への更新＆TestFlight自動送信**: 全変更を反映したIPAビルドを完了しTestFlightへの自動デリバリーを開始。 |
@@ -2488,3 +2490,55 @@ TestFlight Build 68の実機テストにおいて、以下の致命的な不具�
 - **確定仕様**:
   - `SalonWorkScreen.js` のタイマー監視ループ内で、タイム終了状態更新時に `saveSeatsToStorage(updated)` を即時実行。
   - アプリ起動時の `loadInitialData` において、読み込み時点で終了時刻を過ぎている席（超過中）に対し、`mainTimeupAlertedRef.current[s.id] = s.targetEndTimestamp`、`s.timeUpTimestamp`、および経過秒数に応じた `escalationLevel` をあらかじめ記録。アプリ再起動時にポップアップや音が再暴発せず、静かに超過カウント表示（`+00:xx`）だけを継続。
+
+### 33.7. Watchモジュラー一覧マップ起動、スマホ席追加キーボード被り防止、および文字盤メインタイマー終了整合性仕様 (Build 74)
+
+#### 1. Watchモジュラー（コンプリケーション）タップ時の客席マップ一覧起動 ＆ watchOS 10起動競合根絶 (`targets/watch-widget/widget.swift`, `targets/watch/content.swift`)
+- **背景・課題**:
+  - Apple Watch 文字盤のモジュラー（コンプリケーション）をタップした際、本来はサロン客席マップ（一覧）が開くべきところ、リスト画面（カードスクロール）が開いてしまう不具合が発生していた。
+  - これは過去の改修で文字盤タップ時のURLが `assisttimer://open-map` から `assisttimer://main` や個別席URLへ変更されていたこと、および `showingThumbnailMap` が `false` に初期化されていたことが原因であった。
+  - さらに、以前は客席マップをモーダル `.sheet(isPresented: $showingThumbnailMap)` で表示していたため、watchOS 10 の仕様により起動直後のシート描画で画面が真っ暗になるブラックアウトや、客席マップからタイマーカードをタップした際の多重シート競合が発生していた。
+- **確定仕様**:
+  - **コンプリケーション起動URLの統一 (`targets/watch-widget/widget.swift`)**:
+    - 全てのコンプリケーションファミリー（`accessoryRectangular`、`accessoryCircular`、`accessoryInline`、`accessoryCorner`）の `.widgetURL` を `URL(string: "assisttimer://open-map")!` に統一。
+  - **インラインメインビュー構造への刷新 (`targets/watch/content.swift`)**:
+    - `showingThumbnailMap = true` を初期値とし、`SeatThumbnailMapSheet`（客席マップ一覧）をモーダル `.sheet` ではなく `NavigationStack` 直下のメインビューとして直接条件分岐描画（`if showingThumbnailMap { thumbnailMapSheetView } else { cardsScrollView }`）する構造に刷新。
+    - watchOS 10 のモーダルシート起動競合・ブラックアウトを物理的に根絶しつつ、起動時および文字盤タップ時に100%確実にサロン客席マップ一覧を開く挙動を確立。
+    - 文字盤タップ時（`handleOpenURL`）において、`assisttimer://open-map` はもちろん、過去キャッシュに残存するコンプリケーションURL（`assisttimer://open` 等）を受信した場合でも常に `showingThumbnailMap = true`（一覧表示）に遷移。
+  - **一覧画面とリスト画面のスムーズな切り替え導線**:
+    - 一覧上部バーおよびヘッダーに「リスト」表示へ切り替えるトグルボタンを設置（タップで `showingThumbnailMap = false` に切り替えてカードリストを表示。リスト側からは上部バーのグリッドアイコンでいつでも一覧へ復帰）。
+    - 客席マップ一覧の下部に「＋ 新しい席を追加」ボタン（`onAddSeat`）を新設し、一覧画面から直接席追加シートを開ける導線を確保。
+
+#### 2. スマホ（サロン画面）席追加および全テキスト入力モーダルにおけるソフトウェアキーボード被り防止仕様 (`src/screens/SalonWorkScreen.js`)
+- **背景・課題**:
+  - スマホ（サロンワーク画面）で「新しい席を追加」しようとすると、モーダルカードが画面下部に配置（`justifyContent: 'flex-end'`）されているため、iOS/Android のソフトウェアキーボード展開時に入力欄や「追加する」ボタンが完全に隠れてしまい、入力文字の視認や完了操作が困難になっていた。
+  - また、サロン切替や招待コード、タイマー時間設定、スタッフ名追加などの他の入力モーダルでも同様にキーボード被りが発生していた。
+- **確定仕様**:
+  - **「新しい席を追加」モーダルの入力体験最適化**:
+    - モーダル全体を `<KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>` および `<ScrollView keyboardShouldPersistTaps="handled" bounces={false}>` でラップし、キーボード表示時に自動で入力欄・ボタンがキーボード上部へ持ち上がるレイアウトを確立。
+    - 席名入力欄に `autoFocus={true}`、`selectTextOnFocus={true}`、`returnKeyType="done"` を設定し、キーボードの「完了」ボタン押下時にも直接席追加（`handleAddNewSeatMaster`）を実行可能に。
+    - 席名入力欄の直下にワンタップで入力できる候補チップ（`${seats.length + 1}番席`、`セット面`、`個室`、`VIP席`、`シャンプー台`）を配置。
+    - モーダル背景（オーバーレイ）タップでキーボードおよびモーダルを安全に閉じる導線を確保。
+  - **全テキスト入力モーダルへの横断適用**:
+    - 以下の画面下部配置テキスト入力モーダルすべてに `KeyboardAvoidingView` とフォーカス時自動スクロールを完全適用：
+      - サロン切り替え・新規作成モーダル（`isSwitcherModalVisible`）
+      - 招待コード入力モーダル（`isJoinCodeModalVisible`）
+      - タイマー時間・カスタムメニュー入力モーダル（`isSetTimerModalVisible`）
+      - ヘルプ割当・スタッフ名追加モーダル（`isHelpAssignModalVisible`）
+      - チェックスタッフ名追加モーダル（`isCheckStaffModalVisible`）
+      - 施術メモ編集モーダル（`isEditCommentModalVisible`）
+      - 施術履歴追加モーダル（`isAddHistoryModalVisible`）
+
+#### 3. ウォッチ文字盤コンプリケーションにおけるメインタイマー終了判定およびカウントアップOFF時の「超過」誤表示防止仕様 (`targets/watch-widget/widget.swift`, `targets/watch/widget_sync.swift`)
+- **背景・課題**:
+  - メインタイマーで「カウントアップなし（カウントアップOFF）」に設定している場合でも、タイマー終了後に文字盤のモジュラー（コンプリケーション）上で「超過 +00:01...」と表示され続け、タイマーがすでに終了していることが文字盤から判別しづらい問題があった。
+- **確定仕様**:
+  - `WidgetSync.save` において、メインタイマー辞書に `"isCountUpEnabled": m.isCountUpEnabled` を正しく含めて App Group 共有データへ永続化。
+  - `targets/watch-widget/widget.swift` の `ComplicationSeat` に `isCountUpEnabled: Bool` を追加。
+  - `ComplicationData.pick(from:at:)` および `entry(at:snapshot:)` において、`isCountUpEnabled == false` のタイマーは `endDate` に到達した時点で稼働終了（非アクティブ）と判定し、文字盤上で不要な「超過」表示を行わず正しく終了状態（`00:00`）を表示。
+
+#### 4. スマホ側で最後の1席を削除した際のWatch側同期整合性仕様 (`src/screens/SalonWorkScreen.js`)
+- **背景・課題**:
+  - スマホ側で最後の1席を削除して全席が0件になった際、キャッシュフォールバック処理によりウォッチ側に削除前の古い席が残ってしまう問題があった。
+- **確定仕様**:
+  - `syncSeatsToWatch` および `handleDeleteSeat` で `forceEmpty: true` を指定した場合はキャッシュへのフォールバックをバイパスし、確実に `clearAllSeats: true` を送信してウォッチ側の席情報を完全消去。
