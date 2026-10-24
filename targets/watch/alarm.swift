@@ -227,7 +227,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         } else if mainTimer != nil,
                   let existingDueMain = events.first(where: { $0.seatId == "main-timer" && !isAcknowledged($0.key) && isArmed($0.key) }),
                   existingDueMain.date <= nowDate.addingTimeInterval(15),
-                  existingDueMain.date > nowDate.addingTimeInterval(-300) {
+                  existingDueMain.date > nowDate.addingTimeInterval(-10800) {
             // ★ iPhone側またはWatch側がカウントアップOFFで0秒到達と同時に isRunning: false を設定した場合でも、
             //   Watch側の終了時刻直前〜直後であればイベントを消さずに確実に鳴動させる
             if existingDueMain.date <= nowDate.addingTimeInterval(5) {

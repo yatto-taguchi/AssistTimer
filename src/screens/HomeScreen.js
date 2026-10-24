@@ -1105,7 +1105,7 @@ export default function HomeScreen({ navigation }) {
         setIsPreCountingDown(false);
         prepEndTimeRef.current = null;
         if (Platform.OS === 'ios') {
-          const cancelState = {
+          const cancelState = { explicitStop: true,
             remainingTime: currentRemaining,
             targetTime: currentTarget,
             targetEndTimestamp: 0,
@@ -1214,6 +1214,29 @@ export default function HomeScreen({ navigation }) {
           if (wasOverOrZero) {
             remainingTimeRef.current = currentTarget;
             setRemainingTime(currentTarget);
+            if (Platform.OS === 'ios') {
+              const stoppedOverState = {
+                explicitStop: true,
+                remainingTime: currentTarget,
+                targetTime: currentTarget,
+                targetEndTimestamp: 0,
+                isRunning: false,
+                isPaused: false,
+                isCountUp: false,
+                isCountUpEnabled: !!isCountUpEnabledRef.current,
+                genre: selectedCategoryRef.current || selectedCategory || '',
+                isPreCountingDown: false,
+                preCountdownSeconds: 0,
+                isCountdownConfigEnabled: !!isCountdownEnabledRef.current,
+                countdownConfigSeconds: countdownSecondsRef.current || 5,
+                prepEndTimestamp: null,
+              };
+              if (setMainTimerState) {
+                setMainTimerState(stoppedOverState);
+              }
+              updateCachedMainTimerState(stoppedOverState);
+              syncMainTimerToWatch(stoppedOverState, { immediate: true });
+            }
           }
           cancelVibration();
           stopAllAlarms('main');
@@ -1287,7 +1310,7 @@ export default function HomeScreen({ navigation }) {
 
     // ★ リセット時はWatchへクリーンな初期待機状態を即座に伝達（超過の復活を根絶）
     if (Platform.OS === 'ios') {
-      const resetState = {
+      const resetState = { explicitStop: true,
         remainingTime: finalTarget,
         targetTime: finalTarget,
         targetEndTimestamp: 0,
@@ -2495,6 +2518,7 @@ export default function HomeScreen({ navigation }) {
     // ★ 保存モーダル表示中もWatchへは停止（待機状態）として即座に同期し、超過カウントの復活・続き表示を防止
     if (Platform.OS === 'ios') {
       const stoppedState = {
+        explicitStop: true,
         remainingTime: snapTarget,
         targetTime: snapTarget,
         targetEndTimestamp: 0,
@@ -2571,6 +2595,7 @@ export default function HomeScreen({ navigation }) {
     // ★ 保存モーダル表示中もWatchへは停止（待機状態）として即座に同期
     if (Platform.OS === 'ios') {
       const stoppedState = {
+        explicitStop: true,
         remainingTime: snapTarget,
         targetTime: snapTarget,
         targetEndTimestamp: 0,
@@ -3283,7 +3308,7 @@ export default function HomeScreen({ navigation }) {
                     style={[styles.splitEndButtonHalf, { backgroundColor: '#34C759' }]} 
                     onPress={handleOpenSaveInTimeModal}
                   >
-                    <Text style={styles.splitEndButtonMainText}>計測終了</Text>
+                    <Text style={styles.splitEndButtonMainText}>タイマーを止める</Text>
                     <Text style={styles.splitEndButtonSubText}>タイム内</Text>
                   </TouchableOpacity>
                   
@@ -3293,13 +3318,13 @@ export default function HomeScreen({ navigation }) {
                     style={[styles.splitEndButtonHalf, { backgroundColor: '#FF3B30' }]} 
                     onPress={handleOpenSaveModal}
                   >
-                    <Text style={styles.splitEndButtonMainText}>計測終了</Text>
+                    <Text style={styles.splitEndButtonMainText}>タイマーを止める</Text>
                     <Text style={styles.splitEndButtonSubText}>タイムオーバー</Text>
                   </TouchableOpacity>
                 </View>
               ) : (
                 <TouchableOpacity style={styles.endMeasurementButton} onPress={handleOpenSaveModal}>
-                  <Text style={[styles.buttonText, { fontWeight: 'bold' }]}>計測終了</Text>
+                  <Text style={[styles.buttonText, { fontWeight: 'bold' }]}>タイマーを止める</Text>
                 </TouchableOpacity>
               )
             ) : !isPreCountingDown && remainingTime !== targetTime ? (

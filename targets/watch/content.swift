@@ -143,7 +143,7 @@ struct SeatTimerItem: Identifiable, Equatable {
     
     // ★ 00:00（停止中・未稼働・リセット後）判定
     var isZero: Bool {
-        return !isRunning && remainingSeconds <= 0
+        return !isRunning && !isPreCountingDown && remainingSeconds <= 0
     }
     
     // 自分に関係している席か判定（作成者 or シャンプー・コーミング等ヘルプ担当 or サブタイマー・チェック担当 or 全員募集中）
@@ -212,7 +212,7 @@ extension SeatTimerItem {
         if let paused = (dictionary["pausedRemainingSeconds"] as? NSNumber)?.intValue ?? (dictionary["pausedRemainingSeconds"] as? Int) {
             self.pausedRemainingSeconds = paused
         } else {
-            self.pausedRemainingSeconds = self.totalSeconds
+            self.pausedRemainingSeconds = self.isRunning ? self.totalSeconds : 0
         }
         
         // 終了時刻（稼働中かつ有効な未来/過去の絶対時刻があればそれを採用、有効な終了時刻が無ければ停止扱い）
@@ -564,7 +564,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
             } else if !restoredMain.isPreCountingDown {
                 self.watchStartedMainTimerEndTime = nil
-                if restoredMain.pausedRemainingSeconds < 0 {
+                if restoredMain.pausedRemainingSeconds <= 0 || restoredMain.pausedRemainingSeconds >= restoredMain.totalSeconds {
                     restoredMain.pausedRemainingSeconds = 0
                 }
             }
@@ -877,7 +877,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             if let watchEnd = self.watchStartedMainTimerEndTime {
                 if parsedMain.isRunning || parsedMain.isPreCountingDown {
                     if abs(parsedMain.targetEndTime.timeIntervalSince(watchEnd)) <= 20 || parsedMain.totalSeconds == self.mainTimer?.totalSeconds {
-                        self.watchStartedMainTimerEndTime = nil
+                        self.watchStartedMainTimerEndTime = parsedMain.targetEndTime
                     }
                 } else if !isStaleSnapshot && msgType == "SYNC_MAIN_TIMER" {
                     // Watchで開始後、十分な時間（8秒以上）経過した後または終了予定時刻到達後にiPhoneから直接SYNC_MAIN_TIMERの停止が届いた場合は正式な停止・終了として受け入れる
@@ -891,7 +891,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                       watchEnd > nowDate,
                       let cur = self.mainTimer,
                       (cur.isRunning || cur.isPreCountingDown) else { return false }
-                let isUnstartedInitial = !parsedMain.isRunning && !parsedMain.isPreCountingDown && (parsedMain.pausedRemainingSeconds == parsedMain.totalSeconds || parsedMain.pausedRemainingSeconds <= 0)
+                let isExplicitStop = (rawMain["explicitStop"] as? NSNumber)?.boolValue ?? (rawMain["explicitStop"] as? Bool) ?? false
+                if isExplicitStop && !isStaleSnapshot && msgType == "SYNC_MAIN_TIMER" { return false }
+                let isUnstartedInitial = !parsedMain.isRunning && !parsedMain.isPreCountingDown && (parsedMain.pausedRemainingSeconds == parsedMain.totalSeconds || parsedMain.pausedRemainingSeconds <= 0 || !isExplicitStop)
                 // iPhoneがスリープ中・未反映のまま送られてきた SYNC_SEATS 同梱データや保存データ、開始直後(8秒以内)の未反映初期スナップショットによる強制停止をブロック
                 return msgType == "SYNC_SEATS" || isStaleSnapshot || (isUnstartedInitial && nowDate.timeIntervalSince(self.lastMainTimerLocalActionTime) < 8.0)
             }()
@@ -915,10 +917,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     cur.isRunning = false
                     cur.isPreCountingDown = false
                     cur.pausedRemainingSeconds = 0
+                    cur.targetEndTime = Date().addingTimeInterval(TimeInterval(cur.totalSeconds))
                     self.mainTimer = cur
                 }
             } else if isRecentlyModifiedOnWatch {
                 if self.lastMainTimerLocalActionType == "RESET" {
+                    parsedMain.pausedRemainingSeconds = 0
+                    parsedMain.targetEndTime = Date().addingTimeInterval(TimeInterval(parsedMain.totalSeconds))
                     if !parsedMain.isRunning && !parsedMain.isPreCountingDown {
                         parsedMain.pausedRemainingSeconds = 0
                         self.mainTimer = parsedMain
@@ -926,7 +931,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     }
                 } else if self.lastMainTimerLocalActionType == "PAUSE" {
                     if !parsedMain.isRunning && !parsedMain.isPreCountingDown {
-                        if parsedMain.pausedRemainingSeconds < 0 {
+                        if parsedMain.pausedRemainingSeconds <= 0 {
                             parsedMain.pausedRemainingSeconds = 0
                         }
                         self.mainTimer = parsedMain
@@ -975,7 +980,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         self.watchStartedMainTimerEndTime = nil
                         self.persistMainTimerStopState()
                     }
-                    if isExplicitReset || isAutoFinished || parsedMain.pausedRemainingSeconds <= 0 {
+                    let isExplicitStop = (rawMain["explicitStop"] as? NSNumber)?.boolValue ?? (rawMain["explicitStop"] as? Bool) ?? false
+                    if isExplicitReset || isExplicitStop || isAutoFinished || parsedMain.pausedRemainingSeconds <= 0 {
                         parsedMain.pausedRemainingSeconds = 0
                     } else if parsedMain.pausedRemainingSeconds == parsedMain.totalSeconds,
                               let cur = prevCur,
@@ -985,7 +991,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     }
                     if let cur = prevCur, !isStaleSnapshot && !isAutoFinished {
                         let shouldAcknowledge: Bool
-                        if isExplicitReset {
+                        if isExplicitReset || isExplicitStop {
                             shouldAcknowledge = true
                         } else if parsedMain.isCountUpEnabled {
                             shouldAcknowledge = (cur.isRunning || cur.isPreCountingDown || (msgType == "SYNC_MAIN_TIMER" && WatchAlarmCoordinator.shared.isMainTimerRingingOrDue))
@@ -2083,7 +2089,7 @@ struct ContentView: View {
                         alarm.stop()
                         WKInterfaceDevice.current().play(.success)
                     }) {
-                        Text("止める（00:00に戻す）")
+                        Text("タイマーを止める")
                             .font(.system(size: 14, weight: .heavy, design: .rounded))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
@@ -2120,7 +2126,7 @@ struct ContentView: View {
                         alarm.stop()
                         WKInterfaceDevice.current().play(.success)
                     }) {
-                        Text("止める（00:00に戻す）")
+                        Text("タイマーを止める")
                             .font(.system(size: 16, weight: .heavy, design: .rounded))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
@@ -2535,18 +2541,14 @@ struct ContentView: View {
         MainTimerActionSheet(
             item: currentMain,
             onStart: {
-                deferMainTimerSheetCloseAction {
-                    handleStartMainTimer()
-                }
+                handleStartMainTimer()
             },
             onPause: { handlePauseMainTimer() },
             onReset: {
                 handleResetMainTimer()
             },
             onSetTime: { sec in
-                deferMainTimerSheetCloseAction {
-                    handleSetMainTimerTime(totalSec: sec)
-                }
+                handleSetMainTimerTime(totalSec: sec)
             },
             onAdjust: { handleAdjustMainTimer(deltaSec: $0) }
         )
@@ -2639,9 +2641,9 @@ struct ContentView: View {
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
                         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                         WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
-                        sessionManager.sendActionToPhone(action: "RESET_ZERO", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
+                        sessionManager.sendActionToPhone(action: "FINISH_MEASURE", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         showNotification(
-                            text: "⏱️ \(item.displaySeatName): 00:00にリセットしました",
+                            text: "⏹️ \(item.displaySeatName)のタイマーを止めました",
                             color: Color(hex: "#FFD60A")
                         )
                     }
@@ -2651,7 +2653,13 @@ struct ContentView: View {
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].isRunning = false
-                            // ★ 0:00 の停止（以前は古い残り秒数がそのまま表示されることがあった）
+                            timers[idx].totalSeconds = 0
+                            timers[idx].pausedRemainingSeconds = 0
+                            timers[idx].targetEndTime = Date()
+                            timers[idx].status = .normal
+                            timers[idx].shampooStaff = nil
+                            timers[idx].isRecruiting = false
+                            timers[idx].isNoHelpNeeded = false
                             timers[idx].pausedRemainingSeconds = 0
                             timers[idx].clearCheck()
                             timers[idx].isCollapsed = true
@@ -2663,7 +2671,7 @@ struct ContentView: View {
                         WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
                         sessionManager.sendActionToPhone(action: "FINISH_MEASURE", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         showNotification(
-                            text: "🏁 \(item.displaySeatName): 計測を終了しました",
+                            text: "⏹️ \(item.displaySeatName)のタイマーを止めました",
                             color: Color(hex: "#8E8E93")
                         )
                     }
@@ -3211,10 +3219,27 @@ struct MainTimerCard: View {
     }
 
     var body: some View {
-        if isCollapsed {
-            collapsedMainCardView
-        } else {
-            expandedMainCardView
+        Group {
+            if isCollapsed {
+                collapsedMainCardView
+            } else {
+                expandedMainCardView
+            }
+        }
+        .onChange(of: item.isRunning) { running in
+            if running {
+                isManuallyExpanded = false
+            }
+        }
+        .onChange(of: item.isPreCountingDown) { pre in
+            if pre {
+                isManuallyExpanded = false
+            }
+        }
+        .onChange(of: item.isZero) { zero in
+            if zero {
+                isManuallyExpanded = false
+            }
         }
     }
     
@@ -3241,7 +3266,7 @@ struct MainTimerCard: View {
                 HStack(spacing: 3) {
                     Image(systemName: "clock")
                         .font(.system(size: 8))
-                    Text("待機中 (00:00)")
+                    Text("00:00")
                         .font(.system(size: 9.5, weight: .bold))
                 }
                 .foregroundColor(Color(hex: "#8E8E93"))
@@ -3383,24 +3408,8 @@ struct MainTimerCard: View {
                 .padding(.top, 4)
                 .padding(.bottom, 2)
             
-            // ③ 下部ボタン群（スタート/一時停止 ＆ リセット）
-            HStack(spacing: 8) {
-                Button(action: onToggle) {
-                    let isActive = item.isRunning || item.isPreCountingDown
-                    HStack(spacing: 4) {
-                        Image(systemName: item.isOvertime ? "stop.fill" : (isActive ? "pause.fill" : "play.fill"))
-                            .font(.system(size: 11, weight: .bold))
-                        Text(item.isPreCountingDown ? "中止" : (item.isOvertime ? "終了" : (item.isRunning ? "一時停止" : "スタート")))
-                            .font(.system(size: 12, weight: .bold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 7)
-                    .background(isActive ? Color(hex: "#FF9F0A").opacity(0.25) : Color(hex: "#30D158").opacity(0.25))
-                    .foregroundColor(isActive ? Color(hex: "#FF9F0A") : Color(hex: "#30D158"))
-                    .cornerRadius(8)
-                }
-                .buttonStyle(.plain)
-                
+            // ③ 下部ボタン群（スタート/一時停止 ＆ タイマーを止める）
+            if item.isOvertime {
                 Button(action: {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         isManuallyExpanded = false
@@ -3408,20 +3417,66 @@ struct MainTimerCard: View {
                     onReset()
                 }) {
                     HStack(spacing: 4) {
-                        Image(systemName: "arrow.counterclockwise")
+                        Image(systemName: "stop.fill")
                             .font(.system(size: 11, weight: .bold))
-                        Text("リセット")
+                        Text("タイマーを止める")
                             .font(.system(size: 12, weight: .bold))
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Color.white.opacity(0.1))
-                    .foregroundColor(Color(hex: "#8E8E93"))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "#FF453A"))
+                    .foregroundColor(.white)
                     .cornerRadius(8)
                 }
                 .buttonStyle(.plain)
+                .padding(.top, 2)
+            } else {
+                HStack(spacing: 8) {
+                    Button(action: {
+                        if item.isPreCountingDown {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                isManuallyExpanded = false
+                            }
+                        }
+                        onToggle()
+                    }) {
+                        let isActive = item.isRunning || item.isPreCountingDown
+                        HStack(spacing: 4) {
+                            Image(systemName: isActive ? "pause.fill" : "play.fill")
+                                .font(.system(size: 11, weight: .bold))
+                            Text(item.isPreCountingDown ? "中止" : (item.isRunning ? "一時停止" : "スタート"))
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(isActive ? Color(hex: "#FF9F0A").opacity(0.25) : Color(hex: "#30D158").opacity(0.25))
+                        .foregroundColor(isActive ? Color(hex: "#FF9F0A") : Color(hex: "#30D158"))
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button(action: {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            isManuallyExpanded = false
+                        }
+                        onReset()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.counterclockwise")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("タイマーを止める")
+                                .font(.system(size: 12, weight: .bold))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(Color.white.opacity(0.1))
+                        .foregroundColor(Color(hex: "#8E8E93"))
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.top, 2)
             }
-            .padding(.top, 2)
         }
         .padding(10)
         .background(
@@ -3514,7 +3569,7 @@ struct SeatTimerCard: View {
                 HStack(spacing: 3) {
                     Image(systemName: item.isZero ? "clock" : "stop.circle.fill")
                         .font(.system(size: 8))
-                    Text(item.isZero ? "待機中 (00:00)" : "計測終了")
+                    Text("00:00")
                         .font(.system(size: 9.5, weight: .bold))
                 }
                 .foregroundColor(Color(hex: "#8E8E93"))
@@ -4155,7 +4210,7 @@ struct OvertimeActionSheet: View {
                     .buttonStyle(.plain)
                 }
                 
-                // ③ ボタン2: 「止める（00:00に戻す）」ボタン
+                if false { // ③ ボタン2（一本化により非表示）
                 Button(action: {
                     playHaptic(.directionUp)
                     onResetZero()
@@ -4164,7 +4219,7 @@ struct OvertimeActionSheet: View {
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.counterclockwise")
                             .font(.system(size: 13, weight: .bold))
-                        Text("止める（00:00に戻す）")
+                        Text("タイマーを止める")
                             .font(.system(size: 13, weight: .bold))
                     }
                     .frame(maxWidth: .infinity)
@@ -4179,7 +4234,8 @@ struct OvertimeActionSheet: View {
                 }
                 .buttonStyle(.plain)
                 
-                // ④ ボタン3: 「タイム終了（計測終了）」ボタン（アコーディオンをしまう）
+                }
+                // ④ ボタン3: 「タイマーを止める」ボタン（一本化・アコーディオンをしまう）
                 Button(action: {
                     playHaptic(.stop)
                     onFinishMeasure()
@@ -4188,7 +4244,7 @@ struct OvertimeActionSheet: View {
                     HStack(spacing: 6) {
                         Image(systemName: "stop.circle.fill")
                             .font(.system(size: 13, weight: .bold))
-                        Text("タイム終了（計測終了）")
+                        Text("タイマーを止める")
                             .font(.system(size: 13, weight: .bold))
                     }
                     .frame(maxWidth: .infinity)
@@ -4610,7 +4666,7 @@ struct MainTimerActionSheet: View {
                         HStack(spacing: 4) {
                             Image(systemName: "stop.circle.fill")
                                 .font(.system(size: 14, weight: .bold))
-                            Text("計測終了 / リセット")
+                            Text("タイマーを止める")
                                 .font(.system(size: 13, weight: .bold))
                         }
                         .frame(maxWidth: .infinity)
@@ -4623,10 +4679,9 @@ struct MainTimerActionSheet: View {
                 } else if currentItem.isPreCountingDown {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
-                        onPause()
-                        if let updated = WatchSessionManager.shared.mainTimer {
-                            displayItem = updated
-                        }
+                        accumulatedDelta = 0
+                        onReset()
+                        dismiss()
                     }) {
                         HStack(spacing: 4) {
                             Image(systemName: "xmark.circle.fill")
@@ -4668,6 +4723,7 @@ struct MainTimerActionSheet: View {
                             WKInterfaceDevice.current().play(.click)
                             accumulatedDelta = 0
                             onReset()
+                            dismiss()
                             if let updated = WatchSessionManager.shared.mainTimer {
                                 displayItem = updated
                             }
@@ -4675,7 +4731,7 @@ struct MainTimerActionSheet: View {
                             HStack(spacing: 4) {
                                 Image(systemName: "arrow.counterclockwise")
                                     .font(.system(size: 12, weight: .bold))
-                                Text("リセット")
+                                Text("タイマーを止める")
                                     .font(.system(size: 12, weight: .bold))
                             }
                             .frame(maxWidth: .infinity)
@@ -4687,30 +4743,54 @@ struct MainTimerActionSheet: View {
                         .buttonStyle(.plain)
                     }
                 } else {
-                    Button(action: {
-                        WKInterfaceDevice.current().play(.click)
-                        if accumulatedDelta != 0 {
-                            let targetSec = max(10, baseAdjustmentSeconds + accumulatedDelta)
-                            accumulatedDelta = 0
-                            onSetTime(targetSec)
-                        } else {
-                            onStart()
+                    HStack(spacing: 6) {
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            if accumulatedDelta != 0 {
+                                let targetSec = max(10, baseAdjustmentSeconds + accumulatedDelta)
+                                accumulatedDelta = 0
+                                onSetTime(targetSec)
+                            } else {
+                                onStart()
+                            }
+                            dismiss()
+                        }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 13, weight: .bold))
+                                Text(accumulatedDelta != 0 ? "\(formatSeconds(currentDisplaySeconds)) でスタート" : "スタート")
+                                    .font(.system(size: 12.5, weight: .heavy))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color(hex: "#30D158"))
+                            .foregroundColor(.black)
+                            .cornerRadius(8)
                         }
-                        dismiss()
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 14, weight: .bold))
-                            Text(accumulatedDelta != 0 ? "\(formatSeconds(currentDisplaySeconds)) でスタート" : "スタート")
-                                .font(.system(size: 13, weight: .heavy))
+                        .buttonStyle(.plain)
+                        
+                        if !currentItem.isZero {
+                            Button(action: {
+                                WKInterfaceDevice.current().play(.click)
+                                accumulatedDelta = 0
+                                onReset()
+                                dismiss()
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.counterclockwise")
+                                        .font(.system(size: 11, weight: .bold))
+                                    Text("タイマーを止める")
+                                        .font(.system(size: 11.5, weight: .bold))
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 8)
+                                .background(Color.white.opacity(0.15))
+                                .foregroundColor(.white)
+                                .cornerRadius(8)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(Color(hex: "#30D158"))
-                        .foregroundColor(.black)
-                        .cornerRadius(8)
                     }
-                    .buttonStyle(.plain)
                 }
                 
                 // ⑤ 共有タイマーと同じ分・秒トグル調整ボタン（何回も押せる累積調整！）
@@ -5075,13 +5155,13 @@ struct TimeActionSheet: View {
                 )
                 .padding(.horizontal, 2)
                 
-                // ③ 補助ボタン（リセット / -1分 / +1分 / +30秒）
+                // ③ 補助ボタン（00:00 / -1分 / +1分 / +30秒）
                 HStack(spacing: 4) {
                     Button(action: {
                         crownSeconds = 0.0
                         WKInterfaceDevice.current().play(.click)
                     }) {
-                        Text("リセット")
+                        Text("00:00")
                             .font(.system(size: 10, weight: .bold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 4)
@@ -6763,7 +6843,7 @@ struct ThumbnailMainTimerCard: View {
                                 .font(.system(size: 9.5, weight: .bold))
                                 .foregroundColor(stateColor.text)
                         } else {
-                            Text("⏸ 停止")
+                            Text(item.isZero ? "00:00" : "⏸ 停止")
                                 .font(.system(size: 9.5, weight: .medium))
                                 .foregroundColor(Color(hex: "#8E8E93"))
                         }
