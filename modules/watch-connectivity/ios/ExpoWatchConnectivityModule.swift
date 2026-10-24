@@ -185,7 +185,22 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
-      let transfer = session.transferUserInfo(cleanUserInfo)
+      if let msgType = cleanUserInfo["type"] as? String {
+        for transfer in session.outstandingUserInfoTransfers where transfer.isTransferring {
+          if let existingType = transfer.userInfo["type"] as? String,
+             existingType == msgType,
+             transfer.userInfo["notification"] == nil {
+            transfer.cancel()
+          }
+        }
+      }
+
+      let transfer: WCSessionUserInfoTransfer
+      if session.isComplicationEnabled && session.remainingComplicationUserInfoTransfers > 0 {
+        transfer = session.transferCurrentComplicationUserInfo(cleanUserInfo)
+      } else {
+        transfer = session.transferUserInfo(cleanUserInfo)
+      }
       self.pendingUserInfo = nil
       promise.resolve(transfer.isTransferring)
     }

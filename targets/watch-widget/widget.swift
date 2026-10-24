@@ -35,6 +35,8 @@ struct ComplicationSeat {
     let currentUserName: String?
     
     // チェック・ヘルプタイマー情報
+    let prepEndDate: Date?
+    let prepTotalSeconds: Int?
     let checkEndDate: Date?
     let checkTotalSeconds: Int?
     let checkStaff: String?
@@ -114,6 +116,11 @@ enum ComplicationData {
             let isMain = (d["isMainTimer"] as? NSNumber)?.boolValue ?? (d["isMainTimer"] as? Bool) ?? (id == "main-timer")
             let label = (d["seatLabel"] as? String) ?? (isMain ? "メインタイマー" : "\(num)番席")
             
+            var prepEnd: Date? = nil
+            if let prepEpoch = (d["prepEndEpoch"] as? NSNumber)?.doubleValue, prepEpoch > 0 {
+                prepEnd = Date(timeIntervalSince1970: prepEpoch)
+            }
+            let prepTot = (d["prepTotalSeconds"] as? NSNumber)?.intValue
             var checkEnd: Date? = nil
             if let chkEpoch = (d["checkEndEpoch"] as? NSNumber)?.doubleValue, chkEpoch > 0 {
                 checkEnd = Date(timeIntervalSince1970: chkEpoch)
@@ -126,7 +133,8 @@ enum ComplicationData {
             let isCheckComp = (d["isCheckCompleted"] as? NSNumber)?.boolValue ?? (d["isCheckCompleted"] as? Bool) ?? false
             let creator = d["creatorName"] as? String
             let isNoHelp = (d["isNoHelpNeeded"] as? NSNumber)?.boolValue ?? (d["isNoHelpNeeded"] as? Bool) ?? false
-            let isCountUpEnabled = (d["isCountUpEnabled"] as? NSNumber)?.boolValue ?? (d["isCountUpEnabled"] as? Bool) ?? !isMain
+            let savedCountUp = (defaults.object(forKey: "assisttimer.watch.isCountUpEnabled") as? Bool) ?? !isMain
+            let isCountUpEnabled = (d["isCountUpEnabled"] as? NSNumber)?.boolValue ?? (d["isCountUpEnabled"] as? Bool) ?? (isMain ? savedCountUp : true)
             
             return ComplicationSeat(
                 id: id,
@@ -142,6 +150,8 @@ enum ComplicationData {
                 creatorName: creator,
                 isNoHelpNeeded: isNoHelp,
                 currentUserName: currentUserName,
+                prepEndDate: prepEnd,
+                prepTotalSeconds: prepTot,
                 checkEndDate: checkEnd,
                 checkTotalSeconds: checkTot,
                 checkStaff: checkStaff,
@@ -206,6 +216,8 @@ struct ComplicationProvider: TimelineProvider {
                 creatorName: "スタイリスト",
                 isNoHelpNeeded: false,
                 currentUserName: "スタイリスト",
+                prepEndDate: nil,
+                prepTotalSeconds: nil,
                 checkEndDate: Date().addingTimeInterval(3 * 60),
                 checkTotalSeconds: 5 * 60,
                 checkStaff: "田中",
@@ -237,8 +249,15 @@ struct ComplicationProvider: TimelineProvider {
         for seat in seats where seat.isRunning {
             let total = max(10, Double(seat.totalSeconds))
             let end = seat.endDate
+            if let prepEnd = seat.prepEndDate, prepEnd > now {
+                entryDates.insert(prepEnd)
+            }
             if end > now {
                 entryDates.insert(end)
+                if !seat.isCountUpEnabled {
+                    entryDates.insert(end.addingTimeInterval(0.5))
+                    entryDates.insert(end.addingTimeInterval(1.0))
+                }
                 // 残り30%（黄に切り替え）
                 let t30 = end.addingTimeInterval(-total * 0.30)
                 if t30 > now { entryDates.insert(t30) }
@@ -246,9 +265,11 @@ struct ComplicationProvider: TimelineProvider {
                 let t10 = end.addingTimeInterval(-total * 0.10)
                 if t10 > now { entryDates.insert(t10) }
             }
-            // 超過バー満タン（終了＋180秒）
-            let tOverMax = end.addingTimeInterval(180)
-            if tOverMax > now { entryDates.insert(tOverMax) }
+            if seat.isCountUpEnabled {
+                // 超過バー満タン（終了＋180秒）
+                let tOverMax = end.addingTimeInterval(180)
+                if tOverMax > now { entryDates.insert(tOverMax) }
+            }
             
             // ★ チェックタイマーのエントリー（終了時刻 ＆ 残り1分前で赤切り替え ＆ 終了1分後で自動消去切り替え）
             if let checkEnd = seat.checkEndDate, !seat.isCheckCompleted {
@@ -279,13 +300,42 @@ struct ComplicationView: View {
     @Environment(\.widgetFamily) private var family
     let entry: ComplicationEntry
 
+    private var activeSeat: ComplicationSeat? {
+        guard let seat = entry.seat else { return nil }
+        if !seat.isCountUpEnabled && seat.endDate <= entry.date {
+            return nil
+        }
+        return seat
+    }
+
+    private var isPreCountingDown: Bool {
+        guard let seat = activeSeat, let prepEnd = seat.prepEndDate else { return false }
+        return entry.date < prepEnd
+    }
+
     private var isOver: Bool {
-        guard let seat = entry.seat else { return false }
-        return seat.endDate <= entry.date
+        guard let seat = activeSeat else { return false }
+        if isPreCountingDown { return false }
+        return seat.isCountUpEnabled && seat.endDate <= entry.date
     }
 
     private var timeColor: Color {
-        isOver ? Color(red: 1.0, green: 0.27, blue: 0.23) : .white
+        if isPreCountingDown {
+            return Color(red: 1.0, green: 0.84, blue: 0.04)
+        }
+        return isOver ? Color(red: 1.0, green: 0.27, blue: 0.23) : .white
+    }
+
+    private func timerText(for seat: ComplicationSeat) -> Text {
+        if let prepEnd = seat.prepEndDate, entry.date < prepEnd {
+            let start = min(entry.date, prepEnd)
+            return Text(timerInterval: start...prepEnd, countsDown: true)
+        }
+        if !seat.isCountUpEnabled {
+            let start = min(entry.date, seat.endDate)
+            return Text(timerInterval: start...seat.endDate, countsDown: true)
+        }
+        return Text(seat.endDate, style: .timer)
     }
 
     var body: some View {
@@ -307,7 +357,7 @@ struct ComplicationView: View {
     // モジュラー文字盤の大きい枠
     private var rectangular: some View {
         let hasActiveCheck: Bool = {
-            guard let seat = entry.seat, seat.isRunning, !seat.isCheckCompleted, let checkEnd = seat.checkEndDate else {
+            guard let seat = activeSeat, seat.isRunning, !seat.isCheckCompleted, let checkEnd = seat.checkEndDate else {
                 return false
             }
             // チェック終了時刻から60秒以上経過した後は自動的に非表示化し、メインタイマーの特大表示に戻す
@@ -317,7 +367,7 @@ struct ComplicationView: View {
         return VStack(alignment: .leading, spacing: hasActiveCheck ? 1 : 3) {
             // ── 1行目: アイコン・席番号（またはメインタイマー）・自分バッジ・稼働中◯席（1列に集約） ──
             HStack(spacing: 3) {
-                if let seat = entry.seat {
+                if let seat = activeSeat {
                     if seat.isMainTimer {
                         Image(systemName: "stopwatch.fill")
                             .font(.system(size: 11, weight: .bold))
@@ -379,14 +429,14 @@ struct ComplicationView: View {
                 }
             }
             
-            if let seat = entry.seat {
+            if let seat = activeSeat {
                 // ── 2行目: タイム表示（チェックタイマー有無で動的自動サイズ最適化） ──
                 let timeFontSize: CGFloat = hasActiveCheck ? 23 : 28
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(isOver ? "超過" : "残り")
+                    Text(isPreCountingDown ? "準備" : (isOver ? "超過" : "残り"))
                         .font(.system(size: hasActiveCheck ? 11 : 12, weight: .bold))
                         .foregroundColor(timeColor)
-                    Text(seat.endDate, style: .timer)
+                    timerText(for: seat)
                         .font(.system(size: timeFontSize, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(timeColor)
@@ -421,9 +471,19 @@ struct ComplicationView: View {
     private func progressBar(for seat: ComplicationSeat) -> some View {
         let total = max(10, seat.totalSeconds)
         let startDate = seat.endDate.addingTimeInterval(-Double(total))
-        let isOvertime = entry.date >= seat.endDate
+        let isOvertime = seat.isCountUpEnabled && entry.date >= seat.endDate
         
-        if isOvertime {
+        if let prepEnd = seat.prepEndDate, entry.date < prepEnd {
+            let prepTotal = max(1, seat.prepTotalSeconds ?? 5)
+            let prepStart = prepEnd.addingTimeInterval(-Double(prepTotal))
+            ProgressView(
+                timerInterval: prepStart...prepEnd,
+                countsDown: true
+            )
+            .progressViewStyle(.linear)
+            .tint(Color(red: 1.0, green: 0.84, blue: 0.04))
+            .labelsHidden()
+        } else if isOvertime {
             // ★ カウントアップ・超過中: 3分（180秒）で左から右へ赤が伸びていく
             let overtimeMax: TimeInterval = 180
             ProgressView(
@@ -534,12 +594,12 @@ struct ComplicationView: View {
         ZStack {
             AccessoryWidgetBackground()
             VStack(spacing: 0) {
-                if let seat = entry.seat {
+                if let seat = activeSeat {
                     Text(seat.isMainTimer ? "メイン" : "\(seat.seatNumber)番")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(seat.isMainTimer ? Color(red: 0.19, green: 0.82, blue: 0.35) : nil)
                         .widgetAccentable(!seat.isMainTimer)
-                    Text(seat.endDate, style: .timer)
+                    timerText(for: seat)
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(timeColor)
@@ -559,8 +619,8 @@ struct ComplicationView: View {
 
     private var inline: some View {
         Group {
-            if let seat = entry.seat {
-                Text("\(seat.isMainTimer ? "メインタイマー" : "\(seat.seatNumber)番席") \(isOver ? "超過" : "残り") \(seat.endDate, style: .timer)")
+            if let seat = activeSeat {
+                Text("\(seat.isMainTimer ? "メインタイマー" : "\(seat.seatNumber)番席") \(isPreCountingDown ? "準備" : (isOver ? "超過" : "残り")) ") + timerText(for: seat)
             } else {
                 Text("AssistTimer 待機中")
             }
@@ -573,8 +633,8 @@ struct ComplicationView: View {
             .font(.system(size: 20, weight: .bold))
             .widgetAccentable()
             .widgetLabel {
-                if let seat = entry.seat {
-                    Text("\(seat.isMainTimer ? "メイン" : "\(seat.seatNumber)番") \(seat.endDate, style: .timer)")
+                if let seat = activeSeat {
+                    Text("\(seat.isMainTimer ? "メイン" : "\(seat.seatNumber)番") ") + timerText(for: seat)
                 } else {
                     Text("待機中")
                 }

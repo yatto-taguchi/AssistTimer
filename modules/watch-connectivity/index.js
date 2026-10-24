@@ -555,9 +555,11 @@ export const WatchConnectivity = {
         messageResult = '未接続のため即時送信なし';
       }
 
-      // ★ 相手への一時通知（タイマー停止・チェック完了）を含む場合で即時通信に失敗した時のみ
-      //   バックグラウンドのWatch Extensionへ transferUserInfo で届ける
-      const needUserInfoFallback = !!data?.notification && (!reachable || messageResult.startsWith('失敗'));
+      // ★ Watchがバックグラウンド（文字盤表示中・消灯中）で即時通信（sendMessage）できなかった場合、
+      //   updateApplicationContext だけでは Watch アプリがバックグラウンド起床せず文字盤モジュールが更新されないため、
+      //   transferUserInfo（コンプリケーション優先転送）も併用してバックグラウンドの Watch Extension を確実に起こす
+      const isSyncPayload = data?.type === 'SYNC_MAIN_TIMER' || data?.type === 'SYNC_SEATS' || !!data?.notification;
+      const needUserInfoFallback = isSyncPayload && (!reachable || messageResult.startsWith('失敗'));
       if (needUserInfoFallback && typeof NativeModule.transferUserInfo === 'function') {
         try {
           await NativeModule.transferUserInfo(data);

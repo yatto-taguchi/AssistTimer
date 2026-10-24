@@ -2582,3 +2582,49 @@ TestFlight Build 68の実機テストにおいて、以下の致命的な不具�
     - `MainTimerActionSheet` を共有タイマーの `TimeActionSheet` と統一された2モード構成（標準操作画面 ＆ 任意タイム設定統合画面）へ刷新（サブタイマーなし）。
     - 標準操作画面では `+1分 / +3分 / +5分` および `-5分 / -1分 / -30秒 / +30秒` を何回でも連続タップして累積調整し、「✓ 確定」で即座に反映（超過中のマイナス下限ガードおよび通常時の10秒下限ガード付き）。
     - 「タイム再入力。」から遷移する任意タイム設定画面では、Digital Crown無段階調整に加え、分トグル（`00:00, -5分, -1分, +1分, +5分`）・秒トグル（`-30秒, -10秒, +10秒, +30秒`）・定番タイムクイックパネルを完備。
+
+### 33.9. watchOSバックグラウンド実行ペナルティ警告の完全根絶、システムスマートアラーム「開く／終了」完全対応、メインタイマー完了振動・00:00復帰および文字盤モジュール完全同期仕様 (Build 76)
+
+#### 1. watchOSシステム警告「スケジュールされたアラームを再生できませんでした（バックグラウンドタスク無効化確認）」の完全根絶 (`targets/watch/alarm.swift`)
+- **背景・原因**:
+  1. watchOSの `WKExtendedRuntimeSession`（スマートアラーム）において、予約時刻にセッションが `.running` へ遷移した際（`extendedRuntimeSessionDidStart`）、`invalidate()` が呼ばれるより前に必ず `session.notifyUser(hapticType:repeatHandler:)` を呼び出し、かつOSのスマートアラームエンジンが最低1サイクル触覚再生を完了する時間を確保しないと、watchOSが「スケジュールされたアラームを再生できなかった」と判定し、システムのバックグラウンドタスク無効化確認ダイアログを表示する仕様となっている。
+  2. 従来は、`didStart` 直後（数ミリ秒後）にiPhoneから停止パケット等が届いた場合に `notifyUser` 呼び出し直後に即 `s.invalidate()` が実行されてしまう競合や、終了予定時刻の直前（`[-5秒, +3秒]`）に `.scheduled` セッションが `invalidate()` されてしまうケース、さらにバックグラウンド状態（`applicationState == .background`）で `start(at:)` を試行して `.notStarted` のままセッションが残留し以降の予約を阻害する問題があった。
+- **確定仕様**:
+  - `sessionNotifyStartTimes: [WKExtendedRuntimeSession: Date]` を新設し、`notifyUser` 開始時刻を記録。`safeInvalidateSession` において、`notifyUser` 開始から最低 `0.8秒` が経過するまでは `s.invalidate()` を遅延実行し、OSのスマートアラーム再生義務を100%確実に満たしてから安全に終了する構造を確立。
+  - `.scheduled` 状態のセッションが目標時刻の直前・直後（`[-5秒, +3秒]`）にある場合は、`didStart` 遷移直前の `invalidate()` を禁止し、`1.2秒` 待機して `.running` に遷移していれば `notifyUser` を確実に発火させてから終了する保護ロジックを実装。
+  - `scheduleSmartAlarmIfPossible` において、`canScheduleSmartAlarm`（`applicationState != .background`）でない場合は `WKExtendedRuntimeSession.start(at:)` を呼ばず（`pendingSmartAlarmReschedule = true` で次回アクティブ化時に予約）、また `.notStarted` や `.invalid` のセッションが残っていた場合は即座に破棄して正常な再予約を行うよう修正。
+
+#### 2. 共有タイマーのチェックタイマー振動時、watchOSシステム画面「開く／終了」のどちらを押しても後続の全体タイマーが確実に振動する仕様 (`targets/watch/alarm.swift`)
+- **背景・原因**:
+  1. 手首を下げた状態（バックグラウンド／画面消灯時）でチェックタイマーが時刻到達すると、watchOSシステム標準のスマートアラーム画面（`"AssistTimer" からのアラームです。[開く] [終了]`）が表示される。
+  2. ここでユーザーが **[終了]** を押した場合、アプリはフォアグラウンド（`.active`）にならずバックグラウンドのまま `extendedRuntimeSession(_:didInvalidateWith: .none)` が呼ばれる。このときチェックタイマーが未完了のまま残る、あるいはバックグラウンド状態で `rescheduleNotifications` が呼ばれて既に予約済みの全体タイマー通知（`<seatId>-main@<epoch>`）を一度削除して再登録しようとした瞬間にOSによりサスペンドされると、後続の全体タイマーの通知・振動が消失していた。
+  3. 一方、ユーザーが **[開く]** を押した場合にも即座に消火処理が走ってしまうと、次の画面（アプリ内の `alarmOverlay`）が開いた時点で既にアラーム画面が閉じてしまう問題があった。
+- **確定仕様**:
+  - `extendedRuntimeSession(_:didInvalidateWith: .none)` において、すでにアプリが `.active`（または直前0.8秒以内にアクティブ化済み）の場合は `endedKey` を `forceRingingKeys` に保持して `refresh()` を実行し、アプリ内の `alarmOverlay`（次の画面）を即座に表示。
+  - 非アクティブ状態（`.inactive` / `.background`）で `didInvalidateWith: .none` が呼ばれた場合は、watchOSによるバックグラウンド即時凍結（サスペンド）で完了処理が中断されるのを防ぐため、直前の状態を `lastSystemDismissedSnapshot` に退避した上で、**遅延ゼロ（同期処理内）で即座に `acknowledgeRinging`・通知削除・文字盤 `00:00` 保存・後続の全体タイマー予約まで完結**させる。これにより **[終了]** を押した直後にプロセスが凍結されても、100%確実にチェック完了（`STOP_ALARM (kind: check)`）および後続全体タイマーへの引き継ぎが完了する。
+  - もしユーザーが **[開く]** を押していた場合は、直後にフォアグラウンドへ遷移して `appBecameActive()` が呼ばれるため、直近1.8秒以内の `lastSystemDismissedSnapshot` から鳴動状態（`restoredOverlayEvents` ＆ `forceRingingKeys`）およびタイマースナップショットを復元し、確実に `alarmOverlay`（次の画面）を表示してユーザーが「チェックに入る（タイマー続行）」や「止める」を選択できるようにする。
+  - さらに `stop()` 呼び出し時には、すでに後続の全体タイマー等のために新しく予約成立（`.scheduled`）している未発火セッション（`!sessionStarted && !isAcknowledged(key)`）を誤って破棄しないよう保護し、2回目のスマートアラームを確実に温存する。
+
+#### 3. メインタイマー終了時のApple Watch振動の100%確実化 (`targets/watch/alarm.swift`)
+- **背景・原因**:
+  - カウントアップOFF（`isCountUpEnabled == false`）のメインタイマーが `00:00` に到達した際、iPhone側が `isRunning: false` に自動遷移して送信するため、Watch側で `m.isRunning == false` になった瞬間に `rebuildEvents` から `main-timer` イベントが除外され、スマートアラームやローカル通知の引き継ぎ前に鳴動対象から外れる隙間があった。
+  - また、手首を下げてAlways-On Display（常時表示: `applicationState == .inactive`）になっている状態でタイムアップを迎えた際、`updateForegroundHaptics()` が `.active` のみしか許可していなかったため、アプリ内リピート振動ループが止まるケースがあった。
+- **確定仕様**:
+  - `WatchAlarmCoordinator.update` および `rebuildEvents` において、カウントアップOFFのメインタイマーが `m.isRunning == false` で届いた場合でも、保存されていた終了予定時刻 `savedEnd` が現在時刻の直近（`[-60秒, +2秒]`）であり未確認（`!isAcknowledged(key)`）であれば、`forceRingingKeys` に保持してユーザーが止めるまで確実に鳴動・振動を継続。
+  - `userNotificationCenter(_:willPresent:)` において、ローカル通知到達時にも識別子から `eventKey` を抽出して `forceRingingKeys` へ即座に登録し、`playNextHaptic()` を即時駆動。
+  - `updateForegroundHaptics()` の駆動条件を `canScheduleSmartAlarm`（`.active` または `.inactive`）へ拡張し、Always-On Display（手首下げ時）でも途切れず強力に触覚振動を継続。
+
+#### 4. メインタイマー停止・完了時の「00:00」表示復帰および文字盤モジュール（コンプリケーション）完全同期仕様 (`targets/watch/content.swift`, `targets/watch/alarm.swift`, `targets/watch/widget_sync.swift`, `targets/watch-widget/widget.swift`, `src/screens/HomeScreen.js`, `src/screens/SalonWorkScreen.js`)
+- **背景・原因**:
+  1. Watch側の `ThumbnailMainTimerCard`（客席一覧画面のメインタイマーカード）および `MainTimerActionSheet` において、`pausedRemainingSeconds <= 0` のときに `item.totalSeconds`（例: `10:00`）へフォールバックする処理が入っていたため、タイマーを止めたりリセットしても `00:00` に戻らず設定時間が表示され続けていた。
+  2. カウントアップOFFのメインタイマー完了時や「止める／リセット」押下時に、`pausedRemainingSeconds = totalSeconds` を代入していた箇所があり、`MainTimerCard` の `00:00` 待機表示が機能していなかった。
+  3. 準備カウントダウン（`isPreCountingDown`）中に手首を下げてバックグラウンドへ移行した際、`WidgetSync.save` に準備終了時刻（`prepEndEpoch`）が含まれていなかったため、文字盤モジュール側で準備カウントダウン終了から本番カウントダウン・終了までのタイムライン遷移がズレることがあった。
+- **確定仕様**:
+  - **停止・リセット・自動完了時の `00:00` 表示統一**:
+    - メインタイマーの初期待機時、「止める（00:00に戻す）」「リセット」「計測終了」押下時、およびカウントアップOFFでの `00:00` 自動完了時は、すべて `pausedRemainingSeconds = 0` に統一（カウントダウン途中の「一時停止」時のみ残り秒数を保持）。
+    - `ThumbnailMainTimerCard`、`MainTimerCard`、`MainTimerActionSheet` のすべてにおいて、停止・リセット・完了待機時（`pausedRemainingSeconds == 0`）はデジタル表示を **`00:00`** とし、設定分数（例: `10分設定`）をサブ表示として併記。また停止状態（`00:00`）で `+1分 / -1分` 等の微調整を行って「確定」した場合も、デジタル表示は **`00:00`** を維持したまま設定分数（`totalSeconds`、例: `11分設定`）のみを更新し、iPhone・Watch間で表示ジャンプが起きないよう統一。その状態から「スタート」を押した場合は更新後の設定分数で即座にカウントダウンを開始。
+    - カウントアップONで `00:00` を過ぎた場合は従来通り超過タイム（`+00:01...`）を表示し、客席一覧（`SeatThumbnailMapSheet`）上部の集計でも「稼働」としてカウントし、タイマーを止める操作を行った時点で即座に `00:00`（文字盤モジュールは `待機中`）へ復帰。
+  - **カウントアップOFF時のアラームオーバーレイ表示最適化 (`targets/watch/content.swift`)**:
+    - カウントアップOFF設定のメインタイマーがタイムアップ鳴動した際、Watchの `alarmOverlay` では「超過 +00:xx」ではなく **「00:00 完了」** と表示し、「超過カウント続行（画面を見る）」ボタンを非表示にして **「止める（00:00に戻す）」** ボタンのみを明快に表示。
+  - **文字盤コンプリケーション（モジュール）のタイムライン完全同期 (`targets/watch/widget_sync.swift`, `targets/watch-widget/widget.swift`)**:
+    - `WidgetSync.save` において、準備カウントダウン中（`isPreCountingDown`）でも正確な `prepEndEpoch` と本番終了時刻 `endEpoch` を算出し、`widget.swift` のタイムラインエントリーに `prepEndDate` と `endDate` の双方を登録。手首を下げたままでも「準備 → 残りカウントダウン → 完了（待機中）/ 超過」が文字盤モジュール上でリアルタイムに切り替わる仕様を確立。

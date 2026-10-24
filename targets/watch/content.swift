@@ -274,7 +274,13 @@ extension SeatTimerItem {
         self.preCountdownSeconds = (dictionary["preCountdownSeconds"] as? NSNumber)?.intValue ?? (dictionary["preCountdownSeconds"] as? Int) ?? 0
         self.isCountdownConfigEnabled = (dictionary["isCountdownConfigEnabled"] as? NSNumber)?.boolValue ?? (dictionary["isCountdownConfigEnabled"] as? Bool) ?? false
         self.countdownConfigSeconds = (dictionary["countdownConfigSeconds"] as? NSNumber)?.intValue ?? (dictionary["countdownConfigSeconds"] as? Int) ?? 5
-        self.isCountUpEnabled = (dictionary["isCountUpEnabled"] as? NSNumber)?.boolValue ?? (dictionary["isCountUpEnabled"] as? Bool) ?? true
+        let savedCountUp = (UserDefaults.standard.object(forKey: "assisttimer.watch.isCountUpEnabled") as? Bool) ?? true
+        let parsedCountUp = (dictionary["isCountUpEnabled"] as? NSNumber)?.boolValue ?? (dictionary["isCountUpEnabled"] as? Bool)
+        self.isCountUpEnabled = parsedCountUp ?? (self.isMainTimer ? savedCountUp : true)
+        if let explicitCountUp = parsedCountUp, self.isMainTimer {
+            UserDefaults.standard.set(explicitCountUp, forKey: "assisttimer.watch.isCountUpEnabled")
+            UserDefaults(suiteName: "group.com.assisttimer")?.set(explicitCountUp, forKey: "assisttimer.watch.isCountUpEnabled")
+        }
         if let prepEndMs = (dictionary["prepEndTimestamp"] as? NSNumber)?.doubleValue ?? (dictionary["prepEndTimestamp"] as? Double), prepEndMs > 0 {
             self.prepEndTime = Date(timeIntervalSince1970: prepEndMs / 1000.0)
         } else {
@@ -366,8 +372,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         totalSeconds: 600,
         targetEndTime: Date().addingTimeInterval(600),
         isRunning: false,
-        pausedRemainingSeconds: 600,
-        isMainTimer: true
+        pausedRemainingSeconds: 0,
+        isMainTimer: true,
+        isCountUpEnabled: (UserDefaults.standard.object(forKey: "assisttimer.watch.isCountUpEnabled") as? Bool) ?? true
     ) {
         didSet {
             if let m = mainTimer {
@@ -543,22 +550,22 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                abs(restoredMain.targetEndTime.timeIntervalSince1970 - self.lastMainTimerLocalStopEndTime) <= 15 {
                 restoredMain.isRunning = false
                 restoredMain.isPreCountingDown = false
-                restoredMain.pausedRemainingSeconds = restoredMain.totalSeconds
+                restoredMain.pausedRemainingSeconds = 0
                 self.watchStartedMainTimerEndTime = nil
             }
-            // ★ カウントアップOFFのときは終了時刻を過ぎていれば完了・待機状態にする。
+            // ★ カウントアップOFFのときは終了時刻を過ぎていれば完了・待機状態（00:00）にする。
             //   カウントアップONのときは3時間（10800秒）以内の超過は稼働中のまま保護し、それより古い放置データのみリセットする
             if restoredMain.isRunning {
                 let cutoff = restoredMain.isCountUpEnabled ? nowDate.addingTimeInterval(-10800) : nowDate
                 if restoredMain.targetEndTime <= cutoff {
                     restoredMain.isRunning = false
-                    restoredMain.pausedRemainingSeconds = restoredMain.totalSeconds
+                    restoredMain.pausedRemainingSeconds = 0
                     self.watchStartedMainTimerEndTime = nil
                 }
             } else if !restoredMain.isPreCountingDown {
                 self.watchStartedMainTimerEndTime = nil
-                if restoredMain.pausedRemainingSeconds <= 0 {
-                    restoredMain.pausedRemainingSeconds = restoredMain.totalSeconds
+                if restoredMain.pausedRemainingSeconds < 0 {
+                    restoredMain.pausedRemainingSeconds = 0
                 }
             }
             self.mainTimer = restoredMain
@@ -846,7 +853,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     parsedMain.isPreCountingDown = false
                     parsedMain.preCountdownSeconds = 0
                     parsedMain.prepEndTime = nil
-                    parsedMain.pausedRemainingSeconds = parsedMain.totalSeconds
+                    parsedMain.pausedRemainingSeconds = 0
                 }
             }
             // ★ Watch側ですでに稼働中または準備カウントダウン中のメインタイマーがあり、iPhoneから同一設定時間の稼働データ（往復同期）が返ってきた場合は、
@@ -884,7 +891,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                       watchEnd > nowDate,
                       let cur = self.mainTimer,
                       (cur.isRunning || cur.isPreCountingDown) else { return false }
-                let isUnstartedInitial = !parsedMain.isRunning && !parsedMain.isPreCountingDown && parsedMain.pausedRemainingSeconds == parsedMain.totalSeconds
+                let isUnstartedInitial = !parsedMain.isRunning && !parsedMain.isPreCountingDown && (parsedMain.pausedRemainingSeconds == parsedMain.totalSeconds || parsedMain.pausedRemainingSeconds <= 0)
                 // iPhoneがスリープ中・未反映のまま送られてきた SYNC_SEATS 同梱データや保存データ、開始直後(8秒以内)の未反映初期スナップショットによる強制停止をブロック
                 return msgType == "SYNC_SEATS" || isStaleSnapshot || (isUnstartedInitial && nowDate.timeIntervalSince(self.lastMainTimerLocalActionTime) < 8.0)
             }()
@@ -903,26 +910,24 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }()
             
             if isBlockedByLocalStop {
-                // ★ Watchで停止・終了した直後に、iPhoneからまだ反映前の古い稼働中・超過データが返ってきた場合はリセット・停止状態を死守
+                // ★ Watchで停止・終了した直後に、iPhoneからまだ反映前の古い稼働中・超過データが返ってきた場合はリセット・停止状態（00:00）を死守
                 if self.lastMainTimerLocalActionType == "RESET", var cur = self.mainTimer {
                     cur.isRunning = false
                     cur.isPreCountingDown = false
-                    cur.pausedRemainingSeconds = cur.totalSeconds
+                    cur.pausedRemainingSeconds = 0
                     self.mainTimer = cur
                 }
             } else if isRecentlyModifiedOnWatch {
                 if self.lastMainTimerLocalActionType == "RESET" {
                     if !parsedMain.isRunning && !parsedMain.isPreCountingDown {
-                        if parsedMain.pausedRemainingSeconds <= 0 {
-                            parsedMain.pausedRemainingSeconds = parsedMain.totalSeconds
-                        }
+                        parsedMain.pausedRemainingSeconds = 0
                         self.mainTimer = parsedMain
                         didUpdateMain = true
                     }
                 } else if self.lastMainTimerLocalActionType == "PAUSE" {
                     if !parsedMain.isRunning && !parsedMain.isPreCountingDown {
-                        if parsedMain.pausedRemainingSeconds <= 0 {
-                            parsedMain.pausedRemainingSeconds = parsedMain.totalSeconds
+                        if parsedMain.pausedRemainingSeconds < 0 {
+                            parsedMain.pausedRemainingSeconds = 0
                         }
                         self.mainTimer = parsedMain
                         didUpdateMain = true
@@ -943,7 +948,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     }
                 } else if self.lastMainTimerLocalActionType == "ADJUST" {
                     let curRem = self.mainTimer?.remainingSeconds ?? parsedMain.remainingSeconds
-                    if parsedMain.isRunning != self.mainTimer?.isRunning || abs(curRem - parsedMain.remainingSeconds) <= 5 {
+                    let sameStoppedTotal = (!parsedMain.isRunning && !(self.mainTimer?.isRunning ?? false) && parsedMain.totalSeconds == self.mainTimer?.totalSeconds)
+                    if parsedMain.isRunning != self.mainTimer?.isRunning || abs(curRem - parsedMain.remainingSeconds) <= 5 || sameStoppedTotal {
                         self.mainTimer = parsedMain
                         self.lastMainTimerLocalActionTime = Date.distantPast
                         didUpdateMain = true
@@ -958,25 +964,42 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 didUpdateMain = false
             } else {
                 // 通常同期: iPhone側で明示的にリセット・一時停止された場合はWatchのアラームも消火し、停止した終了時刻を4時間記録してゾンビ復活を防ぐ
+                let isExplicitReset = (rawMain["isExplicitReset"] as? Bool) == true || (rawMain["isExplicitReset"] as? NSNumber)?.boolValue == true
+                let isAutoFinished = (rawMain["isAutoFinished"] as? Bool) == true || (rawMain["isAutoFinished"] as? NSNumber)?.boolValue == true
                 if !parsedMain.isRunning && !parsedMain.isPreCountingDown {
-                    if let cur = self.mainTimer, (cur.isRunning || cur.isPreCountingDown) {
+                    let prevCur = self.mainTimer
+                    if let cur = prevCur, (cur.isRunning || cur.isPreCountingDown) {
                         self.lastMainTimerLocalActionTime = nowDate
                         self.lastMainTimerLocalActionType = "RESET"
                         self.lastMainTimerLocalStopEndTime = cur.targetEndTime.timeIntervalSince1970
                         self.watchStartedMainTimerEndTime = nil
                         self.persistMainTimerStopState()
                     }
-                    if parsedMain.pausedRemainingSeconds > 0 {
-                        if let cur = self.mainTimer {
-                            let isNaturalCountdownAutoStop = !parsedMain.isCountUpEnabled && abs(cur.targetEndTime.timeIntervalSince(nowDate)) <= 5
-                            let shouldAcknowledge = !isStaleSnapshot && !isNaturalCountdownAutoStop && (cur.isRunning || cur.isPreCountingDown || (msgType == "SYNC_MAIN_TIMER" && WatchAlarmCoordinator.shared.isMainTimerRingingOrDue))
-                            if shouldAcknowledge {
-                                WatchAlarmCoordinator.shared.acknowledgeMainTimer()
-                            }
+                    if isExplicitReset || isAutoFinished || parsedMain.pausedRemainingSeconds <= 0 {
+                        parsedMain.pausedRemainingSeconds = 0
+                    } else if parsedMain.pausedRemainingSeconds == parsedMain.totalSeconds,
+                              let cur = prevCur,
+                              !cur.isRunning && !cur.isPreCountingDown && cur.pausedRemainingSeconds == 0 {
+                        // Watch側で既に00:00リセット待機中のときは、iPhoneの定期SYNC_SEATSによる初期設定秒数で00:00表示を上書きしない
+                        parsedMain.pausedRemainingSeconds = 0
+                    }
+                    if let cur = prevCur, !isStaleSnapshot && !isAutoFinished {
+                        let shouldAcknowledge: Bool
+                        if isExplicitReset {
+                            shouldAcknowledge = true
+                        } else if parsedMain.isCountUpEnabled {
+                            shouldAcknowledge = (cur.isRunning || cur.isPreCountingDown || (msgType == "SYNC_MAIN_TIMER" && WatchAlarmCoordinator.shared.isMainTimerRingingOrDue))
+                        } else {
+                            // ★ カウントアップOFFのときは00:00到達で自動的に isRunning: false が送られてくるため、
+                            //   明示的リセットでなく終了時刻付近（または鳴動中）であればアラームを絶対に消火しない！
+                            let stoppedEarlyWhileRunning = (cur.isRunning || cur.isPreCountingDown)
+                                && cur.targetEndTime.timeIntervalSince(nowDate) > 10
+                                && !WatchAlarmCoordinator.shared.isMainTimerRingingOrDue
+                            shouldAcknowledge = stoppedEarlyWhileRunning
                         }
-                    } else {
-                        // カウントアップOFFで0秒到達により自動停止した場合は、鳴動中のアラームは維持しつつカード表示は設定時間へ戻す
-                        parsedMain.pausedRemainingSeconds = parsedMain.totalSeconds
+                        if shouldAcknowledge {
+                            WatchAlarmCoordinator.shared.acknowledgeMainTimer()
+                        }
                     }
                 } else if parsedMain.isRunning || parsedMain.isPreCountingDown {
                     // 新しい終了時刻で稼働開始したことが確認できたら、古い停止ブロックを解除
@@ -1475,10 +1498,10 @@ struct ContentView: View {
         showingMainTimerSheet = false
     }
     
-    // ★ MainTimerActionSheet の dismiss() トランザクションと親画面の @State/@Published 更新が衝突しないようシート閉鎖完了後に実行
+    // ★ MainTimerActionSheet の dismiss() トランザクションと親画面の @State/@Published 更新が衝突しないよう次RunLoopで即実行（手首を下げる前にスマートアラーム予約を完了させる）
     private func deferMainTimerSheetCloseAction(_ action: @escaping () -> Void) {
         pendingMainTimerSheetActionBox.action = action
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             executePendingMainTimerSheetAction()
         }
     }
@@ -1593,7 +1616,7 @@ struct ContentView: View {
             .onReceive(ticker) { input in
                 now = input
                 // ★ 準備中カウントダウンが0秒に到達したらローカルでも即座に本番タイマー稼働へ移行
-                if var m = self.mainTimer ?? sessionManager.mainTimer,
+                if var m = sessionManager.mainTimer ?? self.mainTimer,
                    m.isPreCountingDown,
                    let prepEnd = m.prepEndTime,
                    input >= prepEnd {
@@ -1605,28 +1628,28 @@ struct ContentView: View {
                     m.targetEndTime = prepEnd.addingTimeInterval(TimeInterval(runSec))
                     self.mainTimer = m
                     sessionManager.mainTimer = m
-                    WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
-                    alarm.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+                    WidgetSync.save(timers: sessionManager.timers, mainTimer: m, userName: currentUserName)
+                    alarm.update(timers: sessionManager.timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                 }
                 checkUnassignedHelpAlerts()
                 alarm.tick()
-                // ★ カウントアップOFF設定のとき、メインタイマーが終了時刻（00:00）に到達したらアラーム発火後に自動停止（超過カウントアップへ突入させない）
-                if var m = self.mainTimer ?? sessionManager.mainTimer,
+                // ★ カウントアップOFF設定のとき、メインタイマーが終了時刻（00:00）に到達したらアラーム発火後に自動停止（00:00表示に戻し、超過カウントアップへ突入させない）
+                if var m = sessionManager.mainTimer ?? self.mainTimer,
                    m.isRunning,
                    !m.isPreCountingDown,
                    !m.isCountUpEnabled,
                    input >= m.targetEndTime {
                     m.isRunning = false
-                    m.pausedRemainingSeconds = m.totalSeconds
+                    m.pausedRemainingSeconds = 0
                     sessionManager.clearWatchStartedMainTimer()
                     self.mainTimer = m
                     sessionManager.mainTimer = m
-                    WidgetSync.save(timers: timers, mainTimer: m, userName: currentUserName)
-                    alarm.update(timers: timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+                    WidgetSync.save(timers: sessionManager.timers, mainTimer: m, userName: currentUserName)
+                    alarm.update(timers: sessionManager.timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                 }
             }
             .onReceive(sessionManager.$timers) { received in
-                withAnimation(.easeInOut(duration: 0.25)) {
+                if self.timers != received {
                     self.timers = received
                 }
             }
@@ -1843,11 +1866,15 @@ struct ContentView: View {
                         .foregroundColor(.white)
                 }
                 
-                // 席名・アラーム対象 ＋ リアルタイム超過カウントアップ表示
+                // 席名・アラーム対象 ＋ リアルタイム超過カウントアップ表示（カウントアップOFFのメインタイマーは 00:00 完了）
+                let isMainCountUpOff = ((self.mainTimer ?? sessionManager.mainTimer)?.isCountUpEnabled == false)
                 VStack(spacing: 4) {
                     ForEach(alarm.ringing.prefix(3), id: \.key) { e in
                         let overSec = max(0, Int(now.timeIntervalSince(e.date)))
-                        let overText = String(format: "超過 +%02d:%02d", overSec / 60, overSec % 60)
+                        let isNonCountUpMainEvent = (e.seatId == "main-timer" && isMainCountUpOff)
+                        let overText = isNonCountUpMainEvent
+                            ? "00:00 完了"
+                            : String(format: "超過 +%02d:%02d", overSec / 60, overSec % 60)
                         VStack(spacing: 2) {
                             Text(e.title)
                                 .font(.system(size: 14, weight: .heavy, design: .rounded))
@@ -2085,7 +2112,10 @@ struct ContentView: View {
                     .padding(.horizontal, 4)
                     .padding(.bottom, 4)
                 } else {
-                    // ★ ヘルプ未指定時・メインタイマー時: 「止める（00:00に戻す）」＆「超過カウント続行」
+                    // ★ ヘルプ未指定時・メインタイマー時: 「止める（00:00に戻す）」＆「超過カウント続行」（カウントアップOFFのメインタイマー単独鳴動時は「超過カウント続行」を非表示）
+                    let isNonCountUpMainOnly = !alarm.ringing.isEmpty
+                        && alarm.ringing.allSatisfy({ $0.seatId == "main-timer" })
+                        && ((self.mainTimer ?? sessionManager.mainTimer)?.isCountUpEnabled == false)
                     Button(action: {
                         alarm.stop()
                         WKInterfaceDevice.current().play(.success)
@@ -2102,21 +2132,23 @@ struct ContentView: View {
                     .buttonStyle(.plain)
                     .padding(.horizontal, 6)
                     
-                    Button(action: {
-                        alarm.stop(sendToPhone: false)
-                        WKInterfaceDevice.current().play(.click)
-                    }) {
-                        Text("超過カウント続行（画面を見る）")
-                            .font(.system(size: 11.5, weight: .bold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(Color.white.opacity(0.14))
-                            .foregroundColor(Color(hex: "#FFD60A"))
-                            .cornerRadius(10)
+                    if !isNonCountUpMainOnly {
+                        Button(action: {
+                            alarm.stop(sendToPhone: false)
+                            WKInterfaceDevice.current().play(.click)
+                        }) {
+                            Text("超過カウント続行（画面を見る）")
+                                .font(.system(size: 11.5, weight: .bold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(Color.white.opacity(0.14))
+                                .foregroundColor(Color(hex: "#FFD60A"))
+                                .cornerRadius(10)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 6)
+                        .padding(.bottom, 6)
                     }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 6)
-                    .padding(.bottom, 6)
                 }
             }
             .padding(.horizontal, 8)
@@ -2278,8 +2310,9 @@ struct ContentView: View {
             totalSeconds: 600,
             targetEndTime: Date().addingTimeInterval(600),
             isRunning: false,
-            pausedRemainingSeconds: 600,
-            isMainTimer: true
+            pausedRemainingSeconds: 0,
+            isMainTimer: true,
+            isCountUpEnabled: (UserDefaults.standard.object(forKey: "assisttimer.watch.isCountUpEnabled") as? Bool) ?? true
         )
     }
     
@@ -2291,7 +2324,7 @@ struct ContentView: View {
         let stoppedEnd = willPause ? main.targetEndTime.timeIntervalSince1970 : 0
         if willPause {
             if main.isPreCountingDown || wasOvertime {
-                main.pausedRemainingSeconds = main.totalSeconds
+                main.pausedRemainingSeconds = 0
                 main.targetEndTime = now.addingTimeInterval(TimeInterval(main.totalSeconds))
             } else {
                 main.pausedRemainingSeconds = max(0, Int(ceil(main.targetEndTime.timeIntervalSince(now))))
@@ -2358,7 +2391,7 @@ struct ContentView: View {
         let wasOvertime = main.isOvertime
         let stoppedEnd = (main.isRunning || main.isPreCountingDown) ? main.targetEndTime.timeIntervalSince1970 : 0
         if main.isPreCountingDown || wasOvertime {
-            main.pausedRemainingSeconds = main.totalSeconds
+            main.pausedRemainingSeconds = 0
             main.targetEndTime = Date().addingTimeInterval(TimeInterval(main.totalSeconds))
         } else {
             main.pausedRemainingSeconds = max(0, Int(ceil(main.targetEndTime.timeIntervalSince(Date()))))
@@ -2386,7 +2419,7 @@ struct ContentView: View {
         main.isPreCountingDown = false
         main.preCountdownSeconds = 0
         main.prepEndTime = nil
-        main.pausedRemainingSeconds = main.totalSeconds
+        main.pausedRemainingSeconds = 0
         main.targetEndTime = Date().addingTimeInterval(TimeInterval(main.totalSeconds))
         self.mainTimer = main
         sessionManager.mainTimer = main
@@ -2440,14 +2473,23 @@ struct ContentView: View {
             let baseEnd = main.isOvertime ? Date() : main.targetEndTime
             main.targetEndTime = max(Date().addingTimeInterval(5), baseEnd.addingTimeInterval(Double(deltaSec)))
         } else {
-            let nextSec = max(10, main.pausedRemainingSeconds + deltaSec)
-            main.pausedRemainingSeconds = nextSec
-            main.totalSeconds = nextSec
-            main.isRunning = false
+            let wasPausedMidCountdown = (main.pausedRemainingSeconds > 0 && !main.isPreCountingDown)
+            let baseSec = wasPausedMidCountdown ? main.pausedRemainingSeconds : main.totalSeconds
+            let nextSec = max(10, baseSec + deltaSec)
             if main.isPreCountingDown {
+                main.pausedRemainingSeconds = nextSec
+                main.totalSeconds = nextSec
                 let prepEnd = main.prepEndTime ?? Date().addingTimeInterval(TimeInterval(max(1, main.preCountdownSeconds)))
                 main.targetEndTime = prepEnd.addingTimeInterval(TimeInterval(nextSec))
+            } else if wasPausedMidCountdown {
+                main.pausedRemainingSeconds = nextSec
+                main.totalSeconds = max(main.totalSeconds, nextSec)
+            } else {
+                // ★ 停止・初期状態（00:00）での微調整は、デジタル数字を 00:00 のまま維持し、設定分数のみを更新する
+                main.pausedRemainingSeconds = 0
+                main.totalSeconds = nextSec
             }
+            main.isRunning = false
         }
         self.mainTimer = main
         sessionManager.mainTimer = main
@@ -4244,16 +4286,26 @@ struct MainTimerActionSheet: View {
         } else if isOvertime {
             return abs(min(0, Int(currentItem.targetEndTime.timeIntervalSince(now))))
         } else {
-            return currentItem.pausedRemainingSeconds > 0 ? currentItem.pausedRemainingSeconds : currentItem.totalSeconds
+            return max(0, currentItem.pausedRemainingSeconds)
         }
     }
     
-    // 現在の残り秒数 ＋ 累積追加秒数（リアルタイム反映）
+    var baseAdjustmentSeconds: Int {
+        if isRunning || isOvertime {
+            return currentSeconds
+        }
+        return currentSeconds > 0 ? currentSeconds : max(10, currentItem.totalSeconds)
+    }
+    
+    // 現在の残り秒数 ＋ 累積追加秒数（リアルタイム反映。停止中・リセット後は00:00を表示し、調整操作時は設定秒数を基準に増減）
     var currentDisplaySeconds: Int {
         if isOvertime {
             return max(0, accumulatedDelta)
         }
-        return max(10, currentSeconds + accumulatedDelta)
+        if !isRunning && currentSeconds == 0 && accumulatedDelta == 0 {
+            return 0
+        }
+        return max(10, baseAdjustmentSeconds + accumulatedDelta)
     }
     
     private func formatSeconds(_ seconds: Int) -> String {
@@ -4638,7 +4690,7 @@ struct MainTimerActionSheet: View {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
                         if accumulatedDelta != 0 {
-                            let targetSec = max(10, currentSeconds + accumulatedDelta)
+                            let targetSec = max(10, baseAdjustmentSeconds + accumulatedDelta)
                             accumulatedDelta = 0
                             onSetTime(targetSec)
                         } else {
@@ -4714,7 +4766,7 @@ struct MainTimerActionSheet: View {
                             if isOvertime {
                                 accumulatedDelta = max(0, accumulatedDelta + delta)
                             } else {
-                                let minDelta = min(0, 10 - currentSeconds)
+                                let minDelta = min(0, 10 - baseAdjustmentSeconds)
                                 accumulatedDelta = max(minDelta, accumulatedDelta + delta)
                             }
                             WKInterfaceDevice.current().play(.click)
@@ -6451,13 +6503,13 @@ struct SeatThumbnailMapSheet: View {
         timers.sorted { $0.seatNumber < $1.seatNumber }
     }
     
-    // サマリー集計（メインタイマーも稼働数に算入）
+    // サマリー集計（メインタイマーも稼働数に算入・超過カウントアップ中も稼働としてカウント）
     var isMainRunning: Bool {
         guard let m = mainTimer else { return false }
-        return (m.isRunning && m.remainingSeconds > 0) || m.isPreCountingDown
+        return m.isRunning || m.isPreCountingDown
     }
     var runningCount: Int {
-        timers.filter { $0.isRunning && $0.remainingSeconds > 0 }.count + (isMainRunning ? 1 : 0)
+        timers.filter { $0.isRunning }.count + (isMainRunning ? 1 : 0)
     }
     var recruitingCount: Int { timers.filter { $0.isRecruiting }.count }
     var pausedCount: Int {
@@ -6745,7 +6797,7 @@ struct ThumbnailMainTimerCard: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
                     } else {
-                        let pausedSec = item.pausedRemainingSeconds > 0 ? item.pausedRemainingSeconds : item.totalSeconds
+                        let pausedSec = max(0, item.pausedRemainingSeconds)
                         Text(formatSeconds(pausedSec))
                             .font(.system(size: 20, weight: .bold, design: .rounded))
                             .monospacedDigit()

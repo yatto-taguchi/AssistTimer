@@ -322,22 +322,35 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       await ensureSalonSeatsCached();
     }
 
-    const isRunning = !!state.isRunning;
+    const isCountUpEnabled = state.isCountUpEnabled !== undefined ? !!state.isCountUpEnabled : true;
     const isPreCountingDown = !!state.isPreCountingDown;
-    const isCountUp = isRunning && !!state.isCountUp;
+    let isRunning = !!state.isRunning;
+    let isCountUp = isRunning && !!state.isCountUp && isCountUpEnabled;
     const prepEnd = isPreCountingDown
       ? (state.prepEndTimestamp || (Date.now() + (state.preCountdownSeconds || state.countdownConfigSeconds || 5) * 1000))
       : 0;
-    const targetEnd = isRunning
+    let targetEnd = isRunning
       ? (state.targetEndTimestamp || (
           isCountUp ? Date.now() - (state.remainingTime || 0) * 1000 : Date.now() + (state.remainingTime || 0) * 1000
         ))
       : (isPreCountingDown
           ? (state.targetEndTimestamp || (prepEnd + (state.targetTime || state.remainingTime || 600) * 1000))
           : 0);
-    
+
+    let isAutoFinished = !!state.isAutoFinished;
+    if (isRunning && !isPreCountingDown && !isCountUpEnabled && targetEnd > 0 && targetEnd <= Date.now()) {
+      isRunning = false;
+      isCountUp = false;
+      targetEnd = 0;
+      isAutoFinished = true;
+    }
+
+    const isExplicitReset = !!state.isExplicitReset;
+    const isPausedMidCountdown = !isRunning && !isPreCountingDown && !!state.isPaused && !isExplicitReset && !isAutoFinished;
     const pausedRem = !isRunning
-      ? (state.remainingTime != null ? Math.max(0, state.remainingTime) : (state.targetTime || 600))
+      ? (isPausedMidCountdown && state.remainingTime != null
+          ? Math.max(0, state.remainingTime)
+          : (isPreCountingDown ? (state.targetTime || 600) : 0))
       : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
     const mainTimerPayload = {
@@ -351,7 +364,9 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       isRunning: isRunning,
       pausedRemainingSeconds: pausedRem,
       isCountUp: isCountUp,
-      isCountUpEnabled: state.isCountUpEnabled !== undefined ? !!state.isCountUpEnabled : true,
+      isCountUpEnabled: isCountUpEnabled,
+      isAutoFinished: isAutoFinished,
+      isExplicitReset: !!state.isExplicitReset,
       genre: state.genre || '',
       isPreCountingDown: isPreCountingDown,
       preCountdownSeconds: state.preCountdownSeconds || 0,
@@ -428,22 +443,35 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
 
     let mainTimerPayload = null;
     if (_cachedMainTimerState) {
-      const isRunning = !!_cachedMainTimerState.isRunning;
+      const isCountUpEnabled = _cachedMainTimerState.isCountUpEnabled !== undefined ? !!_cachedMainTimerState.isCountUpEnabled : true;
       const isPreCountingDown = !!_cachedMainTimerState.isPreCountingDown;
-      const isCountUp = isRunning && !!_cachedMainTimerState.isCountUp;
+      let isRunning = !!_cachedMainTimerState.isRunning;
+      let isCountUp = isRunning && !!_cachedMainTimerState.isCountUp && isCountUpEnabled;
       const prepEnd = isPreCountingDown
         ? (_cachedMainTimerState.prepEndTimestamp || (Date.now() + (_cachedMainTimerState.preCountdownSeconds || _cachedMainTimerState.countdownConfigSeconds || 5) * 1000))
         : 0;
-      const targetEnd = isRunning
+      let targetEnd = isRunning
         ? (_cachedMainTimerState.targetEndTimestamp || (
             isCountUp ? Date.now() - (_cachedMainTimerState.remainingTime || 0) * 1000 : Date.now() + (_cachedMainTimerState.remainingTime || 0) * 1000
           ))
         : (isPreCountingDown
             ? (_cachedMainTimerState.targetEndTimestamp || (prepEnd + (_cachedMainTimerState.targetTime || _cachedMainTimerState.remainingTime || 600) * 1000))
             : 0);
-      
+
+      let isAutoFinished = !!_cachedMainTimerState.isAutoFinished;
+      if (isRunning && !isPreCountingDown && !isCountUpEnabled && targetEnd > 0 && targetEnd <= Date.now()) {
+        isRunning = false;
+        isCountUp = false;
+        targetEnd = 0;
+        isAutoFinished = true;
+      }
+
+      const isExplicitReset = !!_cachedMainTimerState.isExplicitReset;
+      const isPausedMidCountdown = !isRunning && !isPreCountingDown && !!_cachedMainTimerState.isPaused && !isExplicitReset && !isAutoFinished;
       const pausedRem = !isRunning
-        ? (_cachedMainTimerState.remainingTime != null ? Math.max(0, _cachedMainTimerState.remainingTime) : (_cachedMainTimerState.targetTime || 600))
+        ? (isPausedMidCountdown && _cachedMainTimerState.remainingTime != null
+            ? Math.max(0, _cachedMainTimerState.remainingTime)
+            : (isPreCountingDown ? (_cachedMainTimerState.targetTime || 600) : 0))
         : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
       mainTimerPayload = {
@@ -457,7 +485,9 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
         isRunning: isRunning,
         pausedRemainingSeconds: pausedRem,
         isCountUp: isCountUp,
-        isCountUpEnabled: _cachedMainTimerState.isCountUpEnabled !== undefined ? !!_cachedMainTimerState.isCountUpEnabled : true,
+        isCountUpEnabled: isCountUpEnabled,
+        isAutoFinished: isAutoFinished,
+        isExplicitReset: !!_cachedMainTimerState.isExplicitReset,
         genre: _cachedMainTimerState.genre || '',
         isPreCountingDown: isPreCountingDown,
         preCountdownSeconds: _cachedMainTimerState.preCountdownSeconds || 0,
@@ -1194,11 +1224,17 @@ export default function SalonWorkScreen() {
               targetEndTimestamp: newEnd,
             });
           } else {
-            const nextRem = Math.max(10, (_cachedMainTimerState.remainingTime || _cachedMainTimerState.targetTime || 600) + delta);
+            const isPaused = !!_cachedMainTimerState.isPaused;
+            const baseSec = (isPaused && _cachedMainTimerState.remainingTime > 0)
+              ? _cachedMainTimerState.remainingTime
+              : (_cachedMainTimerState.targetTime || 600);
+            const nextRem = Math.max(10, baseSec + delta);
+            const nextTarget = isPaused ? Math.max(_cachedMainTimerState.targetTime || 600, nextRem) : nextRem;
             updateCachedMainTimerState({
               ..._cachedMainTimerState,
               remainingTime: nextRem,
-              targetTime: nextRem,
+              targetTime: nextTarget,
+              isPaused: isPaused && nextRem !== nextTarget,
             });
           }
         }
@@ -1645,7 +1681,7 @@ export default function SalonWorkScreen() {
           watchNotif = { text: `⏹️ ${actor}が【${seatLabel}】のタイマーを停止しました`, color: '#FF9500', sourceUser: actor };
           break;
         case 'STOP_ALARM':
-          if (extra?.kind === 'check') {
+          if ((extra?.kind || message?.kind) === 'check') {
             watchNotif = { text: `✅ ${actor}が【${seatLabel}】のチェックを完了しました`, color: '#30D158', sourceUser: actor };
           } else {
             watchNotif = { text: `🔕 ${actor}が【${seatLabel}】のアラームを停止しました`, color: '#FF9500', sourceUser: actor };

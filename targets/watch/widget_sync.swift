@@ -68,20 +68,37 @@ enum WidgetSync {
         // ── コンプリケーション用の要約 ──
         var seats: [[String: Any]] = []
         if let m = mainTimer {
-            let mActive = m.isRunning || m.isPreCountingDown
-            seats.append([
+            let now = Date()
+            let runSec = m.pausedRemainingSeconds > 0 ? m.pausedRemainingSeconds : m.totalSeconds
+            let prepEnd: Date? = m.isPreCountingDown
+                ? (m.prepEndTime ?? now.addingTimeInterval(TimeInterval(max(1, m.preCountdownSeconds))))
+                : nil
+            let effectiveEnd: Date = {
+                if let pEnd = prepEnd {
+                    return pEnd.addingTimeInterval(TimeInterval(runSec))
+                }
+                return m.targetEndTime
+            }()
+            let isExpiredNonCountUp = !m.isCountUpEnabled && !m.isPreCountingDown && effectiveEnd <= now
+            let mActive = (m.isRunning || m.isPreCountingDown) && !isExpiredNonCountUp
+            var mainDict: [String: Any] = [
                 "id": m.id,
                 "seatNumber": 0,
                 "seatLabel": "メインタイマー",
                 "isMainTimer": true,
-                "endEpoch": mActive ? m.targetEndTime.timeIntervalSince1970.rounded() : 0,
+                "endEpoch": mActive ? effectiveEnd.timeIntervalSince1970.rounded() : 0,
                 "isRunning": mActive,
                 "pausedRemaining": m.pausedRemainingSeconds,
                 "related": true,
                 "totalSeconds": m.totalSeconds,
                 "isCountUpEnabled": m.isCountUpEnabled,
                 "isCheckCompleted": true
-            ])
+            ]
+            if mActive, let pEnd = prepEnd, pEnd > now {
+                mainDict["prepEndEpoch"] = pEnd.timeIntervalSince1970.rounded()
+                mainDict["prepTotalSeconds"] = max(1, m.countdownConfigSeconds)
+            }
+            seats.append(mainDict)
         }
 
         for t in timers {
