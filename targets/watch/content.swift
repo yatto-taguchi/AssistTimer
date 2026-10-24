@@ -12,7 +12,7 @@ struct SeatTimerItem: Identifiable, Equatable {
     var targetEndTime: Date // 終了目標時刻（画面消灯・スリープでもずれない絶対時刻）
     var isRunning: Bool
     var pausedRemainingSeconds: Int // 一時停止中の残り秒数
-    var helpProcess: String = "シャンプー" // 依頼工程 ("シャンプー", "コーミング", "チェック", "その他")
+    var helpProcess: String = "" // 依頼工程 ("シャンプー", "コーミング", "チェック", "その他", 未指定時は "")
     var shampooStaff: String? // 担当スタッフ (nil = 未定)
     var isRecruiting: Bool = false // 全員に募集中フラグ
     var isNoHelpNeeded: Bool = false
@@ -59,7 +59,7 @@ struct SeatTimerItem: Identifiable, Equatable {
         targetEndTime: Date = Date().addingTimeInterval(600),
         isRunning: Bool = false,
         pausedRemainingSeconds: Int = 600,
-        helpProcess: String = "シャンプー",
+        helpProcess: String = "",
         shampooStaff: String? = nil,
         isRecruiting: Bool = false,
         isNoHelpNeeded: Bool = false,
@@ -226,7 +226,21 @@ extension SeatTimerItem {
             self.targetEndTime = Date().addingTimeInterval(TimeInterval(rem))
         }
         
-        self.helpProcess = (dictionary["helpProcess"] as? String) ?? (dictionary["actionStatus"] as? String) ?? "シャンプー"
+        let rawHelpProcess = (dictionary["helpProcess"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rawActionStatus = (dictionary["actionStatus"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !rawHelpProcess.isEmpty && rawHelpProcess != "normal" {
+            self.helpProcess = rawHelpProcess
+        } else if rawActionStatus == "shampoo" {
+            self.helpProcess = "シャンプー"
+        } else if rawActionStatus == "combing" {
+            self.helpProcess = "コーミング"
+        } else if rawActionStatus == "check" {
+            self.helpProcess = "チェック"
+        } else if rawActionStatus == "other" {
+            self.helpProcess = "その他"
+        } else {
+            self.helpProcess = ""
+        }
         let rawShampoo = (dictionary["shampooStaff"] as? String) ?? (dictionary["assistantStaffName"] as? String)
         self.shampooStaff = (rawShampoo?.isEmpty == false) ? rawShampoo : nil
         self.isRecruiting = (dictionary["isRecruiting"] as? NSNumber)?.boolValue ?? (dictionary["isRecruiting"] as? Bool) ?? false
@@ -234,6 +248,7 @@ extension SeatTimerItem {
         
         // ★ 00:00（停止中・待機中・リセット後）の席はヘルプ・助手を完全クリア（固定残り防止）
         if !self.isRunning && self.pausedRemainingSeconds <= 0 {
+            self.helpProcess = ""
             self.shampooStaff = nil
             self.isRecruiting = false
             self.isNoHelpNeeded = false
@@ -1391,10 +1406,13 @@ struct ContentView: View {
     // ★ タイム確定時などの自動スクロール用ステート
     @State private var scrollToSeatId: String? = nil
     @State private var scrollTrigger: Int = 0
+    // ★ サロン客席マップのDigital Crown（トグル）フォーカス復帰トリガー
+    @State private var mapCrownFocusTrigger: Int = 0
     
     private func triggerScroll(to seatId: String) {
         scrollToSeatId = seatId
         scrollTrigger += 1
+        mapCrownFocusTrigger += 1
     }
     
     // 1秒周期の画面再描画トリガー
@@ -1574,6 +1592,9 @@ struct ContentView: View {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             showingThumbnailMap.toggle()
                         }
+                        if showingThumbnailMap {
+                            mapCrownFocusTrigger += 1
+                        }
                     }) {
                         Image(systemName: showingThumbnailMap ? "list.bullet" : "square.grid.2x2.fill")
                             .font(.system(size: 11, weight: .bold))
@@ -1584,6 +1605,7 @@ struct ContentView: View {
             // ★ メインタイマー専用操作・時間設定シート（メイン画面・一覧画面のカードタップ用）
             .sheet(isPresented: $showingMainTimerSheet, onDismiss: {
                 executePendingMainTimerSheetAction()
+                mapCrownFocusTrigger += 1
             }) {
                 mainTimerSheetView
             }
@@ -1592,6 +1614,7 @@ struct ContentView: View {
                 if let targetId = scrollToSeatId {
                     triggerScroll(to: targetId)
                 }
+                mapCrownFocusTrigger += 1
             }) {
                 addSeatSheetView
             }
@@ -1600,23 +1623,32 @@ struct ContentView: View {
                 if let targetId = scrollToSeatId {
                     triggerScroll(to: targetId)
                 }
+                mapCrownFocusTrigger += 1
             }) { item in
                 timeActionSheetView(item: item)
             }
             // チェック操作シート
-            .sheet(item: bindingCheckAction) { item in
+            .sheet(item: bindingCheckAction, onDismiss: {
+                mapCrownFocusTrigger += 1
+            }) { item in
                 checkActionSheetView(item: item)
             }
             // ★ シャンプー・施術操作シート
-            .sheet(item: bindingShampooAction) { item in
+            .sheet(item: bindingShampooAction, onDismiss: {
+                mapCrownFocusTrigger += 1
+            }) { item in
                 shampooActionSheetView(item: item)
             }
             // ★ ヘルプ工程選択・スタッフ指定・募集シート
-            .sheet(item: bindingSelectHelpStaff) { item in
+            .sheet(item: bindingSelectHelpStaff, onDismiss: {
+                mapCrownFocusTrigger += 1
+            }) { item in
                 selectHelpWorkflowSheetView(item: item)
             }
             // ★ チェック担当スタッフ指定・募集シート
-            .sheet(item: bindingSelectCheckStaff) { item in
+            .sheet(item: bindingSelectCheckStaff, onDismiss: {
+                mapCrownFocusTrigger += 1
+            }) { item in
                 selectCheckStaffSheetView(item: item)
             }
             .onReceive(ticker) { input in
@@ -2511,6 +2543,7 @@ struct ContentView: View {
             mainTimer: self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer(),
             currentUserName: currentUserName,
             now: now,
+            crownFocusTrigger: mapCrownFocusTrigger,
             onSelectSeat: { selectedSeat in
                 triggerScroll(to: selectedSeat.id)
                 timeActionTargetId = selectedSeat.id
@@ -2682,6 +2715,8 @@ struct ContentView: View {
             TimeActionSheet(
                 item: item,
                 initialReinputMode: item.isZero,
+                currentUserName: currentUserName,
+                staffCandidates: sessionManager.members,
                 onAdjust: { deltaSec in
                     triggerScroll(to: item.id)
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
@@ -2710,6 +2745,10 @@ struct ContentView: View {
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         timers[idx].isRunning = false
                         timers[idx].pausedRemainingSeconds = 0
+                        timers[idx].helpProcess = ""
+                        timers[idx].shampooStaff = nil
+                        timers[idx].isRecruiting = false
+                        timers[idx].isNoHelpNeeded = false
                         // ★ チェックタイマーも解除（Q3）
                         timers[idx].clearCheck()
                         sessionManager.timers = timers
@@ -2730,8 +2769,11 @@ struct ContentView: View {
                             timers[idx].isRunning = false
                             timers[idx].pausedRemainingSeconds = 0
                             timers[idx].status = .normal
-                            timers[idx].shampooStaff = currentUserName
+                            timers[idx].shampooStaff = nil
+                            timers[idx].helpProcess = ""
                             timers[idx].isRecruiting = false
+                            timers[idx].isNoHelpNeeded = false
+                            timers[idx].clearCheck()
                         }
                         sessionManager.timers = timers
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
@@ -2751,6 +2793,10 @@ struct ContentView: View {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].isRunning = false
                             timers[idx].pausedRemainingSeconds = 0
+                            timers[idx].helpProcess = ""
+                            timers[idx].shampooStaff = nil
+                            timers[idx].isRecruiting = false
+                            timers[idx].isNoHelpNeeded = false
                             timers[idx].isCheckCompleted = true
                             timers[idx].checkStaff = currentUserName
                             timers[idx].checkTargetEndTime = nil
@@ -2787,6 +2833,11 @@ struct ContentView: View {
                             timers[idx].isRunning = true
                             timers[idx].status = .normal
                             timers[idx].isCollapsed = false
+                            timers[idx].helpProcess = ""
+                            timers[idx].shampooStaff = nil
+                            timers[idx].isRecruiting = false
+                            timers[idx].isNoHelpNeeded = false
+                            timers[idx].hasAlertedHelpUnassigned = false
                             
                             // ★ 途中チェックタイマーの設定または解除
                             if let chk = validCheckSec, chk > 0, let cEnd = checkEnd {
@@ -2818,6 +2869,162 @@ struct ContentView: View {
                             text: "⏱️ \(item.displaySeatName): \(timeStr)に開始しました\(checkText)",
                             color: Color(hex: "#FFD60A")
                         )
+                    }
+                },
+                onAssignHelp: { process, staff in
+                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].helpProcess = process
+                            timers[idx].shampooStaff = staff
+                            if process == "チェック" {
+                                timers[idx].checkStaff = staff
+                            }
+                            timers[idx].isRecruiting = false
+                            timers[idx].isNoHelpNeeded = false
+                        }
+                        sessionManager.timers = timers
+                        sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": process, "assistantStaffName": staff])
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        showNotification(
+                            text: "📤 \(staff)さんに【\(process)】を指定しました",
+                            color: Color(hex: "#0A84FF")
+                        )
+                    }
+                },
+                onRecruitHelp: { process in
+                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].helpProcess = process
+                            timers[idx].shampooStaff = nil
+                            timers[idx].isRecruiting = true
+                            timers[idx].isNoHelpNeeded = false
+                        }
+                        sessionManager.timers = timers
+                        sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": process])
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        showNotification(
+                            text: "📢 【\(item.displaySeatName)】\(process)担当を全員に募集通知しました！",
+                            color: Color(hex: "#FF9F0A")
+                        )
+                    }
+                },
+                onSetNoHelp: {
+                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].helpProcess = ""
+                            timers[idx].shampooStaff = nil
+                            timers[idx].isRecruiting = false
+                            timers[idx].isNoHelpNeeded = true
+                        }
+                        sessionManager.timers = timers
+                        sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": "ヘルプなし", "assistantStaffName": "ヘルプなし"])
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        showNotification(
+                            text: "👤 【\(item.displaySeatName)】ヘルプなし（一人施術）に設定しました",
+                            color: Color(hex: "#8E8E93")
+                        )
+                    }
+                },
+                onClearHelp: {
+                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].helpProcess = ""
+                            timers[idx].shampooStaff = nil
+                            timers[idx].isRecruiting = false
+                            timers[idx].isNoHelpNeeded = false
+                        }
+                        sessionManager.timers = timers
+                        sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        showNotification(
+                            text: "👤 【\(item.displaySeatName)】ヘルプ指定を未定に戻しました",
+                            color: Color(hex: "#8E8E93")
+                        )
+                    }
+                },
+                onAssignCheckStaff: { staff in
+                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].checkStaff = staff
+                        }
+                        sessionManager.timers = timers
+                        sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": staff, "isSubCheck": true])
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        showNotification(
+                            text: "📤 \(staff)さんを途中チェック担当に指定しました",
+                            color: Color(hex: "#30D158")
+                        )
+                    }
+                },
+                onRecruitCheckStaff: {
+                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].checkStaff = "募集中"
+                        }
+                        sessionManager.timers = timers
+                        sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": "チェック", "isSubCheck": true])
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        showNotification(
+                            text: "📢 【\(item.displaySeatName)】途中チェック担当を全員に募集通知しました！",
+                            color: Color(hex: "#FF9F0A")
+                        )
+                    }
+                },
+                onClearCheckStaff: {
+                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].checkStaff = nil
+                        }
+                        sessionManager.timers = timers
+                        sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": "", "isSubCheck": true])
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        showNotification(
+                            text: "👤 途中チェック担当を未定に戻しました",
+                            color: Color(hex: "#8E8E93")
+                        )
+                    }
+                },
+                onCompleteSubCheck: {
+                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].isCheckCompleted = true
+                            timers[idx].checkStaff = currentUserName
+                            timers[idx].checkTargetEndTime = nil
+                            timers[idx].checkTotalSeconds = nil
+                        }
+                        sessionManager.timers = timers
+                        WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
+                            seatId: item.id,
+                            timers: timers,
+                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                            soundOn: sessionManager.alarmSoundEnabled,
+                            currentUserName: currentUserName
+                        )
+                        sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        showNotification(text: "✅ 途中チェック完了（全体タイマー続行）", color: Color(hex: "#30D158"))
+                    }
+                },
+                onCancelSubCheck: {
+                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].checkTargetEndTime = nil
+                            timers[idx].checkTotalSeconds = nil
+                            timers[idx].checkStaff = nil
+                        }
+                        sessionManager.timers = timers
+                        WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
+                            seatId: item.id,
+                            timers: timers,
+                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                            soundOn: sessionManager.alarmSoundEnabled,
+                            currentUserName: currentUserName
+                        )
+                        sessionManager.sendActionToPhone(action: "CANCEL_CHECK", seatId: item.id)
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        showNotification(text: "⏹ 途中チェックタイマーを解除しました", color: Color(hex: "#8E8E93"))
                     }
                 }
             )
@@ -2886,10 +3093,9 @@ struct ContentView: View {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         timers[idx].checkStaff = staff
-                        timers[idx].helpProcess = "チェック"
-                        timers[idx].isRecruiting = false
                     }
-                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": "チェック", "assistantStaffName": staff, "checkStaffName": staff])
+                    sessionManager.timers = timers
+                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": staff, "isSubCheck": true])
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
                         text: "📤 \(staff)さんをチェック担当に指定しました",
@@ -2900,11 +3106,10 @@ struct ContentView: View {
             onRecruitAll: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        timers[idx].checkStaff = nil
-                        timers[idx].helpProcess = "チェック"
-                        timers[idx].isRecruiting = true
+                        timers[idx].checkStaff = "募集中"
                     }
-                    sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": "チェック"])
+                    sessionManager.timers = timers
+                    sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": "チェック", "isSubCheck": true])
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
                         text: "📢 【\(item.displaySeatName)】チェック担当を全員に募集通知しました！",
@@ -2916,9 +3121,9 @@ struct ContentView: View {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         timers[idx].checkStaff = nil
-                        timers[idx].isRecruiting = false
                     }
-                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": "チェック", "assistantStaffName": "", "checkStaffName": ""])
+                    sessionManager.timers = timers
+                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": "", "isSubCheck": true])
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
                         text: "👤 チェック担当を未定に戻しました",
@@ -3079,7 +3284,9 @@ struct ContentView: View {
                             timers[idx].checkStaff = staff
                         }
                         timers[idx].isRecruiting = false
+                        timers[idx].isNoHelpNeeded = false
                     }
+                    sessionManager.timers = timers
                     sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": process, "assistantStaffName": staff])
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
@@ -3097,13 +3304,49 @@ struct ContentView: View {
                             timers[idx].checkStaff = nil
                         }
                         timers[idx].isRecruiting = true
+                        timers[idx].isNoHelpNeeded = false
                     }
+                    sessionManager.timers = timers
                     sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": process])
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     // 募集するの場合は全員に通知する！
                     showNotification(
                         text: "📢 【\(item.displaySeatName)】\(process)担当を全員に募集通知しました！",
                         color: Color(hex: "#FF9F0A")
+                    )
+                }
+            },
+            onSetNoHelp: {
+                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        timers[idx].helpProcess = ""
+                        timers[idx].shampooStaff = nil
+                        timers[idx].isRecruiting = false
+                        timers[idx].isNoHelpNeeded = true
+                    }
+                    sessionManager.timers = timers
+                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": "ヘルプなし", "assistantStaffName": "ヘルプなし"])
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    showNotification(
+                        text: "👤 【\(item.displaySeatName)】ヘルプなし（一人施術）に設定しました",
+                        color: Color(hex: "#8E8E93")
+                    )
+                }
+            },
+            onClearHelp: {
+                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        timers[idx].helpProcess = ""
+                        timers[idx].shampooStaff = nil
+                        timers[idx].isRecruiting = false
+                        timers[idx].isNoHelpNeeded = false
+                    }
+                    sessionManager.timers = timers
+                    sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    showNotification(
+                        text: "👤 【\(item.displaySeatName)】ヘルプ指定を未定に戻しました",
+                        color: Color(hex: "#8E8E93")
                     )
                 }
             }
@@ -3823,7 +4066,8 @@ struct SeatTimerCard: View {
         } else if item.status == .combing {
             return "コーミング中:"
         } else {
-            return "\(item.helpProcess):"
+            let p = item.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "\(p.isEmpty ? "ヘルプ" : p):"
         }
     }
 
@@ -3901,7 +4145,8 @@ struct SeatTimerCard: View {
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(Color(hex: "#FF9F0A"))
                     
-                    Text("\(item.helpProcess): 募集中")
+                    let p = item.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+                    Text("\(p.isEmpty ? "ヘルプ" : p): 募集中")
                         .font(.system(size: 11, weight: .heavy))
                         .foregroundColor(Color(hex: "#FFD60A"))
                     
@@ -4325,7 +4570,9 @@ struct MainTimerActionSheet: View {
         let initialItem = WatchSessionManager.shared.mainTimer ?? item
         self._displayItem = State(initialValue: initialItem)
         let initSec = initialItem.totalSeconds > 0 ? initialItem.totalSeconds : 600
-        self._crownSeconds = State(initialValue: Double(initSec))
+        // ★ 00:00（未稼働・リセット状態）で開いた時は共有タイマーと同じく最初からトグル（Digital Crown）入力モードで開く
+        self._isReinputMode = State(initialValue: initialItem.isZero)
+        self._crownSeconds = State(initialValue: initialItem.isZero ? 0.0 : Double(initSec))
         self.onStart = onStart
         self.onPause = onPause
         self.onReset = onReset
@@ -4408,8 +4655,12 @@ struct MainTimerActionSheet: View {
                 // ① ナビバー（戻る ＆ 任意タイム設定）
                 HStack {
                     Button(action: {
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            isReinputMode = false
+                        if currentItem.isZero {
+                            dismiss()
+                        } else {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                isReinputMode = false
+                            }
                         }
                         WKInterfaceDevice.current().play(.click)
                     }) {
@@ -4425,7 +4676,7 @@ struct MainTimerActionSheet: View {
                     
                     Spacer()
                     
-                    Text("任意タイム設定")
+                    Text("メインタイマー設定")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
                     
@@ -4498,7 +4749,7 @@ struct MainTimerActionSheet: View {
                 }
                 .padding(.horizontal, 2)
                 
-                // ⑤ 決定ボタン（★時間が1秒以上設定された時だけ出現・サブタイマーなし）
+                // ⑤ 決定ボタン（★時間が1秒以上設定された時は「決定」、00:00時は前回設定分数でのワンタップスタートも表示）
                 if Int(crownSeconds) > 0 {
                     Button(action: {
                         let sec = max(10, Int(crownSeconds))
@@ -4524,6 +4775,26 @@ struct MainTimerActionSheet: View {
                     .buttonStyle(.plain)
                     .padding(.horizontal, 2)
                     .transition(.move(edge: .top).combined(with: .opacity))
+                } else if currentItem.totalSeconds > 0 {
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        onStart()
+                        dismiss()
+                    }) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 12, weight: .bold))
+                            Text("前回設定 (\(max(1, currentItem.totalSeconds / 60))分) でスタート")
+                                .font(.system(size: 11, weight: .heavy))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(Color(hex: "#30D158"))
+                        .foregroundColor(.black)
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 2)
                 }
                 
                 // ⑥ クイックパネル（定番タイム 3列グリッド）
@@ -4613,7 +4884,7 @@ struct MainTimerActionSheet: View {
                     .background(Color.white.opacity(0.06))
                     .cornerRadius(4)
                 
-                // ③ 巨大タイマー表示 ＆ 状態（トグル調整時はリアルタイム反映）
+                // ③ 巨大タイマー表示 ＆ 状態（★稼働中・一時停止中もDigital Crownトグルで分・秒を直接調整可能！）
                 VStack(spacing: 2) {
                     if isOvertime && accumulatedDelta <= 0 {
                         Text("超過")
@@ -4634,24 +4905,27 @@ struct MainTimerActionSheet: View {
                         Text("カウントダウン中...")
                             .font(.system(size: 9.5, weight: .semibold))
                             .foregroundColor(Color(hex: "#FFD60A").opacity(0.85))
-                    } else if isRunning || (isOvertime && accumulatedDelta > 0) {
-                        Text(formatSeconds(currentDisplaySeconds))
-                            .font(.system(size: 30, weight: .black, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundColor(accumulatedDelta != 0 ? Color(hex: "#FFD60A") : Color(hex: "#30D158"))
+                    } else {
+                        CrownMinSecPicker(
+                            totalSeconds: Binding(
+                                get: { currentDisplaySeconds },
+                                set: { newTotal in
+                                    let clamped = min(7200, max(10, newTotal))
+                                    accumulatedDelta = clamped - baseAdjustmentSeconds
+                                }
+                            ),
+                            maxMinutes: 120,
+                            fontSize: 28
+                        )
                         if accumulatedDelta != 0 {
                             Text("調整中: \(formatDelta(accumulatedDelta))")
                                 .font(.system(size: 9.5, weight: .bold))
                                 .foregroundColor(Color(hex: "#FFD60A"))
+                        } else if !isRunning {
+                            Text("⏸ 停止中（\(max(1, currentItem.totalSeconds / 60))分設定）")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundColor(Color(hex: "#8E8E93"))
                         }
-                    } else {
-                        Text(formatSeconds(currentDisplaySeconds))
-                            .font(.system(size: 30, weight: .black, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundColor(accumulatedDelta != 0 ? Color(hex: "#FFD60A") : .white)
-                        Text(accumulatedDelta != 0 ? "調整中: \(formatDelta(accumulatedDelta))" : "⏸ 停止中（\(max(1, currentItem.totalSeconds / 60))分設定）")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundColor(accumulatedDelta != 0 ? Color(hex: "#FFD60A") : Color(hex: "#8E8E93"))
                     }
                 }
                 .padding(.vertical, 1)
@@ -5016,22 +5290,47 @@ struct MainTimerActionSheet: View {
     }
 }
 
-// MARK: - タイム操作シート
+// MARK: - タイム操作シート（タイマー操作・メニュー＆ヘルプ担当指定・途中チェック操作統合）
 struct TimeActionSheet: View {
+    enum SubMode {
+        case standard
+        case reinput
+        case selectHelpProcess
+        case selectHelpStaff
+        case selectCheckStaff
+    }
+    
     @Environment(\.dismiss) var dismiss
     let item: SeatTimerItem
     let initialReinputMode: Bool
+    let currentUserName: String
+    let staffCandidates: [String]
     let onAdjust: (Int) -> Void
     let onStop: () -> Void
     let onEnterHelp: (() -> Void)?
     let onCompleteCheck: (() -> Void)?
     let onReinputTime: (Int, Int?) -> Void
+    let onAssignHelp: ((String, String) -> Void)?
+    let onRecruitHelp: ((String) -> Void)?
+    let onSetNoHelp: (() -> Void)?
+    let onClearHelp: (() -> Void)?
+    let onAssignCheckStaff: ((String) -> Void)?
+    let onRecruitCheckStaff: (() -> Void)?
+    let onClearCheckStaff: (() -> Void)?
+    let onCompleteSubCheck: (() -> Void)?
+    let onCancelSubCheck: (() -> Void)?
+    
+    // シート内でのリアルタイム表示用アイテム
+    @State private var liveItem: SeatTimerItem
     
     // 累積追加秒数（何回もタップ可能！）
     @State private var accumulatedDelta: Int = 0
     
-    // タイム再入力モードフラグ
-    @State private var isReinputMode: Bool
+    // シート内サブ画面モード
+    @State private var subMode: SubMode
+    
+    // 選択中のヘルプメニュー（工程）
+    @State private var selectedProcess: String = "シャンプー"
     
     // ★ 途中チェック（サブタイマー）分数 (0 = なし)
     @State private var checkMinutes: Int = 0
@@ -5045,33 +5344,70 @@ struct TimeActionSheet: View {
     
     let reinputMinutes = [5, 10, 15, 20, 25, 30, 35, 40, 45]
     let checkPills = [0, 3, 5, 7, 10]
+    let processOptions: [(name: String, icon: String, color: String)] = [
+        ("シャンプー", "drop.fill", "#0A84FF"),
+        ("コーミング", "comb.fill", "#0A84FF"),
+        ("チェック", "magnifyingglass", "#30D158"),
+        ("その他", "ellipsis.circle", "#8E8E93")
+    ]
     
     init(
         item: SeatTimerItem,
         initialReinputMode: Bool = false,
+        currentUserName: String = "スタイリスト",
+        staffCandidates: [String] = [],
         onAdjust: @escaping (Int) -> Void,
         onStop: @escaping () -> Void,
         onEnterHelp: (() -> Void)? = nil,
         onCompleteCheck: (() -> Void)? = nil,
-        onReinputTime: @escaping (Int, Int?) -> Void
+        onReinputTime: @escaping (Int, Int?) -> Void,
+        onAssignHelp: ((String, String) -> Void)? = nil,
+        onRecruitHelp: ((String) -> Void)? = nil,
+        onSetNoHelp: (() -> Void)? = nil,
+        onClearHelp: (() -> Void)? = nil,
+        onAssignCheckStaff: ((String) -> Void)? = nil,
+        onRecruitCheckStaff: (() -> Void)? = nil,
+        onClearCheckStaff: (() -> Void)? = nil,
+        onCompleteSubCheck: (() -> Void)? = nil,
+        onCancelSubCheck: (() -> Void)? = nil
     ) {
         self.item = item
+        self._liveItem = State(initialValue: item)
         self.initialReinputMode = initialReinputMode
-        self._isReinputMode = State(initialValue: initialReinputMode)
+        self._subMode = State(initialValue: initialReinputMode ? .reinput : .standard)
+        self.currentUserName = currentUserName
+        self.staffCandidates = staffCandidates
         self.onAdjust = onAdjust
         self.onStop = onStop
         self.onEnterHelp = onEnterHelp
         self.onCompleteCheck = onCompleteCheck
         self.onReinputTime = onReinputTime
+        self.onAssignHelp = onAssignHelp
+        self.onRecruitHelp = onRecruitHelp
+        self.onSetNoHelp = onSetNoHelp
+        self.onClearHelp = onClearHelp
+        self.onAssignCheckStaff = onAssignCheckStaff
+        self.onRecruitCheckStaff = onRecruitCheckStaff
+        self.onClearCheckStaff = onClearCheckStaff
+        self.onCompleteSubCheck = onCompleteSubCheck
+        self.onCancelSubCheck = onCancelSubCheck
         let initialCheckMin = (item.checkTotalSeconds ?? 0) / 60
         self._checkMinutes = State(initialValue: initialCheckMin)
+        let initProc = item.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+        self._selectedProcess = State(initialValue: initProc.isEmpty ? "シャンプー" : initProc)
     }
     
     // 現在の残り秒数 ＋ 累積追加秒数（リアルタイム反映）
     var currentDisplaySeconds: Int {
-        let baseRemaining = max(0, Int(item.targetEndTime.timeIntervalSince(now)))
+        let baseRemaining = max(0, Int(liveItem.targetEndTime.timeIntervalSince(now)))
         let adjusted = baseRemaining + accumulatedDelta
         return max(0, adjusted)
+    }
+    
+    // 途中チェックの残り秒数
+    var currentCheckRemainingSeconds: Int? {
+        guard !liveItem.isCheckCompleted, let checkEnd = liveItem.checkTargetEndTime, liveItem.isRunning else { return nil }
+        return max(0, Int(checkEnd.timeIntervalSince(now)))
     }
     
     private func formatSeconds(_ seconds: Int) -> String {
@@ -5096,14 +5432,24 @@ struct TimeActionSheet: View {
     
     var body: some View {
         Group {
-            if isReinputMode {
+            switch subMode {
+            case .reinput:
                 unifiedReinputScrollView
-            } else {
+            case .selectHelpProcess:
+                selectHelpProcessScrollView
+            case .selectHelpStaff:
+                selectHelpStaffScrollView
+            case .selectCheckStaff:
+                selectCheckStaffScrollView
+            case .standard:
                 standardActionScrollView
             }
         }
         .onReceive(ticker) { input in
             now = input
+            if let latest = WatchSessionManager.shared.timers.first(where: { $0.id == liveItem.id }), latest != liveItem {
+                liveItem = latest
+            }
         }
     }
     
@@ -5119,7 +5465,7 @@ struct TimeActionSheet: View {
                             dismiss()
                         } else {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                isReinputMode = false
+                                subMode = .standard
                             }
                         }
                         WKInterfaceDevice.current().play(.click)
@@ -5346,17 +5692,17 @@ struct TimeActionSheet: View {
         }
     }
     
-    // MARK: - 標準操作画面（タイマー稼働中の＋／−・停止・タイム再入力）
+    // MARK: - 標準操作画面（タイマー稼働中の＋／−・停止・ヘルプメニュー＆担当指定・途中チェック操作）
     @ViewBuilder
     private var standardActionScrollView: some View {
         ScrollView {
             VStack(spacing: 6) {
                 // 通常操作モード
                 HStack {
-                    Text("\(item.displaySeatName)のタイマー操作")
+                    Text("\(liveItem.displaySeatName)のタイマー操作")
                         .font(.system(size: 12, weight: .heavy))
                     Spacer()
-                    Text("全体: \(item.totalSeconds / 60)分")
+                    Text("全体: \(liveItem.totalSeconds / 60)分")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.gray)
                 }
@@ -5405,10 +5751,175 @@ struct TimeActionSheet: View {
                 }
                 .buttonStyle(.plain)
                 
-                // ★ ② ヘルプ項目連動ボタン（シャンプー／チェック／コーミング等に連動。未指定時は非表示・同居絶対防止）
-                if !item.isNoHelpNeeded {
-                    let p = item.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !p.isEmpty {
+                // ★ ② 途中チェック（サブタイマー）セクション（設定されている場合のみ表示：担当者指定・募集・チェック完了・解除）
+                if let checkRem = currentCheckRemainingSeconds {
+                    VStack(spacing: 5) {
+                        HStack(alignment: .center) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "magnifyingglass")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(Color(hex: "#30D158"))
+                                Text("途中チェック")
+                                    .font(.system(size: 10, weight: .heavy))
+                                    .foregroundColor(Color(hex: "#A0E0B0"))
+                            }
+                            Spacer()
+                            Text(formatSeconds(checkRem))
+                                .font(.system(size: 14, weight: .black, design: .rounded))
+                                .monospacedDigit()
+                                .foregroundColor(Color(hex: "#30D158"))
+                        }
+                        
+                        // 途中チェック担当者の指名・変更ボタン
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                subMode = .selectCheckStaff
+                            }
+                        }) {
+                            HStack(spacing: 4) {
+                                if let cStaff = liveItem.checkStaff, !cStaff.isEmpty {
+                                    if cStaff == "募集中" {
+                                        Image(systemName: "megaphone.fill")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .foregroundColor(Color(hex: "#FF9F0A"))
+                                        Text("担当: 全員に募集中")
+                                            .font(.system(size: 10.5, weight: .heavy))
+                                            .foregroundColor(Color(hex: "#FFD60A"))
+                                    } else {
+                                        Image(systemName: "person.fill.checkmark")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .foregroundColor(Color(hex: "#30D158"))
+                                        Text("担当: \(cStaff == currentUserName ? "\(cStaff)(あなた)" : cStaff)")
+                                            .font(.system(size: 10.5, weight: .heavy))
+                                            .foregroundColor(.white)
+                                    }
+                                    Spacer()
+                                    Text("変更 >")
+                                        .font(.system(size: 9.5, weight: .bold))
+                                        .foregroundColor(Color(hex: "#8E8E93"))
+                                } else {
+                                    Image(systemName: "person.badge.plus")
+                                        .font(.system(size: 10.5, weight: .bold))
+                                    Text("チェック担当を指名・募集")
+                                        .font(.system(size: 10.5, weight: .heavy))
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 8.5, weight: .bold))
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(liveItem.checkStaff == nil ? Color(hex: "#FF9F0A").opacity(0.25) : Color.white.opacity(0.12))
+                            .foregroundColor(liveItem.checkStaff == nil ? Color(hex: "#FFD60A") : .white)
+                            .cornerRadius(7)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7)
+                                    .stroke(liveItem.checkStaff == nil ? Color(hex: "#FF9F0A").opacity(0.6) : Color.white.opacity(0.15), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        
+                        // 途中チェック完了（全体タイマー続行）ボタン
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            onCompleteSubCheck?()
+                            dismiss()
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 11, weight: .bold))
+                                Text("途中チェック完了（タイマー続行）")
+                                    .font(.system(size: 10.5, weight: .heavy))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(Color(hex: "#30D158").opacity(0.25))
+                            .foregroundColor(Color(hex: "#30D158"))
+                            .cornerRadius(7)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7)
+                                    .stroke(Color(hex: "#30D158").opacity(0.6), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(7)
+                    .background(Color(hex: "#30D158").opacity(0.10))
+                    .cornerRadius(9)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9)
+                            .stroke(Color(hex: "#30D158").opacity(0.35), lineWidth: 1)
+                    )
+                }
+                
+                // ★ ③ 本番ヘルプ（メニュー選択 ＆ 担当者指名 ＆ 切り上げ実行）セクション
+                if liveItem.isNoHelpNeeded {
+                    // ヘルプなし（一人施術）設定中
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            subMode = .selectHelpProcess
+                        }
+                    }) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "person.fill")
+                                .font(.system(size: 11))
+                            Text("👤 ヘルプなし（一人施術）")
+                                .font(.system(size: 11, weight: .bold))
+                            Spacer()
+                            Text("変更 >")
+                                .font(.system(size: 9.5, weight: .bold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 7)
+                        .background(Color.white.opacity(0.08))
+                        .foregroundColor(Color(hex: "#C0C0C8"))
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    let p = liveItem.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if p.isEmpty {
+                        // ★ メニュー未選択時: 勝手に「シャンプーに入る」にせず、メニュー（シャンプー/コーミング/チェック/その他）と担当を選べるボタンを表示！
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                subMode = .selectHelpProcess
+                            }
+                        }) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "person.crop.circle.badge.plus")
+                                        .font(.system(size: 12, weight: .bold))
+                                    Text("メニュー・ヘルプ担当を指定")
+                                        .font(.system(size: 11.5, weight: .heavy))
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 9, weight: .bold))
+                                }
+                                Text("シャンプー / コーミング / チェック / その他")
+                                    .font(.system(size: 8.5, weight: .medium))
+                                    .foregroundColor(Color.white.opacity(0.75))
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 8)
+                            .background(Color(hex: "#FF9F0A").opacity(0.22))
+                            .foregroundColor(Color(hex: "#FFD60A"))
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color(hex: "#FF9F0A").opacity(0.65), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        // ★ メニュー選択済み時: ①そのメニューに入るボタン ＋ ②メニュー・担当者の確認＆変更ボタン
                         if p == "チェック" {
                             Button(action: {
                                 WKInterfaceDevice.current().play(.click)
@@ -5436,7 +5947,7 @@ struct TimeActionSheet: View {
                             }
                             .buttonStyle(.plain)
                         } else {
-                            let iconName = (p == "コーミング") ? "comb.fill" : "drop.fill"
+                            let iconName = (p == "コーミング") ? "comb.fill" : ((p == "その他") ? "ellipsis.circle.fill" : "drop.fill")
                             Button(action: {
                                 WKInterfaceDevice.current().play(.click)
                                 onEnterHelp?()
@@ -5463,10 +5974,58 @@ struct TimeActionSheet: View {
                             }
                             .buttonStyle(.plain)
                         }
+                        
+                        // 現在選択中のメニュー＆担当者バッジ（タップでメニュー・担当者を変更可能）
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            selectedProcess = p
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                subMode = .selectHelpProcess
+                            }
+                        }) {
+                            HStack(spacing: 5) {
+                                if liveItem.isRecruiting {
+                                    Image(systemName: "megaphone.fill")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(Color(hex: "#FF9F0A"))
+                                    Text("\(p): 全員に募集中")
+                                        .font(.system(size: 11, weight: .heavy))
+                                        .foregroundColor(Color(hex: "#FFD60A"))
+                                } else if let staff = liveItem.shampooStaff, !staff.isEmpty {
+                                    Image(systemName: "person.fill.checkmark")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(Color(hex: "#0A84FF"))
+                                    Text("\(p): \(staff == currentUserName ? "\(staff)(あなた)" : staff)")
+                                        .font(.system(size: 11, weight: .heavy))
+                                        .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : .white)
+                                } else {
+                                    Image(systemName: "person.badge.plus")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(Color(hex: "#FFD60A"))
+                                    Text("\(p): 担当未定")
+                                        .font(.system(size: 11, weight: .heavy))
+                                        .foregroundColor(Color(hex: "#FFD60A"))
+                                }
+                                Spacer()
+                                Text("メニュー・担当変更 >")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(Color(hex: "#8E8E93"))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 7)
+                            .background(liveItem.isRecruiting ? Color(hex: "#FF9F0A").opacity(0.18) : Color.white.opacity(0.10))
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(liveItem.isRecruiting ? Color(hex: "#FF9F0A").opacity(0.6) : Color.white.opacity(0.18), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 
-                // ③ +1分, +3分, +5分（何回も押せる！dismissしない）
+                // ④ +1分, +3分, +5分（何回も押せる！dismissしない）
                 HStack(spacing: 5) {
                     Button(action: {
                         accumulatedDelta += 60
@@ -5511,7 +6070,7 @@ struct TimeActionSheet: View {
                     .buttonStyle(.plain)
                 }
                 
-                // ③ -30秒, +30秒（何回も押せる！dismissしない）
+                // ④ -30秒, +30秒（何回も押せる！dismissしない）
                 HStack(spacing: 5) {
                     Button(action: {
                         accumulatedDelta -= 30
@@ -5545,7 +6104,7 @@ struct TimeActionSheet: View {
                 Divider()
                     .padding(.vertical, 1)
                 
-                // ★ ④ 一番下: 追加タイムを押すと「確定」に変わる！（黄色）
+                // ★ ⑤ 一番下: 追加タイムを押すと「確定」に変わる！（黄色）
                 if accumulatedDelta != 0 {
                     HStack(spacing: 5) {
                         // 取り消し・リセットボタン
@@ -5591,7 +6150,7 @@ struct TimeActionSheet: View {
                     Button(action: {
                         crownSeconds = 0.0
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            isReinputMode = true
+                            subMode = .reinput
                         }
                     }) {
                         HStack(spacing: 6) {
@@ -5609,6 +6168,477 @@ struct TimeActionSheet: View {
                     }
                     .buttonStyle(.plain)
                 }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+        }
+    }
+    
+    // MARK: - ★ シート内サブ画面1: 本番ヘルプのメニュー（工程）選択画面
+    @ViewBuilder
+    private var selectHelpProcessScrollView: some View {
+        ScrollView {
+            VStack(spacing: 7) {
+                HStack {
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            subMode = .standard
+                        }
+                    }) {
+                        HStack(spacing: 2) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("戻る")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .foregroundColor(Color(hex: "#0A84FF"))
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                    Text("メニュー選択")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundColor(.white)
+                    Spacer()
+                }
+                .padding(.horizontal, 4)
+                
+                Text("工程を選んで担当者または募集を指定")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundColor(.gray)
+                
+                Divider()
+                
+                ForEach(processOptions, id: \.name) { proc in
+                    let isCurrent = (liveItem.helpProcess == proc.name && !liveItem.isNoHelpNeeded)
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        selectedProcess = proc.name
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            subMode = .selectHelpStaff
+                        }
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: proc.icon)
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(Color(hex: proc.color))
+                                .frame(width: 20)
+                            
+                            Text(proc.name)
+                                .font(.system(size: 13.5, weight: .heavy))
+                            
+                            Spacer()
+                            
+                            if isCurrent {
+                                Text("選択中")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(Color(hex: "#FFD60A"))
+                            }
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.gray)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(isCurrent ? Color(hex: "#0A84FF").opacity(0.25) : Color.white.opacity(0.12))
+                        .foregroundColor(.white)
+                        .cornerRadius(9)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9)
+                                .stroke(isCurrent ? Color(hex: "#0A84FF") : Color.clear, lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                Divider()
+                
+                // ヘルプなし（一人で施術）ボタン
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    liveItem.helpProcess = ""
+                    liveItem.shampooStaff = nil
+                    liveItem.isRecruiting = false
+                    liveItem.isNoHelpNeeded = true
+                    onSetNoHelp?()
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        subMode = .standard
+                    }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 12, weight: .bold))
+                        Text("ヘルプなし（一人で施術）")
+                            .font(.system(size: 11.5, weight: .bold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.10))
+                    .foregroundColor(Color(hex: "#C0C0C8"))
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                
+                if !liveItem.helpProcess.isEmpty || liveItem.shampooStaff != nil || liveItem.isRecruiting || liveItem.isNoHelpNeeded {
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        liveItem.helpProcess = ""
+                        liveItem.shampooStaff = nil
+                        liveItem.isRecruiting = false
+                        liveItem.isNoHelpNeeded = false
+                        onClearHelp?()
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            subMode = .standard
+                        }
+                    }) {
+                        Text("指定を解除（未定に戻す）")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(0.06))
+                            .foregroundColor(.gray)
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+        }
+    }
+    
+    // MARK: - ★ シート内サブ画面2: 本番ヘルプの担当者・全員募集の選択画面
+    @ViewBuilder
+    private var selectHelpStaffScrollView: some View {
+        ScrollView {
+            VStack(spacing: 7) {
+                HStack {
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            subMode = .selectHelpProcess
+                        }
+                    }) {
+                        HStack(spacing: 2) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("工程へ")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .foregroundColor(Color(hex: "#0A84FF"))
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                    Text("【\(selectedProcess)】の担当")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundColor(.white)
+                    Spacer()
+                }
+                .padding(.horizontal, 4)
+                
+                Divider()
+                
+                // ① 全員に募集する
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    liveItem.helpProcess = selectedProcess
+                    liveItem.shampooStaff = nil
+                    liveItem.isRecruiting = true
+                    liveItem.isNoHelpNeeded = false
+                    onRecruitHelp?(selectedProcess)
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        subMode = .standard
+                    }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "megaphone.fill")
+                            .font(.system(size: 12, weight: .heavy))
+                        Text("全員に募集する")
+                            .font(.system(size: 12.5, weight: .black))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(
+                        LinearGradient(colors: [Color(hex: "#FF9F0A"), Color(hex: "#FF8000")], startPoint: .leading, endPoint: .trailing)
+                    )
+                    .foregroundColor(.black)
+                    .cornerRadius(8)
+                    .shadow(color: Color(hex: "#FF9F0A").opacity(0.4), radius: 2, x: 0, y: 1)
+                }
+                .buttonStyle(.plain)
+                
+                // ② 自分が担当する
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    liveItem.helpProcess = selectedProcess
+                    liveItem.shampooStaff = currentUserName
+                    liveItem.isRecruiting = false
+                    liveItem.isNoHelpNeeded = false
+                    onAssignHelp?(selectedProcess, currentUserName)
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        subMode = .standard
+                    }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.fill.checkmark")
+                            .font(.system(size: 12, weight: .heavy))
+                        Text("自分が担当する")
+                            .font(.system(size: 12.5, weight: .heavy))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "#30D158"))
+                    .foregroundColor(.black)
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                
+                // ③ 個別スタッフを指名
+                Text("スタッフを指名（相手に通知）")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(Color(hex: "#A0A0A5"))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 2)
+                
+                if staffCandidates.isEmpty {
+                    VStack(spacing: 4) {
+                        Image(systemName: "person.crop.circle.badge.plus")
+                            .font(.system(size: 20))
+                            .foregroundColor(Color(hex: "#0A84FF"))
+                        Text("📱 スマホの共有コードでメンバーを連携するとスタッフ一覧が表示されます")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 6)
+                    .background(Color.white.opacity(0.06))
+                    .cornerRadius(8)
+                } else {
+                    ForEach(staffCandidates, id: \.self) { staff in
+                        let isMe = (staff == currentUserName)
+                        let isSelected = (liveItem.shampooStaff == staff && liveItem.helpProcess == selectedProcess)
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            liveItem.helpProcess = selectedProcess
+                            liveItem.shampooStaff = staff
+                            liveItem.isRecruiting = false
+                            liveItem.isNoHelpNeeded = false
+                            onAssignHelp?(selectedProcess, staff)
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                subMode = .standard
+                            }
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: isMe ? "star.fill" : "person.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
+                                Text(isMe ? "\(staff)（あなた）" : staff)
+                                    .font(.system(size: 12, weight: isMe ? .heavy : .bold))
+                                Spacer()
+                                if isSelected {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundColor(Color(hex: "#30D158"))
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(isSelected ? Color(hex: "#30D158").opacity(0.2) : (isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12)))
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(isSelected ? Color(hex: "#30D158").opacity(0.6) : (isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1)), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+        }
+    }
+    
+    // MARK: - ★ シート内サブ画面3: 途中チェック（サブタイマー）の担当者・募集選択画面
+    @ViewBuilder
+    private var selectCheckStaffScrollView: some View {
+        ScrollView {
+            VStack(spacing: 7) {
+                HStack {
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            subMode = .standard
+                        }
+                    }) {
+                        HStack(spacing: 2) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("戻る")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .foregroundColor(Color(hex: "#30D158"))
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                    Text("途中チェック担当")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundColor(.white)
+                    Spacer()
+                }
+                .padding(.horizontal, 4)
+                
+                Divider()
+                
+                // ① 全員に募集する
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    liveItem.checkStaff = "募集中"
+                    onRecruitCheckStaff?()
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        subMode = .standard
+                    }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "megaphone.fill")
+                            .font(.system(size: 12, weight: .heavy))
+                        Text("全員に募集する")
+                            .font(.system(size: 12.5, weight: .black))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(
+                        LinearGradient(colors: [Color(hex: "#FF9F0A"), Color(hex: "#FF8000")], startPoint: .leading, endPoint: .trailing)
+                    )
+                    .foregroundColor(.black)
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                
+                // ② 自分がチェックする
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    liveItem.checkStaff = currentUserName
+                    onAssignCheckStaff?(currentUserName)
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        subMode = .standard
+                    }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.fill.checkmark")
+                            .font(.system(size: 12, weight: .heavy))
+                        Text("自分がチェックする")
+                            .font(.system(size: 12.5, weight: .heavy))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "#30D158"))
+                    .foregroundColor(.black)
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                
+                // ③ 個別スタッフを指名
+                Text("スタッフを指名（相手に通知）")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(Color(hex: "#A0A0A5"))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 2)
+                
+                if staffCandidates.isEmpty {
+                    VStack(spacing: 4) {
+                        Image(systemName: "person.crop.circle.badge.plus")
+                            .font(.system(size: 20))
+                            .foregroundColor(Color(hex: "#0A84FF"))
+                        Text("📱 スマホの共有コードでメンバーを連携するとスタッフ一覧が表示されます")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 6)
+                    .background(Color.white.opacity(0.06))
+                    .cornerRadius(8)
+                } else {
+                    ForEach(staffCandidates, id: \.self) { staff in
+                        let isMe = (staff == currentUserName)
+                        let isSelected = (liveItem.checkStaff == staff)
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            liveItem.checkStaff = staff
+                            onAssignCheckStaff?(staff)
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                subMode = .standard
+                            }
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: isMe ? "star.fill" : "person.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
+                                Text(isMe ? "\(staff)（あなた）" : staff)
+                                    .font(.system(size: 12, weight: isMe ? .heavy : .bold))
+                                Spacer()
+                                if isSelected {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundColor(Color(hex: "#30D158"))
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(isSelected ? Color(hex: "#30D158").opacity(0.2) : (isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12)))
+                            .foregroundColor(.white)
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(isSelected ? Color(hex: "#30D158").opacity(0.6) : (isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1)), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                
+                if liveItem.checkStaff != nil {
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        liveItem.checkStaff = nil
+                        onClearCheckStaff?()
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            subMode = .standard
+                        }
+                    }) {
+                        Text("担当を未定に戻す")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(0.08))
+                            .foregroundColor(.gray)
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    onCancelSubCheck?()
+                    dismiss()
+                }) {
+                    Text("途中チェックタイマーを解除")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(Color(hex: "#FF453A").opacity(0.15))
+                        .foregroundColor(Color(hex: "#FF6961"))
+                        .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
@@ -5931,6 +6961,16 @@ struct CrownMinSecPicker: View {
         .onAppear {
             syncFromTotal(totalSeconds)
             focusedUnit = .minute
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                if focusedUnit == nil {
+                    focusedUnit = .minute
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+                if focusedUnit == nil {
+                    focusedUnit = .minute
+                }
+            }
         }
         .onChange(of: minuteValue) { _, newValue in
             let m = min(maxMinutes, max(0, Int(newValue.rounded())))
@@ -6369,6 +7409,8 @@ struct SelectHelpWorkflowSheet: View {
     let staffCandidates: [String]
     let onAssignStaff: (String, String) -> Void // (工程, スタッフ名) -> 相手に通知
     let onRecruitAll: (String) -> Void          // (工程) -> 全員に通知
+    var onSetNoHelp: (() -> Void)? = nil        // ヘルプなし（一人で施術）
+    var onClearHelp: (() -> Void)? = nil        // 指定を解除
     
     // ステップ管理: 0 = 工程選択, 1 = スタッフ指定/募集
     @State private var currentStep: Int = 0
@@ -6391,7 +7433,7 @@ struct SelectHelpWorkflowSheet: View {
                         Text("\(item.displaySeatName)のヘルプ工程")
                             .font(.system(size: 13, weight: .heavy))
                             .foregroundColor(.white)
-                        Text("依頼する工程を選択してください")
+                        Text("依頼するメニューを選択してください")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.gray)
                     }
@@ -6400,7 +7442,9 @@ struct SelectHelpWorkflowSheet: View {
                     Divider()
                     
                     ForEach(processOptions, id: \.name) { proc in
+                        let isCurrentProc = (item.helpProcess == proc.name && !item.isNoHelpNeeded)
                         Button(action: {
+                            WKInterfaceDevice.current().play(.click)
                             selectedProcess = proc.name
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                 currentStep = 1
@@ -6417,6 +7461,16 @@ struct SelectHelpWorkflowSheet: View {
                                 
                                 Spacer()
                                 
+                                if isCurrentProc {
+                                    Text("選択中")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .foregroundColor(Color(hex: proc.color))
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 2)
+                                        .background(Color(hex: proc.color).opacity(0.2))
+                                        .cornerRadius(4)
+                                }
+                                
                                 Image(systemName: "chevron.right")
                                     .font(.system(size: 10, weight: .bold))
                                     .foregroundColor(.gray)
@@ -6424,9 +7478,60 @@ struct SelectHelpWorkflowSheet: View {
                             .frame(maxWidth: .infinity)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 10)
-                            .background(Color.white.opacity(0.12))
+                            .background(isCurrentProc ? Color(hex: proc.color).opacity(0.18) : Color.white.opacity(0.12))
                             .foregroundColor(.white)
                             .cornerRadius(9)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 9)
+                                    .stroke(isCurrentProc ? Color(hex: proc.color).opacity(0.6) : Color.clear, lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    
+                    // ★ ヘルプなし（一人で施術）
+                    if let setNoHelp = onSetNoHelp {
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            setNoHelp()
+                            dismiss()
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "person.fill.checkmark")
+                                    .font(.system(size: 12, weight: .bold))
+                                Text("ヘルプなし（一人で施術）")
+                                    .font(.system(size: 12, weight: .bold))
+                                Spacer()
+                                if item.isNoHelpNeeded {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(Color(hex: "#30D158"))
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .background(item.isNoHelpNeeded ? Color(hex: "#30D158").opacity(0.2) : Color.white.opacity(0.08))
+                            .foregroundColor(item.isNoHelpNeeded ? Color(hex: "#30D158") : Color(hex: "#E0E0E5"))
+                            .cornerRadius(9)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    
+                    // ★ 指定を解除（未選択に戻す）
+                    if let clearHelp = onClearHelp, (!item.helpProcess.isEmpty || item.shampooStaff != nil || item.isRecruiting || item.isNoHelpNeeded) {
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            clearHelp()
+                            dismiss()
+                        }) {
+                            Text("指定を解除（未選択に戻す）")
+                                .font(.system(size: 10.5, weight: .medium))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
+                                .background(Color.white.opacity(0.06))
+                                .foregroundColor(Color(hex: "#FF453A"))
+                                .cornerRadius(7)
                         }
                         .buttonStyle(.plain)
                     }
@@ -6440,22 +7545,25 @@ struct SelectHelpWorkflowSheet: View {
                                     currentStep = 0
                                 }
                             }) {
-                                Image(systemName: "chevron.left")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundColor(Color(hex: "#0A84FF"))
+                                HStack(spacing: 2) {
+                                    Image(systemName: "chevron.left")
+                                    Text("工程へ")
+                                }
+                                .font(.system(size: 10.5, weight: .bold))
+                                .foregroundColor(Color(hex: "#0A84FF"))
                             }
                             .buttonStyle(.plain)
                             
                             Spacer()
                             
-                            Text("【\(selectedProcess)】の依頼")
+                            Text("【\(selectedProcess)】の担当")
                                 .font(.system(size: 13, weight: .heavy))
                                 .foregroundColor(.white)
                             
                             Spacer()
                         }
                         
-                        Text("全員に募集、またはスタッフを指定")
+                        Text("全員に募集、または担当スタッフを指名")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.gray)
                     }
@@ -6464,6 +7572,7 @@ struct SelectHelpWorkflowSheet: View {
                     
                     // ★ ① 全員に募集する（目立つアンバーボタン・全員に通知）
                     Button(action: {
+                        WKInterfaceDevice.current().play(.click)
                         onRecruitAll(selectedProcess)
                         dismiss()
                     }) {
@@ -6484,51 +7593,81 @@ struct SelectHelpWorkflowSheet: View {
                     }
                     .buttonStyle(.plain)
                     
-                    // ★ ② 個別スタッフを指定する
-                    Text("スタッフを指定（相手に通知）")
+                    // ★ ② 自分が担当する（ショートカット）
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        onAssignStaff(selectedProcess, currentUserName)
+                        dismiss()
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "hand.raised.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(Color(hex: "#30D158"))
+                            Text("自分が担当する（\(currentUserName)）")
+                                .font(.system(size: 12, weight: .heavy))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                            Spacer()
+                            if item.shampooStaff == currentUserName && item.helpProcess == selectedProcess {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(Color(hex: "#30D158"))
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(Color(hex: "#30D158").opacity(0.18))
+                        .foregroundColor(.white)
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color(hex: "#30D158").opacity(0.5), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    
+                    // ★ ③ 個別スタッフを指名する
+                    Text("他のスタッフを指名（相手に通知）")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundColor(Color(hex: "#A0A0A5"))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 2)
                     
-                    if staffCandidates.isEmpty {
-                        // ★ メンバーが0人の場合の案内カード
+                    let otherCandidates = staffCandidates.filter { $0 != currentUserName }
+                    if otherCandidates.isEmpty {
+                        // ★ 他のメンバーが0人の場合の案内カード
                         VStack(spacing: 5) {
                             Image(systemName: "person.crop.circle.badge.plus")
-                                .font(.system(size: 24))
+                                .font(.system(size: 22))
                                 .foregroundColor(Color(hex: "#0A84FF"))
                                 .padding(.top, 2)
-                            Text("📱 スマホの共有コードでメンバーを連携してください")
-                                .font(.system(size: 10, weight: .bold))
+                            Text("📱 スマホの共有コードでメンバーを連携すると\n他のスタッフを指名できます")
+                                .font(.system(size: 9.5, weight: .bold))
                                 .foregroundColor(.white)
                                 .multilineTextAlignment(.center)
-                            Text("サロン画面の「メンバー」から共有コードで連携すると\nここに自動でスタッフが表示されます")
-                                .font(.system(size: 8.5))
-                                .foregroundColor(Color(hex: "#8E8E93"))
-                                .multilineTextAlignment(.center)
-                                .lineSpacing(2)
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
+                        .padding(.vertical, 8)
                         .padding(.horizontal, 6)
                         .background(Color.white.opacity(0.06))
                         .cornerRadius(8)
                     } else {
-                        ForEach(staffCandidates, id: \.self) { staff in
-                            let isMe = (staff == currentUserName)
-                            let isSelected = (item.shampooStaff == staff)
+                        ForEach(otherCandidates, id: \.self) { staff in
+                            let isSelected = (item.shampooStaff == staff && item.helpProcess == selectedProcess)
                             
                             Button(action: {
+                                WKInterfaceDevice.current().play(.click)
                                 onAssignStaff(selectedProcess, staff)
                                 dismiss()
                             }) {
                                 HStack(spacing: 6) {
-                                    Image(systemName: isMe ? "star.fill" : "person.fill")
+                                    Image(systemName: "person.fill")
                                         .font(.system(size: 11))
-                                        .foregroundColor(isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
+                                        .foregroundColor(Color(hex: "#0A84FF"))
                                     
-                                    Text(isMe ? "\(staff)（あなた）" : staff)
-                                        .font(.system(size: 12, weight: isMe ? .heavy : .bold))
+                                    Text(staff)
+                                        .font(.system(size: 12, weight: .bold))
                                     
                                     Spacer()
                                     
@@ -6541,12 +7680,12 @@ struct SelectHelpWorkflowSheet: View {
                                 .frame(maxWidth: .infinity)
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 7)
-                                .background(isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12))
+                                .background(isSelected ? Color(hex: "#0A84FF").opacity(0.22) : Color.white.opacity(0.12))
                                 .foregroundColor(.white)
                                 .cornerRadius(8)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8)
-                                        .stroke(isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
+                                        .stroke(isSelected ? Color(hex: "#0A84FF").opacity(0.6) : Color.white.opacity(0.1), lineWidth: 1)
                                 )
                             }
                             .buttonStyle(.plain)
@@ -6556,6 +7695,11 @@ struct SelectHelpWorkflowSheet: View {
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
+        }
+        .onAppear {
+            if !item.helpProcess.isEmpty && item.helpProcess != "ヘルプなし" {
+                selectedProcess = item.helpProcess
+            }
         }
     }
 }
@@ -6567,6 +7711,7 @@ struct SeatThumbnailMapSheet: View {
     let mainTimer: SeatTimerItem?
     let currentUserName: String
     let now: Date
+    var crownFocusTrigger: Int = 0
     let onSelectSeat: (SeatTimerItem) -> Void
     let onSelectMainTimer: () -> Void
     let onToggleMainTimer: () -> Void
@@ -6578,9 +7723,32 @@ struct SeatThumbnailMapSheet: View {
     var onClose: (() -> Void)? = nil
     var onAddSeat: (() -> Void)? = nil
     
+    // ★ 指でのドラッグ操作に加えて、Digital Crown（トグル）でも上下にスクロール移動できるようフォーカス＆ステップ管理
+    @FocusState private var isMapCrownFocused: Bool
+    @State private var crownValue: Double = 0.0
+    @State private var currentScrollStep: Int = 0
+    
     // 席番号順（1番席、2番席、3番席...）に整列して物理レイアウトと連動
     var physicalSortedTimers: [SeatTimerItem] {
         timers.sorted { $0.seatNumber < $1.seatNumber }
+    }
+    
+    // 2列ずつの行配列（Digital Crownでの行単位スクロールと指スクロールを両立）
+    var seatRows: [[SeatTimerItem]] {
+        let sorted = physicalSortedTimers
+        var rows: [[SeatTimerItem]] = []
+        var index = 0
+        while index < sorted.count {
+            let end = min(index + 2, sorted.count)
+            rows.append(Array(sorted[index..<end]))
+            index += 2
+        }
+        return rows
+    }
+    
+    // スクロール可能な最大ステップインデックス（0:ヘッダー, 1:メインタイマー, 2...N+1:客席行, N+2:下部追加ボタン）
+    var maxScrollStep: Int {
+        seatRows.count + 2
     }
     
     // サマリー集計（メインタイマーも稼働数に算入・超過カウントアップ中も稼働としてカウント）
@@ -6597,149 +7765,204 @@ struct SeatThumbnailMapSheet: View {
     }
     
     var body: some View {
-        ScrollView {
-            VStack(spacing: 7) {
-                // ① ヘッダー＆サマリーピルバー
-                VStack(spacing: 4) {
-                    HStack {
-                        Image(systemName: "square.grid.2x2.fill")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundColor(Color(hex: "#64D2FF"))
-                        Text("サロン客席マップ")
-                            .font(.system(size: 13, weight: .heavy))
-                            .foregroundColor(.white)
-                        Spacer()
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            if let onClose = onClose {
-                                onClose()
-                            } else {
-                                dismiss()
-                            }
-                        }) {
-                            HStack(spacing: 2) {
-                                Image(systemName: "list.bullet")
-                                    .font(.system(size: 9, weight: .bold))
-                                Text("リスト")
-                                    .font(.system(size: 9.5, weight: .bold))
-                            }
-                            .foregroundColor(Color(hex: "#64D2FF"))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2.5)
-                            .background(Color(hex: "#64D2FF").opacity(0.18))
-                            .cornerRadius(6)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    
-                    // 稼働サマリーピル（一目で状況把握）
-                    HStack(spacing: 5) {
-                        HStack(spacing: 3) {
-                            Circle()
-                                .fill(Color(hex: "#30D158"))
-                                .frame(width: 6, height: 6)
-                            Text("稼働:\(runningCount)")
-                                .font(.system(size: 10, weight: .heavy))
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 7) {
+                    // ① ヘッダー＆サマリーピルバー
+                    VStack(spacing: 4) {
+                        HStack {
+                            Image(systemName: "square.grid.2x2.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(Color(hex: "#64D2FF"))
+                            Text("サロン客席マップ")
+                                .font(.system(size: 13, weight: .heavy))
                                 .foregroundColor(.white)
+                            Spacer()
+                            Button(action: {
+                                WKInterfaceDevice.current().play(.click)
+                                if let onClose = onClose {
+                                    onClose()
+                                } else {
+                                    dismiss()
+                                }
+                            }) {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "list.bullet")
+                                        .font(.system(size: 9, weight: .bold))
+                                    Text("リスト")
+                                        .font(.system(size: 9.5, weight: .bold))
+                                }
+                                .foregroundColor(Color(hex: "#64D2FF"))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2.5)
+                                .background(Color(hex: "#64D2FF").opacity(0.18))
+                                .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.white.opacity(0.12))
-                        .cornerRadius(5)
                         
-                        if recruitingCount > 0 {
+                        // 稼働サマリーピル（一目で状況把握）
+                        HStack(spacing: 5) {
                             HStack(spacing: 3) {
-                                Image(systemName: "megaphone.fill")
-                                    .font(.system(size: 8))
-                                    .foregroundColor(Color(hex: "#FF9F0A"))
-                                Text("募集:\(recruitingCount)")
+                                Circle()
+                                    .fill(Color(hex: "#30D158"))
+                                    .frame(width: 6, height: 6)
+                                Text("稼働:\(runningCount)")
                                     .font(.system(size: 10, weight: .heavy))
-                                    .foregroundColor(Color(hex: "#FFD60A"))
+                                    .foregroundColor(.white)
                             }
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color(hex: "#FF9F0A").opacity(0.25))
+                            .background(Color.white.opacity(0.12))
                             .cornerRadius(5)
+                            
+                            if recruitingCount > 0 {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "megaphone.fill")
+                                        .font(.system(size: 8))
+                                        .foregroundColor(Color(hex: "#FF9F0A"))
+                                    Text("募集:\(recruitingCount)")
+                                        .font(.system(size: 10, weight: .heavy))
+                                        .foregroundColor(Color(hex: "#FFD60A"))
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color(hex: "#FF9F0A").opacity(0.25))
+                                .cornerRadius(5)
+                            }
+                            
+                            HStack(spacing: 2) {
+                                Text("⏸ 停止:\(pausedCount)")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundColor(Color(hex: "#8E8E93"))
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.white.opacity(0.08))
+                            .cornerRadius(5)
+                            
+                            Spacer()
                         }
-                        
-                        HStack(spacing: 2) {
-                            Text("⏸ 停止:\(pausedCount)")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundColor(Color(hex: "#8E8E93"))
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.white.opacity(0.08))
-                        .cornerRadius(5)
-                        
-                        Spacer()
                     }
+                    .padding(.horizontal, 4)
+                    .id("map_step_0")
+                    
+                    // ★ メインタイマー専用カード（上段にフルタイトル・下段に特大タイマー時間・タップで詳細シート）
+                    if let main = mainTimer {
+                        ThumbnailMainTimerCard(
+                            item: main,
+                            now: now,
+                            onTap: {
+                                onSelectMainTimer()
+                            }
+                        )
+                        .id("map_step_1")
+                    }
+                    
+                    Divider()
+                    
+                    // ② 2列サムネイルグリッド（客席タイマー群：指スクロール＋Digital Crown上下スクロール両対応）
+                    VStack(spacing: 6) {
+                        ForEach(Array(seatRows.enumerated()), id: \.offset) { rowIdx, rowItems in
+                            HStack(spacing: 6) {
+                                ForEach(rowItems) { item in
+                                    Button(action: {
+                                        WKInterfaceDevice.current().play(.click)
+                                        onSelectSeat(item)
+                                    }) {
+                                        ThumbnailSeatCard(
+                                            item: item,
+                                            currentUserName: currentUserName,
+                                            now: now
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .frame(maxWidth: .infinity)
+                                }
+                                if rowItems.count == 1 {
+                                    Color.clear
+                                        .frame(maxWidth: .infinity)
+                                }
+                            }
+                            .id("map_step_\(rowIdx + 2)")
+                            .onAppear {
+                                currentScrollStep = rowIdx + 2
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                    
+                    VStack(spacing: 6) {
+                        Text("※タップで操作 / リューズまたは指で上下移動")
+                            .font(.system(size: 8.5, weight: .medium))
+                            .foregroundColor(Color(hex: "#8E8E93"))
+                            .padding(.top, 4)
+                        
+                        if let onAddSeat = onAddSeat {
+                            Button(action: {
+                                WKInterfaceDevice.current().play(.click)
+                                onAddSeat()
+                            }) {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "plus.circle.fill")
+                                        .font(.system(size: 13, weight: .bold))
+                                    Text("新しい席を追加")
+                                        .font(.system(size: 12, weight: .bold))
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(Color(hex: "#0A84FF").opacity(0.18))
+                                .foregroundColor(Color(hex: "#0A84FF"))
+                                .cornerRadius(9)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 9)
+                                        .stroke(Color(hex: "#0A84FF").opacity(0.4), lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.top, 2)
+                        }
+                    }
+                    .id("map_step_\(maxScrollStep)")
                 }
                 .padding(.horizontal, 4)
-                
-                // ★ メインタイマー専用カード（上段にフルタイトル・下段に特大タイマー時間・タップで詳細シート）
-                if let main = mainTimer {
-                    ThumbnailMainTimerCard(
-                        item: main,
-                        now: now,
-                        onTap: {
-                            onSelectMainTimer()
-                        }
-                    )
+                .padding(.vertical, 4)
+            }
+            .focusable()
+            .focused($isMapCrownFocused)
+            .digitalCrownRotation(
+                $crownValue,
+                from: -10000.0,
+                through: 10000.0,
+                by: 1.0,
+                sensitivity: .low,
+                isContinuous: true,
+                isHapticFeedbackEnabled: true
+            )
+            .onChange(of: crownValue) { oldVal, newVal in
+                let delta = Int(newVal.rounded()) - Int(oldVal.rounded())
+                guard delta != 0 else { return }
+                let direction = delta > 0 ? 1 : -1
+                let nextStep = min(maxScrollStep, max(0, currentScrollStep + direction))
+                if nextStep != currentScrollStep {
+                    currentScrollStep = nextStep
                 }
-                
-                Divider()
-                
-                // ② 2列サムネイルグリッド（客席タイマー群）
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
-                    ForEach(physicalSortedTimers) { item in
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            onSelectSeat(item)
-                        }) {
-                            ThumbnailSeatCard(
-                                item: item,
-                                currentUserName: currentUserName,
-                                now: now
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 2)
-                
-                Text("※タップすると席のタイマー操作が開きます")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(Color(hex: "#8E8E93"))
-                    .padding(.top, 4)
-                
-                if let onAddSeat = onAddSeat {
-                    Button(action: {
-                        WKInterfaceDevice.current().play(.click)
-                        onAddSeat()
-                    }) {
-                        HStack(spacing: 5) {
-                            Image(systemName: "plus.circle.fill")
-                                .font(.system(size: 13, weight: .bold))
-                            Text("新しい席を追加")
-                                .font(.system(size: 12, weight: .bold))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(Color(hex: "#0A84FF").opacity(0.18))
-                        .foregroundColor(Color(hex: "#0A84FF"))
-                        .cornerRadius(9)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 9)
-                                .stroke(Color(hex: "#0A84FF").opacity(0.4), lineWidth: 1)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.top, 2)
+                let anchor: UnitPoint = nextStep == 0 ? .top : (nextStep >= maxScrollStep ? .bottom : .center)
+                withAnimation(.easeOut(duration: 0.16)) {
+                    proxy.scrollTo("map_step_\(nextStep)", anchor: anchor)
                 }
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 4)
+            .onAppear {
+                isMapCrownFocused = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    isMapCrownFocused = true
+                }
+            }
+            .onChange(of: crownFocusTrigger) { _, _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    isMapCrownFocused = true
+                }
+            }
         }
     }
 }
@@ -7082,6 +8305,7 @@ struct ThumbnailSeatCard: View {
                 }
                 
                 // ② ヘルプ担当（アシスタント / 一人施術 / 募集中）
+                let procPrefix = (item.helpProcess.isEmpty || item.helpProcess == "ヘルプなし") ? "助" : item.helpProcess
                 HStack(spacing: 2) {
                     if item.isNoHelpNeeded {
                         Image(systemName: "person.fill")
@@ -7100,7 +8324,7 @@ struct ThumbnailSeatCard: View {
                         Image(systemName: "megaphone.fill")
                             .font(.system(size: 6.5))
                             .foregroundColor(Color(hex: "#FF9F0A"))
-                        Text("助:募集中")
+                        Text("\(procPrefix):募集中")
                             .font(.system(size: 8, weight: .heavy))
                             .foregroundColor(Color(hex: "#FFD60A"))
                             .lineLimit(1)
@@ -7108,17 +8332,17 @@ struct ThumbnailSeatCard: View {
                         Image(systemName: "hands.sparkles.fill")
                             .font(.system(size: 6.5))
                             .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
-                        Text("助:\(staff == currentUserName ? "あなた" : staff)")
+                        Text("\(procPrefix):\(staff == currentUserName ? "あなた" : staff)")
                             .font(.system(size: 8, weight: staff == currentUserName ? .heavy : .bold))
                             .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : Color(hex: "#64D2FF"))
                             .lineLimit(1)
                     } else if isRunning {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 6.5))
-                            .foregroundColor(Color(hex: "#FF453A"))
-                        Text("助:未定")
+                            .foregroundColor(Color(hex: "#FF9F0A"))
+                        Text("\(procPrefix):未定")
                             .font(.system(size: 8, weight: .bold))
-                            .foregroundColor(Color(hex: "#FF453A"))
+                            .foregroundColor(Color(hex: "#FF9F0A"))
                             .lineLimit(1)
                     } else {
                         Text("助:待機中")

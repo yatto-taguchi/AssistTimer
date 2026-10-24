@@ -243,9 +243,9 @@ export const formatSeatsPayload = (seatsList) => {
         targetEndTimestamp: targetEnd,
         isRunning: isRunning,
         pausedRemainingSeconds: pausedRem,
-        helpProcess: (isZero || isCollapsedSeat) ? '' : (actionInfo ? actionInfo.label : (s.helpProcess || 'シャンプー')),
+        helpProcess: (isZero || isCollapsedSeat || isNoHelp) ? '' : (actionInfo ? actionInfo.label : (s.helpProcess || (s.assistantStaffName ? 'シャンプー' : ''))),
         shampooStaff: (isNoHelp || isZero || isCollapsedSeat) ? '' : (s.assistantStaffName || ''),
-        isRecruiting: !isNoHelp && !isZero && !isCollapsedSeat && !s.assistantStaffName && isRunning,
+        isRecruiting: !isNoHelp && !isZero && !isCollapsedSeat && !!s.isRecruiting && !s.assistantStaffName && isRunning,
         isNoHelpNeeded: isNoHelp,
         status: (isZero || isCollapsedSeat) ? 'normal' : (actionInfo ? actionInfo.id : 'normal'),
         checkTargetSeconds: s.checkTargetSeconds ? Number(s.checkTargetSeconds) : 0,
@@ -1428,25 +1428,46 @@ export default function SalonWorkScreen() {
           case 'ASSIGN_HELP': {
             const hasCheckStaff = extra?.checkStaffName !== undefined;
             const hasAssistantStaff = extra?.assistantStaffName !== undefined;
+            const isSubCheckOnly = extra?.isSubCheck === true || (hasCheckStaff && !hasAssistantStaff);
             const rawStaff = hasCheckStaff ? extra.checkStaffName : (hasAssistantStaff ? extra.assistantStaffName : watchUser);
             const staff = (rawStaff !== undefined && rawStaff !== null) ? rawStaff : '';
-            const process = extra?.helpProcess || 'シャンプー';
+            if (isSubCheckOnly) {
+              return {
+                ...s,
+                checkStaffName: staff,
+              };
+            }
+            const process = extra?.helpProcess ?? '';
+            if (staff === 'ヘルプなし' || staff === 'none' || process === 'ヘルプなし') {
+              return {
+                ...s,
+                isRecruiting: false,
+                assistantStaffName: 'ヘルプなし',
+                helpProcess: '',
+                actionStatus: null,
+                isShampooing: false,
+              };
+            }
             const matchedInfo = getActionStatusInfo(process, process === 'シャンプー' || process === 'shampoo');
-            const canonicalStatus = matchedInfo ? matchedInfo.id : 'shampoo';
+            const canonicalStatus = matchedInfo ? matchedInfo.id : (process ? 'shampoo' : null);
             const isCheck = canonicalStatus === 'check';
             return {
               ...s,
               isRecruiting: false,
-              ...(isCheck
-                ? { checkStaffName: staff }
-                : {
-                    assistantStaffName: staff,
-                    actionStatus: canonicalStatus,
-                    isShampooing: canonicalStatus === 'shampoo',
-                  }),
+              helpProcess: process,
+              assistantStaffName: staff,
+              actionStatus: canonicalStatus,
+              isShampooing: canonicalStatus === 'shampoo',
+              ...(isCheck ? { checkStaffName: staff } : {}),
             };
           }
           case 'RECRUIT_HELP': {
+            if (extra?.isSubCheck === true) {
+              return {
+                ...s,
+                checkStaffName: '',
+              };
+            }
             const process = extra?.helpProcess || s.helpProcess || s.actionStatus || 'シャンプー';
             const matchedInfo = getActionStatusInfo(process, process === 'シャンプー' || process === 'shampoo');
             const canonicalStatus = matchedInfo ? matchedInfo.id : 'shampoo';
@@ -1454,8 +1475,9 @@ export default function SalonWorkScreen() {
             return {
               ...s,
               isRecruiting: true,
+              helpProcess: process,
               ...(isCheck
-                ? { checkStaffName: '' }
+                ? { checkStaffName: '', assistantStaffName: '', actionStatus: canonicalStatus, isShampooing: false }
                 : {
                     assistantStaffName: '',
                     actionStatus: canonicalStatus,
@@ -1608,6 +1630,11 @@ export default function SalonWorkScreen() {
               targetEndTimestamp: targetEnd,
               pausedRemainingSeconds: null,
               colorStaffName: watchUser || s.colorStaffName,
+              assistantStaffName: '',
+              helpProcess: '',
+              actionStatus: null,
+              isShampooing: false,
+              isRecruiting: false,
               // ★ Watch から指定された途中チェック（サブタイマー）を反映
               checkTargetSeconds: checkSec,
               checkInitialMinutes: checkSec ? Math.round(checkSec / 60) : null,
@@ -1664,6 +1691,8 @@ export default function SalonWorkScreen() {
             return {
               ...s,
               assistantStaffName: '',
+              helpProcess: '',
+              isRecruiting: false,
               checkStaffName: '',
               isShampooing: false,
               actionStatus: null,
@@ -3067,6 +3096,9 @@ export default function SalonWorkScreen() {
             colorStaffName: userName || 'スタイリスト',
             // ★ 新しく測る時は前の施術のヘルプを勝手に引き継がない
             assistantStaffName: (modalAssistantStaff || '').trim() || '',
+            actionStatus: null,
+            helpProcess: (modalAssistantStaff && modalAssistantStaff !== 'ヘルプなし' && modalAssistantStaff !== 'none') ? 'シャンプー' : '',
+            isRecruiting: false,
             isShampooing: false,
             targetSeconds: targetSec,
             initialMinutes: mins > 0 ? mins : Math.round(targetSec / 60),
@@ -3174,6 +3206,9 @@ export default function SalonWorkScreen() {
           colorStaffName: userName || 'スタイリスト',
           // ★ 新規開始時はモーダルの指定がなければ空文字
           assistantStaffName: (modalAssistantStaff || '').trim() || '',
+          actionStatus: null,
+          helpProcess: (modalAssistantStaff && modalAssistantStaff !== 'ヘルプなし' && modalAssistantStaff !== 'none') ? 'シャンプー' : '',
+          isRecruiting: false,
           isShampooing: false,
           targetSeconds: targetSec,
           initialMinutes: mins > 0 ? mins : Math.round(targetSec / 60),
