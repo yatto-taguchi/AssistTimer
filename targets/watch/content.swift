@@ -3469,17 +3469,17 @@ struct MainTimerCard: View {
                 expandedMainCardView
             }
         }
-        .onChange(of: item.isRunning) { running in
+        .onChange(of: item.isRunning) { _, running in
             if running {
                 isManuallyExpanded = false
             }
         }
-        .onChange(of: item.isPreCountingDown) { pre in
+        .onChange(of: item.isPreCountingDown) { _, pre in
             if pre {
                 isManuallyExpanded = false
             }
         }
-        .onChange(of: item.isZero) { zero in
+        .onChange(of: item.isZero) { _, zero in
             if zero {
                 isManuallyExpanded = false
             }
@@ -4851,393 +4851,12 @@ struct MainTimerActionSheet: View {
     private var standardMainActionScrollView: some View {
         ScrollView {
             VStack(spacing: 7) {
-                // ① ナビゲーションバー
-                HStack {
-                    HStack(spacing: 4) {
-                        Image(systemName: "stopwatch.fill")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundColor(Color(hex: "#30D158"))
-                        Text("メインタイマー")
-                            .font(.system(size: 13, weight: .heavy))
-                            .foregroundColor(.white)
-                    }
-                    Spacer()
-                    Button(action: {
-                        WKInterfaceDevice.current().play(.click)
-                        dismiss()
-                    }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 16))
-                            .foregroundColor(Color(hex: "#8E8E93"))
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 4)
-                
-                // ② 共有タイマーではない旨の注意書き
-                Text("※こちらは共有タイマーではありません")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(Color(hex: "#FFD60A").opacity(0.85))
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 3)
-                    .padding(.horizontal, 6)
-                    .background(Color.white.opacity(0.06))
-                    .cornerRadius(4)
-                
-                // ③ 巨大タイマー表示 ＆ 状態（★稼働中・一時停止中もDigital Crownトグルで分・秒を直接調整可能！）
-                VStack(spacing: 2) {
-                    if isOvertime && accumulatedDelta <= 0 {
-                        Text("超過")
-                            .font(.system(size: 11, weight: .heavy))
-                            .foregroundColor(Color(hex: "#FF453A"))
-                        Text("+\(formatSeconds(currentSeconds))")
-                            .font(.system(size: 30, weight: .black, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundColor(Color(hex: "#FF453A"))
-                    } else if currentItem.isPreCountingDown {
-                        Text("準備中")
-                            .font(.system(size: 11, weight: .heavy))
-                            .foregroundColor(Color(hex: "#FFD60A"))
-                        Text(formatSeconds(currentItem.prepRemainingSeconds))
-                            .font(.system(size: 30, weight: .black, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundColor(Color(hex: "#FFD60A"))
-                        Text("カウントダウン中...")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundColor(Color(hex: "#FFD60A").opacity(0.85))
-                    } else {
-                        CrownMinSecPicker(
-                            totalSeconds: Binding(
-                                get: { currentDisplaySeconds },
-                                set: { newTotal in
-                                    let clamped = min(7200, max(10, newTotal))
-                                    accumulatedDelta = clamped - baseAdjustmentSeconds
-                                }
-                            ),
-                            maxMinutes: 120,
-                            fontSize: 28
-                        )
-                        if accumulatedDelta != 0 {
-                            Text("調整中: \(formatDelta(accumulatedDelta))")
-                                .font(.system(size: 9.5, weight: .bold))
-                                .foregroundColor(Color(hex: "#FFD60A"))
-                        } else if !isRunning {
-                            Text("⏸ 停止中（\(max(1, currentItem.totalSeconds / 60))分設定）")
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundColor(Color(hex: "#8E8E93"))
-                        }
-                    }
-                }
-                .padding(.vertical, 1)
-                
-                // ④ メイン操作ボタン（スタート / 一時停止 / リセット / 準備中中止）
-                if isOvertime {
-                    Button(action: {
-                        WKInterfaceDevice.current().play(.click)
-                        onReset()
-                        dismiss()
-                    }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "stop.circle.fill")
-                                .font(.system(size: 14, weight: .bold))
-                            Text("タイマーを止める")
-                                .font(.system(size: 13, weight: .bold))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(Color(hex: "#FF453A"))
-                        .foregroundColor(.white)
-                        .cornerRadius(8)
-                    }
-                    .buttonStyle(.plain)
-                } else if currentItem.isPreCountingDown {
-                    Button(action: {
-                        WKInterfaceDevice.current().play(.click)
-                        accumulatedDelta = 0
-                        onReset()
-                        dismiss()
-                    }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 13, weight: .bold))
-                            Text("カウントダウン中止")
-                                .font(.system(size: 13, weight: .bold))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(Color(hex: "#FF453A"))
-                        .foregroundColor(.white)
-                        .cornerRadius(8)
-                    }
-                    .buttonStyle(.plain)
-                } else if isRunning {
-                    HStack(spacing: 6) {
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            onPause()
-                            if let updated = WatchSessionManager.shared.mainTimer {
-                                displayItem = updated
-                            }
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "pause.fill")
-                                    .font(.system(size: 12, weight: .bold))
-                                Text("一時停止")
-                                    .font(.system(size: 12, weight: .bold))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(Color(hex: "#FF9F0A"))
-                            .foregroundColor(.black)
-                            .cornerRadius(8)
-                        }
-                        .buttonStyle(.plain)
-                        
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            accumulatedDelta = 0
-                            onReset()
-                            dismiss()
-                            if let updated = WatchSessionManager.shared.mainTimer {
-                                displayItem = updated
-                            }
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "arrow.counterclockwise")
-                                    .font(.system(size: 12, weight: .bold))
-                                Text("タイマーを止める")
-                                    .font(.system(size: 12, weight: .bold))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(Color.white.opacity(0.15))
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                } else {
-                    HStack(spacing: 6) {
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            if accumulatedDelta != 0 {
-                                let targetSec = max(10, baseAdjustmentSeconds + accumulatedDelta)
-                                accumulatedDelta = 0
-                                onSetTime(targetSec)
-                            } else {
-                                onStart()
-                            }
-                            dismiss()
-                        }) {
-                            HStack(spacing: 5) {
-                                Image(systemName: "play.fill")
-                                    .font(.system(size: 13, weight: .bold))
-                                Text(accumulatedDelta != 0 ? "\(formatSeconds(currentDisplaySeconds)) でスタート" : "スタート")
-                                    .font(.system(size: 12.5, weight: .heavy))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(Color(hex: "#30D158"))
-                            .foregroundColor(.black)
-                            .cornerRadius(8)
-                        }
-                        .buttonStyle(.plain)
-                        
-                        if !currentItem.isZero {
-                            Button(action: {
-                                WKInterfaceDevice.current().play(.click)
-                                accumulatedDelta = 0
-                                onReset()
-                                dismiss()
-                            }) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "arrow.counterclockwise")
-                                        .font(.system(size: 11, weight: .bold))
-                                    Text("タイマーを止める")
-                                        .font(.system(size: 11.5, weight: .bold))
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 8)
-                                .background(Color.white.opacity(0.15))
-                                .foregroundColor(.white)
-                                .cornerRadius(8)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                
-                // ⑤ 共有タイマーと同じ分・秒トグル調整ボタン（何回も押せる累積調整！）
-                // 上段: +1分, +3分, +5分
-                HStack(spacing: 5) {
-                    Button(action: {
-                        accumulatedDelta += 60
-                        WKInterfaceDevice.current().play(.click)
-                    }) {
-                        Text("+1分")
-                            .font(.system(size: 12, weight: .bold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 7)
-                            .background(Color.white.opacity(0.16))
-                            .foregroundColor(.white)
-                            .cornerRadius(7)
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Button(action: {
-                        accumulatedDelta += 180
-                        WKInterfaceDevice.current().play(.click)
-                    }) {
-                        Text("+3分")
-                            .font(.system(size: 12, weight: .bold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 7)
-                            .background(Color.white.opacity(0.16))
-                            .foregroundColor(.white)
-                            .cornerRadius(7)
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Button(action: {
-                        accumulatedDelta += 300
-                        WKInterfaceDevice.current().play(.click)
-                    }) {
-                        Text("+5分")
-                            .font(.system(size: 12, weight: .heavy))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 7)
-                            .background(Color(hex: "#0A84FF").opacity(0.35))
-                            .foregroundColor(Color(hex: "#64D2FF"))
-                            .cornerRadius(7)
-                    }
-                    .buttonStyle(.plain)
-                }
-                
-                // 下段: -5分, -1分, -30秒, +30秒
-                HStack(spacing: 4) {
-                    ForEach([("-5分", -300), ("-1分", -60), ("-30秒", -30), ("+30秒", 30)], id: \.0) { label, delta in
-                        Button(action: {
-                            if isOvertime {
-                                accumulatedDelta = max(0, accumulatedDelta + delta)
-                            } else {
-                                let minDelta = min(0, 10 - baseAdjustmentSeconds)
-                                accumulatedDelta = max(minDelta, accumulatedDelta + delta)
-                            }
-                            WKInterfaceDevice.current().play(.click)
-                        }) {
-                            Text(label)
-                                .font(.system(size: 10, weight: .bold))
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 6)
-                                .background(Color.white.opacity(0.12))
-                                .foregroundColor(delta < 0 ? Color(hex: "#FF6961") : Color(hex: "#C0C0C8"))
-                                .cornerRadius(6)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                
-                // ⑥ トグル調整時は「確定」ボタン、未調整時は「タイム再入力。」ボタン（共有タイマーと完全統一）
-                if accumulatedDelta != 0 {
-                    HStack(spacing: 5) {
-                        Button(action: {
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                                accumulatedDelta = 0
-                            }
-                            WKInterfaceDevice.current().play(.click)
-                        }) {
-                            Image(systemName: "arrow.counterclockwise")
-                                .font(.system(size: 12, weight: .bold))
-                                .frame(width: 34, height: 34)
-                                .background(Color.white.opacity(0.15))
-                                .foregroundColor(.white)
-                                .cornerRadius(7)
-                        }
-                        .buttonStyle(.plain)
-                        
-                        Button(action: {
-                            let delta = accumulatedDelta
-                            accumulatedDelta = 0
-                            WKInterfaceDevice.current().play(.click)
-                            onAdjust(delta)
-                            if isRunning || isOvertime {
-                                dismiss()
-                            } else if let updated = WatchSessionManager.shared.mainTimer {
-                                displayItem = updated
-                            }
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .font(.system(size: 13, weight: .heavy))
-                                Text("確定 (\(formatDelta(accumulatedDelta)))")
-                                    .font(.system(size: 12, weight: .black))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(
-                                LinearGradient(colors: [Color(hex: "#FFD60A"), Color(hex: "#FF9F0A")], startPoint: .leading, endPoint: .trailing)
-                            )
-                            .foregroundColor(.black)
-                            .cornerRadius(8)
-                            .shadow(color: Color(hex: "#FFD60A").opacity(0.4), radius: 2, x: 0, y: 1)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                } else {
-                    Button(action: {
-                        WKInterfaceDevice.current().play(.click)
-                        crownSeconds = Double(currentItem.totalSeconds > 0 ? currentItem.totalSeconds : 600)
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            isReinputMode = true
-                        }
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 12, weight: .bold))
-                            Text("タイム再入力。")
-                                .font(.system(size: 12, weight: .heavy))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(Color(hex: "#FFD60A"))
-                        .foregroundColor(.black)
-                        .cornerRadius(8)
-                        .shadow(color: Color(hex: "#FFD60A").opacity(0.35), radius: 2, x: 0, y: 1)
-                    }
-                    .buttonStyle(.plain)
-                }
-                
-                // ⑦ クイック時間選択（定番タイム）
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("クイックパネル (定番タイム)")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(Color(hex: "#8E8E93"))
-                        .padding(.leading, 2)
-                    
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 5) {
-                        ForEach(quickMinutes, id: \.self) { m in
-                            let isSelected = (currentItem.totalSeconds == m * 60)
-                            Button(action: {
-                                WKInterfaceDevice.current().play(.click)
-                                onSetTime(m * 60)
-                                dismiss()
-                            }) {
-                                Text("\(m)分")
-                                    .font(.system(size: 12, weight: isSelected ? .heavy : .bold))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 6)
-                                    .background(isSelected ? Color(hex: "#30D158").opacity(0.3) : Color.white.opacity(0.08))
-                                    .foregroundColor(isSelected ? Color(hex: "#30D158") : .white)
-                                    .cornerRadius(6)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 6)
-                                            .stroke(isSelected ? Color(hex: "#30D158") : Color.clear, lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
+                mainActionHeaderSection
+                mainActionDisplaySection
+                mainActionPrimaryControlSection
+                mainActionDeltaButtonsSection
+                mainActionConfirmOrReinputSection
+                mainActionQuickGridSection
                 
                 Divider()
                     .padding(.vertical, 2)
@@ -5247,6 +4866,412 @@ struct MainTimerActionSheet: View {
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 6)
+        }
+    }
+    
+    @ViewBuilder
+    private var mainActionHeaderSection: some View {
+        // ① ナビゲーションバー
+        HStack {
+            HStack(spacing: 4) {
+                Image(systemName: "stopwatch.fill")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(Color(hex: "#30D158"))
+                Text("メインタイマー")
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundColor(.white)
+            }
+            Spacer()
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                dismiss()
+            }) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundColor(Color(hex: "#8E8E93"))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 4)
+        
+        // ② 共有タイマーではない旨の注意書き
+        Text("※こちらは共有タイマーではありません")
+            .font(.system(size: 9, weight: .medium))
+            .foregroundColor(Color(hex: "#FFD60A").opacity(0.85))
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.vertical, 3)
+            .padding(.horizontal, 6)
+            .background(Color.white.opacity(0.06))
+            .cornerRadius(4)
+    }
+    
+    @ViewBuilder
+    private var mainActionDisplaySection: some View {
+        // ③ 巨大タイマー表示 ＆ 状態（★稼働中・一時停止中もDigital Crownトグルで分・秒を直接調整可能！）
+        VStack(spacing: 2) {
+            if isOvertime && accumulatedDelta <= 0 {
+                Text("超過")
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundColor(Color(hex: "#FF453A"))
+                Text("+\(formatSeconds(currentSeconds))")
+                    .font(.system(size: 30, weight: .black, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundColor(Color(hex: "#FF453A"))
+            } else if currentItem.isPreCountingDown {
+                Text("準備中")
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundColor(Color(hex: "#FFD60A"))
+                Text(formatSeconds(currentItem.prepRemainingSeconds))
+                    .font(.system(size: 30, weight: .black, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundColor(Color(hex: "#FFD60A"))
+                Text("カウントダウン中...")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundColor(Color(hex: "#FFD60A").opacity(0.85))
+            } else {
+                CrownMinSecPicker(
+                    totalSeconds: Binding(
+                        get: { currentDisplaySeconds },
+                        set: { newTotal in
+                            let clamped = min(7200, max(10, newTotal))
+                            accumulatedDelta = clamped - baseAdjustmentSeconds
+                        }
+                    ),
+                    maxMinutes: 120,
+                    fontSize: 28
+                )
+                if accumulatedDelta != 0 {
+                    Text("調整中: \(formatDelta(accumulatedDelta))")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundColor(Color(hex: "#FFD60A"))
+                } else if !isRunning {
+                    Text("⏸ 停止中（\(max(1, currentItem.totalSeconds / 60))分設定）")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundColor(Color(hex: "#8E8E93"))
+                }
+            }
+        }
+        .padding(.vertical, 1)
+    }
+    
+    @ViewBuilder
+    private var mainActionPrimaryControlSection: some View {
+        // ④ メイン操作ボタン（スタート / 一時停止 / リセット / 準備中中止）
+        if isOvertime {
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                onReset()
+                dismiss()
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.system(size: 14, weight: .bold))
+                    Text("タイマーを止める")
+                        .font(.system(size: 13, weight: .bold))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(Color(hex: "#FF453A"))
+                .foregroundColor(.white)
+                .cornerRadius(8)
+            }
+            .buttonStyle(.plain)
+        } else if currentItem.isPreCountingDown {
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                accumulatedDelta = 0
+                onReset()
+                dismiss()
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13, weight: .bold))
+                    Text("カウントダウン中止")
+                        .font(.system(size: 13, weight: .bold))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(Color(hex: "#FF453A"))
+                .foregroundColor(.white)
+                .cornerRadius(8)
+            }
+            .buttonStyle(.plain)
+        } else if isRunning {
+            HStack(spacing: 6) {
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    onPause()
+                    if let updated = WatchSessionManager.shared.mainTimer {
+                        displayItem = updated
+                    }
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "pause.fill")
+                            .font(.system(size: 12, weight: .bold))
+                        Text("一時停止")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "#FF9F0A"))
+                    .foregroundColor(.black)
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    accumulatedDelta = 0
+                    onReset()
+                    dismiss()
+                    if let updated = WatchSessionManager.shared.mainTimer {
+                        displayItem = updated
+                    }
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 12, weight: .bold))
+                        Text("タイマーを止める")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.15))
+                    .foregroundColor(.white)
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+            }
+        } else {
+            HStack(spacing: 6) {
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    if accumulatedDelta != 0 {
+                        let targetSec = max(10, baseAdjustmentSeconds + accumulatedDelta)
+                        accumulatedDelta = 0
+                        onSetTime(targetSec)
+                    } else {
+                        onStart()
+                    }
+                    dismiss()
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 13, weight: .bold))
+                        Text(accumulatedDelta != 0 ? "\(formatSeconds(currentDisplaySeconds)) でスタート" : "スタート")
+                            .font(.system(size: 12.5, weight: .heavy))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "#30D158"))
+                    .foregroundColor(.black)
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                
+                if !currentItem.isZero {
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        accumulatedDelta = 0
+                        onReset()
+                        dismiss()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.counterclockwise")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("タイマーを止める")
+                                .font(.system(size: 11.5, weight: .bold))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 8)
+                        .background(Color.white.opacity(0.15))
+                        .foregroundColor(.white)
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var mainActionDeltaButtonsSection: some View {
+        // ⑤ 共有タイマーと同じ分・秒トグル調整ボタン（何回も押せる累積調整！）
+        // 上段: +1分, +3分, +5分
+        HStack(spacing: 5) {
+            Button(action: {
+                accumulatedDelta += 60
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("+1分")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.16))
+                    .foregroundColor(.white)
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                accumulatedDelta += 180
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("+3分")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.16))
+                    .foregroundColor(.white)
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                accumulatedDelta += 300
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("+5分")
+                    .font(.system(size: 12, weight: .heavy))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .background(Color(hex: "#0A84FF").opacity(0.35))
+                    .foregroundColor(Color(hex: "#64D2FF"))
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+        }
+        
+        // 下段: -5分, -1分, -30秒, +30秒
+        HStack(spacing: 4) {
+            ForEach([("-5分", -300), ("-1分", -60), ("-30秒", -30), ("+30秒", 30)], id: \.0) { label, delta in
+                Button(action: {
+                    if isOvertime {
+                        accumulatedDelta = max(0, accumulatedDelta + delta)
+                    } else {
+                        let minDelta = min(0, 10 - baseAdjustmentSeconds)
+                        accumulatedDelta = max(minDelta, accumulatedDelta + delta)
+                    }
+                    WKInterfaceDevice.current().play(.click)
+                }) {
+                    Text(label)
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.12))
+                        .foregroundColor(delta < 0 ? Color(hex: "#FF6961") : Color(hex: "#C0C0C8"))
+                        .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var mainActionConfirmOrReinputSection: some View {
+        // ⑥ トグル調整時は「確定」ボタン、未調整時は「タイム再入力。」ボタン（共有タイマーと完全統一）
+        if accumulatedDelta != 0 {
+            HStack(spacing: 5) {
+                Button(action: {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                        accumulatedDelta = 0
+                    }
+                    WKInterfaceDevice.current().play(.click)
+                }) {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 34, height: 34)
+                        .background(Color.white.opacity(0.15))
+                        .foregroundColor(.white)
+                        .cornerRadius(7)
+                }
+                .buttonStyle(.plain)
+                
+                Button(action: {
+                    let delta = accumulatedDelta
+                    accumulatedDelta = 0
+                    WKInterfaceDevice.current().play(.click)
+                    onAdjust(delta)
+                    if isRunning || isOvertime {
+                        dismiss()
+                    } else if let updated = WatchSessionManager.shared.mainTimer {
+                        displayItem = updated
+                    }
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 13, weight: .heavy))
+                        Text("確定 (\(formatDelta(accumulatedDelta)))")
+                            .font(.system(size: 12, weight: .black))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(
+                        LinearGradient(colors: [Color(hex: "#FFD60A"), Color(hex: "#FF9F0A")], startPoint: .leading, endPoint: .trailing)
+                    )
+                    .foregroundColor(.black)
+                    .cornerRadius(8)
+                    .shadow(color: Color(hex: "#FFD60A").opacity(0.4), radius: 2, x: 0, y: 1)
+                }
+                .buttonStyle(.plain)
+            }
+        } else {
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                crownSeconds = Double(currentItem.totalSeconds > 0 ? currentItem.totalSeconds : 600)
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    isReinputMode = true
+                }
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 12, weight: .bold))
+                    Text("タイム再入力。")
+                        .font(.system(size: 12, weight: .heavy))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(Color(hex: "#FFD60A"))
+                .foregroundColor(.black)
+                .cornerRadius(8)
+                .shadow(color: Color(hex: "#FFD60A").opacity(0.35), radius: 2, x: 0, y: 1)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+    
+    @ViewBuilder
+    private var mainActionQuickGridSection: some View {
+        // ⑦ クイック時間選択（定番タイム）
+        VStack(alignment: .leading, spacing: 4) {
+            Text("クイックパネル (定番タイム)")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(Color(hex: "#8E8E93"))
+                .padding(.leading, 2)
+            
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 5) {
+                ForEach(quickMinutes, id: \.self) { m in
+                    let isSelected = (currentItem.totalSeconds == m * 60)
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        onSetTime(m * 60)
+                        dismiss()
+                    }) {
+                        Text("\(m)分")
+                            .font(.system(size: 12, weight: isSelected ? .heavy : .bold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(isSelected ? Color(hex: "#30D158").opacity(0.3) : Color.white.opacity(0.08))
+                            .foregroundColor(isSelected ? Color(hex: "#30D158") : .white)
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(isSelected ? Color(hex: "#30D158") : Color.clear, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
     }
     
@@ -5697,480 +5722,528 @@ struct TimeActionSheet: View {
     private var standardActionScrollView: some View {
         ScrollView {
             VStack(spacing: 6) {
-                // 通常操作モード
-                HStack {
-                    Text("\(liveItem.displaySeatName)のタイマー操作")
-                        .font(.system(size: 12, weight: .heavy))
-                    Spacer()
-                    Text("全体: \(liveItem.totalSeconds / 60)分")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.gray)
-                }
-                .padding(.horizontal, 4)
-                
-                Divider()
-                    .padding(.vertical, 1)
-                
-                // ★ ① 一番上: 時刻 ＋ タイマーを止める（緑色！）
-                Button(action: {
-                    WKInterfaceDevice.current().play(.click)
-                    onStop()
-                    dismiss()
-                }) {
-                    HStack(spacing: 6) {
-                        // リアルタイム残り時間（下の＋／−を押すとリアルタイムで変化！）
-                        HStack(spacing: 3) {
-                            Image(systemName: "timer")
-                                .font(.system(size: 10, weight: .bold))
-                            Text(formatSeconds(currentDisplaySeconds))
-                                .font(.system(size: 15, weight: .black, design: .rounded))
-                                .monospacedDigit()
-                        }
-                        .foregroundColor(.black)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.white.opacity(0.35))
-                        .cornerRadius(5)
-                        
-                        Spacer()
-                        
-                        HStack(spacing: 3) {
-                            Image(systemName: "stop.circle.fill")
-                                .font(.system(size: 12, weight: .heavy))
-                            Text("タイマーを止める")
-                                .font(.system(size: 11, weight: .heavy))
-                        }
-                        .foregroundColor(.black)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 8)
-                    .background(Color(hex: "#30D158"))
-                    .cornerRadius(8)
-                    .shadow(color: Color(hex: "#30D158").opacity(0.35), radius: 2, x: 0, y: 1)
-                }
-                .buttonStyle(.plain)
-                
-                // ★ ② 途中チェック（サブタイマー）セクション（設定されている場合のみ表示：担当者指定・募集・チェック完了・解除）
-                if let checkRem = currentCheckRemainingSeconds {
-                    VStack(spacing: 5) {
-                        HStack(alignment: .center) {
-                            HStack(spacing: 3) {
-                                Image(systemName: "magnifyingglass")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(Color(hex: "#30D158"))
-                                Text("途中チェック")
-                                    .font(.system(size: 10, weight: .heavy))
-                                    .foregroundColor(Color(hex: "#A0E0B0"))
-                            }
-                            Spacer()
-                            Text(formatSeconds(checkRem))
-                                .font(.system(size: 14, weight: .black, design: .rounded))
-                                .monospacedDigit()
-                                .foregroundColor(Color(hex: "#30D158"))
-                        }
-                        
-                        // 途中チェック担当者の指名・変更ボタン
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                subMode = .selectCheckStaff
-                            }
-                        }) {
-                            HStack(spacing: 4) {
-                                if let cStaff = liveItem.checkStaff, !cStaff.isEmpty {
-                                    if cStaff == "募集中" {
-                                        Image(systemName: "megaphone.fill")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundColor(Color(hex: "#FF9F0A"))
-                                        Text("担当: 全員に募集中")
-                                            .font(.system(size: 10.5, weight: .heavy))
-                                            .foregroundColor(Color(hex: "#FFD60A"))
-                                    } else {
-                                        Image(systemName: "person.fill.checkmark")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundColor(Color(hex: "#30D158"))
-                                        Text("担当: \(cStaff == currentUserName ? "\(cStaff)(あなた)" : cStaff)")
-                                            .font(.system(size: 10.5, weight: .heavy))
-                                            .foregroundColor(.white)
-                                    }
-                                    Spacer()
-                                    Text("変更 >")
-                                        .font(.system(size: 9.5, weight: .bold))
-                                        .foregroundColor(Color(hex: "#8E8E93"))
-                                } else {
-                                    Image(systemName: "person.badge.plus")
-                                        .font(.system(size: 10.5, weight: .bold))
-                                    Text("チェック担当を指名・募集")
-                                        .font(.system(size: 10.5, weight: .heavy))
-                                    Spacer()
-                                    Image(systemName: "chevron.right")
-                                        .font(.system(size: 8.5, weight: .bold))
-                                }
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
-                            .background(liveItem.checkStaff == nil ? Color(hex: "#FF9F0A").opacity(0.25) : Color.white.opacity(0.12))
-                            .foregroundColor(liveItem.checkStaff == nil ? Color(hex: "#FFD60A") : .white)
-                            .cornerRadius(7)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 7)
-                                    .stroke(liveItem.checkStaff == nil ? Color(hex: "#FF9F0A").opacity(0.6) : Color.white.opacity(0.15), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        
-                        // 途中チェック完了（全体タイマー続行）ボタン
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            onCompleteSubCheck?()
-                            dismiss()
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .font(.system(size: 11, weight: .bold))
-                                Text("途中チェック完了（タイマー続行）")
-                                    .font(.system(size: 10.5, weight: .heavy))
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.8)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                            .background(Color(hex: "#30D158").opacity(0.25))
-                            .foregroundColor(Color(hex: "#30D158"))
-                            .cornerRadius(7)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 7)
-                                    .stroke(Color(hex: "#30D158").opacity(0.6), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(7)
-                    .background(Color(hex: "#30D158").opacity(0.10))
-                    .cornerRadius(9)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 9)
-                            .stroke(Color(hex: "#30D158").opacity(0.35), lineWidth: 1)
-                    )
-                }
-                
-                // ★ ③ 本番ヘルプ（メニュー選択 ＆ 担当者指名 ＆ 切り上げ実行）セクション
-                if liveItem.isNoHelpNeeded {
-                    // ヘルプなし（一人施術）設定中
-                    Button(action: {
-                        WKInterfaceDevice.current().play(.click)
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            subMode = .selectHelpProcess
-                        }
-                    }) {
-                        HStack(spacing: 5) {
-                            Image(systemName: "person.fill")
-                                .font(.system(size: 11))
-                            Text("👤 ヘルプなし（一人施術）")
-                                .font(.system(size: 11, weight: .bold))
-                            Spacer()
-                            Text("変更 >")
-                                .font(.system(size: 9.5, weight: .bold))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 7)
-                        .background(Color.white.opacity(0.08))
-                        .foregroundColor(Color(hex: "#C0C0C8"))
-                        .cornerRadius(8)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    let p = liveItem.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if p.isEmpty {
-                        // ★ メニュー未選択時: 勝手に「シャンプーに入る」にせず、メニュー（シャンプー/コーミング/チェック/その他）と担当を選べるボタンを表示！
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                subMode = .selectHelpProcess
-                            }
-                        }) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 5) {
-                                    Image(systemName: "person.crop.circle.badge.plus")
-                                        .font(.system(size: 12, weight: .bold))
-                                    Text("メニュー・ヘルプ担当を指定")
-                                        .font(.system(size: 11.5, weight: .heavy))
-                                    Spacer()
-                                    Image(systemName: "chevron.right")
-                                        .font(.system(size: 9, weight: .bold))
-                                }
-                                Text("シャンプー / コーミング / チェック / その他")
-                                    .font(.system(size: 8.5, weight: .medium))
-                                    .foregroundColor(Color.white.opacity(0.75))
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 8)
-                            .background(Color(hex: "#FF9F0A").opacity(0.22))
-                            .foregroundColor(Color(hex: "#FFD60A"))
-                            .cornerRadius(8)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color(hex: "#FF9F0A").opacity(0.65), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        // ★ メニュー選択済み時: ①そのメニューに入るボタン ＋ ②メニュー・担当者の確認＆変更ボタン
-                        if p == "チェック" {
-                            Button(action: {
-                                WKInterfaceDevice.current().play(.click)
-                                onCompleteCheck?()
-                                dismiss()
-                            }) {
-                                HStack(spacing: 5) {
-                                    Image(systemName: "magnifyingglass")
-                                        .font(.system(size: 12, weight: .heavy))
-                                    Text("チェックに入る（切り上げ）")
-                                        .font(.system(size: 12, weight: .heavy))
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 8)
-                                .background(
-                                    LinearGradient(
-                                        colors: [Color(hex: "#30D158"), Color(hex: "#248A3D")],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                                .foregroundColor(.white)
-                                .cornerRadius(8)
-                                .shadow(color: Color(hex: "#30D158").opacity(0.3), radius: 2, x: 0, y: 1)
-                            }
-                            .buttonStyle(.plain)
-                        } else {
-                            let iconName = (p == "コーミング") ? "comb.fill" : ((p == "その他") ? "ellipsis.circle.fill" : "drop.fill")
-                            Button(action: {
-                                WKInterfaceDevice.current().play(.click)
-                                onEnterHelp?()
-                                dismiss()
-                            }) {
-                                HStack(spacing: 5) {
-                                    Image(systemName: iconName)
-                                        .font(.system(size: 12, weight: .heavy))
-                                    Text("\(p)に入る（切り上げ）")
-                                        .font(.system(size: 12, weight: .heavy))
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 8)
-                                .background(
-                                    LinearGradient(
-                                        colors: [Color(hex: "#0A84FF"), Color(hex: "#0062D2")],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                                .foregroundColor(.white)
-                                .cornerRadius(8)
-                                .shadow(color: Color(hex: "#0A84FF").opacity(0.35), radius: 2, x: 0, y: 1)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        
-                        // 現在選択中のメニュー＆担当者バッジ（タップでメニュー・担当者を変更可能）
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            selectedProcess = p
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                subMode = .selectHelpProcess
-                            }
-                        }) {
-                            HStack(spacing: 5) {
-                                if liveItem.isRecruiting {
-                                    Image(systemName: "megaphone.fill")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(Color(hex: "#FF9F0A"))
-                                    Text("\(p): 全員に募集中")
-                                        .font(.system(size: 11, weight: .heavy))
-                                        .foregroundColor(Color(hex: "#FFD60A"))
-                                } else if let staff = liveItem.shampooStaff, !staff.isEmpty {
-                                    Image(systemName: "person.fill.checkmark")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(Color(hex: "#0A84FF"))
-                                    Text("\(p): \(staff == currentUserName ? "\(staff)(あなた)" : staff)")
-                                        .font(.system(size: 11, weight: .heavy))
-                                        .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : .white)
-                                } else {
-                                    Image(systemName: "person.badge.plus")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(Color(hex: "#FFD60A"))
-                                    Text("\(p): 担当未定")
-                                        .font(.system(size: 11, weight: .heavy))
-                                        .foregroundColor(Color(hex: "#FFD60A"))
-                                }
-                                Spacer()
-                                Text("メニュー・担当変更 >")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundColor(Color(hex: "#8E8E93"))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 7)
-                            .background(liveItem.isRecruiting ? Color(hex: "#FF9F0A").opacity(0.18) : Color.white.opacity(0.10))
-                            .cornerRadius(8)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(liveItem.isRecruiting ? Color(hex: "#FF9F0A").opacity(0.6) : Color.white.opacity(0.18), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                
-                // ④ +1分, +3分, +5分（何回も押せる！dismissしない）
-                HStack(spacing: 5) {
-                    Button(action: {
-                        accumulatedDelta += 60
-                        WKInterfaceDevice.current().play(.click)
-                    }) {
-                        Text("+1分")
-                            .font(.system(size: 12, weight: .bold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(Color.white.opacity(0.16))
-                            .foregroundColor(.white)
-                            .cornerRadius(7)
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Button(action: {
-                        accumulatedDelta += 180
-                        WKInterfaceDevice.current().play(.click)
-                    }) {
-                        Text("+3分")
-                            .font(.system(size: 12, weight: .bold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(Color.white.opacity(0.16))
-                            .foregroundColor(.white)
-                            .cornerRadius(7)
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Button(action: {
-                        accumulatedDelta += 300
-                        WKInterfaceDevice.current().play(.click)
-                    }) {
-                        Text("+5分")
-                            .font(.system(size: 12, weight: .heavy))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(Color(hex: "#0A84FF").opacity(0.35))
-                            .foregroundColor(Color(hex: "#64D2FF"))
-                            .cornerRadius(7)
-                    }
-                    .buttonStyle(.plain)
-                }
-                
-                // ④ -30秒, +30秒（何回も押せる！dismissしない）
-                HStack(spacing: 5) {
-                    Button(action: {
-                        accumulatedDelta -= 30
-                        WKInterfaceDevice.current().play(.click)
-                    }) {
-                        Text("-30秒")
-                            .font(.system(size: 11, weight: .semibold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 7)
-                            .background(Color.white.opacity(0.12))
-                            .foregroundColor(Color(hex: "#C0C0C8"))
-                            .cornerRadius(6)
-                    }
-                    .buttonStyle(.plain)
-                    
-                    Button(action: {
-                        accumulatedDelta += 30
-                        WKInterfaceDevice.current().play(.click)
-                    }) {
-                        Text("+30秒")
-                            .font(.system(size: 11, weight: .semibold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 7)
-                            .background(Color.white.opacity(0.12))
-                            .foregroundColor(Color(hex: "#C0C0C8"))
-                            .cornerRadius(6)
-                    }
-                    .buttonStyle(.plain)
-                }
-                
-                Divider()
-                    .padding(.vertical, 1)
-                
-                // ★ ⑤ 一番下: 追加タイムを押すと「確定」に変わる！（黄色）
-                if accumulatedDelta != 0 {
-                    HStack(spacing: 5) {
-                        // 取り消し・リセットボタン
-                        Button(action: {
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                                accumulatedDelta = 0
-                            }
-                            WKInterfaceDevice.current().play(.click)
-                        }) {
-                            Image(systemName: "arrow.counterclockwise")
-                                .font(.system(size: 12, weight: .bold))
-                                .frame(width: 34, height: 34)
-                                .background(Color.white.opacity(0.15))
-                                .foregroundColor(.white)
-                                .cornerRadius(7)
-                        }
-                        .buttonStyle(.plain)
-                        
-                        // 確定ボタン（黄色）
-                        Button(action: {
-                            onAdjust(accumulatedDelta)
-                            dismiss()
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .font(.system(size: 13, weight: .heavy))
-                                Text("確定 (\(formatDelta(accumulatedDelta)))")
-                                    .font(.system(size: 12, weight: .black))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 9)
-                            .background(
-                                LinearGradient(colors: [Color(hex: "#FFD60A"), Color(hex: "#FF9F0A")], startPoint: .leading, endPoint: .trailing)
-                            )
-                            .foregroundColor(.black)
-                            .cornerRadius(8)
-                            .shadow(color: Color(hex: "#FFD60A").opacity(0.4), radius: 2, x: 0, y: 1)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                } else {
-                    // 追加タイムがない時は「タイム再入力。」（黄色）
-                    Button(action: {
-                        crownSeconds = 0.0
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            subMode = .reinput
-                        }
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 12, weight: .bold))
-                            Text("タイム再入力。")
-                                .font(.system(size: 12, weight: .heavy))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(Color(hex: "#FFD60A"))
-                        .foregroundColor(.black)
-                        .cornerRadius(8)
-                        .shadow(color: Color(hex: "#FFD60A").opacity(0.35), radius: 2, x: 0, y: 1)
-                    }
-                    .buttonStyle(.plain)
-                }
+                standardHeaderAndStopSection
+                standardSubCheckSection
+                standardHelpSection
+                standardDeltaButtonsSection
+                standardConfirmOrReinputSection
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
+        }
+    }
+    
+    @ViewBuilder
+    private var standardHeaderAndStopSection: some View {
+        // 通常操作モード
+        HStack {
+            Text("\(liveItem.displaySeatName)のタイマー操作")
+                .font(.system(size: 12, weight: .heavy))
+            Spacer()
+            Text("全体: \(liveItem.totalSeconds / 60)分")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.gray)
+        }
+        .padding(.horizontal, 4)
+        
+        Divider()
+            .padding(.vertical, 1)
+        
+        // ★ ① 一番上: 時刻 ＋ タイマーを止める（緑色！）
+        Button(action: {
+            WKInterfaceDevice.current().play(.click)
+            onStop()
+            dismiss()
+        }) {
+            HStack(spacing: 6) {
+                // リアルタイム残り時間（下の＋／−を押すとリアルタイムで変化！）
+                HStack(spacing: 3) {
+                    Image(systemName: "timer")
+                        .font(.system(size: 10, weight: .bold))
+                    Text(formatSeconds(currentDisplaySeconds))
+                        .font(.system(size: 15, weight: .black, design: .rounded))
+                        .monospacedDigit()
+                }
+                .foregroundColor(.black)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.white.opacity(0.35))
+                .cornerRadius(5)
+                
+                Spacer()
+                
+                HStack(spacing: 3) {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.system(size: 12, weight: .heavy))
+                    Text("タイマーを止める")
+                        .font(.system(size: 11, weight: .heavy))
+                }
+                .foregroundColor(.black)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
+            .background(Color(hex: "#30D158"))
+            .cornerRadius(8)
+            .shadow(color: Color(hex: "#30D158").opacity(0.35), radius: 2, x: 0, y: 1)
+        }
+        .buttonStyle(.plain)
+    }
+    
+    @ViewBuilder
+    private var standardSubCheckSection: some View {
+        // ★ ② 途中チェック（サブタイマー）セクション（設定されている場合のみ表示：担当者指定・募集・チェック完了・解除）
+        if let checkRem = currentCheckRemainingSeconds {
+            VStack(spacing: 5) {
+                HStack(alignment: .center) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(Color(hex: "#30D158"))
+                        Text("途中チェック")
+                            .font(.system(size: 10, weight: .heavy))
+                            .foregroundColor(Color(hex: "#A0E0B0"))
+                    }
+                    Spacer()
+                    Text(formatSeconds(checkRem))
+                        .font(.system(size: 14, weight: .black, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(Color(hex: "#30D158"))
+                }
+                
+                standardSubCheckStaffButton
+                
+                // 途中チェック完了（全体タイマー続行）ボタン
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    onCompleteSubCheck?()
+                    dismiss()
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("途中チェック完了（タイマー続行）")
+                            .font(.system(size: 10.5, weight: .heavy))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color(hex: "#30D158").opacity(0.25))
+                    .foregroundColor(Color(hex: "#30D158"))
+                    .cornerRadius(7)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7)
+                            .stroke(Color(hex: "#30D158").opacity(0.6), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(7)
+            .background(Color(hex: "#30D158").opacity(0.10))
+            .cornerRadius(9)
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(Color(hex: "#30D158").opacity(0.35), lineWidth: 1)
+            )
+        }
+    }
+    
+    @ViewBuilder
+    private var standardSubCheckStaffButton: some View {
+        let isUnassigned = (liveItem.checkStaff == nil)
+        let bgColor: Color = isUnassigned ? Color(hex: "#FF9F0A").opacity(0.25) : Color.white.opacity(0.12)
+        let fgColor: Color = isUnassigned ? Color(hex: "#FFD60A") : .white
+        let strokeColor: Color = isUnassigned ? Color(hex: "#FF9F0A").opacity(0.6) : Color.white.opacity(0.15)
+        
+        // 途中チェック担当者の指名・変更ボタン
+        Button(action: {
+            WKInterfaceDevice.current().play(.click)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                subMode = .selectCheckStaff
+            }
+        }) {
+            HStack(spacing: 4) {
+                if let cStaff = liveItem.checkStaff, !cStaff.isEmpty {
+                    if cStaff == "募集中" {
+                        Image(systemName: "megaphone.fill")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(Color(hex: "#FF9F0A"))
+                        Text("担当: 全員に募集中")
+                            .font(.system(size: 10.5, weight: .heavy))
+                            .foregroundColor(Color(hex: "#FFD60A"))
+                    } else {
+                        let displayStaff = (cStaff == currentUserName) ? "\(cStaff)(あなた)" : cStaff
+                        Image(systemName: "person.fill.checkmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(Color(hex: "#30D158"))
+                        Text("担当: \(displayStaff)")
+                            .font(.system(size: 10.5, weight: .heavy))
+                            .foregroundColor(.white)
+                    }
+                    Spacer()
+                    Text("変更 >")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundColor(Color(hex: "#8E8E93"))
+                } else {
+                    Image(systemName: "person.badge.plus")
+                        .font(.system(size: 10.5, weight: .bold))
+                    Text("チェック担当を指名・募集")
+                        .font(.system(size: 10.5, weight: .heavy))
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8.5, weight: .bold))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(bgColor)
+            .foregroundColor(fgColor)
+            .cornerRadius(7)
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(strokeColor, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+    
+    @ViewBuilder
+    private var standardHelpSection: some View {
+        // ★ ③ 本番ヘルプ（メニュー選択 ＆ 担当者指名 ＆ 切り上げ実行）セクション
+        if liveItem.isNoHelpNeeded {
+            // ヘルプなし（一人施術）設定中
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    subMode = .selectHelpProcess
+                }
+            }) {
+                HStack(spacing: 5) {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 11))
+                    Text("👤 ヘルプなし（一人施術）")
+                        .font(.system(size: 11, weight: .bold))
+                    Spacer()
+                    Text("変更 >")
+                        .font(.system(size: 9.5, weight: .bold))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+                .background(Color.white.opacity(0.08))
+                .foregroundColor(Color(hex: "#C0C0C8"))
+                .cornerRadius(8)
+            }
+            .buttonStyle(.plain)
+        } else {
+            let p = liveItem.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+            if p.isEmpty {
+                // ★ メニュー未選択時: 勝手に「シャンプーに入る」にせず、メニュー（シャンプー/コーミング/チェック/その他）と担当を選べるボタンを表示！
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        subMode = .selectHelpProcess
+                    }
+                }) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "person.crop.circle.badge.plus")
+                                .font(.system(size: 12, weight: .bold))
+                            Text("メニュー・ヘルプ担当を指定")
+                                .font(.system(size: 11.5, weight: .heavy))
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                        Text("シャンプー / コーミング / チェック / その他")
+                            .font(.system(size: 8.5, weight: .medium))
+                            .foregroundColor(Color.white.opacity(0.75))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "#FF9F0A").opacity(0.22))
+                    .foregroundColor(Color(hex: "#FFD60A"))
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(hex: "#FF9F0A").opacity(0.65), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+            } else {
+                standardHelpSelectedMenuSection(process: p)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func standardHelpSelectedMenuSection(process p: String) -> some View {
+        // ★ メニュー選択済み時: ①そのメニューに入るボタン ＋ ②メニュー・担当者の確認＆変更ボタン
+        if p == "チェック" {
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                onCompleteCheck?()
+                dismiss()
+            }) {
+                HStack(spacing: 5) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12, weight: .heavy))
+                    Text("チェックに入る（切り上げ）")
+                        .font(.system(size: 12, weight: .heavy))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(
+                    LinearGradient(
+                        colors: [Color(hex: "#30D158"), Color(hex: "#248A3D")],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .foregroundColor(.white)
+                .cornerRadius(8)
+                .shadow(color: Color(hex: "#30D158").opacity(0.3), radius: 2, x: 0, y: 1)
+            }
+            .buttonStyle(.plain)
+        } else {
+            let iconName: String = (p == "コーミング") ? "comb.fill" : ((p == "その他") ? "ellipsis.circle.fill" : "drop.fill")
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                onEnterHelp?()
+                dismiss()
+            }) {
+                HStack(spacing: 5) {
+                    Image(systemName: iconName)
+                        .font(.system(size: 12, weight: .heavy))
+                    Text("\(p)に入る（切り上げ）")
+                        .font(.system(size: 12, weight: .heavy))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(
+                    LinearGradient(
+                        colors: [Color(hex: "#0A84FF"), Color(hex: "#0062D2")],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .foregroundColor(.white)
+                .cornerRadius(8)
+                .shadow(color: Color(hex: "#0A84FF").opacity(0.35), radius: 2, x: 0, y: 1)
+            }
+            .buttonStyle(.plain)
+        }
+        
+        standardHelpStatusBadgeButton(process: p)
+    }
+    
+    @ViewBuilder
+    private func standardHelpStatusBadgeButton(process p: String) -> some View {
+        let bgColor: Color = liveItem.isRecruiting ? Color(hex: "#FF9F0A").opacity(0.18) : Color.white.opacity(0.10)
+        let strokeColor: Color = liveItem.isRecruiting ? Color(hex: "#FF9F0A").opacity(0.6) : Color.white.opacity(0.18)
+        
+        // 現在選択中のメニュー＆担当者バッジ（タップでメニュー・担当者を変更可能）
+        Button(action: {
+            WKInterfaceDevice.current().play(.click)
+            selectedProcess = p
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                subMode = .selectHelpProcess
+            }
+        }) {
+            HStack(spacing: 5) {
+                if liveItem.isRecruiting {
+                    Image(systemName: "megaphone.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Color(hex: "#FF9F0A"))
+                    Text("\(p): 全員に募集中")
+                        .font(.system(size: 11, weight: .heavy))
+                        .foregroundColor(Color(hex: "#FFD60A"))
+                } else if let staff = liveItem.shampooStaff, !staff.isEmpty {
+                    let isMe = (staff == currentUserName)
+                    let displayStaff = isMe ? "\(staff)(あなた)" : staff
+                    let staffColor: Color = isMe ? Color(hex: "#FFD60A") : .white
+                    Image(systemName: "person.fill.checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Color(hex: "#0A84FF"))
+                    Text("\(p): \(displayStaff)")
+                        .font(.system(size: 11, weight: .heavy))
+                        .foregroundColor(staffColor)
+                } else {
+                    Image(systemName: "person.badge.plus")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Color(hex: "#FFD60A"))
+                    Text("\(p): 担当未定")
+                        .font(.system(size: 11, weight: .heavy))
+                        .foregroundColor(Color(hex: "#FFD60A"))
+                }
+                Spacer()
+                Text("メニュー・担当変更 >")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(Color(hex: "#8E8E93"))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(bgColor)
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(strokeColor, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+    
+    @ViewBuilder
+    private var standardDeltaButtonsSection: some View {
+        // ④ +1分, +3分, +5分（何回も押せる！dismissしない）
+        HStack(spacing: 5) {
+            Button(action: {
+                accumulatedDelta += 60
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("+1分")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.16))
+                    .foregroundColor(.white)
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                accumulatedDelta += 180
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("+3分")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.16))
+                    .foregroundColor(.white)
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                accumulatedDelta += 300
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("+5分")
+                    .font(.system(size: 12, weight: .heavy))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "#0A84FF").opacity(0.35))
+                    .foregroundColor(Color(hex: "#64D2FF"))
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+        }
+        
+        // ④ -30秒, +30秒（何回も押せる！dismissしない）
+        HStack(spacing: 5) {
+            Button(action: {
+                accumulatedDelta -= 30
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("-30秒")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.12))
+                    .foregroundColor(Color(hex: "#C0C0C8"))
+                    .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                accumulatedDelta += 30
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("+30秒")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.12))
+                    .foregroundColor(Color(hex: "#C0C0C8"))
+                    .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+        }
+        
+        Divider()
+            .padding(.vertical, 1)
+    }
+    
+    @ViewBuilder
+    private var standardConfirmOrReinputSection: some View {
+        // ★ ⑤ 一番下: 追加タイムを押すと「確定」に変わる！（黄色）
+        if accumulatedDelta != 0 {
+            HStack(spacing: 5) {
+                // 取り消し・リセットボタン
+                Button(action: {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                        accumulatedDelta = 0
+                    }
+                    WKInterfaceDevice.current().play(.click)
+                }) {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 34, height: 34)
+                        .background(Color.white.opacity(0.15))
+                        .foregroundColor(.white)
+                        .cornerRadius(7)
+                }
+                .buttonStyle(.plain)
+                
+                // 確定ボタン（黄色）
+                Button(action: {
+                    onAdjust(accumulatedDelta)
+                    dismiss()
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 13, weight: .heavy))
+                        Text("確定 (\(formatDelta(accumulatedDelta)))")
+                            .font(.system(size: 12, weight: .black))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(
+                        LinearGradient(colors: [Color(hex: "#FFD60A"), Color(hex: "#FF9F0A")], startPoint: .leading, endPoint: .trailing)
+                    )
+                    .foregroundColor(.black)
+                    .cornerRadius(8)
+                    .shadow(color: Color(hex: "#FFD60A").opacity(0.4), radius: 2, x: 0, y: 1)
+                }
+                .buttonStyle(.plain)
+            }
+        } else {
+            // 追加タイムがない時は「タイム再入力。」（黄色）
+            Button(action: {
+                crownSeconds = 0.0
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    subMode = .reinput
+                }
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 12, weight: .bold))
+                    Text("タイム再入力。")
+                        .font(.system(size: 12, weight: .heavy))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(Color(hex: "#FFD60A"))
+                .foregroundColor(.black)
+                .cornerRadius(8)
+                .shadow(color: Color(hex: "#FFD60A").opacity(0.35), radius: 2, x: 0, y: 1)
+            }
+            .buttonStyle(.plain)
         }
     }
     
@@ -6418,50 +6491,59 @@ struct TimeActionSheet: View {
                     .cornerRadius(8)
                 } else {
                     ForEach(staffCandidates, id: \.self) { staff in
-                        let isMe = (staff == currentUserName)
-                        let isSelected = (liveItem.shampooStaff == staff && liveItem.helpProcess == selectedProcess)
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            liveItem.helpProcess = selectedProcess
-                            liveItem.shampooStaff = staff
-                            liveItem.isRecruiting = false
-                            liveItem.isNoHelpNeeded = false
-                            onAssignHelp?(selectedProcess, staff)
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                subMode = .standard
-                            }
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: isMe ? "star.fill" : "person.fill")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
-                                Text(isMe ? "\(staff)（あなた）" : staff)
-                                    .font(.system(size: 12, weight: isMe ? .heavy : .bold))
-                                Spacer()
-                                if isSelected {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 12, weight: .bold))
-                                        .foregroundColor(Color(hex: "#30D158"))
-                                }
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 7)
-                            .background(isSelected ? Color(hex: "#30D158").opacity(0.2) : (isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12)))
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(isSelected ? Color(hex: "#30D158").opacity(0.6) : (isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1)), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
+                        helpStaffCandidateRow(staff)
                     }
                 }
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
         }
+    }
+    
+    @ViewBuilder
+    private func helpStaffCandidateRow(_ staff: String) -> some View {
+        let isMe = (staff == currentUserName)
+        let isSelected = (liveItem.shampooStaff == staff && liveItem.helpProcess == selectedProcess)
+        let bgColor: Color = isSelected ? Color(hex: "#30D158").opacity(0.2) : (isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12))
+        let strokeColor: Color = isSelected ? Color(hex: "#30D158").opacity(0.6) : (isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1))
+        let iconColor: Color = isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF")
+        
+        Button(action: {
+            WKInterfaceDevice.current().play(.click)
+            liveItem.helpProcess = selectedProcess
+            liveItem.shampooStaff = staff
+            liveItem.isRecruiting = false
+            liveItem.isNoHelpNeeded = false
+            onAssignHelp?(selectedProcess, staff)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                subMode = .standard
+            }
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: isMe ? "star.fill" : "person.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(iconColor)
+                Text(isMe ? "\(staff)（あなた）" : staff)
+                    .font(.system(size: 12, weight: isMe ? .heavy : .bold))
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(Color(hex: "#30D158"))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(bgColor)
+            .foregroundColor(.white)
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(strokeColor, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
     }
     
     // MARK: - ★ シート内サブ画面3: 途中チェック（サブタイマー）の担当者・募集選択画面
@@ -6567,41 +6649,7 @@ struct TimeActionSheet: View {
                     .cornerRadius(8)
                 } else {
                     ForEach(staffCandidates, id: \.self) { staff in
-                        let isMe = (staff == currentUserName)
-                        let isSelected = (liveItem.checkStaff == staff)
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            liveItem.checkStaff = staff
-                            onAssignCheckStaff?(staff)
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                subMode = .standard
-                            }
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: isMe ? "star.fill" : "person.fill")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
-                                Text(isMe ? "\(staff)（あなた）" : staff)
-                                    .font(.system(size: 12, weight: isMe ? .heavy : .bold))
-                                Spacer()
-                                if isSelected {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 12, weight: .bold))
-                                        .foregroundColor(Color(hex: "#30D158"))
-                                }
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 7)
-                            .background(isSelected ? Color(hex: "#30D158").opacity(0.2) : (isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12)))
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(isSelected ? Color(hex: "#30D158").opacity(0.6) : (isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1)), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
+                        checkStaffCandidateRow(staff)
                     }
                 }
                 
@@ -6643,6 +6691,49 @@ struct TimeActionSheet: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
         }
+    }
+    
+    @ViewBuilder
+    private func checkStaffCandidateRow(_ staff: String) -> some View {
+        let isMe = (staff == currentUserName)
+        let isSelected = (liveItem.checkStaff == staff)
+        let bgColor: Color = isSelected ? Color(hex: "#30D158").opacity(0.2) : (isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12))
+        let strokeColor: Color = isSelected ? Color(hex: "#30D158").opacity(0.6) : (isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1))
+        let iconColor: Color = isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF")
+        
+        Button(action: {
+            WKInterfaceDevice.current().play(.click)
+            liveItem.checkStaff = staff
+            onAssignCheckStaff?(staff)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                subMode = .standard
+            }
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: isMe ? "star.fill" : "person.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(iconColor)
+                Text(isMe ? "\(staff)（あなた）" : staff)
+                    .font(.system(size: 12, weight: isMe ? .heavy : .bold))
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(Color(hex: "#30D158"))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(bgColor)
+            .foregroundColor(.white)
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(strokeColor, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -7428,269 +7519,9 @@ struct SelectHelpWorkflowSheet: View {
         ScrollView {
             VStack(spacing: 8) {
                 if currentStep == 0 {
-                    // ===== ステップ1: 工程を選択 =====
-                    VStack(spacing: 2) {
-                        Text("\(item.displaySeatName)のヘルプ工程")
-                            .font(.system(size: 13, weight: .heavy))
-                            .foregroundColor(.white)
-                        Text("依頼するメニューを選択してください")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(.gray)
-                    }
-                    .padding(.bottom, 2)
-                    
-                    Divider()
-                    
-                    ForEach(processOptions, id: \.name) { proc in
-                        let isCurrentProc = (item.helpProcess == proc.name && !item.isNoHelpNeeded)
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            selectedProcess = proc.name
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                currentStep = 1
-                            }
-                        }) {
-                            HStack(spacing: 8) {
-                                Image(systemName: proc.icon)
-                                    .font(.system(size: 14, weight: .bold))
-                                    .foregroundColor(Color(hex: proc.color))
-                                    .frame(width: 20)
-                                
-                                Text(proc.name)
-                                    .font(.system(size: 14, weight: .heavy))
-                                
-                                Spacer()
-                                
-                                if isCurrentProc {
-                                    Text("選択中")
-                                        .font(.system(size: 9, weight: .bold))
-                                        .foregroundColor(Color(hex: proc.color))
-                                        .padding(.horizontal, 5)
-                                        .padding(.vertical, 2)
-                                        .background(Color(hex: proc.color).opacity(0.2))
-                                        .cornerRadius(4)
-                                }
-                                
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(.gray)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(isCurrentProc ? Color(hex: proc.color).opacity(0.18) : Color.white.opacity(0.12))
-                            .foregroundColor(.white)
-                            .cornerRadius(9)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 9)
-                                    .stroke(isCurrentProc ? Color(hex: proc.color).opacity(0.6) : Color.clear, lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    
-                    // ★ ヘルプなし（一人で施術）
-                    if let setNoHelp = onSetNoHelp {
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            setNoHelp()
-                            dismiss()
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "person.fill.checkmark")
-                                    .font(.system(size: 12, weight: .bold))
-                                Text("ヘルプなし（一人で施術）")
-                                    .font(.system(size: 12, weight: .bold))
-                                Spacer()
-                                if item.isNoHelpNeeded {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 12))
-                                        .foregroundColor(Color(hex: "#30D158"))
-                                }
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 9)
-                            .background(item.isNoHelpNeeded ? Color(hex: "#30D158").opacity(0.2) : Color.white.opacity(0.08))
-                            .foregroundColor(item.isNoHelpNeeded ? Color(hex: "#30D158") : Color(hex: "#E0E0E5"))
-                            .cornerRadius(9)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    
-                    // ★ 指定を解除（未選択に戻す）
-                    if let clearHelp = onClearHelp, (!item.helpProcess.isEmpty || item.shampooStaff != nil || item.isRecruiting || item.isNoHelpNeeded) {
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.click)
-                            clearHelp()
-                            dismiss()
-                        }) {
-                            Text("指定を解除（未選択に戻す）")
-                                .font(.system(size: 10.5, weight: .medium))
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 6)
-                                .background(Color.white.opacity(0.06))
-                                .foregroundColor(Color(hex: "#FF453A"))
-                                .cornerRadius(7)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    
+                    step1ProcessSelectionView
                 } else {
-                    // ===== ステップ2: 全員に募集 または スタッフ指定 =====
-                    VStack(spacing: 2) {
-                        HStack {
-                            Button(action: {
-                                withAnimation {
-                                    currentStep = 0
-                                }
-                            }) {
-                                HStack(spacing: 2) {
-                                    Image(systemName: "chevron.left")
-                                    Text("工程へ")
-                                }
-                                .font(.system(size: 10.5, weight: .bold))
-                                .foregroundColor(Color(hex: "#0A84FF"))
-                            }
-                            .buttonStyle(.plain)
-                            
-                            Spacer()
-                            
-                            Text("【\(selectedProcess)】の担当")
-                                .font(.system(size: 13, weight: .heavy))
-                                .foregroundColor(.white)
-                            
-                            Spacer()
-                        }
-                        
-                        Text("全員に募集、または担当スタッフを指名")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(.gray)
-                    }
-                    
-                    Divider()
-                    
-                    // ★ ① 全員に募集する（目立つアンバーボタン・全員に通知）
-                    Button(action: {
-                        WKInterfaceDevice.current().play(.click)
-                        onRecruitAll(selectedProcess)
-                        dismiss()
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "megaphone.fill")
-                                .font(.system(size: 13, weight: .heavy))
-                            Text("全員に募集する")
-                                .font(.system(size: 13, weight: .black))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(
-                            LinearGradient(colors: [Color(hex: "#FF9F0A"), Color(hex: "#FF8000")], startPoint: .leading, endPoint: .trailing)
-                        )
-                        .foregroundColor(.black)
-                        .cornerRadius(9)
-                        .shadow(color: Color(hex: "#FF9F0A").opacity(0.4), radius: 3, x: 0, y: 2)
-                    }
-                    .buttonStyle(.plain)
-                    
-                    // ★ ② 自分が担当する（ショートカット）
-                    Button(action: {
-                        WKInterfaceDevice.current().play(.click)
-                        onAssignStaff(selectedProcess, currentUserName)
-                        dismiss()
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "hand.raised.fill")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundColor(Color(hex: "#30D158"))
-                            Text("自分が担当する（\(currentUserName)）")
-                                .font(.system(size: 12, weight: .heavy))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                            Spacer()
-                            if item.shampooStaff == currentUserName && item.helpProcess == selectedProcess {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(Color(hex: "#30D158"))
-                            }
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(Color(hex: "#30D158").opacity(0.18))
-                        .foregroundColor(.white)
-                        .cornerRadius(8)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color(hex: "#30D158").opacity(0.5), lineWidth: 1)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    
-                    // ★ ③ 個別スタッフを指名する
-                    Text("他のスタッフを指名（相手に通知）")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(Color(hex: "#A0A0A5"))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 2)
-                    
-                    let otherCandidates = staffCandidates.filter { $0 != currentUserName }
-                    if otherCandidates.isEmpty {
-                        // ★ 他のメンバーが0人の場合の案内カード
-                        VStack(spacing: 5) {
-                            Image(systemName: "person.crop.circle.badge.plus")
-                                .font(.system(size: 22))
-                                .foregroundColor(Color(hex: "#0A84FF"))
-                                .padding(.top, 2)
-                            Text("📱 スマホの共有コードでメンバーを連携すると\n他のスタッフを指名できます")
-                                .font(.system(size: 9.5, weight: .bold))
-                                .foregroundColor(.white)
-                                .multilineTextAlignment(.center)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 6)
-                        .background(Color.white.opacity(0.06))
-                        .cornerRadius(8)
-                    } else {
-                        ForEach(otherCandidates, id: \.self) { staff in
-                            let isSelected = (item.shampooStaff == staff && item.helpProcess == selectedProcess)
-                            
-                            Button(action: {
-                                WKInterfaceDevice.current().play(.click)
-                                onAssignStaff(selectedProcess, staff)
-                                dismiss()
-                            }) {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "person.fill")
-                                        .font(.system(size: 11))
-                                        .foregroundColor(Color(hex: "#0A84FF"))
-                                    
-                                    Text(staff)
-                                        .font(.system(size: 12, weight: .bold))
-                                    
-                                    Spacer()
-                                    
-                                    if isSelected {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .font(.system(size: 12, weight: .bold))
-                                            .foregroundColor(Color(hex: "#30D158"))
-                                    }
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 7)
-                                .background(isSelected ? Color(hex: "#0A84FF").opacity(0.22) : Color.white.opacity(0.12))
-                                .foregroundColor(.white)
-                                .cornerRadius(8)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(isSelected ? Color(hex: "#0A84FF").opacity(0.6) : Color.white.opacity(0.1), lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
+                    step2StaffSelectionView
                 }
             }
             .padding(.horizontal, 6)
@@ -7699,6 +7530,282 @@ struct SelectHelpWorkflowSheet: View {
         .onAppear {
             if !item.helpProcess.isEmpty && item.helpProcess != "ヘルプなし" {
                 selectedProcess = item.helpProcess
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var step1ProcessSelectionView: some View {
+        // ===== ステップ1: 工程を選択 =====
+        VStack(spacing: 2) {
+            Text("\(item.displaySeatName)のヘルプ工程")
+                .font(.system(size: 13, weight: .heavy))
+                .foregroundColor(.white)
+            Text("依頼するメニューを選択してください")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.gray)
+        }
+        .padding(.bottom, 2)
+        
+        Divider()
+        
+        ForEach(processOptions, id: \.name) { proc in
+            let isCurrentProc = (item.helpProcess == proc.name && !item.isNoHelpNeeded)
+            let bgColor: Color = isCurrentProc ? Color(hex: proc.color).opacity(0.18) : Color.white.opacity(0.12)
+            let strokeColor: Color = isCurrentProc ? Color(hex: proc.color).opacity(0.6) : Color.clear
+            
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                selectedProcess = proc.name
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    currentStep = 1
+                }
+            }) {
+                HStack(spacing: 8) {
+                    Image(systemName: proc.icon)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(Color(hex: proc.color))
+                        .frame(width: 20)
+                    
+                    Text(proc.name)
+                        .font(.system(size: 14, weight: .heavy))
+                    
+                    Spacer()
+                    
+                    if isCurrentProc {
+                        Text("選択中")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(Color(hex: proc.color))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color(hex: proc.color).opacity(0.2))
+                            .cornerRadius(4)
+                    }
+                    
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.gray)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(bgColor)
+                .foregroundColor(.white)
+                .cornerRadius(9)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9)
+                        .stroke(strokeColor, lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+        }
+        
+        // ★ ヘルプなし（一人で施術）
+        if let setNoHelp = onSetNoHelp {
+            let noHelpBg: Color = item.isNoHelpNeeded ? Color(hex: "#30D158").opacity(0.2) : Color.white.opacity(0.08)
+            let noHelpFg: Color = item.isNoHelpNeeded ? Color(hex: "#30D158") : Color(hex: "#E0E0E5")
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                setNoHelp()
+                dismiss()
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "person.fill.checkmark")
+                        .font(.system(size: 12, weight: .bold))
+                    Text("ヘルプなし（一人で施術）")
+                        .font(.system(size: 12, weight: .bold))
+                    Spacer()
+                    if item.isNoHelpNeeded {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color(hex: "#30D158"))
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(noHelpBg)
+                .foregroundColor(noHelpFg)
+                .cornerRadius(9)
+            }
+            .buttonStyle(.plain)
+        }
+        
+        // ★ 指定を解除（未選択に戻す）
+        if let clearHelp = onClearHelp, (!item.helpProcess.isEmpty || item.shampooStaff != nil || item.isRecruiting || item.isNoHelpNeeded) {
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                clearHelp()
+                dismiss()
+            }) {
+                Text("指定を解除（未選択に戻す）")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color.white.opacity(0.06))
+                    .foregroundColor(Color(hex: "#FF453A"))
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+    
+    @ViewBuilder
+    private var step2StaffSelectionView: some View {
+        // ===== ステップ2: 全員に募集 または スタッフ指定 =====
+        VStack(spacing: 2) {
+            HStack {
+                Button(action: {
+                    withAnimation {
+                        currentStep = 0
+                    }
+                }) {
+                    HStack(spacing: 2) {
+                        Image(systemName: "chevron.left")
+                        Text("工程へ")
+                    }
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundColor(Color(hex: "#0A84FF"))
+                }
+                .buttonStyle(.plain)
+                
+                Spacer()
+                
+                Text("【\(selectedProcess)】の担当")
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundColor(.white)
+                
+                Spacer()
+            }
+            
+            Text("全員に募集、または担当スタッフを指名")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.gray)
+        }
+        
+        Divider()
+        
+        // ★ ① 全員に募集する（目立つアンバーボタン・全員に通知）
+        Button(action: {
+            WKInterfaceDevice.current().play(.click)
+            onRecruitAll(selectedProcess)
+            dismiss()
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "megaphone.fill")
+                    .font(.system(size: 13, weight: .heavy))
+                Text("全員に募集する")
+                    .font(.system(size: 13, weight: .black))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(
+                LinearGradient(colors: [Color(hex: "#FF9F0A"), Color(hex: "#FF8000")], startPoint: .leading, endPoint: .trailing)
+            )
+            .foregroundColor(.black)
+            .cornerRadius(9)
+            .shadow(color: Color(hex: "#FF9F0A").opacity(0.4), radius: 3, x: 0, y: 2)
+        }
+        .buttonStyle(.plain)
+        
+        // ★ ② 自分が担当する（ショートカット）
+        Button(action: {
+            WKInterfaceDevice.current().play(.click)
+            onAssignStaff(selectedProcess, currentUserName)
+            dismiss()
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "hand.raised.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(Color(hex: "#30D158"))
+                Text("自分が担当する（\(currentUserName)）")
+                    .font(.system(size: 12, weight: .heavy))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer()
+                if item.shampooStaff == currentUserName && item.helpProcess == selectedProcess {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color(hex: "#30D158"))
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(hex: "#30D158").opacity(0.18))
+            .foregroundColor(.white)
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color(hex: "#30D158").opacity(0.5), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        
+        // ★ ③ 個別スタッフを指名する
+        Text("他のスタッフを指名（相手に通知）")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundColor(Color(hex: "#A0A0A5"))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 2)
+        
+        let otherCandidates = staffCandidates.filter { $0 != currentUserName }
+        if otherCandidates.isEmpty {
+            // ★ 他のメンバーが0人の場合の案内カード
+            VStack(spacing: 5) {
+                Image(systemName: "person.crop.circle.badge.plus")
+                    .font(.system(size: 22))
+                    .foregroundColor(Color(hex: "#0A84FF"))
+                    .padding(.top, 2)
+                Text("📱 スマホの共有コードでメンバーを連携すると\n他のスタッフを指名できます")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 6)
+            .background(Color.white.opacity(0.06))
+            .cornerRadius(8)
+        } else {
+            ForEach(otherCandidates, id: \.self) { staff in
+                let isSelected = (item.shampooStaff == staff && item.helpProcess == selectedProcess)
+                let bgColor: Color = isSelected ? Color(hex: "#0A84FF").opacity(0.22) : Color.white.opacity(0.12)
+                let strokeColor: Color = isSelected ? Color(hex: "#0A84FF").opacity(0.6) : Color.white.opacity(0.1)
+                
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    onAssignStaff(selectedProcess, staff)
+                    dismiss()
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(hex: "#0A84FF"))
+                        
+                        Text(staff)
+                            .font(.system(size: 12, weight: .bold))
+                        
+                        Spacer()
+                        
+                        if isSelected {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(Color(hex: "#30D158"))
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(bgColor)
+                    .foregroundColor(.white)
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(strokeColor, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
             }
         }
     }
@@ -7768,84 +7875,8 @@ struct SeatThumbnailMapSheet: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 7) {
-                    // ① ヘッダー＆サマリーピルバー
-                    VStack(spacing: 4) {
-                        HStack {
-                            Image(systemName: "square.grid.2x2.fill")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundColor(Color(hex: "#64D2FF"))
-                            Text("サロン客席マップ")
-                                .font(.system(size: 13, weight: .heavy))
-                                .foregroundColor(.white)
-                            Spacer()
-                            Button(action: {
-                                WKInterfaceDevice.current().play(.click)
-                                if let onClose = onClose {
-                                    onClose()
-                                } else {
-                                    dismiss()
-                                }
-                            }) {
-                                HStack(spacing: 2) {
-                                    Image(systemName: "list.bullet")
-                                        .font(.system(size: 9, weight: .bold))
-                                    Text("リスト")
-                                        .font(.system(size: 9.5, weight: .bold))
-                                }
-                                .foregroundColor(Color(hex: "#64D2FF"))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2.5)
-                                .background(Color(hex: "#64D2FF").opacity(0.18))
-                                .cornerRadius(6)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        
-                        // 稼働サマリーピル（一目で状況把握）
-                        HStack(spacing: 5) {
-                            HStack(spacing: 3) {
-                                Circle()
-                                    .fill(Color(hex: "#30D158"))
-                                    .frame(width: 6, height: 6)
-                                Text("稼働:\(runningCount)")
-                                    .font(.system(size: 10, weight: .heavy))
-                                    .foregroundColor(.white)
-                            }
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.white.opacity(0.12))
-                            .cornerRadius(5)
-                            
-                            if recruitingCount > 0 {
-                                HStack(spacing: 3) {
-                                    Image(systemName: "megaphone.fill")
-                                        .font(.system(size: 8))
-                                        .foregroundColor(Color(hex: "#FF9F0A"))
-                                    Text("募集:\(recruitingCount)")
-                                        .font(.system(size: 10, weight: .heavy))
-                                        .foregroundColor(Color(hex: "#FFD60A"))
-                                }
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color(hex: "#FF9F0A").opacity(0.25))
-                                .cornerRadius(5)
-                            }
-                            
-                            HStack(spacing: 2) {
-                                Text("⏸ 停止:\(pausedCount)")
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundColor(Color(hex: "#8E8E93"))
-                            }
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.white.opacity(0.08))
-                            .cornerRadius(5)
-                            
-                            Spacer()
-                        }
-                    }
-                    .padding(.horizontal, 4)
-                    .id("map_step_0")
+                    mapHeaderSection
+                        .id("map_step_0")
                     
                     // ★ メインタイマー専用カード（上段にフルタイトル・下段に特大タイマー時間・タップで詳細シート）
                     if let main = mainTimer {
@@ -7861,69 +7892,10 @@ struct SeatThumbnailMapSheet: View {
                     
                     Divider()
                     
-                    // ② 2列サムネイルグリッド（客席タイマー群：指スクロール＋Digital Crown上下スクロール両対応）
-                    VStack(spacing: 6) {
-                        ForEach(Array(seatRows.enumerated()), id: \.offset) { rowIdx, rowItems in
-                            HStack(spacing: 6) {
-                                ForEach(rowItems) { item in
-                                    Button(action: {
-                                        WKInterfaceDevice.current().play(.click)
-                                        onSelectSeat(item)
-                                    }) {
-                                        ThumbnailSeatCard(
-                                            item: item,
-                                            currentUserName: currentUserName,
-                                            now: now
-                                        )
-                                    }
-                                    .buttonStyle(.plain)
-                                    .frame(maxWidth: .infinity)
-                                }
-                                if rowItems.count == 1 {
-                                    Color.clear
-                                        .frame(maxWidth: .infinity)
-                                }
-                            }
-                            .id("map_step_\(rowIdx + 2)")
-                            .onAppear {
-                                currentScrollStep = rowIdx + 2
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 2)
+                    mapSeatGridSection
                     
-                    VStack(spacing: 6) {
-                        Text("※タップで操作 / リューズまたは指で上下移動")
-                            .font(.system(size: 8.5, weight: .medium))
-                            .foregroundColor(Color(hex: "#8E8E93"))
-                            .padding(.top, 4)
-                        
-                        if let onAddSeat = onAddSeat {
-                            Button(action: {
-                                WKInterfaceDevice.current().play(.click)
-                                onAddSeat()
-                            }) {
-                                HStack(spacing: 5) {
-                                    Image(systemName: "plus.circle.fill")
-                                        .font(.system(size: 13, weight: .bold))
-                                    Text("新しい席を追加")
-                                        .font(.system(size: 12, weight: .bold))
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 8)
-                                .background(Color(hex: "#0A84FF").opacity(0.18))
-                                .foregroundColor(Color(hex: "#0A84FF"))
-                                .cornerRadius(9)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 9)
-                                        .stroke(Color(hex: "#0A84FF").opacity(0.4), lineWidth: 1)
-                                )
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.top, 2)
-                        }
-                    }
-                    .id("map_step_\(maxScrollStep)")
+                    mapFooterSection
+                        .id("map_step_\(maxScrollStep)")
                 }
                 .padding(.horizontal, 4)
                 .padding(.vertical, 4)
@@ -7962,6 +7934,156 @@ struct SeatThumbnailMapSheet: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     isMapCrownFocused = true
                 }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var mapHeaderSection: some View {
+        // ① ヘッダー＆サマリーピルバー
+        VStack(spacing: 4) {
+            HStack {
+                Image(systemName: "square.grid.2x2.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(Color(hex: "#64D2FF"))
+                Text("サロン客席マップ")
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundColor(.white)
+                Spacer()
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    if let onClose = onClose {
+                        onClose()
+                    } else {
+                        dismiss()
+                    }
+                }) {
+                    HStack(spacing: 2) {
+                        Image(systemName: "list.bullet")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("リスト")
+                            .font(.system(size: 9.5, weight: .bold))
+                    }
+                    .foregroundColor(Color(hex: "#64D2FF"))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2.5)
+                    .background(Color(hex: "#64D2FF").opacity(0.18))
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+            }
+            
+            // 稼働サマリーピル（一目で状況把握）
+            HStack(spacing: 5) {
+                HStack(spacing: 3) {
+                    Circle()
+                        .fill(Color(hex: "#30D158"))
+                        .frame(width: 6, height: 6)
+                    Text("稼働:\(runningCount)")
+                        .font(.system(size: 10, weight: .heavy))
+                        .foregroundColor(.white)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.white.opacity(0.12))
+                .cornerRadius(5)
+                
+                if recruitingCount > 0 {
+                    HStack(spacing: 3) {
+                        Image(systemName: "megaphone.fill")
+                            .font(.system(size: 8))
+                            .foregroundColor(Color(hex: "#FF9F0A"))
+                        Text("募集:\(recruitingCount)")
+                            .font(.system(size: 10, weight: .heavy))
+                            .foregroundColor(Color(hex: "#FFD60A"))
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color(hex: "#FF9F0A").opacity(0.25))
+                    .cornerRadius(5)
+                }
+                
+                HStack(spacing: 2) {
+                    Text("⏸ 停止:\(pausedCount)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(Color(hex: "#8E8E93"))
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.white.opacity(0.08))
+                .cornerRadius(5)
+                
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 4)
+    }
+    
+    @ViewBuilder
+    private var mapSeatGridSection: some View {
+        // ② 2列サムネイルグリッド（客席タイマー群：指スクロール＋Digital Crown上下スクロール両対応）
+        VStack(spacing: 6) {
+            ForEach(Array(seatRows.enumerated()), id: \.offset) { rowIdx, rowItems in
+                HStack(spacing: 6) {
+                    ForEach(rowItems) { item in
+                        Button(action: {
+                            WKInterfaceDevice.current().play(.click)
+                            onSelectSeat(item)
+                        }) {
+                            ThumbnailSeatCard(
+                                item: item,
+                                currentUserName: currentUserName,
+                                now: now
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity)
+                    }
+                    if rowItems.count == 1 {
+                        Color.clear
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .id("map_step_\(rowIdx + 2)")
+                .onAppear {
+                    currentScrollStep = rowIdx + 2
+                }
+            }
+        }
+        .padding(.horizontal, 2)
+    }
+    
+    @ViewBuilder
+    private var mapFooterSection: some View {
+        VStack(spacing: 6) {
+            Text("※タップで操作 / リューズまたは指で上下移動")
+                .font(.system(size: 8.5, weight: .medium))
+                .foregroundColor(Color(hex: "#8E8E93"))
+                .padding(.top, 4)
+            
+            if let onAddSeat = onAddSeat {
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    onAddSeat()
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 13, weight: .bold))
+                        Text("新しい席を追加")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "#0A84FF").opacity(0.18))
+                    .foregroundColor(Color(hex: "#0A84FF"))
+                    .cornerRadius(9)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9)
+                            .stroke(Color(hex: "#0A84FF").opacity(0.4), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
             }
         }
     }

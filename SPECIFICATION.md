@@ -2673,7 +2673,7 @@ TestFlight Build 68の実機テストにおいて、以下の致命的な不具�
   - **文字盤コンプリケーション（モジュール）のタイムライン完全同期 (`targets/watch/widget_sync.swift`, `targets/watch-widget/widget.swift`)**:
     - `WidgetSync.save` において、準備カウントダウン中（`isPreCountingDown`）でも正確な `prepEndEpoch` と本番終了時刻 `endEpoch` を算出し、`widget.swift` のタイムラインエントリーに `prepEndDate` と `endDate` の双方を登録。手首を下げたままでも「準備 → 残りカウントダウン → 完了（待機中）/ 超過」が文字盤モジュール上でリアルタイムに切り替わる仕様を確立。
 
-## 35. WatchメインタイマーのDigital Crown（トグル）分数調整完全対応、サロン客席マップの指＋トグル上下移動両立、および共有タイマーのメニュー別ヘルプ担当指名・途中チェック担当指定ワークフロー完全復活仕様 (Build 78)
+## 35. WatchメインタイマーのDigital Crown（トグル）分数調整完全対応、サロン客席マップの指＋トグル上下移動両立、および共有タイマーのメニュー別ヘルプ担当指名・途中チェック担当指定ワークフロー完全復活仕様 (Build 78 / 79)
 
 #### 1. Apple WatchメインタイマーのDigital Crown（トグル）による分数・秒数調整の完全対応 (`targets/watch/content.swift`)
 - **背景・課題**:
