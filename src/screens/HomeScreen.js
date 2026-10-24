@@ -1034,6 +1034,8 @@ export default function HomeScreen({ navigation }) {
       const effectivePrepMainEndMs = (incomingMainEndMs > Date.now() && Math.abs(incomingMainEndMs - defaultMainEndMs) <= 15000)
         ? incomingMainEndMs
         : defaultMainEndMs;
+      lastAutoFinishedAtRef.current = 0;
+      lastAutoFinishedEndTimestampRef.current = 0;
       triggeredPrepVoicesRef.current.clear();
       remainingTimeRef.current = currentTarget;
       setRemainingTime(currentTarget);
@@ -1376,7 +1378,7 @@ export default function HomeScreen({ navigation }) {
     }
 
     const isAutoFinishedNow = !effectiveIsRunning && !effectiveIsPre && !saveModalVisible
-      && (Date.now() - lastAutoFinishedAtRef.current < 15000);
+      && lastAutoFinishedAtRef.current > 0 && lastAutoFinishedAtRef.current > lastMainTimerResetAtRef.current;
     const isExplicitResetNow = !effectiveIsRunning && !effectiveIsPre && !isAutoFinishedNow
       && (Date.now() - lastMainTimerResetAtRef.current < 5000);
 
@@ -1884,7 +1886,7 @@ export default function HomeScreen({ navigation }) {
       const prepEnd = prepEndTimeRef.current || (now + (preCountdownTimeRef.current || countdownSecondsRef.current || 5) * 1000);
       endMs = prepEnd + currentTarget * 1000;
     }
-    const isAutoFinishedNow = !isRunning && !isPre && (now - lastAutoFinishedAtRef.current < 15000);
+    const isAutoFinishedNow = !isRunning && !isPre && lastAutoFinishedAtRef.current > 0 && lastAutoFinishedAtRef.current > lastMainTimerResetAtRef.current;
     const isExplicitResetNow = !isRunning && !isPre && !isAutoFinishedNow && (now - lastMainTimerResetAtRef.current < 5000);
     return {
       remainingTime: currentRemaining,

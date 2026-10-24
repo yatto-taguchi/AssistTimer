@@ -133,8 +133,8 @@ enum ComplicationData {
             let isCheckComp = (d["isCheckCompleted"] as? NSNumber)?.boolValue ?? (d["isCheckCompleted"] as? Bool) ?? false
             let creator = d["creatorName"] as? String
             let isNoHelp = (d["isNoHelpNeeded"] as? NSNumber)?.boolValue ?? (d["isNoHelpNeeded"] as? Bool) ?? false
-            let savedCountUp = (defaults.object(forKey: "assisttimer.watch.isCountUpEnabled") as? Bool) ?? !isMain
-            let isCountUpEnabled = (d["isCountUpEnabled"] as? NSNumber)?.boolValue ?? (d["isCountUpEnabled"] as? Bool) ?? (isMain ? savedCountUp : true)
+
+            let isCountUpEnabled = true
             
             return ComplicationSeat(
                 id: id,

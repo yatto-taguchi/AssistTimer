@@ -79,8 +79,8 @@ enum WidgetSync {
                 }
                 return m.targetEndTime
             }()
-            let isExpiredNonCountUp = !m.isCountUpEnabled && !m.isPreCountingDown && effectiveEnd <= now
-            let mActive = (m.isRunning || m.isPreCountingDown) && !isExpiredNonCountUp
+            let mActive = (m.isRunning || m.isPreCountingDown)
+
             var mainDict: [String: Any] = [
                 "id": m.id,
                 "seatNumber": 0,
@@ -91,7 +91,7 @@ enum WidgetSync {
                 "pausedRemaining": m.pausedRemainingSeconds,
                 "related": true,
                 "totalSeconds": m.totalSeconds,
-                "isCountUpEnabled": m.isCountUpEnabled,
+                "isCountUpEnabled": true,
                 "isCheckCompleted": true
             ]
             if mActive, let pEnd = prepEnd, pEnd > now {

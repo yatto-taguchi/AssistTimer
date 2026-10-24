@@ -556,17 +556,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         let now = Date()
         var changed = false
 
-        // ★ カウントアップOFFのメインタイマーが終了時刻（00:00）に到達した場合、
-        //   バックグラウンド（スマートアラーム起床時・通知発火時）でも即座に 00:00 停止状態へ戻して文字盤モジュール（コンプリケーション）を更新する。
-        //   ※ events 内のアラーム予定自体は消さず、そのまま振動・鳴動を継続させる。
-        if var m = WatchSessionManager.shared.mainTimer,
-           m.isRunning && !m.isPreCountingDown && !m.isCountUpEnabled && now >= m.targetEndTime {
-            m.isRunning = false
-            m.pausedRemainingSeconds = 0
-            WatchSessionManager.shared.mainTimer = m
-            WatchSessionManager.shared.clearWatchStartedMainTimer()
-            WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: m, userName: WatchSessionManager.shared.currentUserName)
-        }
+        // ★ メインタイマーが終了時刻（00:00）に到達しても自動停止（00:00リセット）は行わず、
+        //   ユーザーが明示的に「タイマーを止める」等を押すまでは超過（カウントアップ）状態を維持する。
 
         // ★ 終了予定時刻が現在より未来（または直近2秒以内に開始されたばかり）のイベントを arm 対象とする
         for e in events where !isArmed(e.key) && e.date > now.addingTimeInterval(-2) {
@@ -694,10 +685,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         for id in seatIds {
             let isMainTimer = (id == "main-timer" || id == WatchSessionManager.shared.mainTimer?.id)
             if isMainTimer {
-                let isCountUpDisabled = (WatchSessionManager.shared.mainTimer?.isCountUpEnabled == false)
-                if sendToPhone || isCountUpDisabled {
-                    // ★ メインタイマーのアラーム消火: メインタイマーのみを安全に 00:00 リセットし、客席タイマーには絶対に触れない！
-                    //   カウントアップOFFの時や明示的に止めた時（sendToPhone == true）は 00:00 停止状態へ戻し、文字盤モジュールも即時更新する。
+                if sendToPhone {
+                    // ★ メインタイマーのアラーム消火: ユーザーが明示的に「タイマーを止める / シャンプーに入る」等を押した時（sendToPhone == true）のみ
+                    //   00:00 停止状態へ戻し、文字盤モジュールも即時更新する。システムアラーム画面の「開く」「終了」では超過（カウントアップ）を維持する。
                     let stoppedEnd = targets.first(where: { $0.seatId == id })?.date.timeIntervalSince1970
                         ?? (WatchSessionManager.shared.mainTimer?.targetEndTime.timeIntervalSince1970 ?? 0)
                     if var m = WatchSessionManager.shared.mainTimer {
@@ -706,8 +696,11 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                         m.preCountdownSeconds = 0
                         m.prepEndTime = nil
                         m.pausedRemainingSeconds = 0
+                        m.helpProcess = ""
+                        m.isNoHelpNeeded = false
                         m.targetEndTime = Date().addingTimeInterval(TimeInterval(m.totalSeconds))
                         WatchSessionManager.shared.mainTimer = m
+                        WatchSessionManager.shared.clearWatchStartedMainTimer()
                         WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: m, userName: WatchSessionManager.shared.currentUserName)
                     }
                     WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_RESET", stoppedEndTime: stoppedEnd)
@@ -1159,55 +1152,19 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                         // ★ チェックタイマーは遅延ゼロで即座にチェック完了＆残りの本タイマー予約まで完結させる
                         self.acknowledgeRinging(sendToPhone: true, completeCheckIfNeeded: true)
                     } else {
-                        let isMainTimer = (ev.seatId == "main-timer" || ev.seatId == WatchSessionManager.shared.mainTimer?.id)
-                        let isCountUpDisabled = (WatchSessionManager.shared.mainTimer?.isCountUpEnabled == false)
-                        if isMainTimer && isCountUpDisabled {
-                            self.acknowledgeRinging(sendToPhone: true, completeCheckIfNeeded: false)
-                        } else {
-                            // ★ まず遅延ゼロでアラーム・保留通知を消火し、Watchローカル表示と文字盤モジュールを即座に 00:00 へ戻す
-                            self.acknowledgeRinging(sendToPhone: false, completeCheckIfNeeded: false)
-                            if isMainTimer {
-                                let stoppedEnd = ev.date.timeIntervalSince1970
-                                if var m = WatchSessionManager.shared.mainTimer {
-                                    m.isRunning = false
-                                    m.isPreCountingDown = false
-                                    m.preCountdownSeconds = 0
-                                    m.prepEndTime = nil
-                                    m.pausedRemainingSeconds = 0
-                                    m.targetEndTime = Date().addingTimeInterval(TimeInterval(m.totalSeconds))
-                                    WatchSessionManager.shared.mainTimer = m
-                                    WatchSessionManager.shared.clearWatchStartedMainTimer()
-                                    WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: m, userName: WatchSessionManager.shared.currentUserName)
-                                }
-                                self.pendingSystemDismissPhoneSyncWorkItem?.cancel()
-                                let work = DispatchWorkItem { [weak self] in
-                                    guard let self = self, WKApplication.shared().applicationState != .active else { return }
-                                    self.lastSystemDismissedSnapshot = nil
-                                    WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_RESET", stoppedEndTime: stoppedEnd)
-                                }
-                                self.pendingSystemDismissPhoneSyncWorkItem = work
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
-                            } else {
-                                let seatId = ev.seatId
-                                let expectedEndMs = ev.date.timeIntervalSince1970 * 1000.0
-                                WatchSessionManager.shared.applyLocalStop(seatId: seatId)
-                                self.pendingSystemDismissPhoneSyncWorkItem?.cancel()
-                                let work = DispatchWorkItem { [weak self] in
-                                    guard let self = self, WKApplication.shared().applicationState != .active else { return }
-                                    self.lastSystemDismissedSnapshot = nil
-                                    WatchSessionManager.shared.sendActionToPhone(
-                                        action: "STOP_ALARM",
-                                        seatId: seatId,
-                                        extra: ["kind": "main", "expectedEnd": expectedEndMs]
-                                    )
-                                }
-                                self.pendingSystemDismissPhoneSyncWorkItem = work
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
-                            }
-                        }
+                        // ★ システムアラーム画面（「"AssistTimer" からのアラームです。 [開く] [終了]」）では、
+                        //   「開く」「終了」のどちらを押しても 00:00 には戻さず、超過（カウントアップ）状態を維持する。
+                        //   アラーム音・振動・保留通知のみを消火し、「開く」でアプリが前面に来た場合は appBecameActive() で
+                        //   消化タイム・オーバーレイ表示（「シャンプーに入る」「タイマーを止める」等）を復元する。
+                        self.acknowledgeRinging(sendToPhone: false, completeCheckIfNeeded: false)
+                        WidgetSync.save(
+                            timers: WatchSessionManager.shared.timers,
+                            mainTimer: WatchSessionManager.shared.mainTimer,
+                            userName: WatchSessionManager.shared.currentUserName
+                        )
                     }
                 } else {
-                    self.acknowledgeRinging(sendToPhone: true, completeCheckIfNeeded: true)
+                    self.acknowledgeRinging(sendToPhone: false, completeCheckIfNeeded: true)
                 }
                 self.notificationSignature = ""
                 self.refresh()
@@ -1378,7 +1335,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     }
                 }
             }
-            let shouldSendStopToPhone = (response.actionIdentifier == "STOP_ACTION")
+            let shouldSendStopToPhone = false
             self.stop(sendToPhone: shouldSendStopToPhone)
             completionHandler()
         }
