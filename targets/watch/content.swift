@@ -495,6 +495,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     // ★ Watch で直近に行われた客席操作（ヘルプ募集・担当指名・時間微調整など）が、iPhoneからのすれ違い SYNC_SEATS で巻き戻されるのを防ぐ短期保護
     private var localSeatMods: [String: Date] = [:]
     private let localSeatModHoldSeconds: TimeInterval = 3.5
+    private var watchStartedSeatTimes: [String: Date] = [:]
     
     // ★ Watch 上で収納（計測終了）・展開（スリムバーをタップ）した席。停止中は iPhone の値より優先し、
     //   席が稼働したら消す（同期のたびにカードが勝手に開閉しないようにする）
@@ -589,7 +590,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
         let savedWatchEndEpoch = UserDefaults.standard.double(forKey: savedWatchMainEndKey)
         if savedWatchEndEpoch > nowDate.addingTimeInterval(-10800).timeIntervalSince1970 {
-            if self.lastMainTimerLocalStopEndTime > 0 && abs(savedWatchEndEpoch - self.lastMainTimerLocalStopEndTime) <= 15 {
+            if self.lastMainTimerLocalStopEndTime > 0 && abs(savedWatchEndEpoch - self.lastMainTimerLocalStopEndTime) <= 2 {
                 self.watchStartedMainTimerEndTime = nil
             } else {
                 self.watchStartedMainTimerEndTime = Date(timeIntervalSince1970: savedWatchEndEpoch)
@@ -611,7 +612,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
             if (restoredMain.isRunning || restoredMain.isPreCountingDown),
                self.lastMainTimerLocalStopEndTime > 0,
-               abs(restoredMain.targetEndTime.timeIntervalSince1970 - self.lastMainTimerLocalStopEndTime) <= 15 {
+               abs(restoredMain.targetEndTime.timeIntervalSince1970 - self.lastMainTimerLocalStopEndTime) <= 2 {
                 restoredMain.isRunning = false
                 restoredMain.isPreCountingDown = false
                 restoredMain.pausedRemainingSeconds = 0
@@ -642,7 +643,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     let id = restoredTimers[i].id
                     if let stop = self.localStops[id],
                        restoredTimers[i].isRunning,
-                       abs(restoredTimers[i].targetEndTime.timeIntervalSince1970 - stop.end) < 15,
+                       abs(restoredTimers[i].targetEndTime.timeIntervalSince1970 - stop.end) <= 2,
                        nowDate.timeIntervalSince(stop.at) < localStopHoldSeconds {
                         restoredTimers[i].isRunning = false
                         restoredTimers[i].pausedRemainingSeconds = 0
@@ -779,6 +780,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     // ★ Watch 上（または iPhone 側同期）で席を止めたことを記録（止める前の終了時刻も保存・永続化。メインスレッドで呼ぶ）
     func markLocalStop(seatId: String, endTime: Date) {
         localStops[seatId] = (at: Date(), end: endTime.timeIntervalSince1970)
+        watchStartedSeatTimes[seatId] = nil
+        persistLocalStops()
+    }
+    
+    func clearLocalStop(seatId: String) {
+        localStops[seatId] = nil
         persistLocalStops()
     }
     
@@ -808,9 +815,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             markLocalStop(seatId: seatId, endTime: end)
             timers[idx].isRunning = false
             timers[idx].pausedRemainingSeconds = 0
+            timers[idx].status = .normal
             timers[idx].clearCheck()
             timers[idx].shampooStaff = nil
-            timers[idx].helpProcess = "シャンプー"
+            timers[idx].helpProcess = ""
             timers[idx].isRecruiting = false
             timers[idx].isNoHelpNeeded = false
             let snapshot = timers
@@ -939,12 +947,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                (cur.isRunning || cur.isPreCountingDown),
                (parsedMain.isRunning || parsedMain.isPreCountingDown),
                cur.totalSeconds == parsedMain.totalSeconds {
-                if abs(cur.targetEndTime.timeIntervalSince(parsedMain.targetEndTime)) <= 15 {
+                if (cur.targetEndTime > nowDate) == (parsedMain.targetEndTime > nowDate),
+                   abs(cur.targetEndTime.timeIntervalSince(parsedMain.targetEndTime)) <= 2 {
                     parsedMain.targetEndTime = cur.targetEndTime
                 }
                 if cur.isPreCountingDown && parsedMain.isPreCountingDown,
                    let curPrep = cur.prepEndTime, let incPrep = parsedMain.prepEndTime,
-                   abs(curPrep.timeIntervalSince(incPrep)) <= 15 {
+                   abs(curPrep.timeIntervalSince(incPrep)) <= 2 {
                     parsedMain.prepEndTime = curPrep
                 }
             }
@@ -980,9 +989,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 guard self.lastMainTimerLocalActionType == "RESET" || self.lastMainTimerLocalActionType == "PAUSE" else { return false }
                 guard timeSinceLocalAction < self.mainTimerStopHoldSeconds else { return false }
                 guard parsedMain.isRunning || parsedMain.isPreCountingDown else { return false }
-                if timeSinceLocalAction < self.mainTimerLocalHoldSeconds { return true }
-                if self.lastMainTimerLocalStopEndTime > 0,
-                   abs(parsedMain.targetEndTime.timeIntervalSince1970 - self.lastMainTimerLocalStopEndTime) <= 15 {
+                if self.lastMainTimerLocalStopEndTime > 0 {
+                    if abs(parsedMain.targetEndTime.timeIntervalSince1970 - self.lastMainTimerLocalStopEndTime) <= 2 {
+                        return true
+                    }
+                    // 新しい未来の終了時刻（停止したタイマーと2秒超異なる）で稼働開始された場合はブロックしない
+                    if parsedMain.targetEndTime > nowDate && !isStaleSnapshot {
+                        return false
+                    }
+                }
+                if timeSinceLocalAction < 2.0 || parsedMain.targetEndTime <= nowDate || isStaleSnapshot {
                     return true
                 }
                 return false
@@ -1001,17 +1017,29 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
             } else if isRecentlyModifiedOnWatch {
                 if self.lastMainTimerLocalActionType == "RESET" {
-                    parsedMain.pausedRemainingSeconds = 0
-                    parsedMain.helpProcess = ""
-                    parsedMain.isNoHelpNeeded = false
-                    parsedMain.targetEndTime = Date().addingTimeInterval(TimeInterval(parsedMain.totalSeconds))
-                    if !parsedMain.isRunning && !parsedMain.isPreCountingDown {
+                    if parsedMain.isRunning || parsedMain.isPreCountingDown {
+                        // Watch停止後にiPhone等で新しい未来の終了時刻を持つタイマーが開始された場合は即時反映
+                        self.mainTimer = parsedMain
+                        self.lastMainTimerLocalActionTime = Date.distantPast
+                        self.lastMainTimerLocalStopEndTime = 0
+                        self.persistMainTimerStopState()
+                        didUpdateMain = true
+                    } else {
                         parsedMain.pausedRemainingSeconds = 0
+                        parsedMain.helpProcess = ""
+                        parsedMain.isNoHelpNeeded = false
+                        parsedMain.targetEndTime = Date().addingTimeInterval(TimeInterval(parsedMain.totalSeconds))
                         self.mainTimer = parsedMain
                         didUpdateMain = true
                     }
                 } else if self.lastMainTimerLocalActionType == "PAUSE" {
-                    if !parsedMain.isRunning && !parsedMain.isPreCountingDown {
+                    if parsedMain.isRunning || parsedMain.isPreCountingDown {
+                        self.mainTimer = parsedMain
+                        self.lastMainTimerLocalActionTime = Date.distantPast
+                        self.lastMainTimerLocalStopEndTime = 0
+                        self.persistMainTimerStopState()
+                        didUpdateMain = true
+                    } else {
                         if parsedMain.pausedRemainingSeconds <= 0 {
                             parsedMain.pausedRemainingSeconds = 0
                         }
@@ -1094,7 +1122,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 } else if parsedMain.isRunning || parsedMain.isPreCountingDown {
                     // 新しい終了時刻で稼働開始したことが確認できたら、古い停止ブロックを解除
                     if self.lastMainTimerLocalStopEndTime > 0,
-                       abs(parsedMain.targetEndTime.timeIntervalSince1970 - self.lastMainTimerLocalStopEndTime) > 15 {
+                       abs(parsedMain.targetEndTime.timeIntervalSince1970 - self.lastMainTimerLocalStopEndTime) > 2 {
                         self.lastMainTimerLocalStopEndTime = 0
                         self.persistMainTimerStopState()
                     }
@@ -1146,10 +1174,24 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             localSeatMods[id] = nil
                         }
                     }
+                    // ★ Watch主導で開始したばかりの席（15秒以内、または古い保存データ到着時）が、iPhone側の未反映データで強制停止されるのを保護
+                    if let startedAt = watchStartedSeatTimes[id] {
+                        if parsed[i].isRunning {
+                            watchStartedSeatTimes[id] = nil
+                        } else if (nowDate.timeIntervalSince(startedAt) < 15.0 || isStaleSnapshot),
+                                  let prev = self.timers.first(where: { $0.id == id }),
+                                  prev.isRunning,
+                                  prev.targetEndTime > nowDate {
+                            parsed[i] = prev
+                        } else {
+                            watchStartedSeatTimes[id] = nil
+                        }
+                    }
                     // ★ 既存の同一タイマーがWatchで稼働中の場合、往復同期による数秒のズレで終了予定時刻が書き換わってスマートアラームが破棄されるのを防ぐ
                     if let prev = self.timers.first(where: { $0.id == id }), prev.isRunning, parsed[i].isRunning {
                         if prev.totalSeconds == parsed[i].totalSeconds,
-                           abs(prev.targetEndTime.timeIntervalSince(parsed[i].targetEndTime)) <= 15 {
+                           (prev.targetEndTime > nowDate) == (parsed[i].targetEndTime > nowDate),
+                           abs(prev.targetEndTime.timeIntervalSince(parsed[i].targetEndTime)) <= 2 {
                             parsed[i].targetEndTime = prev.targetEndTime
                             if prev.hasAlertedHelpUnassigned {
                                 parsed[i].hasAlertedHelpUnassigned = true
@@ -1162,17 +1204,18 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             if prev.checkTotalSeconds == parsed[i].checkTotalSeconds,
                                let prevChk = prev.checkTargetEndTime,
                                let newChk = parsed[i].checkTargetEndTime,
-                               abs(prevChk.timeIntervalSince(newChk)) <= 15 {
+                               (prevChk > nowDate) == (newChk > nowDate),
+                               abs(prevChk.timeIntervalSince(newChk)) <= 2 {
                                 parsed[i].checkTargetEndTime = prevChk
                             }
                         }
                     } else if parsed[i].isRunning && parsed[i].remainingSeconds <= 180 {
                         parsed[i].hasAlertedHelpUnassigned = true
                     }
-                    // ★ Watch で完了・解除したチェックタイマーが、すれ違いの古い通信パケットで復活するのを15秒間ブロック
+                    // ★ Watch で完了・解除したチェックタイマーが、すれ違いの古い通信パケットで復活するのをブロック
                     if let chkClear = localCheckClears[id] {
                         let incomingChkEnd = parsed[i].checkTargetEndTime?.timeIntervalSince1970 ?? 0
-                        let sameCheck = (chkClear.checkEnd <= 0) || (incomingChkEnd > 0 && abs(incomingChkEnd - chkClear.checkEnd) < 15)
+                        let sameCheck = (chkClear.checkEnd <= 0) || (incomingChkEnd > 0 && abs(incomingChkEnd - chkClear.checkEnd) <= 2)
                         if !parsed[i].isCheckCompleted && parsed[i].checkTargetEndTime != nil && sameCheck && nowDate.timeIntervalSince(chkClear.at) < localCheckClearHoldSeconds {
                             parsed[i].isCheckCompleted = true
                             parsed[i].checkTargetEndTime = nil
@@ -1180,16 +1223,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             if parsed[i].checkStaff == nil {
                                 parsed[i].checkStaff = self.currentUserName
                             }
-                        } else if parsed[i].isCheckCompleted || parsed[i].checkTargetEndTime == nil || nowDate.timeIntervalSince(chkClear.at) >= localCheckClearHoldSeconds {
+                        } else if parsed[i].isCheckCompleted || parsed[i].checkTargetEndTime == nil || !sameCheck || nowDate.timeIntervalSince(chkClear.at) >= localCheckClearHoldSeconds {
                             localCheckClears[id] = nil
                         }
                     }
                     // ★ iPhone側で計測終了・リセットされた席も終了時刻を記録し、後から届く古い applicationContext 等でゾンビ復活するのを防ぐ
-                    if let prev = self.timers.first(where: { $0.id == id }), prev.isRunning, !parsed[i].isRunning {
+                    if let prev = self.timers.first(where: { $0.id == id }), prev.isRunning, !parsed[i].isRunning, !isStaleSnapshot {
                         markLocalStop(seatId: id, endTime: prev.targetEndTime)
                     }
                     guard let stop = localStops[id] else { continue }
-                    let sameEnd = abs(parsed[i].targetEndTime.timeIntervalSince1970 - stop.end) < 15
+                    let sameEnd = abs(parsed[i].targetEndTime.timeIntervalSince1970 - stop.end) <= 2
                     if nowDate.timeIntervalSince(stop.at) >= localStopHoldSeconds {
                         localStops[id] = nil
                         persistLocalStops()
@@ -1296,6 +1339,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         let executeSend = {
             if !seatId.isEmpty && seatId != "main-timer" && action != "REQUEST_SYNC" {
                 self.markLocalSeatMod(seatId: seatId)
+                if action == "START_TIMER" {
+                    self.watchStartedSeatTimes[seatId] = Date()
+                    self.clearLocalStop(seatId: seatId)
+                }
             }
             self.lastSentAction = action
             self.lastSentAt = Date()
@@ -1348,13 +1395,29 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
             }
         }
+        let isCriticalStopAction = (
+            action == "STOP_ALARM" ||
+            action == "STOP_TIMER" ||
+            action == "COMPLETE_CHECK" ||
+            action == "MAIN_TIMER_RESET" ||
+            action == "MAIN_TIMER_PAUSE" ||
+            action == "ENTER_HELP" ||
+            action == "RESET_ZERO" ||
+            action == "FINISH_MEASURE"
+        )
         if session.isReachable {
             lastSendResult = "即時送信中…"
             var acked = false
             var fallbackSent = false
-            if isMainTimerAction {
-                // ★ Watch操作直後に手首を下ろした場合でも確実にiPhoneへ届けるため、1.2秒以内に即時応答がなければ予備ルート(transferUserInfo)も自動併用（iPhone側でactionId重複排除済み）
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            // ★ バックグラウンド通知の「アラーム停止」やシステムスマートアラーム画面の「終了」から呼ばれた場合は、
+            //   直後にwatchOSがプロセスをサスペンドしても確実にiPhoneへ停止が届くよう、即時送信(sendMessage)と同時に
+            //   OSデーモン保証キュー(transferUserInfo)へも即座に投入する（iPhone側で重複排除済み・二度手間防止）
+            if isCriticalStopAction && WKApplication.shared().applicationState != .active {
+                fallbackSent = true
+                session.transferUserInfo(payload)
+            } else if isMainTimerAction || isCriticalStopAction {
+                // ★ Watch操作直後に手首を下ろした場合でも確実にiPhoneへ届けるため、1.0秒以内に即時応答がなければ予備ルート(transferUserInfo)も自動併用
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                     guard !acked && !fallbackSent else { return }
                     if (action == "MAIN_TIMER_START" || action == "MAIN_TIMER_SET_TIME"),
                        let latestType = self?.lastMainTimerLocalActionType,
@@ -3023,6 +3086,7 @@ struct ContentView: View {
                             }
                         }
                         sessionManager.timers = timers
+                        sessionManager.clearLocalStop(seatId: item.id)
                         sessionManager.clearLocalCheckClear(seatId: item.id)
                         sessionManager.setCollapseOverride(seatId: item.id, collapsed: nil)
                         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
