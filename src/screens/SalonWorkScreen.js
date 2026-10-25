@@ -250,6 +250,7 @@ export const formatSeatsPayload = (seatsList) => {
         status: (isZero || isCollapsedSeat) ? 'normal' : (actionInfo ? actionInfo.id : 'normal'),
         checkTargetSeconds: s.checkTargetSeconds ? Number(s.checkTargetSeconds) : 0,
         checkEndTimestamp: isRunning && s.checkEndTimestamp ? Number(s.checkEndTimestamp) : 0,
+        checkProcess: s.checkProcess || 'チェック',
         checkStaffName: s.checkStaffName || '',
         isCheckCompleted: s.checkStatus === 'completed',
         isCollapsed: isCollapsedSeat,
@@ -1435,6 +1436,7 @@ export default function SalonWorkScreen() {
               return {
                 ...s,
                 checkStaffName: staff,
+                checkProcess: extra?.checkProcess || s.checkProcess || 'チェック',
               };
             }
             const process = extra?.helpProcess ?? '';
@@ -1466,6 +1468,7 @@ export default function SalonWorkScreen() {
               return {
                 ...s,
                 checkStaffName: '',
+                checkProcess: extra?.checkProcess || extra?.helpProcess || s.checkProcess || 'チェック',
               };
             }
             const process = extra?.helpProcess || s.helpProcess || s.actionStatus || 'シャンプー';
@@ -1660,6 +1663,19 @@ export default function SalonWorkScreen() {
             if (secondsToAdd === 0) {
               hasChanged = false;
               return s;
+            }
+            if (extra?.isSubCheck) {
+              const currentCheckEnd = s.checkEndTimestamp || Date.now();
+              const computedCheckEnd = Math.max(Date.now() + 5000, currentCheckEnd + secondsToAdd * 1000);
+              const incomingCheckEnd = Number(extra?.checkEndTimestamp || 0);
+              const newCheckEnd = (incomingCheckEnd > Date.now() && Math.abs(incomingCheckEnd - computedCheckEnd) <= 15000)
+                ? incomingCheckEnd
+                : computedCheckEnd;
+              return {
+                ...s,
+                checkTargetSeconds: Math.max(10, (s.checkTargetSeconds || 0) + secondsToAdd),
+                checkEndTimestamp: newCheckEnd,
+              };
             }
             if (s.status !== 'running') {
               // ★ 停止中は残り時間だけ変えて停止のまま（Watch の表示と同じ。以前は勝手に再開していた）

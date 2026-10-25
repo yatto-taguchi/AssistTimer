@@ -29,8 +29,32 @@ struct SeatTimerItem: Identifiable, Equatable {
     // 途中チェックタイマー
     var checkTotalSeconds: Int?
     var checkTargetEndTime: Date?
+    var checkProcess: String = "チェック"
     var checkStaff: String?
     var isCheckCompleted: Bool = false
+    
+    var displayCheckProcess: String {
+        let p = checkProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+        return p.isEmpty ? "チェック" : p
+    }
+    
+    var checkProcessIconName: String {
+        switch displayCheckProcess {
+        case "コーミング": return "comb.fill"
+        case "1液2液": return "drop.fill"
+        case "担当を呼ぶ": return "bell.fill"
+        default: return "magnifyingglass"
+        }
+    }
+    
+    var checkProcessColorHex: String {
+        switch displayCheckProcess {
+        case "コーミング": return "#0A84FF"
+        case "1液2液": return "#BF5AF2"
+        case "担当を呼ぶ": return "#FF9F0A"
+        default: return "#30D158"
+        }
+    }
     
     // ヘルプ未定アラート発火済みフラグ（全員通知用）
     var hasAlertedHelpUnassigned: Bool = false
@@ -66,6 +90,7 @@ struct SeatTimerItem: Identifiable, Equatable {
         status: TreatmentStatus = .normal,
         checkTotalSeconds: Int? = nil,
         checkTargetEndTime: Date? = nil,
+        checkProcess: String = "チェック",
         checkStaff: String? = nil,
         isCheckCompleted: Bool = false,
         hasAlertedHelpUnassigned: Bool = false,
@@ -94,6 +119,7 @@ struct SeatTimerItem: Identifiable, Equatable {
         self.status = status
         self.checkTotalSeconds = checkTotalSeconds
         self.checkTargetEndTime = checkTargetEndTime
+        self.checkProcess = checkProcess
         self.checkStaff = checkStaff
         self.isCheckCompleted = isCheckCompleted
         self.hasAlertedHelpUnassigned = hasAlertedHelpUnassigned
@@ -173,6 +199,7 @@ struct SeatTimerItem: Identifiable, Equatable {
     mutating func clearCheck() {
         checkTotalSeconds = nil
         checkTargetEndTime = nil
+        checkProcess = "チェック"
         checkStaff = nil
         isCheckCompleted = false
     }
@@ -278,6 +305,8 @@ extension SeatTimerItem {
         } else {
             self.checkTargetEndTime = nil
         }
+        let rawCheckProcess = (dictionary["checkProcess"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.checkProcess = rawCheckProcess.isEmpty ? "チェック" : rawCheckProcess
         let rawCheckStaff = (dictionary["checkStaff"] as? String) ?? (dictionary["checkStaffName"] as? String)
         self.checkStaff = (rawCheckStaff?.isEmpty == false) ? rawCheckStaff : nil
         self.isCheckCompleted = (dictionary["isCheckCompleted"] as? NSNumber)?.boolValue ?? (dictionary["isCheckCompleted"] as? Bool) ?? false
@@ -344,6 +373,7 @@ extension SeatTimerItem {
         if let shampooStaff = shampooStaff { dict["shampooStaff"] = shampooStaff }
         if let checkTotalSeconds = checkTotalSeconds { dict["checkTotalSeconds"] = checkTotalSeconds }
         if let checkTargetEndTime = checkTargetEndTime { dict["checkEndTimestamp"] = checkTargetEndTime.timeIntervalSince1970 * 1000.0 }
+        dict["checkProcess"] = displayCheckProcess
         if let checkStaff = checkStaff { dict["checkStaff"] = checkStaff }
         if let genre = genre { dict["genre"] = genre }
         if let prepEndTime = prepEndTime { dict["prepEndTimestamp"] = prepEndTime.timeIntervalSince1970 * 1000.0 }
@@ -1080,12 +1110,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                 parsed[i].hasAlertedHelpUnassigned = true
                             }
                         }
-                        if !prev.isCheckCompleted && !parsed[i].isCheckCompleted,
-                           prev.checkTotalSeconds == parsed[i].checkTotalSeconds,
-                           let prevChk = prev.checkTargetEndTime,
-                           let newChk = parsed[i].checkTargetEndTime,
-                           abs(prevChk.timeIntervalSince(newChk)) <= 15 {
-                            parsed[i].checkTargetEndTime = prevChk
+                        if !prev.isCheckCompleted && !parsed[i].isCheckCompleted {
+                            if parsed[i].checkProcess == "チェック" && prev.checkProcess != "チェック" {
+                                parsed[i].checkProcess = prev.checkProcess
+                            }
+                            if prev.checkTotalSeconds == parsed[i].checkTotalSeconds,
+                               let prevChk = prev.checkTargetEndTime,
+                               let newChk = parsed[i].checkTargetEndTime,
+                               abs(prevChk.timeIntervalSince(newChk)) <= 15 {
+                                parsed[i].checkTargetEndTime = prevChk
+                            }
                         }
                     } else if parsed[i].isRunning && parsed[i].remainingSeconds <= 180 {
                         parsed[i].hasAlertedHelpUnassigned = true
@@ -1361,6 +1395,38 @@ extension Color {
     }
 }
 
+// MARK: - ★ 全Apple Watch画面サイズ（38mm/40mm/41mm/42mm/44mm/45mm/46mm/49mm）自動最適化ヘルパー
+enum WatchLayout {
+    static var screenWidth: CGFloat {
+        WKInterfaceDevice.current().screenBounds.width
+    }
+    /// 38mm(136pt) / 旧42mm(156pt) / 40mm(162pt) / 41mm(176pt) などの小型画面
+    static var isSmall: Bool {
+        screenWidth < 180
+    }
+    /// 44mm(184pt) / 新42mm(187pt) 以下の中〜小型画面（45mm=198pt, 46mm=208pt, 49mm=205pt 以外）
+    static var isCompact: Bool {
+        screenWidth < 192
+    }
+    /// 画面幅に応じたスケール係数（基準: 198pt、最小 0.84 〜 最大 1.0）
+    static var scale: CGFloat {
+        let s = screenWidth / 198.0
+        return min(1.0, max(0.84, s))
+    }
+    static func font(_ base: CGFloat) -> CGFloat {
+        return (base * scale * 2).rounded() / 2
+    }
+    static var cardPadding: CGFloat {
+        isSmall ? 6 : (isCompact ? 7.5 : 9)
+    }
+    static var sheetHorizontalPadding: CGFloat {
+        isSmall ? 2 : (isCompact ? 4 : 6)
+    }
+    static var buttonHorizontalPadding: CGFloat {
+        isSmall ? 6 : (isCompact ? 7.5 : 9)
+    }
+}
+
 // ★ シート閉鎖中のSwiftUI ViewGraph再評価・クラッシュを防ぐための非リアクティブ遅延実行ボックス
 private final class PendingSheetActionBox {
     var action: (() -> Void)? = nil
@@ -1382,6 +1448,7 @@ struct ContentView: View {
     // タイム操作シート対象席
     @State private var timeActionTargetId: String? = nil
     @State private var timeActionInitialBranchMode: Bool = false
+    @State private var timeActionInitialSubCheckBranchMode: Bool = false
     
     // チェック操作シート対象席
     @State private var checkActionTargetId: String? = nil
@@ -1774,11 +1841,14 @@ struct ContentView: View {
             Text("📱 iPhoneで席を追加してください")
                 .font(.system(size: 13, weight: .bold))
                 .foregroundColor(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
                 .multilineTextAlignment(.center)
             
             Text("サロンワーク画面の客席と\n自動でリアルタイム連動します")
                 .font(.system(size: 11))
                 .foregroundColor(Color(hex: "#8E8E93"))
+                .minimumScaleFactor(0.8)
                 .multilineTextAlignment(.center)
                 .lineSpacing(2)
         }
@@ -2075,6 +2145,8 @@ struct ContentView: View {
                                     .font(.system(size: 13, weight: .heavy))
                                 Text(label)
                                     .font(.system(size: 14, weight: .heavy))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 11)
@@ -2135,6 +2207,8 @@ struct ContentView: View {
                                     .font(.system(size: 13, weight: .heavy))
                                 Text(label)
                                     .font(.system(size: 14, weight: .heavy))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 11)
@@ -2163,6 +2237,8 @@ struct ContentView: View {
                     }) {
                         Text("タイマーを止める")
                             .font(.system(size: 14, weight: .heavy, design: .rounded))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
                             .background(Color(hex: "#FF453A"))
@@ -2180,6 +2256,8 @@ struct ContentView: View {
                     }) {
                         Text("超過カウント続行（画面を見る）")
                             .font(.system(size: 11.5, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
                             .background(Color.white.opacity(0.14))
@@ -2200,6 +2278,8 @@ struct ContentView: View {
                     }) {
                         Text("タイマーを止める")
                             .font(.system(size: 16, weight: .heavy, design: .rounded))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
                             .background(Color(hex: "#FF453A"))
@@ -2216,6 +2296,8 @@ struct ContentView: View {
                     }) {
                         Text("超過カウント続行（画面を見る）")
                             .font(.system(size: 11.5, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
                             .background(Color.white.opacity(0.14))
@@ -2227,7 +2309,7 @@ struct ContentView: View {
                     .padding(.bottom, 6)
                 }
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
@@ -2273,6 +2355,7 @@ struct ContentView: View {
                                 now: now,
                                 onOpenTimeAction: {
                                     timeActionInitialBranchMode = !item.isZero
+                                    timeActionInitialSubCheckBranchMode = false
                                     timeActionTargetId = item.id
                                     playHaptic(.click)
                                 },
@@ -2285,7 +2368,9 @@ struct ContentView: View {
                                     playHaptic(.click)
                                 },
                                 onOpenCheckAction: {
-                                    checkActionTargetId = item.id
+                                    timeActionInitialBranchMode = false
+                                    timeActionInitialSubCheckBranchMode = true
+                                    timeActionTargetId = item.id
                                     playHaptic(.click)
                                 },
                                 onOpenSelectCheckStaff: {
@@ -2317,6 +2402,8 @@ struct ContentView: View {
                                 .font(.system(size: 15, weight: .bold))
                             Text("新しい席を追加")
                                 .font(.system(size: 13, weight: .bold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
@@ -2620,6 +2707,7 @@ struct ContentView: View {
             onSelectSeat: { selectedSeat in
                 triggerScroll(to: selectedSeat.id)
                 timeActionInitialBranchMode = false
+                timeActionInitialSubCheckBranchMode = false
                 timeActionTargetId = selectedSeat.id
             },
             onSelectMainTimer: {
@@ -2701,7 +2789,7 @@ struct ContentView: View {
     
     @ViewBuilder
     private func timeActionSheetView(item: SeatTimerItem) -> some View {
-        if item.isOvertime {
+        if item.isOvertime && !timeActionInitialSubCheckBranchMode {
             // ★ カウントアップ（超過中）時の専用シート（3つのボタン: シャンプー入る、タイムリセット、計測終了）
             OvertimeActionSheet(
                 item: item,
@@ -2796,8 +2884,9 @@ struct ContentView: View {
             // ★ 00:00になっている場合は、タップしたらタイム入力画面にそのまま移動！
             TimeActionSheet(
                 item: item,
-                initialReinputMode: item.isZero,
+                initialReinputMode: item.isZero && !timeActionInitialSubCheckBranchMode,
                 initialTimerBranchMode: timeActionInitialBranchMode,
+                initialSubCheckBranchMode: timeActionInitialSubCheckBranchMode,
                 currentUserName: currentUserName,
                 staffCandidates: sessionManager.members,
                 onAdjust: { deltaSec in
@@ -2821,6 +2910,31 @@ struct ContentView: View {
                         )
                         let deltaText = formatDeltaString(deltaSec)
                         showNotification(text: "⏱️ \(item.displaySeatName): \(deltaText)しました", color: Color(hex: "#0A84FF"))
+                    }
+                },
+                onAdjustCheck: { deltaSec in
+                    triggerScroll(to: item.id)
+                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        let baseCheckEnd = timers[idx].checkTargetEndTime ?? Date()
+                        let newCheckEnd = max(Date().addingTimeInterval(5), baseCheckEnd.addingTimeInterval(Double(deltaSec)))
+                        timers[idx].checkTargetEndTime = newCheckEnd
+                        timers[idx].checkTotalSeconds = max(10, (timers[idx].checkTotalSeconds ?? 0) + deltaSec)
+                        timers[idx].isCollapsed = false
+                        sessionManager.timers = timers
+                        sessionManager.setCollapseOverride(seatId: item.id, collapsed: false)
+                        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
+                        sessionManager.sendActionToPhone(
+                            action: "ADJUST_TIME",
+                            seatId: item.id,
+                            extra: [
+                                "secondsToAdd": deltaSec,
+                                "isSubCheck": true,
+                                "checkEndTimestamp": newCheckEnd.timeIntervalSince1970 * 1000.0
+                            ]
+                        )
+                        let deltaText = formatDeltaString(deltaSec)
+                        showNotification(text: "⏱️ \(item.displaySeatName) チェック: \(deltaText)しました", color: Color(hex: "#30D158"))
                     }
                 },
                 onStop: {
@@ -3025,30 +3139,32 @@ struct ContentView: View {
                         )
                     }
                 },
-                onAssignCheckStaff: { staff in
+                onAssignCheckStaff: { checkProcess, staff in
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].checkProcess = checkProcess
                             timers[idx].checkStaff = staff
                         }
                         sessionManager.timers = timers
-                        sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": staff, "isSubCheck": true])
+                        sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": staff, "checkProcess": checkProcess, "isSubCheck": true])
                         WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                         showNotification(
-                            text: "📤 \(staff)さんを途中チェック担当に指定しました",
+                            text: "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
                             color: Color(hex: "#30D158")
                         )
                     }
                 },
-                onRecruitCheckStaff: {
+                onRecruitCheckStaff: { checkProcess in
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].checkProcess = checkProcess
                             timers[idx].checkStaff = "募集中"
                         }
                         sessionManager.timers = timers
-                        sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": "チェック", "isSubCheck": true])
+                        sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": checkProcess, "checkProcess": checkProcess, "isSubCheck": true])
                         WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                         showNotification(
-                            text: "📢 【\(item.displaySeatName)】途中チェック担当を全員に募集通知しました！",
+                            text: "📢 【\(item.displaySeatName)】\(checkProcess)担当を全員に募集通知しました！",
                             color: Color(hex: "#FF9F0A")
                         )
                     }
@@ -3056,13 +3172,14 @@ struct ContentView: View {
                 onClearCheckStaff: {
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            timers[idx].checkProcess = "チェック"
                             timers[idx].checkStaff = nil
                         }
                         sessionManager.timers = timers
-                        sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": "", "isSubCheck": true])
+                        sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": "", "checkProcess": "チェック", "isSubCheck": true])
                         WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                         showNotification(
-                            text: "👤 途中チェック担当を未定に戻しました",
+                            text: "👤 チェック担当を未定に戻しました",
                             color: Color(hex: "#8E8E93")
                         )
                     }
@@ -3086,7 +3203,7 @@ struct ContentView: View {
                         )
                         sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
                         WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                        showNotification(text: "✅ 途中チェック完了（全体タイマー続行）", color: Color(hex: "#30D158"))
+                        showNotification(text: "✅ チェック完了（全体タイマー続行）", color: Color(hex: "#30D158"))
                     }
                 },
                 onCancelSubCheck: {
@@ -3107,7 +3224,7 @@ struct ContentView: View {
                         )
                         sessionManager.sendActionToPhone(action: "CANCEL_CHECK", seatId: item.id)
                         WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                        showNotification(text: "⏹ 途中チェックタイマーを解除しました", color: Color(hex: "#8E8E93"))
+                        showNotification(text: "⏹ チェックタイマーを解除しました", color: Color(hex: "#8E8E93"))
                     }
                 }
             )
@@ -3172,30 +3289,32 @@ struct ContentView: View {
             item: item,
             currentUserName: currentUserName,
             staffCandidates: sessionManager.members,
-            onAssignStaff: { staff in
+            onAssignStaff: { checkProcess, staff in
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        timers[idx].checkProcess = checkProcess
                         timers[idx].checkStaff = staff
                     }
                     sessionManager.timers = timers
-                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": staff, "isSubCheck": true])
+                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": staff, "checkProcess": checkProcess, "isSubCheck": true])
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
-                        text: "📤 \(staff)さんをチェック担当に指定しました",
+                        text: "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
                         color: Color(hex: "#30D158")
                     )
                 }
             },
-            onRecruitAll: {
+            onRecruitAll: { checkProcess in
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        timers[idx].checkProcess = checkProcess
                         timers[idx].checkStaff = "募集中"
                     }
                     sessionManager.timers = timers
-                    sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": "チェック", "isSubCheck": true])
+                    sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": checkProcess, "checkProcess": checkProcess, "isSubCheck": true])
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
-                        text: "📢 【\(item.displaySeatName)】チェック担当を全員に募集通知しました！",
+                        text: "📢 【\(item.displaySeatName)】\(checkProcess)担当を全員に募集通知しました！",
                         color: Color(hex: "#FF9F0A")
                     )
                 }
@@ -3203,10 +3322,11 @@ struct ContentView: View {
             onClearStaff: {
                 if let idx = timers.firstIndex(where: { $0.id == item.id }) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                        timers[idx].checkProcess = "チェック"
                         timers[idx].checkStaff = nil
                     }
                     sessionManager.timers = timers
-                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": "", "isSubCheck": true])
+                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": "", "checkProcess": "チェック", "isSubCheck": true])
                     WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
                     showNotification(
                         text: "👤 チェック担当を未定に戻しました",
@@ -3579,13 +3699,15 @@ struct MainTimerCard: View {
             }
             WKInterfaceDevice.current().play(.click)
         }) {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 // 左側: タイトル
                 HStack(spacing: 3) {
                     Image(systemName: "stopwatch.fill")
                         .font(.system(size: 11, weight: .bold))
                     Text("メインタイマー")
-                        .font(.system(size: 13, weight: .bold))
+                        .font(.system(size: WatchLayout.font(13), weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
                 .foregroundColor(Color(hex: "#30D158"))
                 
@@ -3595,25 +3717,29 @@ struct MainTimerCard: View {
                         .font(.system(size: 8))
                     Text("00:00")
                         .font(.system(size: 9.5, weight: .bold))
+                        .lineLimit(1)
                 }
                 .foregroundColor(Color(hex: "#8E8E93"))
                 .padding(.horizontal, 5)
                 .padding(.vertical, 2)
                 .background(Color.white.opacity(0.1))
                 .cornerRadius(4)
+                .fixedSize(horizontal: true, vertical: false)
                 
-                Spacer()
+                Spacer(minLength: 2)
                 
                 // 右側: 開く
-                HStack(spacing: 3) {
+                HStack(spacing: 2) {
                     Text("開く")
                         .font(.system(size: 10, weight: .bold))
+                        .lineLimit(1)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9, weight: .bold))
                 }
                 .foregroundColor(Color(hex: "#30D158"))
+                .fixedSize(horizontal: true, vertical: false)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
             .padding(.vertical, 9)
             .background(Color(hex: "#1C1C1E"))
             .cornerRadius(10)
@@ -3635,9 +3761,10 @@ struct MainTimerCard: View {
                     .font(.system(size: 11, weight: .bold))
                     .foregroundColor(Color(hex: "#30D158"))
                 Text("メインタイマー")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: WatchLayout.font(13), weight: .bold))
                     .foregroundColor(Color(hex: "#30D158"))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                 
                 if let genre = item.genre, !genre.isEmpty {
                     Text(genre)
@@ -3648,9 +3775,10 @@ struct MainTimerCard: View {
                         .background(Color(hex: "#30D158").opacity(0.2))
                         .cornerRadius(4)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
                 
-                Spacer()
+                Spacer(minLength: 2)
                 
                 // あなたバッジ
                 HStack(spacing: 2) {
@@ -3658,12 +3786,14 @@ struct MainTimerCard: View {
                         .font(.system(size: 7))
                     Text("あなた")
                         .font(.system(size: 9.5, weight: .heavy))
+                        .lineLimit(1)
                 }
                 .foregroundColor(Color(hex: "#FFD60A"))
                 .padding(.horizontal, 4)
                 .padding(.vertical, 1.5)
                 .background(Color(hex: "#FFD60A").opacity(0.18))
                 .cornerRadius(4)
+                .fixedSize(horizontal: true, vertical: false)
             }
             
             // ② 1番目（一番上）: タイム数字 ＆ プログレスバー（タップで操作・止める・メニューに入る等へ分岐）
@@ -3679,18 +3809,24 @@ struct MainTimerCard: View {
                             Text("超過")
                                 .font(.system(size: 12, weight: .heavy))
                                 .foregroundColor(Color(hex: "#FF453A"))
+                                .lineLimit(1)
+                                .fixedSize()
                         } else if item.isPreCountingDown {
                             Text("準備中")
                                 .font(.system(size: 12, weight: .heavy))
                                 .foregroundColor(Color(hex: "#FFD60A"))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         Text(formatSeconds(item.isPreCountingDown ? item.prepRemainingSeconds : abs(item.remainingSeconds)))
-                            .font(.system(size: 32, weight: .black, design: .rounded))
+                            .font(.system(size: WatchLayout.font(32), weight: .black, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(
                                 item.isOvertime ? Color(hex: "#FF453A") :
                                 (item.isPreCountingDown ? Color(hex: "#FFD60A") : Color(hex: "#30D158"))
                             )
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
                     
@@ -3699,18 +3835,26 @@ struct MainTimerCard: View {
                             .font(.system(size: 9))
                         Text("\(item.totalSeconds / 60)分設定")
                             .font(.system(size: 10, weight: .semibold))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                         if item.isOvertime {
                             Text("• タップで止める・タイム終了 >")
                                 .font(.system(size: 9.5, weight: .heavy))
                                 .foregroundColor(Color(hex: "#FFD60A"))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
                         } else if item.isPreCountingDown {
                             Text("• ⏳ カウントダウン中")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(Color(hex: "#FFD60A"))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.72)
                         } else if !item.isRunning {
                             Text("• ⏸️ 停止中")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(Color(hex: "#FF9F0A"))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                         } else {
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 8))
@@ -3739,7 +3883,7 @@ struct MainTimerCard: View {
                     .padding(.bottom, 2)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                 .padding(.vertical, 8)
                 .background(
                     RoundedRectangle(cornerRadius: 10)
@@ -3755,14 +3899,14 @@ struct MainTimerCard: View {
             // ③ 2番目（タイマー数字の下）: タイマー全体の最後に何をするか（シャンプー・コーミング等）を選べる場所
             mainHelpMenuSection
         }
-        .padding(9)
+        .padding(WatchLayout.cardPadding)
         .background(Color(hex: "#1C1C1E"))
         .cornerRadius(14)
         .overlay(
             RoundedRectangle(cornerRadius: 14)
                 .stroke(cardBorderColor, lineWidth: 1.5)
         )
-        .padding(.horizontal, 4)
+        .padding(.horizontal, WatchLayout.isSmall ? 2 : 4)
     }
 
     @ViewBuilder
@@ -3782,12 +3926,16 @@ struct MainTimerCard: View {
                         .font(.system(size: 10))
                     Text("👤 ヘルプなし (ワンマン)")
                         .font(.system(size: 10, weight: .medium))
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Spacer(minLength: 2)
                     Text("変更 >")
                         .font(.system(size: 9, weight: .bold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 9)
+                .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                 .padding(.vertical, 7)
                 .background(Color.white.opacity(0.06))
                 .foregroundColor(Color(hex: "#8E8E93"))
@@ -3804,27 +3952,33 @@ struct MainTimerCard: View {
                     onOpenAction?()
                 }
             }) {
-                HStack(spacing: 5) {
+                HStack(spacing: 4) {
                     Image(systemName: iconName)
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(Color(hex: "#0A84FF"))
                     Text("\(p):")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(Color(hex: "#C0C0C8"))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     Text("あなた")
                         .font(.system(size: 11, weight: .heavy))
                         .foregroundColor(Color(hex: "#FFD60A"))
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Spacer(minLength: 2)
                     HStack(spacing: 2) {
                         Text("変更")
                             .font(.system(size: 9, weight: .semibold))
+                            .lineLimit(1)
                         Image(systemName: "chevron.right")
                             .font(.system(size: 8, weight: .bold))
                     }
                     .foregroundColor(Color(hex: "#8E8E93"))
+                    .fixedSize(horizontal: true, vertical: false)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 9)
+                .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                 .padding(.vertical, 7)
                 .background(Color(hex: "#FFD60A").opacity(0.14))
                 .cornerRadius(8)
@@ -3843,19 +3997,19 @@ struct MainTimerCard: View {
                     onOpenAction?()
                 }
             }) {
-                HStack(spacing: 5) {
+                HStack(spacing: 4) {
                     Image(systemName: "drop.fill")
                         .font(.system(size: 11, weight: .bold))
                     Text("終了後のメニューを指定（シャンプー等）")
                         .font(.system(size: 10.5, weight: .heavy))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    Spacer()
+                        .minimumScaleFactor(0.7)
+                    Spacer(minLength: 2)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8, weight: .bold))
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 9)
+                .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                 .padding(.vertical, 7)
                 .background(Color(hex: "#FF9F0A").opacity(0.18))
                 .foregroundColor(Color(hex: "#FFD60A"))
@@ -3934,13 +4088,15 @@ struct SeatTimerCard: View {
             WatchSessionManager.shared.setCollapseOverride(seatId: item.id, collapsed: false)
             WKInterfaceDevice.current().play(.click)
         }) {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 // 左側: 席番号
                 HStack(spacing: 3) {
                     Image(systemName: "applewatch")
                         .font(.system(size: 11, weight: .bold))
                     Text(item.displaySeatName)
-                        .font(.system(size: 13, weight: .heavy))
+                        .font(.system(size: WatchLayout.font(13), weight: .heavy))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
                 .foregroundColor(.white)
                 
@@ -3950,25 +4106,29 @@ struct SeatTimerCard: View {
                         .font(.system(size: 8))
                     Text("00:00")
                         .font(.system(size: 9.5, weight: .bold))
+                        .lineLimit(1)
                 }
                 .foregroundColor(Color(hex: "#8E8E93"))
                 .padding(.horizontal, 5)
                 .padding(.vertical, 2)
                 .background(Color.white.opacity(0.1))
                 .cornerRadius(4)
+                .fixedSize(horizontal: true, vertical: false)
                 
-                Spacer()
+                Spacer(minLength: 2)
                 
                 // 右側: 開く
-                HStack(spacing: 3) {
+                HStack(spacing: 2) {
                     Text("開く")
                         .font(.system(size: 10, weight: .bold))
+                        .lineLimit(1)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9, weight: .bold))
                 }
                 .foregroundColor(Color(hex: "#64D2FF"))
+                .fixedSize(horizontal: true, vertical: false)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
             .padding(.vertical, 9)
             .background(Color(hex: "#1C1C1E"))
             .cornerRadius(10)
@@ -3989,7 +4149,7 @@ struct SeatTimerCard: View {
             helpStaffSection
             checkTimerSection
         }
-        .padding(9)
+        .padding(WatchLayout.cardPadding)
         .background(Color(hex: "#1C1C1E"))
         .cornerRadius(14)
         .overlay(
@@ -4002,24 +4162,24 @@ struct SeatTimerCard: View {
     @ViewBuilder
     private var headerSection: some View {
         HStack(alignment: .center, spacing: 4) {
-            // 席番号（左側: 見切れそうになったら「...」で省略）
+            // 席番号（左側: 見切れそうになったら縮小または「...」で省略）
             HStack(spacing: 3) {
                 Image(systemName: "applewatch")
                     .font(.system(size: 11, weight: .bold))
                 Text(item.displaySeatName)
-                    .font(.system(size: 14, weight: .heavy))
+                    .font(.system(size: WatchLayout.font(14), weight: .heavy))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .truncationMode(.tail)
             }
             .foregroundColor(.white)
             .layoutPriority(0)
             
-            Spacer(minLength: 6)
+            Spacer(minLength: 4)
             
-            // 担当表示（右上に寄せる: 固定サイズで文字潰れを防止）
+            // 担当表示（右上に寄せる: 1行維持で文字潰れを防止）
             creatorRoleBadge
                 .layoutPriority(1)
-                .fixedSize(horizontal: true, vertical: false)
         }
     }
     
@@ -4032,34 +4192,38 @@ struct SeatTimerCard: View {
                     .font(.system(size: 8))
                     .foregroundColor(Color(hex: "#FFD60A"))
                 Text("担当: あなた")
-                    .font(.system(size: 11, weight: .heavy))
+                    .font(.system(size: WatchLayout.font(11), weight: .heavy))
                     .foregroundColor(Color(hex: "#FFD60A"))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2.5)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
             .background(Color(hex: "#FFD60A").opacity(0.18))
             .cornerRadius(6)
+            .fixedSize(horizontal: true, vertical: false)
         } else if item.shampooStaff == currentUserName || item.checkStaff == currentUserName {
             // 他人作成で自分がヘルプの場合: 「担当: 佐藤 ★あなた」
-            HStack(spacing: 4) {
+            HStack(spacing: 3) {
                 Text("担当: \(item.creatorName)")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(Color(hex: "#E5E5EA"))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                 
                 HStack(spacing: 2) {
                     Image(systemName: "star.fill")
                         .font(.system(size: 7))
                     Text("あなた")
-                        .font(.system(size: 9.5, weight: .heavy))
+                        .font(.system(size: 9, weight: .heavy))
                         .lineLimit(1)
                 }
                 .foregroundColor(Color(hex: "#FFD60A"))
-                .padding(.horizontal, 4)
+                .padding(.horizontal, 3.5)
                 .padding(.vertical, 1.5)
                 .background(Color(hex: "#FFD60A").opacity(0.18))
                 .cornerRadius(4)
+                .fixedSize(horizontal: true, vertical: false)
             }
         } else {
             // 他人が担当の席: 「担当: ヤマモト」
@@ -4067,7 +4231,8 @@ struct SeatTimerCard: View {
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(Color(hex: "#C7C7CC"))
                 .lineLimit(1)
-                .padding(.horizontal, 6)
+                .minimumScaleFactor(0.75)
+                .padding(.horizontal, 5)
                 .padding(.vertical, 2)
                 .background(Color.white.opacity(0.1))
                 .cornerRadius(5)
@@ -4115,12 +4280,16 @@ struct SeatTimerCard: View {
                         Text("超過")
                             .font(.system(size: 12, weight: .heavy))
                             .foregroundColor(Color(hex: "#FF453A"))
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                     
                     Text(formatSeconds(abs(item.remainingSeconds)))
-                        .font(.system(size: 32, weight: .black, design: .rounded))
+                        .font(.system(size: WatchLayout.font(32), weight: .black, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(item.isOvertime ? Color(hex: "#FF453A") : Color(hex: "#64D2FF"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                 }
                 .frame(maxWidth: .infinity, alignment: .center)
                 
@@ -4130,15 +4299,21 @@ struct SeatTimerCard: View {
                         .font(.system(size: 9))
                     Text("\(item.totalSeconds / 60)分設定")
                         .font(.system(size: 10, weight: .semibold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     
                     if item.isOvertime {
                         Text("• タップで止める・タイム終了 >")
                             .font(.system(size: 9.5, weight: .heavy))
                             .foregroundColor(Color(hex: "#FFD60A"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                     } else if !item.isRunning {
                         Text("• ⏸️ 停止中")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundColor(Color(hex: "#FF9F0A"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                 }
                 .foregroundColor(item.isOvertime ? Color(hex: "#FF857D") : Color(hex: "#90C0E0"))
@@ -4167,7 +4342,7 @@ struct SeatTimerCard: View {
                 .padding(.bottom, 2)
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 8)
+            .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
             .padding(.vertical, 8)
             .background(
                 RoundedRectangle(cornerRadius: 10)
@@ -4230,7 +4405,7 @@ struct SeatTimerCard: View {
     @ViewBuilder
     private func staffAssignedButton(staff: String) -> some View {
         Button(action: onOpenSelectHelpStaff) {
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 Image(systemName: shampooStatusIcon)
                     .font(.system(size: 11, weight: .bold))
                     .foregroundColor(isShampooOrCombing ? .white : Color(hex: "#0A84FF"))
@@ -4238,23 +4413,29 @@ struct SeatTimerCard: View {
                 Text(shampooStatusTitle)
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(Color(hex: "#C0C0C8"))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
                 
                 Text(staff)
                     .font(.system(size: 11, weight: .heavy))
                     .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : .white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
                 
-                Spacer()
+                Spacer(minLength: 2)
                 
                 HStack(spacing: 2) {
                     Text(isShampooOrCombing ? "施術中" : "変更")
                         .font(.system(size: 9, weight: .semibold))
+                        .lineLimit(1)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8, weight: .bold))
                 }
                 .foregroundColor(isShampooOrCombing ? Color.white.opacity(0.8) : Color(hex: "#8E8E93"))
+                .fixedSize(horizontal: true, vertical: false)
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 9)
+            .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
             .padding(.vertical, 7)
             .background(staffButtonBackground(staff: staff))
             .cornerRadius(8)
@@ -4276,7 +4457,7 @@ struct SeatTimerCard: View {
         } else if item.isRecruiting {
             // ★ 全員に募集中！
             Button(action: onOpenSelectHelpStaff) {
-                HStack(spacing: 5) {
+                HStack(spacing: 4) {
                     Image(systemName: "megaphone.fill")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(Color(hex: "#FF9F0A"))
@@ -4285,15 +4466,19 @@ struct SeatTimerCard: View {
                     Text("\(p.isEmpty ? "ヘルプ" : p): 募集中")
                         .font(.system(size: 11, weight: .heavy))
                         .foregroundColor(Color(hex: "#FFD60A"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                     
-                    Spacer()
+                    Spacer(minLength: 2)
                     
                     Text("私が入る >")
                         .font(.system(size: 10, weight: .heavy))
                         .foregroundColor(Color(hex: "#FF9F0A"))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 9)
+                .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                 .padding(.vertical, 7)
                 .background(Color(hex: "#FF9F0A").opacity(0.2))
                 .cornerRadius(8)
@@ -4311,6 +4496,8 @@ struct SeatTimerCard: View {
                         .font(.system(size: 10))
                     Text("👤 ヘルプなし (ワンマン)")
                         .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 7)
@@ -4323,17 +4510,19 @@ struct SeatTimerCard: View {
         } else if !item.isZero {
             // 指定なし ➔ タイマー稼働中・設定時のみ「ヘルプを指定してください」を表示
             Button(action: onOpenSelectHelpStaff) {
-                HStack(spacing: 5) {
+                HStack(spacing: 4) {
                     Image(systemName: "person.crop.circle.badge.plus")
                         .font(.system(size: 11, weight: .bold))
                     Text("ヘルプを指定してください")
                         .font(.system(size: 11, weight: .heavy))
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Spacer(minLength: 2)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8, weight: .bold))
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 9)
+                .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                 .padding(.vertical, 7)
                 .background(Color(hex: "#FF9F0A").opacity(0.18))
                 .foregroundColor(Color(hex: "#FFD60A"))
@@ -4347,38 +4536,44 @@ struct SeatTimerCard: View {
         }
     }
     
-    // MARK: - ④ 3番目: 途中チェックのタイマーの数字 ＋ その下に途中チェックに入る人の名前を入れる場所
+    // MARK: - ④ 3番目: チェックのタイマーの数字 ＋ その下にチェックに入る人の名前を入れる場所
     @ViewBuilder
     private var checkTimerSection: some View {
         if let checkSec = item.checkRemainingSeconds {
+            let chkProc = item.displayCheckProcess
             VStack(spacing: 5) {
-                // 上段: 途中チェックのタイマーの数字（タップで途中チェック完了・解除などの操作シートへ分岐）
+                // 上段: チェックのタイマーの数字（タップでチェック完了・解除などの操作シートへ分岐）
                 Button(action: onOpenCheckAction) {
-                    HStack(alignment: .center, spacing: 5) {
-                        Image(systemName: "magnifyingglass")
+                    HStack(alignment: .center, spacing: 4) {
+                        Image(systemName: item.checkProcessIconName)
                             .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(Color(hex: "#30D158"))
-                        Text("途中チェック")
-                            .font(.system(size: 10, weight: .heavy))
+                            .foregroundColor(Color(hex: item.checkProcessColorHex))
+                        Text(chkProc)
+                            .font(.system(size: 10.5, weight: .heavy))
                             .foregroundColor(Color(hex: "#A0E0B0"))
-                        Spacer()
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .fixedSize(horizontal: true, vertical: false)
+                        Spacer(minLength: 2)
                         Text(formatSeconds(checkSec))
-                            .font(.system(size: 18, weight: .black, design: .rounded))
+                            .font(.system(size: WatchLayout.font(18), weight: .black, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(Color(hex: "#30D158"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                         Image(systemName: "chevron.right")
                             .font(.system(size: 8.5, weight: .bold))
                             .foregroundColor(Color(hex: "#8E8E93"))
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 8)
+                    .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                     .padding(.vertical, 5)
                     .background(Color(hex: "#30D158").opacity(0.15))
                     .cornerRadius(7)
                 }
                 .buttonStyle(.plain)
                 
-                // 下段（途中チェックのタイマーの数字の下）: 途中チェックに入るべき人の名前を入れる場所
+                // 下段（チェックのタイマーの数字の下）: チェックに入るべき人の名前を入れる場所
                 if let cStaff = item.checkStaff, !cStaff.isEmpty {
                     Button(action: onOpenSelectCheckStaff) {
                         HStack(spacing: 4) {
@@ -4386,25 +4581,31 @@ struct SeatTimerCard: View {
                                 Image(systemName: "megaphone.fill")
                                     .font(.system(size: 9.5, weight: .bold))
                                     .foregroundColor(Color(hex: "#FF9F0A"))
-                                Text("チェック担当: 全員に募集中")
+                                Text("\(chkProc): 全員に募集中")
                                     .font(.system(size: 10.5, weight: .heavy))
                                     .foregroundColor(Color(hex: "#FFD60A"))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.72)
                             } else {
                                 let displayStaff = (cStaff == currentUserName) ? "\(cStaff)(あなた)" : cStaff
                                 Image(systemName: "person.fill.checkmark")
                                     .font(.system(size: 9.5, weight: .bold))
                                     .foregroundColor(Color(hex: "#30D158"))
-                                Text("チェック担当: \(displayStaff)")
+                                Text("\(chkProc): \(displayStaff)")
                                     .font(.system(size: 10.5, weight: .heavy))
                                     .foregroundColor(.white)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.72)
                             }
-                            Spacer()
+                            Spacer(minLength: 2)
                             Text("変更 >")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(Color(hex: "#8E8E93"))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 8)
+                        .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                         .padding(.vertical, 6)
                         .background(Color.white.opacity(0.10))
                         .cornerRadius(7)
@@ -4421,12 +4622,14 @@ struct SeatTimerCard: View {
                                 .font(.system(size: 10, weight: .bold))
                             Text("チェック担当を指名・募集")
                                 .font(.system(size: 10.5, weight: .heavy))
-                            Spacer()
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.72)
+                            Spacer(minLength: 2)
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 8.5, weight: .bold))
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 8)
+                        .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                         .padding(.vertical, 6)
                         .background(Color(hex: "#FF9F0A").opacity(0.25))
                         .foregroundColor(Color(hex: "#FFD60A"))
@@ -4439,7 +4642,7 @@ struct SeatTimerCard: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(7)
+            .padding(WatchLayout.isSmall ? 5 : 7)
             .background(Color(hex: "#30D158").opacity(0.10))
             .cornerRadius(10)
             .overlay(
@@ -4452,9 +4655,12 @@ struct SeatTimerCard: View {
                     .font(.system(size: 10))
                 Text("チェック完了")
                     .font(.system(size: 10, weight: .bold))
+                    .lineLimit(1)
                 if let cStaff = item.checkStaff {
                     Text("(\(cStaff))")
                         .font(.system(size: 10))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
             }
             .foregroundColor(Color(hex: "#30D158").opacity(0.8))
@@ -4579,6 +4785,8 @@ struct OvertimeActionSheet: View {
                                 .font(.system(size: 14, weight: .bold))
                             Text("\(helpProcessName)に入る")
                                 .font(.system(size: 14, weight: .heavy))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
@@ -4612,6 +4820,8 @@ struct OvertimeActionSheet: View {
                             .font(.system(size: 13, weight: .bold))
                         Text("タイマーを止める")
                             .font(.system(size: 13, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 9)
@@ -4637,6 +4847,8 @@ struct OvertimeActionSheet: View {
                             .font(.system(size: 13, weight: .bold))
                         Text("タイマーを止める")
                             .font(.system(size: 13, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 9)
@@ -4661,7 +4873,7 @@ struct OvertimeActionSheet: View {
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.bottom, 6)
         }
         .onReceive(ticker) { input in
@@ -4717,6 +4929,12 @@ struct MainTimerActionSheet: View {
         ("コーミング", "comb.fill", "#0A84FF"),
         ("チェック", "magnifyingglass", "#30D158"),
         ("その他", "ellipsis.circle", "#8E8E93")
+    ]
+    let checkProcessOptions: [(name: String, icon: String, color: String)] = [
+        ("コーミング", "comb.fill", "#0A84FF"),
+        ("チェック", "magnifyingglass", "#30D158"),
+        ("1液2液", "drop.fill", "#BF5AF2"),
+        ("担当を呼ぶ", "bell.fill", "#FF9F0A")
     ]
     
     init(
@@ -4838,28 +5056,32 @@ struct MainTimerActionSheet: View {
                             dismiss()
                         } else {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                subMode = .standard
+                                subMode = .timerActionBranch
                             }
                         }
                         WKInterfaceDevice.current().play(.click)
                     }) {
-                        HStack(spacing: 3) {
+                        HStack(spacing: 2) {
                             Image(systemName: "chevron.left")
                                 .font(.system(size: 11, weight: .bold))
                             Text("戻る")
                                 .font(.system(size: 11, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         .foregroundColor(Color(hex: "#FFD60A"))
                     }
                     .buttonStyle(.plain)
                     
-                    Spacer()
+                    Spacer(minLength: 4)
                     
                     Text("メインタイマー設定")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                     
-                    Spacer()
+                    Spacer(minLength: 4)
                 }
                 .padding(.horizontal, 4)
                 
@@ -4882,6 +5104,8 @@ struct MainTimerActionSheet: View {
                     }) {
                         Text("00:00")
                             .font(.system(size: 9.5, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 5)
                             .background(Color.white.opacity(0.12))
@@ -4897,6 +5121,8 @@ struct MainTimerActionSheet: View {
                         }) {
                             Text(label)
                                 .font(.system(size: 10, weight: .bold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.65)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 5)
                                 .background(delta > 0 ? Color(hex: "#0A84FF").opacity(0.28) : Color.white.opacity(0.15))
@@ -4917,6 +5143,8 @@ struct MainTimerActionSheet: View {
                         }) {
                             Text(label)
                                 .font(.system(size: 9.5, weight: .bold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.68)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 4)
                                 .background(Color.white.opacity(0.12))
@@ -4941,6 +5169,8 @@ struct MainTimerActionSheet: View {
                                 .font(.system(size: 12, weight: .heavy))
                             Text("決定 (\(formatSeconds(Int(crownSeconds))))")
                                 .font(.system(size: 12, weight: .black))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 7)
@@ -4965,6 +5195,8 @@ struct MainTimerActionSheet: View {
                                 .font(.system(size: 12, weight: .bold))
                             Text("前回設定 (\(max(1, currentItem.totalSeconds / 60))分) でスタート")
                                 .font(.system(size: 11, weight: .heavy))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 7)
@@ -4987,6 +5219,8 @@ struct MainTimerActionSheet: View {
                     Text("クイックパネル (定番タイム)")
                         .font(.system(size: 10, weight: .heavy))
                         .foregroundColor(Color(hex: "#E0E0E5"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                     Spacer()
                 }
                 .padding(.horizontal, 4)
@@ -5000,6 +5234,8 @@ struct MainTimerActionSheet: View {
                         }) {
                             Text("\(min)分")
                                 .font(.system(size: 13, weight: .heavy))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 7)
                                 .background(Color(hex: "#FFD60A").opacity(0.22))
@@ -5020,7 +5256,7 @@ struct MainTimerActionSheet: View {
                 
                 phoneSoundToggleButton
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
     }
@@ -5032,29 +5268,30 @@ struct MainTimerActionSheet: View {
             VStack(spacing: 6) {
                 mainStandardTopTimerSection
                 mainStandardHelpMenuSection
-                mainActionDeltaButtonsSection
-                mainActionConfirmOrReinputSection
-                mainActionQuickGridSection
                 
                 Divider()
                     .padding(.vertical, 2)
                 
                 phoneSoundToggleButton
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
     }
     
     @ViewBuilder
     private var mainStandardTopTimerSection: some View {
-        HStack {
+        HStack(spacing: 4) {
             Text("メインタイマーの操作")
                 .font(.system(size: 12, weight: .heavy))
-            Spacer()
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+            Spacer(minLength: 4)
             Text("全体: \(currentItem.totalSeconds / 60)分")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.gray)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, 4)
         
@@ -5075,33 +5312,42 @@ struct MainTimerActionSheet: View {
                 
                 if isOvertime && accumulatedDelta <= 0 {
                     Text("超過 +\(formatSeconds(currentSeconds))")
-                        .font(.system(size: 20, weight: .black, design: .rounded))
+                        .font(.system(size: WatchLayout.font(20), weight: .black, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(Color(hex: "#FF453A"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 } else if currentItem.isPreCountingDown {
                     Text("準備中 \(formatSeconds(currentItem.prepRemainingSeconds))")
-                        .font(.system(size: 18, weight: .black, design: .rounded))
+                        .font(.system(size: WatchLayout.font(18), weight: .black, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(Color(hex: "#FFD60A"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 } else {
                     Text(formatSeconds(currentDisplaySeconds))
-                        .font(.system(size: 22, weight: .black, design: .rounded))
+                        .font(.system(size: WatchLayout.font(22), weight: .black, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(Color(hex: "#30D158"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
                 
-                Spacer()
+                Spacer(minLength: 4)
                 
                 HStack(spacing: 2) {
                     Text("操作")
                         .font(.system(size: 10, weight: .bold))
+                        .lineLimit(1)
+                        .fixedSize()
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .bold))
                 }
                 .foregroundColor(Color(hex: "#8E8E93"))
+                .fixedSize(horizontal: true, vertical: false)
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
             .padding(.vertical, 9)
             .background(
                 RoundedRectangle(cornerRadius: 9)
@@ -5130,12 +5376,16 @@ struct MainTimerActionSheet: View {
                         .font(.system(size: 11))
                     Text("👤 ヘルプなし（一人で施術）")
                         .font(.system(size: 11, weight: .bold))
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    Spacer(minLength: 4)
                     Text("変更 >")
                         .font(.system(size: 9.5, weight: .bold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 9)
+                .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                 .padding(.vertical, 7)
                 .background(Color.white.opacity(0.08))
                 .foregroundColor(Color(hex: "#C0C0C8"))
@@ -5157,16 +5407,20 @@ struct MainTimerActionSheet: View {
                                 .font(.system(size: 11, weight: .bold))
                             Text("終了後のメニューを指定")
                                 .font(.system(size: 11.5, weight: .heavy))
-                            Spacer()
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                            Spacer(minLength: 4)
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 9, weight: .bold))
                         }
                         Text("シャンプー / コーミング / チェック / その他")
                             .font(.system(size: 8.5, weight: .medium))
                             .foregroundColor(Color.white.opacity(0.75))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 9)
+                    .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                     .padding(.vertical, 8)
                     .background(Color(hex: "#FF9F0A").opacity(0.22))
                     .foregroundColor(Color(hex: "#FFD60A"))
@@ -5192,13 +5446,17 @@ struct MainTimerActionSheet: View {
                         Text("\(p): あなた")
                             .font(.system(size: 11, weight: .heavy))
                             .foregroundColor(Color(hex: "#FFD60A"))
-                        Spacer()
-                        Text("メニュー変更 >")
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                        Spacer(minLength: 4)
+                        Text("変更 >")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundColor(Color(hex: "#8E8E93"))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 9)
+                    .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                     .padding(.vertical, 7)
                     .background(Color.white.opacity(0.10))
                     .cornerRadius(8)
@@ -5229,36 +5487,52 @@ struct MainTimerActionSheet: View {
                                 .font(.system(size: 11, weight: .bold))
                             Text("戻る")
                                 .font(.system(size: 11, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         .foregroundColor(Color(hex: "#30D158"))
                     }
                     .buttonStyle(.plain)
-                    Spacer()
+                    Spacer(minLength: 4)
                     Text("メインタイマー")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Spacer(minLength: 4)
                 }
                 .padding(.horizontal, 4)
                 
                 // 現在のタイム表示
                 VStack(spacing: 2) {
-                    if isOvertime {
+                    if isOvertime && accumulatedDelta <= 0 {
                         Text("超過タイム")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(Color(hex: "#FF453A"))
+                            .lineLimit(1)
                         Text("+\(formatSeconds(currentSeconds))")
-                            .font(.system(size: 26, weight: .black, design: .rounded))
+                            .font(.system(size: WatchLayout.font(26), weight: .black, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(Color(hex: "#FF453A"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     } else {
                         Text(formatSeconds(currentDisplaySeconds))
-                            .font(.system(size: 26, weight: .black, design: .rounded))
+                            .font(.system(size: WatchLayout.font(26), weight: .black, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(Color(hex: "#30D158"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                 }
                 .padding(.vertical, 2)
+                
+                // ★ 微調整ボタン（+1分 / +3分 / +5分、-30秒 / +30秒）を「シャンプーに入る」の上に配置
+                mainActionDeltaButtonsSection
+                
+                if accumulatedDelta != 0 {
+                    mainActionConfirmSection
+                }
                 
                 // ① シャンプーに入る / 選択メニューに入るボタン（ヘルプなし以外で表示、00:00に戻す）
                 if !currentItem.isNoHelpNeeded {
@@ -5281,6 +5555,8 @@ struct MainTimerActionSheet: View {
                                 .font(.system(size: 14, weight: .heavy))
                             Text("\(p)に入る")
                                 .font(.system(size: 14, weight: .heavy))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 11)
@@ -5309,6 +5585,8 @@ struct MainTimerActionSheet: View {
                             .font(.system(size: 14, weight: .bold))
                         Text("タイマーを止める")
                             .font(.system(size: 14, weight: .heavy))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
@@ -5317,6 +5595,9 @@ struct MainTimerActionSheet: View {
                     .cornerRadius(10)
                 }
                 .buttonStyle(.plain)
+                
+                // ★ 「タイマーを止める」の下に「タイム再入力。」を配置
+                mainActionReinputButton
                 
                 // ③ 稼働中（超過前）の一時停止 / 停止中の再開
                 if !isOvertime && !currentItem.isPreCountingDown {
@@ -5334,6 +5615,8 @@ struct MainTimerActionSheet: View {
                                 .font(.system(size: 12, weight: .bold))
                             Text(isRunning ? "一時停止" : "再開・スタート")
                                 .font(.system(size: 12, weight: .bold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
@@ -5344,7 +5627,7 @@ struct MainTimerActionSheet: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
     }
@@ -5366,21 +5649,27 @@ struct MainTimerActionSheet: View {
                                 .font(.system(size: 11, weight: .bold))
                             Text("戻る")
                                 .font(.system(size: 11, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         .foregroundColor(Color(hex: "#30D158"))
                     }
                     .buttonStyle(.plain)
-                    Spacer()
+                    Spacer(minLength: 4)
                     Text("メニュー選択")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Spacer(minLength: 4)
                 }
                 .padding(.horizontal, 4)
                 
                 Text("タイマー終了後に行う工程を選択")
                     .font(.system(size: 9.5, weight: .medium))
                     .foregroundColor(.gray)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                 
                 Divider()
                 
@@ -5403,20 +5692,24 @@ struct MainTimerActionSheet: View {
                             
                             Text(proc.name)
                                 .font(.system(size: 13.5, weight: .heavy))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                             
-                            Spacer()
+                            Spacer(minLength: 4)
                             
                             if isCurrent {
                                 Text("選択中")
                                     .font(.system(size: 9, weight: .bold))
                                     .foregroundColor(Color(hex: "#FFD60A"))
+                                    .lineLimit(1)
+                                    .fixedSize()
                             }
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 10, weight: .bold))
                                 .foregroundColor(.gray)
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                         .padding(.vertical, 9)
                         .background(isCurrent ? Color(hex: "#0A84FF").opacity(0.25) : Color.white.opacity(0.12))
                         .foregroundColor(.white)
@@ -5445,6 +5738,8 @@ struct MainTimerActionSheet: View {
                             .font(.system(size: 12, weight: .bold))
                         Text("ヘルプなし（一人で施術）")
                             .font(.system(size: 11.5, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
@@ -5466,6 +5761,8 @@ struct MainTimerActionSheet: View {
                     }) {
                         Text("指定を解除（未定に戻す）")
                             .font(.system(size: 10.5, weight: .medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
                             .background(Color.white.opacity(0.06))
@@ -5475,7 +5772,7 @@ struct MainTimerActionSheet: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
     }
@@ -5491,8 +5788,10 @@ struct MainTimerActionSheet: View {
             }) {
                 Text("+1分")
                     .font(.system(size: 12, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 7)
+                    .padding(.vertical, 8)
                     .background(Color.white.opacity(0.16))
                     .foregroundColor(.white)
                     .cornerRadius(7)
@@ -5505,8 +5804,10 @@ struct MainTimerActionSheet: View {
             }) {
                 Text("+3分")
                     .font(.system(size: 12, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 7)
+                    .padding(.vertical, 8)
                     .background(Color.white.opacity(0.16))
                     .foregroundColor(.white)
                     .cornerRadius(7)
@@ -5519,8 +5820,10 @@ struct MainTimerActionSheet: View {
             }) {
                 Text("+5分")
                     .font(.system(size: 12, weight: .heavy))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 7)
+                    .padding(.vertical, 8)
                     .background(Color(hex: "#0A84FF").opacity(0.35))
                     .foregroundColor(Color(hex: "#64D2FF"))
                     .cornerRadius(7)
@@ -5528,102 +5831,124 @@ struct MainTimerActionSheet: View {
             .buttonStyle(.plain)
         }
         
-        // 下段: -5分, -1分, -30秒, +30秒
-        HStack(spacing: 4) {
-            ForEach([("-5分", -300), ("-1分", -60), ("-30秒", -30), ("+30秒", 30)], id: \.0) { label, delta in
-                Button(action: {
-                    if isOvertime {
-                        accumulatedDelta = max(0, accumulatedDelta + delta)
-                    } else {
-                        let minDelta = min(0, 10 - baseAdjustmentSeconds)
-                        accumulatedDelta = max(minDelta, accumulatedDelta + delta)
-                    }
-                    WKInterfaceDevice.current().play(.click)
-                }) {
-                    Text(label)
-                        .font(.system(size: 10, weight: .bold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
-                        .background(Color.white.opacity(0.12))
-                        .foregroundColor(delta < 0 ? Color(hex: "#FF6961") : Color(hex: "#C0C0C8"))
-                        .cornerRadius(6)
+        // 下段: -30秒, +30秒（共有タイマーと同じ2ボタンに統一）
+        HStack(spacing: 5) {
+            Button(action: {
+                if isOvertime {
+                    accumulatedDelta = max(0, accumulatedDelta - 30)
+                } else {
+                    let minDelta = min(0, 10 - baseAdjustmentSeconds)
+                    accumulatedDelta = max(minDelta, accumulatedDelta - 30)
                 }
-                .buttonStyle(.plain)
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("-30秒")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.12))
+                    .foregroundColor(Color(hex: "#C0C0C8"))
+                    .cornerRadius(6)
             }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                accumulatedDelta += 30
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("+30秒")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.12))
+                    .foregroundColor(Color(hex: "#C0C0C8"))
+                    .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
         }
     }
     
     @ViewBuilder
-    private var mainActionConfirmOrReinputSection: some View {
-        // ⑥ トグル調整時は「確定」ボタン、未調整時は「タイム再入力。」ボタン（共有タイマーと完全統一）
-        if accumulatedDelta != 0 {
-            HStack(spacing: 5) {
-                Button(action: {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                        accumulatedDelta = 0
-                    }
-                    WKInterfaceDevice.current().play(.click)
-                }) {
-                    Image(systemName: "arrow.counterclockwise")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(width: 34, height: 34)
-                        .background(Color.white.opacity(0.15))
-                        .foregroundColor(.white)
-                        .cornerRadius(7)
-                }
-                .buttonStyle(.plain)
-                
-                Button(action: {
-                    let delta = accumulatedDelta
-                    accumulatedDelta = 0
-                    WKInterfaceDevice.current().play(.click)
-                    onAdjust(delta)
-                    if isRunning || isOvertime {
-                        dismiss()
-                    } else if let updated = WatchSessionManager.shared.mainTimer {
-                        displayItem = updated
-                    }
-                }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 13, weight: .heavy))
-                        Text("確定 (\(formatDelta(accumulatedDelta)))")
-                            .font(.system(size: 12, weight: .black))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background(
-                        LinearGradient(colors: [Color(hex: "#FFD60A"), Color(hex: "#FF9F0A")], startPoint: .leading, endPoint: .trailing)
-                    )
-                    .foregroundColor(.black)
-                    .cornerRadius(8)
-                    .shadow(color: Color(hex: "#FFD60A").opacity(0.4), radius: 2, x: 0, y: 1)
-                }
-                .buttonStyle(.plain)
-            }
-        } else {
+    private var mainActionConfirmSection: some View {
+        // ⑥ トグル調整時の「確定」ボタン
+        HStack(spacing: 5) {
             Button(action: {
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                    accumulatedDelta = 0
+                }
                 WKInterfaceDevice.current().play(.click)
-                crownSeconds = Double(currentItem.totalSeconds > 0 ? currentItem.totalSeconds : 600)
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    subMode = .reinput
+            }) {
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 34, height: 34)
+                    .background(Color.white.opacity(0.15))
+                    .foregroundColor(.white)
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                let delta = accumulatedDelta
+                accumulatedDelta = 0
+                WKInterfaceDevice.current().play(.click)
+                onAdjust(delta)
+                if isRunning || isOvertime {
+                    dismiss()
+                } else if let updated = WatchSessionManager.shared.mainTimer {
+                    displayItem = updated
                 }
             }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 12, weight: .bold))
-                    Text("タイム再入力。")
-                        .font(.system(size: 12, weight: .heavy))
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 13, weight: .heavy))
+                    Text("確定 (\(formatDelta(accumulatedDelta)))")
+                        .font(.system(size: 12, weight: .black))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
-                .background(Color(hex: "#FFD60A"))
+                .background(
+                    LinearGradient(colors: [Color(hex: "#FFD60A"), Color(hex: "#FF9F0A")], startPoint: .leading, endPoint: .trailing)
+                )
                 .foregroundColor(.black)
                 .cornerRadius(8)
-                .shadow(color: Color(hex: "#FFD60A").opacity(0.35), radius: 2, x: 0, y: 1)
+                .shadow(color: Color(hex: "#FFD60A").opacity(0.4), radius: 2, x: 0, y: 1)
             }
             .buttonStyle(.plain)
         }
+    }
+    
+    @ViewBuilder
+    private var mainActionReinputButton: some View {
+        // 「タイマーを止める」の下に配置する「タイム再入力。」ボタン
+        Button(action: {
+            WKInterfaceDevice.current().play(.click)
+            crownSeconds = Double(currentItem.totalSeconds > 0 ? currentItem.totalSeconds : 600)
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                subMode = .reinput
+            }
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 12, weight: .bold))
+                Text("タイム再入力。")
+                    .font(.system(size: 12, weight: .heavy))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(Color(hex: "#FFD60A"))
+            .foregroundColor(.black)
+            .cornerRadius(9)
+            .shadow(color: Color(hex: "#FFD60A").opacity(0.35), radius: 2, x: 0, y: 1)
+        }
+        .buttonStyle(.plain)
     }
     
     @ViewBuilder
@@ -5633,6 +5958,8 @@ struct MainTimerActionSheet: View {
             Text("クイックパネル (定番タイム)")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(Color(hex: "#8E8E93"))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
                 .padding(.leading, 2)
             
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 5) {
@@ -5645,6 +5972,8 @@ struct MainTimerActionSheet: View {
                     }) {
                         Text("\(m)分")
                             .font(.system(size: 12, weight: isSelected ? .heavy : .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
                             .background(isSelected ? Color(hex: "#30D158").opacity(0.3) : Color.white.opacity(0.08))
@@ -5678,15 +6007,19 @@ struct MainTimerActionSheet: View {
                         Text("携帯の音")
                             .font(.system(size: 11, weight: .bold))
                             .foregroundColor(.white)
+                            .lineLimit(1)
                         Spacer()
                         Text(phoneSoundEnabled ? "ON" : "OFF")
                             .font(.system(size: 11, weight: .heavy))
                             .foregroundColor(phoneSoundEnabled ? Color(hex: "#30D158") : Color(hex: "#8E8E93"))
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                     Text(phoneSoundEnabled ? "iPhoneからも音・音声アナウンスが鳴ります" : "携帯は消音、ウォッチの振動のみでお知らせ")
                         .font(.system(size: 8))
                         .foregroundColor(Color(hex: "#8E8E93"))
                         .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                 }
             }
             .padding(8)
@@ -5710,6 +6043,7 @@ struct TimeActionSheet: View {
         case reinput
         case selectHelpProcess
         case selectHelpStaff
+        case selectCheckProcess
         case selectCheckStaff
     }
     
@@ -5727,23 +6061,30 @@ struct TimeActionSheet: View {
     let onRecruitHelp: ((String) -> Void)?
     let onSetNoHelp: (() -> Void)?
     let onClearHelp: (() -> Void)?
-    let onAssignCheckStaff: ((String) -> Void)?
-    let onRecruitCheckStaff: (() -> Void)?
+    let onAssignCheckStaff: ((String, String) -> Void)?
+    let onRecruitCheckStaff: ((String) -> Void)?
     let onClearCheckStaff: (() -> Void)?
     let onCompleteSubCheck: (() -> Void)?
     let onCancelSubCheck: (() -> Void)?
+    let onAdjustCheck: ((Int) -> Void)?
     
     // シート内でのリアルタイム表示用アイテム
     @State private var liveItem: SeatTimerItem
     
     // 累積追加秒数（何回もタップ可能！）
     @State private var accumulatedDelta: Int = 0
+    // チェックタイマー用の累積追加秒数
+    @State private var checkAccumulatedDelta: Int = 0
+    // チェック操作画面からヘルプ変更を開いたかどうかの戻り先フラグ
+    @State private var cameFromSubCheckBranch: Bool = false
     
     // シート内サブ画面モード
     @State private var subMode: SubMode
     
     // 選択中のヘルプメニュー（工程）
     @State private var selectedProcess: String = "シャンプー"
+    // 選択中のチェックメニュー（内容）
+    @State private var selectedCheckProcess: String = "チェック"
     
     // ★ 途中チェック（サブタイマー）分数 (0 = なし)
     @State private var checkMinutes: Int = 0
@@ -5763,14 +6104,22 @@ struct TimeActionSheet: View {
         ("チェック", "magnifyingglass", "#30D158"),
         ("その他", "ellipsis.circle", "#8E8E93")
     ]
+    let checkProcessOptions: [(name: String, icon: String, color: String)] = [
+        ("コーミング", "comb.fill", "#0A84FF"),
+        ("チェック", "magnifyingglass", "#30D158"),
+        ("1液2液", "drop.fill", "#BF5AF2"),
+        ("担当を呼ぶ", "bell.fill", "#FF9F0A")
+    ]
     
     init(
         item: SeatTimerItem,
         initialReinputMode: Bool = false,
         initialTimerBranchMode: Bool = false,
+        initialSubCheckBranchMode: Bool = false,
         currentUserName: String = "スタイリスト",
         staffCandidates: [String] = [],
         onAdjust: @escaping (Int) -> Void,
+        onAdjustCheck: ((Int) -> Void)? = nil,
         onStop: @escaping () -> Void,
         onEnterHelp: (() -> Void)? = nil,
         onCompleteCheck: (() -> Void)? = nil,
@@ -5779,8 +6128,8 @@ struct TimeActionSheet: View {
         onRecruitHelp: ((String) -> Void)? = nil,
         onSetNoHelp: (() -> Void)? = nil,
         onClearHelp: (() -> Void)? = nil,
-        onAssignCheckStaff: ((String) -> Void)? = nil,
-        onRecruitCheckStaff: (() -> Void)? = nil,
+        onAssignCheckStaff: ((String, String) -> Void)? = nil,
+        onRecruitCheckStaff: ((String) -> Void)? = nil,
         onClearCheckStaff: (() -> Void)? = nil,
         onCompleteSubCheck: (() -> Void)? = nil,
         onCancelSubCheck: (() -> Void)? = nil
@@ -5788,10 +6137,12 @@ struct TimeActionSheet: View {
         self.item = item
         self._liveItem = State(initialValue: item)
         self.initialReinputMode = initialReinputMode
-        self._subMode = State(initialValue: initialReinputMode ? .reinput : (initialTimerBranchMode ? .timerActionBranch : .standard))
+        let initSubMode: SubMode = initialSubCheckBranchMode ? .subCheckActionBranch : (initialReinputMode ? .reinput : (initialTimerBranchMode ? .timerActionBranch : .standard))
+        self._subMode = State(initialValue: initSubMode)
         self.currentUserName = currentUserName
         self.staffCandidates = staffCandidates
         self.onAdjust = onAdjust
+        self.onAdjustCheck = onAdjustCheck
         self.onStop = onStop
         self.onEnterHelp = onEnterHelp
         self.onCompleteCheck = onCompleteCheck
@@ -5809,6 +6160,7 @@ struct TimeActionSheet: View {
         self._checkMinutes = State(initialValue: initialCheckMin)
         let initProc = item.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
         self._selectedProcess = State(initialValue: initProc.isEmpty ? "シャンプー" : initProc)
+        self._selectedCheckProcess = State(initialValue: item.displayCheckProcess)
     }
     
     var isOvertime: Bool {
@@ -5830,6 +6182,12 @@ struct TimeActionSheet: View {
     var currentCheckRemainingSeconds: Int? {
         guard !liveItem.isCheckCompleted, let checkEnd = liveItem.checkTargetEndTime, liveItem.isRunning else { return nil }
         return max(0, Int(checkEnd.timeIntervalSince(now)))
+    }
+    
+    // 途中チェックの表示秒数（残り秒数 ＋ チェック用累積追加秒数）
+    var currentCheckDisplaySeconds: Int? {
+        guard let baseRem = currentCheckRemainingSeconds else { return nil }
+        return max(0, baseRem + checkAccumulatedDelta)
     }
     
     private func formatSeconds(_ seconds: Int) -> String {
@@ -5865,6 +6223,8 @@ struct TimeActionSheet: View {
                 selectHelpProcessScrollView
             case .selectHelpStaff:
                 selectHelpStaffScrollView
+            case .selectCheckProcess:
+                selectCheckProcessScrollView
             case .selectCheckStaff:
                 selectCheckStaffScrollView
             case .standard:
@@ -5891,28 +6251,32 @@ struct TimeActionSheet: View {
                             dismiss()
                         } else {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                subMode = .standard
+                                subMode = .timerActionBranch
                             }
                         }
                         WKInterfaceDevice.current().play(.click)
                     }) {
-                        HStack(spacing: 3) {
+                        HStack(spacing: 2) {
                             Image(systemName: "chevron.left")
                                 .font(.system(size: 11, weight: .bold))
                             Text("戻る")
                                 .font(.system(size: 11, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         .foregroundColor(Color(hex: "#FFD60A"))
                     }
                     .buttonStyle(.plain)
                     
-                    Spacer()
+                    Spacer(minLength: 4)
                     
                     Text("任意タイム設定")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                     
-                    Spacer()
+                    Spacer(minLength: 4)
                 }
                 .padding(.horizontal, 4)
                 
@@ -5935,6 +6299,8 @@ struct TimeActionSheet: View {
                     }) {
                         Text("00:00")
                             .font(.system(size: 10, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.68)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 4)
                             .background(Color.white.opacity(0.12))
@@ -5949,6 +6315,8 @@ struct TimeActionSheet: View {
                     }) {
                         Text("-1分")
                             .font(.system(size: 11, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.68)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 4)
                             .background(Color.white.opacity(0.15))
@@ -5963,6 +6331,8 @@ struct TimeActionSheet: View {
                     }) {
                         Text("+1分")
                             .font(.system(size: 11, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.68)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 4)
                             .background(Color.white.opacity(0.15))
@@ -5977,6 +6347,8 @@ struct TimeActionSheet: View {
                     }) {
                         Text("+30秒")
                             .font(.system(size: 10, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.68)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 4)
                             .background(Color.white.opacity(0.15))
@@ -5987,21 +6359,23 @@ struct TimeActionSheet: View {
                 }
                 .padding(.horizontal, 2)
                 
-                // ★ 途中チェック（サブタイマー）設定セクション
+                // ★ チェック（サブタイマー）設定セクション
                 VStack(spacing: 3) {
                     HStack(alignment: .firstTextBaseline) {
                         HStack(spacing: 3) {
                             Image(systemName: "magnifyingglass")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(Color(hex: "#30D158"))
-                            Text("途中チェック:")
+                            Text("チェック:")
                                 .font(.system(size: 10, weight: .bold))
                                 .foregroundColor(.gray)
+                                .lineLimit(1)
                         }
                         Spacer()
                         Text(checkMinutes == 0 ? "なし" : "\(checkMinutes)分")
                             .font(.system(size: 13, weight: .heavy, design: .rounded))
                             .foregroundColor(checkMinutes == 0 ? .gray : Color(hex: "#30D158"))
+                            .lineLimit(1)
                     }
                     .padding(.horizontal, 4)
                     
@@ -6013,6 +6387,8 @@ struct TimeActionSheet: View {
                             }) {
                                 Text(cmin == 0 ? "なし" : "\(cmin)分")
                                     .font(.system(size: 10, weight: .bold))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.68)
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 5)
                                     .background(checkMinutes == cmin ? Color(hex: "#30D158") : Color.white.opacity(0.12))
@@ -6044,10 +6420,12 @@ struct TimeActionSheet: View {
                                 Text("決定 (\(formatSeconds(Int(crownSeconds)))) 【\(checkMinutes)分CHK】")
                                     .font(.system(size: 10.5, weight: .black))
                                     .lineLimit(1)
-                                    .minimumScaleFactor(0.8)
+                                    .minimumScaleFactor(0.72)
                             } else {
                                 Text("決定 (\(formatSeconds(Int(crownSeconds))))")
                                     .font(.system(size: 12, weight: .black))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
                             }
                         }
                         .frame(maxWidth: .infinity)
@@ -6075,14 +6453,19 @@ struct TimeActionSheet: View {
                     Text("クイックパネル (定番タイム)")
                         .font(.system(size: 10, weight: .heavy))
                         .foregroundColor(Color(hex: "#E0E0E5"))
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    Spacer(minLength: 2)
                     HStack(spacing: 2) {
                         Text("下も選択可")
                             .font(.system(size: 8.5, weight: .semibold))
+                            .lineLimit(1)
+                            .fixedSize()
                         Image(systemName: "chevron.down")
                             .font(.system(size: 7.5, weight: .bold))
                     }
                     .foregroundColor(Color(hex: "#8E8E93"))
+                    .fixedSize(horizontal: true, vertical: false)
                 }
                 .padding(.horizontal, 4)
                 
@@ -6098,6 +6481,8 @@ struct TimeActionSheet: View {
                         }) {
                             Text("\(min)分")
                                 .font(.system(size: 13, weight: .heavy))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 7)
                                 .background(Color(hex: "#FFD60A").opacity(0.22))
@@ -6113,12 +6498,12 @@ struct TimeActionSheet: View {
                 }
                 .padding(.horizontal, 2)
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 2)
         }
     }
     
-    // MARK: - 標準操作画面（1番目: タイマー数字[タップで分岐] ➔ 2番目: 終了後メニュー＆ヘルプ担当 ➔ 3番目: 途中チェック数字＋その下にチェック担当）
+    // MARK: - 標準操作画面（1番目: タイマー数字[タップで分岐] ➔ 2番目: 終了後メニュー＆ヘルプ担当 ➔ 3番目: チェック数字＋その下にチェック担当）
     @ViewBuilder
     private var standardActionScrollView: some View {
         ScrollView {
@@ -6126,23 +6511,25 @@ struct TimeActionSheet: View {
                 standardTopTimerSection
                 standardHelpSection
                 standardSubCheckSection
-                standardDeltaButtonsSection
-                standardConfirmOrReinputSection
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
     }
     
     @ViewBuilder
     private var standardTopTimerSection: some View {
-        HStack {
+        HStack(spacing: 4) {
             Text("\(liveItem.displaySeatName)のタイマー操作")
                 .font(.system(size: 12, weight: .heavy))
-            Spacer()
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+            Spacer(minLength: 4)
             Text("全体: \(liveItem.totalSeconds / 60)分")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.gray)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, 4)
         
@@ -6163,28 +6550,35 @@ struct TimeActionSheet: View {
                 
                 if isOvertime {
                     Text("超過 +\(formatSeconds(overtimeSeconds))")
-                        .font(.system(size: 20, weight: .black, design: .rounded))
+                        .font(.system(size: WatchLayout.font(20), weight: .black, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(Color(hex: "#FF453A"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 } else {
                     Text(formatSeconds(currentDisplaySeconds))
-                        .font(.system(size: 22, weight: .black, design: .rounded))
+                        .font(.system(size: WatchLayout.font(22), weight: .black, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(Color(hex: "#64D2FF"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
                 
-                Spacer()
+                Spacer(minLength: 4)
                 
                 HStack(spacing: 2) {
                     Text("操作")
                         .font(.system(size: 10, weight: .bold))
+                        .lineLimit(1)
+                        .fixedSize()
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .bold))
                 }
                 .foregroundColor(Color(hex: "#8E8E93"))
+                .fixedSize(horizontal: true, vertical: false)
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
             .padding(.vertical, 9)
             .background(
                 RoundedRectangle(cornerRadius: 9)
@@ -6215,30 +6609,45 @@ struct TimeActionSheet: View {
                                 .font(.system(size: 11, weight: .bold))
                             Text("戻る")
                                 .font(.system(size: 11, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         .foregroundColor(Color(hex: "#64D2FF"))
                     }
                     .buttonStyle(.plain)
-                    Spacer()
+                    Spacer(minLength: 4)
                     Text(liveItem.displaySeatName)
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Spacer(minLength: 4)
                 }
                 .padding(.horizontal, 4)
                 
                 if isOvertime {
                     Text("超過 +\(formatSeconds(overtimeSeconds))")
-                        .font(.system(size: 22, weight: .black, design: .rounded))
+                        .font(.system(size: WatchLayout.font(22), weight: .black, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(Color(hex: "#FF453A"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .padding(.vertical, 2)
                 } else {
                     Text(formatSeconds(currentDisplaySeconds))
-                        .font(.system(size: 26, weight: .black, design: .rounded))
+                        .font(.system(size: WatchLayout.font(26), weight: .black, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(Color(hex: "#64D2FF"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .padding(.vertical, 2)
+                }
+                
+                // ★ 微調整ボタン（+1分 / +3分 / +5分、-30秒 / +30秒）を「シャンプーに入る」の上に配置
+                standardDeltaButtonsSection
+                
+                if accumulatedDelta != 0 {
+                    standardConfirmSection
                 }
                 
                 // ① シャンプーに入る / 選択メニューに入るボタン（ヘルプなし以外で表示、00:00に戻す）
@@ -6256,6 +6665,8 @@ struct TimeActionSheet: View {
                                     .font(.system(size: 14, weight: .heavy))
                                 Text("チェックに入る")
                                     .font(.system(size: 14, weight: .heavy))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 11)
@@ -6282,6 +6693,8 @@ struct TimeActionSheet: View {
                                     .font(.system(size: 14, weight: .heavy))
                                 Text("\(p)に入る")
                                     .font(.system(size: 14, weight: .heavy))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 11)
@@ -6310,6 +6723,8 @@ struct TimeActionSheet: View {
                             .font(.system(size: 14, weight: .bold))
                         Text("タイマーを止める")
                             .font(.system(size: 14, weight: .heavy))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
@@ -6319,29 +6734,15 @@ struct TimeActionSheet: View {
                 }
                 .buttonStyle(.plain)
                 
-                // ③ 時間を変更・微調整する画面へ戻る
-                Button(action: {
-                    WKInterfaceDevice.current().play(.click)
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        subMode = .standard
-                    }
-                }) {
-                    Text("時間を変更・微調整")
-                        .font(.system(size: 11, weight: .bold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 7)
-                        .background(Color.white.opacity(0.10))
-                        .foregroundColor(Color(hex: "#C0C0C8"))
-                        .cornerRadius(8)
-                }
-                .buttonStyle(.plain)
+                // ★ 「タイマーを止める」の下に「タイム再入力。」を配置
+                standardReinputButton
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
     }
     
-    // MARK: - ★ 途中チェックのタイマーの数字をタップした時の分岐画面（「途中チェック完了」「解除」）
+    // MARK: - ★ チェックのタイマーの数字をタップした時の分岐画面（微調整・チェック/コーミングに入る・ヘルプ変更）
     @ViewBuilder
     private var subCheckActionBranchScrollView: some View {
         ScrollView {
@@ -6349,6 +6750,7 @@ struct TimeActionSheet: View {
                 HStack {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
+                        checkAccumulatedDelta = 0
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                             subMode = .standard
                         }
@@ -6358,77 +6760,264 @@ struct TimeActionSheet: View {
                                 .font(.system(size: 11, weight: .bold))
                             Text("戻る")
                                 .font(.system(size: 11, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         .foregroundColor(Color(hex: "#30D158"))
                     }
                     .buttonStyle(.plain)
-                    Spacer()
-                    Text("途中チェック操作")
+                    Spacer(minLength: 4)
+                    Text("チェック操作")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Spacer(minLength: 4)
                 }
                 .padding(.horizontal, 4)
                 
-                if let checkRem = currentCheckRemainingSeconds {
+                if let checkRem = currentCheckDisplaySeconds {
                     Text(formatSeconds(checkRem))
-                        .font(.system(size: 26, weight: .black, design: .rounded))
+                        .font(.system(size: WatchLayout.font(26), weight: .black, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(Color(hex: "#30D158"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .padding(.vertical, 2)
                 }
+                
+                // ★ 微調整ボタン（+1分 / +3分 / +5分、-30秒 / +30秒）を「チェックに入る」の上に配置
+                subCheckDeltaButtonsSection
+                
+                if checkAccumulatedDelta != 0 {
+                    subCheckConfirmSection
+                }
+                
+                // ① チェックやコーミング・1液2液・担当を呼ぶと連動した名称のボタン（全体タイマーは続行）
+                let checkProcessName: String = liveItem.displayCheckProcess
+                let checkIconName: String = liveItem.checkProcessIconName
+                let checkActionLabel: String = (checkProcessName == "担当を呼ぶ") ? "担当を呼ぶ（完了）" : "\(checkProcessName)に入る"
+                let checkColors: [Color] = {
+                    switch checkProcessName {
+                    case "コーミング":
+                        return [Color(hex: "#0A84FF"), Color(hex: "#0062D2")]
+                    case "1液2液":
+                        return [Color(hex: "#BF5AF2"), Color(hex: "#8E44AD")]
+                    case "担当を呼ぶ":
+                        return [Color(hex: "#FF9F0A"), Color(hex: "#FF8000")]
+                    default:
+                        return [Color(hex: "#30D158"), Color(hex: "#248A3D")]
+                    }
+                }()
                 
                 Button(action: {
                     WKInterfaceDevice.current().play(.success)
                     onCompleteSubCheck?()
                     dismiss()
                 }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 13, weight: .bold))
-                        Text("途中チェック完了（タイマー続行）")
-                            .font(.system(size: 11.5, weight: .heavy))
+                    HStack(spacing: 6) {
+                        Image(systemName: checkIconName)
+                            .font(.system(size: 14, weight: .heavy))
+                        Text(checkActionLabel)
+                            .font(.system(size: 14, weight: .heavy))
                             .lineLimit(1)
-                            .minimumScaleFactor(0.8)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Color(hex: "#30D158"))
-                    .foregroundColor(.black)
-                    .cornerRadius(9)
+                    .padding(.vertical, 11)
+                    .background(
+                        LinearGradient(
+                            colors: checkColors,
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
                 }
                 .buttonStyle(.plain)
                 
+                // ② 「タイマーを止める」「タイム再入力」の代わりに「ヘルプ変更」ボタンを配置（タップで内容選択 ➔ 担当選択リストへ）
                 Button(action: {
                     WKInterfaceDevice.current().play(.click)
-                    onCancelSubCheck?()
-                    dismiss()
+                    cameFromSubCheckBranch = true
+                    selectedCheckProcess = liveItem.displayCheckProcess
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        subMode = .selectCheckProcess
+                    }
                 }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "trash.fill")
-                            .font(.system(size: 12, weight: .bold))
-                        Text("途中チェックタイマーを解除")
-                            .font(.system(size: 11.5, weight: .bold))
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.2.fill")
+                            .font(.system(size: 13, weight: .bold))
+                        if let cStaff = liveItem.checkStaff, !cStaff.isEmpty {
+                            Text("ヘルプ変更 (\(cStaff))")
+                                .font(.system(size: 13, weight: .heavy))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.72)
+                        } else {
+                            Text("ヘルプ変更")
+                                .font(.system(size: 14, weight: .heavy))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                        }
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background(Color(hex: "#FF453A").opacity(0.2))
-                    .foregroundColor(Color(hex: "#FF6961"))
-                    .cornerRadius(9)
+                    .padding(.vertical, 10)
+                    .background(Color.white.opacity(0.16))
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.white.opacity(0.25), lineWidth: 1)
+                    )
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
     }
     
     @ViewBuilder
+    private var subCheckDeltaButtonsSection: some View {
+        // +1分, +3分, +5分（何回も押せる！dismissしない）
+        HStack(spacing: 5) {
+            Button(action: {
+                checkAccumulatedDelta += 60
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("+1分")
+                    .font(.system(size: 12, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.16))
+                    .foregroundColor(.white)
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                checkAccumulatedDelta += 180
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("+3分")
+                    .font(.system(size: 12, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.16))
+                    .foregroundColor(.white)
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                checkAccumulatedDelta += 300
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("+5分")
+                    .font(.system(size: 12, weight: .heavy))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "#30D158").opacity(0.35))
+                    .foregroundColor(Color(hex: "#30D158"))
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+        }
+        
+        // -30秒, +30秒（何回も押せる！dismissしない）
+        HStack(spacing: 5) {
+            Button(action: {
+                checkAccumulatedDelta -= 30
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("-30秒")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.12))
+                    .foregroundColor(Color(hex: "#C0C0C8"))
+                    .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                checkAccumulatedDelta += 30
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Text("+30秒")
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.12))
+                    .foregroundColor(Color(hex: "#C0C0C8"))
+                    .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+    
+    @ViewBuilder
+    private var subCheckConfirmSection: some View {
+        // ★ 追加タイムを押した時に出現する「確定」ボタン（黄色）
+        HStack(spacing: 5) {
+            Button(action: {
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                    checkAccumulatedDelta = 0
+                }
+                WKInterfaceDevice.current().play(.click)
+            }) {
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 34, height: 34)
+                    .background(Color.white.opacity(0.15))
+                    .foregroundColor(.white)
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                onAdjustCheck?(checkAccumulatedDelta)
+                dismiss()
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 13, weight: .heavy))
+                    Text("確定 (\(formatDelta(checkAccumulatedDelta)))")
+                        .font(.system(size: 12, weight: .black))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(
+                    LinearGradient(colors: [Color(hex: "#FFD60A"), Color(hex: "#FF9F0A")], startPoint: .leading, endPoint: .trailing)
+                )
+                .foregroundColor(.black)
+                .cornerRadius(8)
+                .shadow(color: Color(hex: "#FFD60A").opacity(0.4), radius: 2, x: 0, y: 1)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+    
+    @ViewBuilder
     private var standardSubCheckSection: some View {
-        // ★ ③ 3番目: 途中チェックのタイマーの数字 ＋ その下に途中チェックに入るべき人の名前を入れる場所
+        // ★ ③ 3番目: チェックのタイマーの数字 ＋ その下にチェックに入るべき人の名前を入れる場所
         if let checkRem = currentCheckRemainingSeconds {
+            let chkProc = liveItem.displayCheckProcess
             VStack(spacing: 5) {
-                // 上段: 途中チェックのタイマーの数字（タップで途中チェック完了・解除へ分岐）
+                // 上段: チェックのタイマーの数字（タップでチェック完了・解除へ分岐）
                 Button(action: {
                     WKInterfaceDevice.current().play(.click)
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
@@ -6436,37 +7025,44 @@ struct TimeActionSheet: View {
                     }
                 }) {
                     HStack(alignment: .center, spacing: 5) {
-                        Image(systemName: "magnifyingglass")
+                        Image(systemName: liveItem.checkProcessIconName)
                             .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(Color(hex: "#30D158"))
-                        Text("途中チェック")
+                            .foregroundColor(Color(hex: liveItem.checkProcessColorHex))
+                        Text(chkProc)
                             .font(.system(size: 10.5, weight: .heavy))
                             .foregroundColor(Color(hex: "#A0E0B0"))
-                        Spacer()
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                        Spacer(minLength: 4)
                         Text(formatSeconds(checkRem))
-                            .font(.system(size: 17, weight: .black, design: .rounded))
+                            .font(.system(size: WatchLayout.font(17), weight: .black, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(Color(hex: "#30D158"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                         HStack(spacing: 2) {
                             Text("操作")
                                 .font(.system(size: 9, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize()
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 8, weight: .bold))
                         }
                         .foregroundColor(Color(hex: "#8E8E93"))
+                        .fixedSize(horizontal: true, vertical: false)
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 8)
+                    .padding(.horizontal, WatchLayout.isSmall ? 6 : 8)
                     .padding(.vertical, 6)
                     .background(Color(hex: "#30D158").opacity(0.16))
                     .cornerRadius(7)
                 }
                 .buttonStyle(.plain)
                 
-                // 下段（途中チェックのタイマーの数字の下）: 途中チェックに入るべき人の名前を入れる場所
+                // 下段（チェックのタイマーの数字の下）: チェックに入るべき人の名前を入れる場所
                 standardSubCheckStaffButton
             }
-            .padding(7)
+            .padding(WatchLayout.isSmall ? 5 : 7)
             .background(Color(hex: "#30D158").opacity(0.10))
             .cornerRadius(9)
             .overlay(
@@ -6482,12 +7078,15 @@ struct TimeActionSheet: View {
         let bgColor: Color = isUnassigned ? Color(hex: "#FF9F0A").opacity(0.25) : Color.white.opacity(0.12)
         let fgColor: Color = isUnassigned ? Color(hex: "#FFD60A") : .white
         let strokeColor: Color = isUnassigned ? Color(hex: "#FF9F0A").opacity(0.6) : Color.white.opacity(0.15)
+        let chkProc = liveItem.displayCheckProcess
         
-        // 途中チェック担当者の指名・変更ボタン
+        // チェック担当者の指名・変更ボタン（内容選択 ➔ 担当選択）
         Button(action: {
             WKInterfaceDevice.current().play(.click)
+            cameFromSubCheckBranch = false
+            selectedCheckProcess = liveItem.displayCheckProcess
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                subMode = .selectCheckStaff
+                subMode = .selectCheckProcess
             }
         }) {
             HStack(spacing: 4) {
@@ -6496,34 +7095,42 @@ struct TimeActionSheet: View {
                         Image(systemName: "megaphone.fill")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(Color(hex: "#FF9F0A"))
-                        Text("チェック担当: 全員に募集中")
+                        Text("\(chkProc): 全員に募集中")
                             .font(.system(size: 10.5, weight: .heavy))
                             .foregroundColor(Color(hex: "#FFD60A"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
                     } else {
                         let displayStaff = (cStaff == currentUserName) ? "\(cStaff)(あなた)" : cStaff
                         Image(systemName: "person.fill.checkmark")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(Color(hex: "#30D158"))
-                        Text("チェック担当: \(displayStaff)")
+                        Text("\(chkProc): \(displayStaff)")
                             .font(.system(size: 10.5, weight: .heavy))
                             .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
                     }
-                    Spacer()
+                    Spacer(minLength: 4)
                     Text("変更 >")
                         .font(.system(size: 9.5, weight: .bold))
                         .foregroundColor(Color(hex: "#8E8E93"))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 } else {
                     Image(systemName: "person.badge.plus")
                         .font(.system(size: 10.5, weight: .bold))
                     Text("チェック担当を指名・募集")
                         .font(.system(size: 10.5, weight: .heavy))
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    Spacer(minLength: 4)
                     Image(systemName: "chevron.right")
                         .font(.system(size: 8.5, weight: .bold))
                 }
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 8)
+            .padding(.horizontal, WatchLayout.isSmall ? 6 : 8)
             .padding(.vertical, 6)
             .background(bgColor)
             .foregroundColor(fgColor)
@@ -6552,12 +7159,16 @@ struct TimeActionSheet: View {
                         .font(.system(size: 11))
                     Text("👤 ヘルプなし（一人施術）")
                         .font(.system(size: 11, weight: .bold))
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    Spacer(minLength: 4)
                     Text("変更 >")
                         .font(.system(size: 9.5, weight: .bold))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 9)
+                .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                 .padding(.vertical, 7)
                 .background(Color.white.opacity(0.08))
                 .foregroundColor(Color(hex: "#C0C0C8"))
@@ -6580,16 +7191,20 @@ struct TimeActionSheet: View {
                                 .font(.system(size: 12, weight: .bold))
                             Text("メニュー・ヘルプ担当を指定")
                                 .font(.system(size: 11.5, weight: .heavy))
-                            Spacer()
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.72)
+                            Spacer(minLength: 4)
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 9, weight: .bold))
                         }
                         Text("シャンプー / コーミング / チェック / その他")
                             .font(.system(size: 8.5, weight: .medium))
                             .foregroundColor(Color.white.opacity(0.75))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 9)
+                    .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                     .padding(.vertical, 8)
                     .background(Color(hex: "#FF9F0A").opacity(0.22))
                     .foregroundColor(Color(hex: "#FFD60A"))
@@ -6627,6 +7242,8 @@ struct TimeActionSheet: View {
                     Text("\(p): 全員に募集中")
                         .font(.system(size: 11, weight: .heavy))
                         .foregroundColor(Color(hex: "#FFD60A"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                 } else if let staff = liveItem.shampooStaff, !staff.isEmpty {
                     let isMe = (staff == currentUserName)
                     let displayStaff = isMe ? "\(staff)(あなた)" : staff
@@ -6637,6 +7254,8 @@ struct TimeActionSheet: View {
                     Text("\(p): \(displayStaff)")
                         .font(.system(size: 11, weight: .heavy))
                         .foregroundColor(staffColor)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                 } else {
                     Image(systemName: "person.badge.plus")
                         .font(.system(size: 10, weight: .bold))
@@ -6644,14 +7263,18 @@ struct TimeActionSheet: View {
                     Text("\(p): 担当未定")
                         .font(.system(size: 11, weight: .heavy))
                         .foregroundColor(Color(hex: "#FFD60A"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                 }
-                Spacer()
-                Text("メニュー・担当変更 >")
+                Spacer(minLength: 4)
+                Text("変更 >")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundColor(Color(hex: "#8E8E93"))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 9)
+            .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
             .padding(.vertical, 7)
             .background(bgColor)
             .cornerRadius(8)
@@ -6673,6 +7296,8 @@ struct TimeActionSheet: View {
             }) {
                 Text("+1分")
                     .font(.system(size: 12, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
                     .background(Color.white.opacity(0.16))
@@ -6687,6 +7312,8 @@ struct TimeActionSheet: View {
             }) {
                 Text("+3分")
                     .font(.system(size: 12, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
                     .background(Color.white.opacity(0.16))
@@ -6701,6 +7328,8 @@ struct TimeActionSheet: View {
             }) {
                 Text("+5分")
                     .font(.system(size: 12, weight: .heavy))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
                     .background(Color(hex: "#0A84FF").opacity(0.35))
@@ -6718,6 +7347,8 @@ struct TimeActionSheet: View {
             }) {
                 Text("-30秒")
                     .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 7)
                     .background(Color.white.opacity(0.12))
@@ -6732,6 +7363,8 @@ struct TimeActionSheet: View {
             }) {
                 Text("+30秒")
                     .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 7)
                     .background(Color.white.opacity(0.12))
@@ -6740,77 +7373,79 @@ struct TimeActionSheet: View {
             }
             .buttonStyle(.plain)
         }
-        
-        Divider()
-            .padding(.vertical, 1)
     }
     
     @ViewBuilder
-    private var standardConfirmOrReinputSection: some View {
-        // ★ ⑤ 一番下: 追加タイムを押すと「確定」に変わる！（黄色）
-        if accumulatedDelta != 0 {
-            HStack(spacing: 5) {
-                // 取り消し・リセットボタン
-                Button(action: {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                        accumulatedDelta = 0
-                    }
-                    WKInterfaceDevice.current().play(.click)
-                }) {
-                    Image(systemName: "arrow.counterclockwise")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(width: 34, height: 34)
-                        .background(Color.white.opacity(0.15))
-                        .foregroundColor(.white)
-                        .cornerRadius(7)
-                }
-                .buttonStyle(.plain)
-                
-                // 確定ボタン（黄色）
-                Button(action: {
-                    onAdjust(accumulatedDelta)
-                    dismiss()
-                }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 13, weight: .heavy))
-                        Text("確定 (\(formatDelta(accumulatedDelta)))")
-                            .font(.system(size: 12, weight: .black))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background(
-                        LinearGradient(colors: [Color(hex: "#FFD60A"), Color(hex: "#FF9F0A")], startPoint: .leading, endPoint: .trailing)
-                    )
-                    .foregroundColor(.black)
-                    .cornerRadius(8)
-                    .shadow(color: Color(hex: "#FFD60A").opacity(0.4), radius: 2, x: 0, y: 1)
-                }
-                .buttonStyle(.plain)
-            }
-        } else {
-            // 追加タイムがない時は「タイム再入力。」（黄色）
+    private var standardConfirmSection: some View {
+        // ★ 追加タイムを押した時に出現する「確定」ボタン（黄色）
+        HStack(spacing: 5) {
+            // 取り消し・リセットボタン
             Button(action: {
-                crownSeconds = 0.0
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                    subMode = .reinput
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                    accumulatedDelta = 0
                 }
+                WKInterfaceDevice.current().play(.click)
             }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 12, weight: .bold))
-                    Text("タイム再入力。")
-                        .font(.system(size: 12, weight: .heavy))
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 34, height: 34)
+                    .background(Color.white.opacity(0.15))
+                    .foregroundColor(.white)
+                    .cornerRadius(7)
+            }
+            .buttonStyle(.plain)
+            
+            // 確定ボタン（黄色）
+            Button(action: {
+                onAdjust(accumulatedDelta)
+                dismiss()
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 13, weight: .heavy))
+                    Text("確定 (\(formatDelta(accumulatedDelta)))")
+                        .font(.system(size: 12, weight: .black))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .background(Color(hex: "#FFD60A"))
+                .padding(.vertical, 9)
+                .background(
+                    LinearGradient(colors: [Color(hex: "#FFD60A"), Color(hex: "#FF9F0A")], startPoint: .leading, endPoint: .trailing)
+                )
                 .foregroundColor(.black)
                 .cornerRadius(8)
-                .shadow(color: Color(hex: "#FFD60A").opacity(0.35), radius: 2, x: 0, y: 1)
+                .shadow(color: Color(hex: "#FFD60A").opacity(0.4), radius: 2, x: 0, y: 1)
             }
             .buttonStyle(.plain)
         }
+    }
+    
+    @ViewBuilder
+    private var standardReinputButton: some View {
+        // ★ 「タイマーを止める」の下に配置する「タイム再入力。」（黄色）
+        Button(action: {
+            crownSeconds = 0.0
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                subMode = .reinput
+            }
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 12, weight: .bold))
+                Text("タイム再入力。")
+                    .font(.system(size: 12, weight: .heavy))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(Color(hex: "#FFD60A"))
+            .foregroundColor(.black)
+            .cornerRadius(9)
+            .shadow(color: Color(hex: "#FFD60A").opacity(0.35), radius: 2, x: 0, y: 1)
+        }
+        .buttonStyle(.plain)
     }
     
     // MARK: - ★ シート内サブ画面1: 本番ヘルプのメニュー（工程）選択画面
@@ -6830,21 +7465,27 @@ struct TimeActionSheet: View {
                                 .font(.system(size: 11, weight: .bold))
                             Text("戻る")
                                 .font(.system(size: 11, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         .foregroundColor(Color(hex: "#0A84FF"))
                     }
                     .buttonStyle(.plain)
-                    Spacer()
+                    Spacer(minLength: 4)
                     Text("メニュー選択")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Spacer(minLength: 4)
                 }
                 .padding(.horizontal, 4)
                 
                 Text("工程を選んで担当者または募集を指定")
                     .font(.system(size: 9.5, weight: .medium))
                     .foregroundColor(.gray)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                 
                 Divider()
                 
@@ -6865,20 +7506,24 @@ struct TimeActionSheet: View {
                             
                             Text(proc.name)
                                 .font(.system(size: 13.5, weight: .heavy))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                             
-                            Spacer()
+                            Spacer(minLength: 4)
                             
                             if isCurrent {
                                 Text("選択中")
                                     .font(.system(size: 9, weight: .bold))
                                     .foregroundColor(Color(hex: "#FFD60A"))
+                                    .lineLimit(1)
+                                    .fixedSize()
                             }
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 10, weight: .bold))
                                 .foregroundColor(.gray)
                         }
                         .frame(maxWidth: .infinity)
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                         .padding(.vertical, 9)
                         .background(isCurrent ? Color(hex: "#0A84FF").opacity(0.25) : Color.white.opacity(0.12))
                         .foregroundColor(.white)
@@ -6910,6 +7555,8 @@ struct TimeActionSheet: View {
                             .font(.system(size: 12, weight: .bold))
                         Text("ヘルプなし（一人で施術）")
                             .font(.system(size: 11.5, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
@@ -6933,6 +7580,8 @@ struct TimeActionSheet: View {
                     }) {
                         Text("指定を解除（未定に戻す）")
                             .font(.system(size: 10.5, weight: .medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
                             .background(Color.white.opacity(0.06))
@@ -6942,7 +7591,7 @@ struct TimeActionSheet: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
     }
@@ -6964,15 +7613,19 @@ struct TimeActionSheet: View {
                                 .font(.system(size: 11, weight: .bold))
                             Text("工程へ")
                                 .font(.system(size: 11, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         .foregroundColor(Color(hex: "#0A84FF"))
                     }
                     .buttonStyle(.plain)
-                    Spacer()
+                    Spacer(minLength: 4)
                     Text("【\(selectedProcess)】の担当")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    Spacer(minLength: 4)
                 }
                 .padding(.horizontal, 4)
                 
@@ -6995,6 +7648,8 @@ struct TimeActionSheet: View {
                             .font(.system(size: 12, weight: .heavy))
                         Text("全員に募集する")
                             .font(.system(size: 12.5, weight: .black))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 9)
@@ -7024,6 +7679,8 @@ struct TimeActionSheet: View {
                             .font(.system(size: 12, weight: .heavy))
                         Text("自分が担当する")
                             .font(.system(size: 12.5, weight: .heavy))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
@@ -7037,6 +7694,8 @@ struct TimeActionSheet: View {
                 Text("スタッフを指名（相手に通知）")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundColor(Color(hex: "#A0A0A5"))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 2)
                 
@@ -7061,7 +7720,7 @@ struct TimeActionSheet: View {
                     }
                 }
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
     }
@@ -7091,7 +7750,9 @@ struct TimeActionSheet: View {
                     .foregroundColor(iconColor)
                 Text(isMe ? "\(staff)（あなた）" : staff)
                     .font(.system(size: 12, weight: isMe ? .heavy : .bold))
-                Spacer()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Spacer(minLength: 4)
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 12, weight: .bold))
@@ -7099,7 +7760,7 @@ struct TimeActionSheet: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
             .padding(.vertical, 7)
             .background(bgColor)
             .foregroundColor(.white)
@@ -7112,16 +7773,17 @@ struct TimeActionSheet: View {
         .buttonStyle(.plain)
     }
     
-    // MARK: - ★ シート内サブ画面3: 途中チェック（サブタイマー）の担当者・募集選択画面
+    // MARK: - ★ シート内サブ画面3-1: チェック（サブタイマー）の内容選択画面（コーミング / チェック / 1液2液 / 担当を呼ぶ）
     @ViewBuilder
-    private var selectCheckStaffScrollView: some View {
+    private var selectCheckProcessScrollView: some View {
+        let returnTarget: SubMode = cameFromSubCheckBranch ? .subCheckActionBranch : .standard
         ScrollView {
             VStack(spacing: 7) {
                 HStack {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            subMode = .standard
+                            subMode = returnTarget
                         }
                     }) {
                         HStack(spacing: 2) {
@@ -7129,15 +7791,153 @@ struct TimeActionSheet: View {
                                 .font(.system(size: 11, weight: .bold))
                             Text("戻る")
                                 .font(.system(size: 11, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         .foregroundColor(Color(hex: "#30D158"))
                     }
                     .buttonStyle(.plain)
-                    Spacer()
-                    Text("途中チェック担当")
+                    Spacer(minLength: 4)
+                    Text("チェック内容")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    Spacer(minLength: 4)
+                }
+                .padding(.horizontal, 4)
+                
+                Text("内容を選んで担当者または募集を指定")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundColor(.gray)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                
+                Divider()
+                
+                ForEach(checkProcessOptions, id: \.name) { proc in
+                    let isCurrent = (liveItem.displayCheckProcess == proc.name && liveItem.checkStaff != nil)
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        selectedCheckProcess = proc.name
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            subMode = .selectCheckStaff
+                        }
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: proc.icon)
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(Color(hex: proc.color))
+                                .frame(width: 20)
+                            
+                            Text(proc.name)
+                                .font(.system(size: 13.5, weight: .heavy))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                            
+                            Spacer(minLength: 4)
+                            
+                            if isCurrent {
+                                Text("選択中")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(Color(hex: "#FFD60A"))
+                                    .lineLimit(1)
+                                    .fixedSize()
+                            }
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.gray)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
+                        .padding(.vertical, 9)
+                        .background(isCurrent ? Color(hex: proc.color).opacity(0.25) : Color.white.opacity(0.12))
+                        .foregroundColor(.white)
+                        .cornerRadius(9)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9)
+                                .stroke(isCurrent ? Color(hex: proc.color) : Color.clear, lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                if liveItem.checkStaff != nil {
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        liveItem.checkProcess = "チェック"
+                        liveItem.checkStaff = nil
+                        onClearCheckStaff?()
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            subMode = returnTarget
+                        }
+                    }) {
+                        Text("担当を未定に戻す")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(Color.white.opacity(0.08))
+                            .foregroundColor(.gray)
+                            .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    onCancelSubCheck?()
+                    dismiss()
+                }) {
+                    Text("チェックタイマーを解除")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(Color(hex: "#FF453A").opacity(0.15))
+                        .foregroundColor(Color(hex: "#FF6961"))
+                        .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
+            .padding(.vertical, 4)
+        }
+    }
+    
+    // MARK: - ★ シート内サブ画面3-2: チェック（サブタイマー）の担当者・募集選択画面
+    @ViewBuilder
+    private var selectCheckStaffScrollView: some View {
+        let returnTarget: SubMode = cameFromSubCheckBranch ? .subCheckActionBranch : .standard
+        ScrollView {
+            VStack(spacing: 7) {
+                HStack {
+                    Button(action: {
+                        WKInterfaceDevice.current().play(.click)
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            subMode = .selectCheckProcess
+                        }
+                    }) {
+                        HStack(spacing: 2) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("内容へ")
+                                .font(.system(size: 11, weight: .bold))
+                                .lineLimit(1)
+                                .fixedSize()
+                        }
+                        .foregroundColor(Color(hex: "#30D158"))
+                    }
+                    .buttonStyle(.plain)
+                    Spacer(minLength: 4)
+                    Text("【\(selectedCheckProcess)】の担当")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    Spacer(minLength: 4)
                 }
                 .padding(.horizontal, 4)
                 
@@ -7146,10 +7946,11 @@ struct TimeActionSheet: View {
                 // ① 全員に募集する
                 Button(action: {
                     WKInterfaceDevice.current().play(.click)
+                    liveItem.checkProcess = selectedCheckProcess
                     liveItem.checkStaff = "募集中"
-                    onRecruitCheckStaff?()
+                    onRecruitCheckStaff?(selectedCheckProcess)
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        subMode = .standard
+                        subMode = returnTarget
                     }
                 }) {
                     HStack(spacing: 6) {
@@ -7157,6 +7958,8 @@ struct TimeActionSheet: View {
                             .font(.system(size: 12, weight: .heavy))
                         Text("全員に募集する")
                             .font(.system(size: 12.5, weight: .black))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 9)
@@ -7168,20 +7971,23 @@ struct TimeActionSheet: View {
                 }
                 .buttonStyle(.plain)
                 
-                // ② 自分がチェックする
+                // ② 自分が担当する
                 Button(action: {
                     WKInterfaceDevice.current().play(.click)
+                    liveItem.checkProcess = selectedCheckProcess
                     liveItem.checkStaff = currentUserName
-                    onAssignCheckStaff?(currentUserName)
+                    onAssignCheckStaff?(selectedCheckProcess, currentUserName)
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                        subMode = .standard
+                        subMode = returnTarget
                     }
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "person.fill.checkmark")
                             .font(.system(size: 12, weight: .heavy))
-                        Text("自分がチェックする")
+                        Text("自分が担当する")
                             .font(.system(size: 12.5, weight: .heavy))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
@@ -7195,6 +8001,8 @@ struct TimeActionSheet: View {
                 Text("スタッフを指名（相手に通知）")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundColor(Color(hex: "#A0A0A5"))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 2)
                 
@@ -7222,14 +8030,17 @@ struct TimeActionSheet: View {
                 if liveItem.checkStaff != nil {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
+                        liveItem.checkProcess = "チェック"
                         liveItem.checkStaff = nil
                         onClearCheckStaff?()
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            subMode = .standard
+                            subMode = returnTarget
                         }
                     }) {
                         Text("担当を未定に戻す")
                             .font(.system(size: 10.5, weight: .medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
                             .background(Color.white.opacity(0.08))
@@ -7244,8 +8055,10 @@ struct TimeActionSheet: View {
                     onCancelSubCheck?()
                     dismiss()
                 }) {
-                    Text("途中チェックタイマーを解除")
+                    Text("チェックタイマーを解除")
                         .font(.system(size: 10.5, weight: .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
                         .background(Color(hex: "#FF453A").opacity(0.15))
@@ -7254,7 +8067,7 @@ struct TimeActionSheet: View {
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
     }
@@ -7262,17 +8075,19 @@ struct TimeActionSheet: View {
     @ViewBuilder
     private func checkStaffCandidateRow(_ staff: String) -> some View {
         let isMe = (staff == currentUserName)
-        let isSelected = (liveItem.checkStaff == staff)
+        let isSelected = (liveItem.checkStaff == staff && liveItem.displayCheckProcess == selectedCheckProcess)
         let bgColor: Color = isSelected ? Color(hex: "#30D158").opacity(0.2) : (isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12))
         let strokeColor: Color = isSelected ? Color(hex: "#30D158").opacity(0.6) : (isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1))
         let iconColor: Color = isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF")
+        let returnTarget: SubMode = cameFromSubCheckBranch ? .subCheckActionBranch : .standard
         
         Button(action: {
             WKInterfaceDevice.current().play(.click)
+            liveItem.checkProcess = selectedCheckProcess
             liveItem.checkStaff = staff
-            onAssignCheckStaff?(staff)
+            onAssignCheckStaff?(selectedCheckProcess, staff)
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                subMode = .standard
+                subMode = returnTarget
             }
         }) {
             HStack(spacing: 6) {
@@ -7281,7 +8096,9 @@ struct TimeActionSheet: View {
                     .foregroundColor(iconColor)
                 Text(isMe ? "\(staff)（あなた）" : staff)
                     .font(.system(size: 12, weight: isMe ? .heavy : .bold))
-                Spacer()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Spacer(minLength: 4)
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 12, weight: .bold))
@@ -7289,7 +8106,7 @@ struct TimeActionSheet: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
             .padding(.vertical, 7)
             .background(bgColor)
             .foregroundColor(.white)
@@ -7318,19 +8135,25 @@ struct CheckActionSheet: View {
                 Text("\(item.displaySeatName)のチェックタイマー")
                     .font(.system(size: 12, weight: .heavy))
                     .foregroundColor(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
                 
                 if let staff = item.checkStaff {
                     Text("担当: \(staff)")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(Color(hex: "#30D158"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 } else if item.isRecruiting {
                     Text("担当: 募集中")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(Color(hex: "#FF9F0A"))
+                        .lineLimit(1)
                 } else {
                     Text("担当: 未定")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(Color(hex: "#FFD60A"))
+                        .lineLimit(1)
                 }
                 
                 // ★ 担当者を指定/変更ボタン（タップでスタッフ選択シートを開く）
@@ -7343,6 +8166,8 @@ struct CheckActionSheet: View {
                             .font(.system(size: 12, weight: .bold))
                         Text(item.checkStaff == nil ? "担当者を指定する" : "担当者を変更する")
                             .font(.system(size: 12, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
@@ -7359,6 +8184,8 @@ struct CheckActionSheet: View {
                     HStack(spacing: 4) {
                         Image(systemName: "checkmark.circle.fill")
                         Text("チェック完了にする")
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .font(.system(size: 13, weight: .heavy))
                     .frame(maxWidth: .infinity)
@@ -7375,6 +8202,8 @@ struct CheckActionSheet: View {
                 }) {
                     Text("チェックタイマーを解除")
                         .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 7)
                         .background(Color.white.opacity(0.1))
@@ -7383,161 +8212,298 @@ struct CheckActionSheet: View {
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
     }
 }
 
-// MARK: - チェック担当スタッフ指定・募集シート
+// MARK: - チェック担当スタッフ指定・募集シート（2ステップ: ①内容選択 ➔ ②担当者選択）
 struct SelectCheckStaffSheet: View {
     @Environment(\.dismiss) var dismiss
     let item: SeatTimerItem
     let currentUserName: String
     let staffCandidates: [String]
-    let onAssignStaff: (String) -> Void
-    let onRecruitAll: () -> Void
+    let onAssignStaff: (String, String) -> Void
+    let onRecruitAll: (String) -> Void
     let onClearStaff: () -> Void
+    
+    @State private var currentStep: Int = 0
+    @State private var selectedCheckProcess: String = "チェック"
+    
+    let checkProcessOptions: [(name: String, icon: String, color: String)] = [
+        ("コーミング", "comb.fill", "#0A84FF"),
+        ("チェック", "magnifyingglass", "#30D158"),
+        ("1液2液", "drop.fill", "#BF5AF2"),
+        ("担当を呼ぶ", "bell.fill", "#FF9F0A")
+    ]
     
     var body: some View {
         ScrollView {
             VStack(spacing: 8) {
-                // ヘッダー部
-                VStack(spacing: 2) {
-                    Text("\(item.displaySeatName) チェック担当")
-                        .font(.system(size: 13, weight: .heavy))
-                        .foregroundColor(.white)
-                    
-                    Text("チェック担当の指定または全員に募集")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.gray)
-                }
-                
-                Divider()
-                
-                // ① 全員に募集する（アンバー）
-                Button(action: {
-                    onRecruitAll()
-                    dismiss()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "megaphone.fill")
-                            .font(.system(size: 12, weight: .heavy))
-                        Text("全員に募集する")
-                            .font(.system(size: 13, weight: .black))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background(
-                        LinearGradient(colors: [Color(hex: "#FF9F0A"), Color(hex: "#FF8000")], startPoint: .leading, endPoint: .trailing)
-                    )
-                    .foregroundColor(.black)
-                    .cornerRadius(8)
-                    .shadow(color: Color(hex: "#FF9F0A").opacity(0.4), radius: 2, x: 0, y: 1)
-                }
-                .buttonStyle(.plain)
-                
-                // ② あなた（自分）が担当する（緑）
-                Button(action: {
-                    onAssignStaff(currentUserName)
-                    dismiss()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "person.fill.checkmark")
-                            .font(.system(size: 12, weight: .heavy))
-                        Text("自分がチェックする")
-                            .font(.system(size: 13, weight: .heavy))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background(Color(hex: "#30D158"))
-                    .foregroundColor(.black)
-                    .cornerRadius(8)
-                }
-                .buttonStyle(.plain)
-                
-                // ③ 個別スタッフを指定
-                Text("スタッフを指名（相手に通知）")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(Color(hex: "#A0A0A5"))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 2)
-                
-                if staffCandidates.isEmpty {
-                    VStack(spacing: 4) {
-                        Image(systemName: "person.crop.circle.badge.plus")
-                            .font(.system(size: 20))
-                            .foregroundColor(Color(hex: "#0A84FF"))
-                        Text("📱 スマホの共有コードでメンバーを連携してください")
-                            .font(.system(size: 9.5, weight: .bold))
-                            .foregroundColor(.white)
-                            .multilineTextAlignment(.center)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 6)
-                    .background(Color.white.opacity(0.06))
-                    .cornerRadius(8)
+                if currentStep == 0 {
+                    step1CheckProcessSelectionView
                 } else {
-                    ForEach(staffCandidates, id: \.self) { staff in
-                        let isMe = (staff == currentUserName)
-                        let isSelected = (item.checkStaff == staff)
-                        
-                        Button(action: {
-                            onAssignStaff(staff)
-                            dismiss()
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: isMe ? "star.fill" : "person.fill")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
-                                
-                                Text(isMe ? "\(staff)（あなた）" : staff)
-                                    .font(.system(size: 12, weight: isMe ? .heavy : .bold))
-                                
-                                Spacer()
-                                
-                                if isSelected {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 12, weight: .bold))
-                                        .foregroundColor(Color(hex: "#30D158"))
-                                }
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 7)
-                            .background(isSelected ? Color(hex: "#30D158").opacity(0.2) : (isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12)))
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(isSelected ? Color(hex: "#30D158").opacity(0.6) : (isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1)), lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                
-                // ④ 既に担当者がいる場合、未定に戻すボタン
-                if item.checkStaff != nil || item.isRecruiting {
-                    Button(action: {
-                        onClearStaff()
-                        dismiss()
-                    }) {
-                        Text("担当を未定に戻す")
-                            .font(.system(size: 11, weight: .medium))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                            .background(Color.white.opacity(0.08))
-                            .foregroundColor(.gray)
-                            .cornerRadius(8)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.top, 2)
+                    step2CheckStaffSelectionView
                 }
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
+        }
+        .onAppear {
+            selectedCheckProcess = item.displayCheckProcess
+        }
+    }
+    
+    @ViewBuilder
+    private var step1CheckProcessSelectionView: some View {
+        VStack(spacing: 2) {
+            Text("\(item.displaySeatName) チェック内容")
+                .font(.system(size: 13, weight: .heavy))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+            
+            Text("内容を選んで担当者または募集を指定")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.gray)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        
+        Divider()
+        
+        ForEach(checkProcessOptions, id: \.name) { proc in
+            let isCurrent = (item.displayCheckProcess == proc.name && item.checkStaff != nil)
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                selectedCheckProcess = proc.name
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    currentStep = 1
+                }
+            }) {
+                HStack(spacing: 8) {
+                    Image(systemName: proc.icon)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(Color(hex: proc.color))
+                        .frame(width: 20)
+                    
+                    Text(proc.name)
+                        .font(.system(size: 13.5, weight: .heavy))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    
+                    Spacer(minLength: 4)
+                    
+                    if isCurrent {
+                        Text("選択中")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(Color(hex: "#FFD60A"))
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.gray)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
+                .padding(.vertical, 9)
+                .background(isCurrent ? Color(hex: proc.color).opacity(0.25) : Color.white.opacity(0.12))
+                .foregroundColor(.white)
+                .cornerRadius(9)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9)
+                        .stroke(isCurrent ? Color(hex: proc.color) : Color.clear, lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+        }
+        
+        if item.checkStaff != nil || item.isRecruiting {
+            Button(action: {
+                onClearStaff()
+                dismiss()
+            }) {
+                Text("担当を未定に戻す")
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color.white.opacity(0.08))
+                    .foregroundColor(.gray)
+                    .cornerRadius(8)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
+        }
+    }
+    
+    @ViewBuilder
+    private var step2CheckStaffSelectionView: some View {
+        HStack {
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    currentStep = 0
+                }
+            }) {
+                HStack(spacing: 2) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 11, weight: .bold))
+                    Text("内容へ")
+                        .font(.system(size: 11, weight: .bold))
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                .foregroundColor(Color(hex: "#30D158"))
+            }
+            .buttonStyle(.plain)
+            
+            Spacer(minLength: 4)
+            
+            Text("【\(selectedCheckProcess)】の担当")
+                .font(.system(size: 12, weight: .heavy))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+            
+            Spacer(minLength: 4)
+        }
+        .padding(.horizontal, 4)
+        
+        Divider()
+        
+        // ① 全員に募集する（アンバー）
+        Button(action: {
+            onRecruitAll(selectedCheckProcess)
+            dismiss()
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "megaphone.fill")
+                    .font(.system(size: 12, weight: .heavy))
+                Text("全員に募集する")
+                    .font(.system(size: 13, weight: .black))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(
+                LinearGradient(colors: [Color(hex: "#FF9F0A"), Color(hex: "#FF8000")], startPoint: .leading, endPoint: .trailing)
+            )
+            .foregroundColor(.black)
+            .cornerRadius(8)
+            .shadow(color: Color(hex: "#FF9F0A").opacity(0.4), radius: 2, x: 0, y: 1)
+        }
+        .buttonStyle(.plain)
+        
+        // ② あなた（自分）が担当する（緑）
+        Button(action: {
+            onAssignStaff(selectedCheckProcess, currentUserName)
+            dismiss()
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "person.fill.checkmark")
+                    .font(.system(size: 12, weight: .heavy))
+                Text("自分が担当する")
+                    .font(.system(size: 13, weight: .heavy))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(Color(hex: "#30D158"))
+            .foregroundColor(.black)
+            .cornerRadius(8)
+        }
+        .buttonStyle(.plain)
+        
+        // ③ 個別スタッフを指定
+        Text("スタッフを指名（相手に通知）")
+            .font(.system(size: 9, weight: .bold))
+            .foregroundColor(Color(hex: "#A0A0A5"))
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 2)
+        
+        if staffCandidates.isEmpty {
+            VStack(spacing: 4) {
+                Image(systemName: "person.crop.circle.badge.plus")
+                    .font(.system(size: 20))
+                    .foregroundColor(Color(hex: "#0A84FF"))
+                Text("📱 スマホの共有コードでメンバーを連携してください")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 6)
+            .background(Color.white.opacity(0.06))
+            .cornerRadius(8)
+        } else {
+            ForEach(staffCandidates, id: \.self) { staff in
+                let isMe = (staff == currentUserName)
+                let isSelected = (item.checkStaff == staff && item.displayCheckProcess == selectedCheckProcess)
+                
+                Button(action: {
+                    onAssignStaff(selectedCheckProcess, staff)
+                    dismiss()
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: isMe ? "star.fill" : "person.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
+                        
+                        Text(isMe ? "\(staff)（あなた）" : staff)
+                            .font(.system(size: 12, weight: isMe ? .heavy : .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                        
+                        Spacer(minLength: 4)
+                        
+                        if isSelected {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(Color(hex: "#30D158"))
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
+                    .padding(.vertical, 7)
+                    .background(isSelected ? Color(hex: "#30D158").opacity(0.2) : (isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12)))
+                    .foregroundColor(.white)
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(isSelected ? Color(hex: "#30D158").opacity(0.6) : (isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1)), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        
+        // ④ 既に担当者がいる場合、未定に戻すボタン
+        if item.checkStaff != nil || item.isRecruiting {
+            Button(action: {
+                onClearStaff()
+                dismiss()
+            }) {
+                Text("担当を未定に戻す")
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color.white.opacity(0.08))
+                    .foregroundColor(.gray)
+                    .cornerRadius(8)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 2)
         }
     }
 }
@@ -7565,9 +8531,10 @@ struct CrownMinSecPicker: View {
     private let secondColor = Color(hex: "#30D158")
 
     var body: some View {
+        let effectiveFontSize = WatchLayout.font(fontSize)
         VStack(spacing: 2) {
             HStack(spacing: 3) {
-                unitField(.minute, value: totalSeconds / 60, color: minuteColor, label: "分")
+                unitField(.minute, value: totalSeconds / 60, color: minuteColor, label: "分", size: effectiveFontSize)
                     .focusable()
                     .focused($focusedUnit, equals: .minute)
                     .digitalCrownRotation(
@@ -7585,10 +8552,10 @@ struct CrownMinSecPicker: View {
                     }
 
                 Text(":")
-                    .font(.system(size: fontSize * 0.8, weight: .bold, design: .monospaced))
+                    .font(.system(size: effectiveFontSize * 0.8, weight: .bold, design: .monospaced))
                     .foregroundColor(.gray)
 
-                unitField(.second, value: totalSeconds % 60, color: secondColor, label: "秒")
+                unitField(.second, value: totalSeconds % 60, color: secondColor, label: "秒", size: effectiveFontSize)
                     .focusable()
                     .focused($focusedUnit, equals: .second)
                     .digitalCrownRotation(
@@ -7612,6 +8579,8 @@ struct CrownMinSecPicker: View {
                     .font(.system(size: 8))
                 Text(focusedUnit == .second ? "Crownで【秒】を調整（分をタップで切替）" : "Crownで【分】を調整（秒をタップで切替）")
                     .font(.system(size: 8.5, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.68)
             }
             .foregroundColor(focusedUnit == .second ? secondColor : minuteColor)
         }
@@ -7652,15 +8621,19 @@ struct CrownMinSecPicker: View {
         if secondValue != s { secondValue = s }
     }
 
-    private func unitField(_ unit: EditTimeUnit, value: Int, color: Color, label: String) -> some View {
+    private func unitField(_ unit: EditTimeUnit, value: Int, color: Color, label: String, size: CGFloat) -> some View {
         let selected = focusedUnit == unit
         return HStack(alignment: .lastTextBaseline, spacing: 1) {
             Text(String(format: "%02d", value))
-                .font(.system(size: fontSize, weight: .black, design: .monospaced))
+                .font(.system(size: size, weight: .black, design: .monospaced))
                 .foregroundColor(selected ? color : Color.white.opacity(0.85))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
             Text(label)
                 .font(.system(size: 9, weight: .bold))
                 .foregroundColor(selected ? color : .gray)
+                .lineLimit(1)
+                .fixedSize()
         }
         .padding(.horizontal, 5)
         .padding(.vertical, 1)
@@ -7703,7 +8676,7 @@ struct AddSeatSheet: View {
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(.gray)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.85)
+                        .minimumScaleFactor(0.75)
                     Spacer()
                     Button(action: {
                         if seatNumber > 1 {
@@ -7723,7 +8696,7 @@ struct AddSeatSheet: View {
                         .font(.system(size: 15, weight: .heavy, design: .rounded))
                         .foregroundColor(.white)
                         .lineLimit(1)
-                        .minimumScaleFactor(0.85)
+                        .minimumScaleFactor(0.75)
                         .frame(minWidth: 44)
                     
                     Button(action: {
@@ -7749,6 +8722,7 @@ struct AddSeatSheet: View {
                     Text("全体タイム:")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(.gray)
+                        .lineLimit(1)
                     Spacer()
                 }
                 .padding(.horizontal, 4)
@@ -7775,6 +8749,8 @@ struct AddSeatSheet: View {
                         }) {
                             Text("\(min)分")
                                 .font(.system(size: 12, weight: .bold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 6)
                                 .background(selectedMinutes == min && selectedSeconds == 0 ? Color(hex: "#0A84FF") : Color.white.opacity(0.12))
@@ -7788,13 +8764,15 @@ struct AddSeatSheet: View {
                 Divider()
                 
                 HStack(alignment: .firstTextBaseline) {
-                    Text("途中チェック:")
+                    Text("チェック:")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.gray)
+                        .lineLimit(1)
                     Spacer()
                     Text(checkMinutes == 0 ? "なし" : "\(checkMinutes)分")
                         .font(.system(size: 15, weight: .heavy, design: .rounded))
                         .foregroundColor(checkMinutes == 0 ? .gray : Color(hex: "#30D158"))
+                        .lineLimit(1)
                 }
                 .padding(.horizontal, 4)
                 
@@ -7806,6 +8784,8 @@ struct AddSeatSheet: View {
                         }) {
                             Text(cmin == 0 ? "なし" : "\(cmin)分")
                                 .font(.system(size: 11, weight: .bold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 6)
                                 .background(checkMinutes == cmin ? Color(hex: "#30D158") : Color.white.opacity(0.12))
@@ -7840,6 +8820,8 @@ struct AddSeatSheet: View {
                 }) {
                     Text("タイマースタート")
                         .font(.system(size: 13, weight: .heavy))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 9)
                         .background(selectedMinutes * 60 + selectedSeconds > 0 ? Color(hex: "#30D158") : Color.gray.opacity(0.3))
@@ -7850,7 +8832,7 @@ struct AddSeatSheet: View {
                 .disabled(selectedMinutes * 60 + selectedSeconds <= 0)
                 .padding(.top, 4)
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.bottom, 16)
         }
     }
@@ -7876,11 +8858,15 @@ struct ShampooActionSheet: View {
                     Text("\(item.displaySeatName)の\(item.helpProcess)操作")
                         .font(.system(size: 13, weight: .heavy))
                         .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                     
                     if let staff = item.shampooStaff {
                         Text("現在の担当: \(staff)")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(hex: "#FFD60A"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                 }
                 
@@ -7899,6 +8885,8 @@ struct ShampooActionSheet: View {
                                     .font(.system(size: 16, weight: .bold))
                                 Text("コーミング完了（通常へ）")
                                     .font(.system(size: 14, weight: .heavy))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.72)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
@@ -7917,6 +8905,8 @@ struct ShampooActionSheet: View {
                                     .font(.system(size: 16, weight: .bold))
                                 Text("コーミングする。")
                                     .font(.system(size: 15, weight: .heavy))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 13)
@@ -7943,6 +8933,8 @@ struct ShampooActionSheet: View {
                                     .font(.system(size: 16, weight: .bold))
                                 Text("チェック完了（通常へ）")
                                     .font(.system(size: 14, weight: .heavy))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.72)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
@@ -7965,6 +8957,8 @@ struct ShampooActionSheet: View {
                                     .font(.system(size: 16, weight: .bold))
                                 Text("チェックする。")
                                     .font(.system(size: 15, weight: .heavy))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 13)
@@ -7986,6 +8980,8 @@ struct ShampooActionSheet: View {
                                     .font(.system(size: 16, weight: .bold))
                                 Text("シャンプー完了（通常へ）")
                                     .font(.system(size: 14, weight: .heavy))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.72)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
@@ -8004,6 +9000,8 @@ struct ShampooActionSheet: View {
                                     .font(.system(size: 16, weight: .bold))
                                 Text("シャンプーする。")
                                     .font(.system(size: 15, weight: .heavy))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 13)
@@ -8028,6 +9026,8 @@ struct ShampooActionSheet: View {
                             .font(.system(size: 12, weight: .bold))
                         Text("スタッフ変更")
                             .font(.system(size: 12, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
@@ -8044,6 +9044,8 @@ struct ShampooActionSheet: View {
                 }) {
                     Text("担当を解除（未指定に戻す）")
                         .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
                         .background(Color.white.opacity(0.08))
@@ -8052,7 +9054,7 @@ struct ShampooActionSheet: View {
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
     }
@@ -8080,6 +9082,12 @@ struct SelectHelpWorkflowSheet: View {
         ("チェック", "magnifyingglass", "#30D158"),
         ("その他", "ellipsis.circle", "#8E8E93")
     ]
+    let checkProcessOptions: [(name: String, icon: String, color: String)] = [
+        ("コーミング", "comb.fill", "#0A84FF"),
+        ("チェック", "magnifyingglass", "#30D158"),
+        ("1液2液", "drop.fill", "#BF5AF2"),
+        ("担当を呼ぶ", "bell.fill", "#FF9F0A")
+    ]
     
     var body: some View {
         ScrollView {
@@ -8090,7 +9098,7 @@ struct SelectHelpWorkflowSheet: View {
                     step2StaffSelectionView
                 }
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
         }
         .onAppear {
@@ -8107,9 +9115,13 @@ struct SelectHelpWorkflowSheet: View {
             Text("\(item.displaySeatName)のヘルプ工程")
                 .font(.system(size: 13, weight: .heavy))
                 .foregroundColor(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
             Text("依頼するメニューを選択してください")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.gray)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
         }
         .padding(.bottom, 2)
         
@@ -8135,8 +9147,10 @@ struct SelectHelpWorkflowSheet: View {
                     
                     Text(proc.name)
                         .font(.system(size: 14, weight: .heavy))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                     
-                    Spacer()
+                    Spacer(minLength: 4)
                     
                     if isCurrentProc {
                         Text("選択中")
@@ -8146,6 +9160,8 @@ struct SelectHelpWorkflowSheet: View {
                             .padding(.vertical, 2)
                             .background(Color(hex: proc.color).opacity(0.2))
                             .cornerRadius(4)
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                     
                     Image(systemName: "chevron.right")
@@ -8153,7 +9169,7 @@ struct SelectHelpWorkflowSheet: View {
                         .foregroundColor(.gray)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 12)
+                .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                 .padding(.vertical, 10)
                 .background(bgColor)
                 .foregroundColor(.white)
@@ -8180,7 +9196,9 @@ struct SelectHelpWorkflowSheet: View {
                         .font(.system(size: 12, weight: .bold))
                     Text("ヘルプなし（一人で施術）")
                         .font(.system(size: 12, weight: .bold))
-                    Spacer()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    Spacer(minLength: 4)
                     if item.isNoHelpNeeded {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 12))
@@ -8188,7 +9206,7 @@ struct SelectHelpWorkflowSheet: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.horizontal, 12)
+                .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                 .padding(.vertical, 9)
                 .background(noHelpBg)
                 .foregroundColor(noHelpFg)
@@ -8206,6 +9224,8 @@ struct SelectHelpWorkflowSheet: View {
             }) {
                 Text("指定を解除（未選択に戻す）")
                     .font(.system(size: 10.5, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
                     .background(Color.white.opacity(0.06))
@@ -8229,24 +9249,30 @@ struct SelectHelpWorkflowSheet: View {
                     HStack(spacing: 2) {
                         Image(systemName: "chevron.left")
                         Text("工程へ")
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                     .font(.system(size: 10.5, weight: .bold))
                     .foregroundColor(Color(hex: "#0A84FF"))
                 }
                 .buttonStyle(.plain)
                 
-                Spacer()
+                Spacer(minLength: 4)
                 
                 Text("【\(selectedProcess)】の担当")
                     .font(.system(size: 13, weight: .heavy))
                     .foregroundColor(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
                 
-                Spacer()
+                Spacer(minLength: 4)
             }
             
             Text("全員に募集、または担当スタッフを指名")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundColor(.gray)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
         }
         
         Divider()
@@ -8262,6 +9288,8 @@ struct SelectHelpWorkflowSheet: View {
                     .font(.system(size: 13, weight: .heavy))
                 Text("全員に募集する")
                     .font(.system(size: 13, weight: .black))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
@@ -8287,8 +9315,8 @@ struct SelectHelpWorkflowSheet: View {
                 Text("自分が担当する（\(currentUserName)）")
                     .font(.system(size: 12, weight: .heavy))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                Spacer()
+                    .minimumScaleFactor(0.72)
+                Spacer(minLength: 4)
                 if item.shampooStaff == currentUserName && item.helpProcess == selectedProcess {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 12))
@@ -8296,7 +9324,7 @@ struct SelectHelpWorkflowSheet: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
             .padding(.vertical, 8)
             .background(Color(hex: "#30D158").opacity(0.18))
             .foregroundColor(.white)
@@ -8312,6 +9340,8 @@ struct SelectHelpWorkflowSheet: View {
         Text("他のスタッフを指名（相手に通知）")
             .font(.system(size: 9, weight: .bold))
             .foregroundColor(Color(hex: "#A0A0A5"))
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 2)
         
@@ -8351,8 +9381,10 @@ struct SelectHelpWorkflowSheet: View {
                         
                         Text(staff)
                             .font(.system(size: 12, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                         
-                        Spacer()
+                        Spacer(minLength: 4)
                         
                         if isSelected {
                             Image(systemName: "checkmark.circle.fill")
@@ -8361,7 +9393,7 @@ struct SelectHelpWorkflowSheet: View {
                         }
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                     .padding(.vertical, 7)
                     .background(bgColor)
                     .foregroundColor(.white)
@@ -8508,14 +9540,16 @@ struct SeatThumbnailMapSheet: View {
     private var mapHeaderSection: some View {
         // ① ヘッダー＆サマリーピルバー
         VStack(spacing: 4) {
-            HStack {
+            HStack(spacing: 4) {
                 Image(systemName: "square.grid.2x2.fill")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(Color(hex: "#64D2FF"))
                 Text("サロン客席マップ")
                     .font(.system(size: 13, weight: .heavy))
                     .foregroundColor(.white)
-                Spacer()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Spacer(minLength: 4)
                 Button(action: {
                     WKInterfaceDevice.current().play(.click)
                     if let onClose = onClose {
@@ -8529,18 +9563,21 @@ struct SeatThumbnailMapSheet: View {
                             .font(.system(size: 9, weight: .bold))
                         Text("リスト")
                             .font(.system(size: 9.5, weight: .bold))
+                            .lineLimit(1)
+                            .fixedSize()
                     }
                     .foregroundColor(Color(hex: "#64D2FF"))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2.5)
                     .background(Color(hex: "#64D2FF").opacity(0.18))
                     .cornerRadius(6)
+                    .fixedSize(horizontal: true, vertical: false)
                 }
                 .buttonStyle(.plain)
             }
             
             // 稼働サマリーピル（一目で状況把握）
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 HStack(spacing: 3) {
                     Circle()
                         .fill(Color(hex: "#30D158"))
@@ -8548,8 +9585,10 @@ struct SeatThumbnailMapSheet: View {
                     Text("稼働:\(runningCount)")
                         .font(.system(size: 10, weight: .heavy))
                         .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                 }
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 5)
                 .padding(.vertical, 2)
                 .background(Color.white.opacity(0.12))
                 .cornerRadius(5)
@@ -8562,8 +9601,10 @@ struct SeatThumbnailMapSheet: View {
                         Text("募集:\(recruitingCount)")
                             .font(.system(size: 10, weight: .heavy))
                             .foregroundColor(Color(hex: "#FFD60A"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
                     }
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, 5)
                     .padding(.vertical, 2)
                     .background(Color(hex: "#FF9F0A").opacity(0.25))
                     .cornerRadius(5)
@@ -8573,13 +9614,15 @@ struct SeatThumbnailMapSheet: View {
                     Text("⏸ 停止:\(pausedCount)")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(Color(hex: "#8E8E93"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                 }
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 5)
                 .padding(.vertical, 2)
                 .background(Color.white.opacity(0.08))
                 .cornerRadius(5)
                 
-                Spacer()
+                Spacer(minLength: 0)
             }
         }
         .padding(.horizontal, 4)
@@ -8625,6 +9668,8 @@ struct SeatThumbnailMapSheet: View {
             Text("※タップで操作 / リューズまたは指で上下移動")
                 .font(.system(size: 8.5, weight: .medium))
                 .foregroundColor(Color(hex: "#8E8E93"))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
                 .padding(.top, 4)
             
             if let onAddSeat = onAddSeat {
@@ -8637,6 +9682,8 @@ struct SeatThumbnailMapSheet: View {
                             .font(.system(size: 13, weight: .bold))
                         Text("新しい席を追加")
                             .font(.system(size: 12, weight: .bold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
@@ -8718,7 +9765,7 @@ struct ThumbnailMainTimerCard: View {
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
                         .lineLimit(1)
-                        .fixedSize()
+                        .minimumScaleFactor(0.75)
                     
                     if let genre = item.genre, !genre.isEmpty {
                         Text(genre)
@@ -8729,9 +9776,10 @@ struct ThumbnailMainTimerCard: View {
                             .background(stateColor.text.opacity(0.2))
                             .cornerRadius(4)
                             .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     }
                     
-                    Spacer()
+                    Spacer(minLength: 4)
                     
                     // 稼働状態インジケータ（タップで設定へ進めることが直感的にわかる）
                     HStack(spacing: 2) {
@@ -8739,6 +9787,8 @@ struct ThumbnailMainTimerCard: View {
                             Text("超過")
                                 .font(.system(size: 9.5, weight: .heavy))
                                 .foregroundColor(Color(hex: "#FF453A"))
+                                .lineLimit(1)
+                                .fixedSize()
                         } else if item.isPreCountingDown {
                             Circle()
                                 .fill(Color(hex: "#FFD60A"))
@@ -8746,6 +9796,8 @@ struct ThumbnailMainTimerCard: View {
                             Text("準備中")
                                 .font(.system(size: 9.5, weight: .bold))
                                 .foregroundColor(Color(hex: "#FFD60A"))
+                                .lineLimit(1)
+                                .fixedSize()
                         } else if isRunning {
                             Circle()
                                 .fill(stateColor.text)
@@ -8753,58 +9805,65 @@ struct ThumbnailMainTimerCard: View {
                             Text("稼働中")
                                 .font(.system(size: 9.5, weight: .bold))
                                 .foregroundColor(stateColor.text)
+                                .lineLimit(1)
+                                .fixedSize()
                         } else {
                             Text(item.isZero ? "00:00" : "⏸ 停止")
                                 .font(.system(size: 9.5, weight: .medium))
                                 .foregroundColor(Color(hex: "#8E8E93"))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         Image(systemName: "chevron.right")
                             .font(.system(size: 8.5, weight: .bold))
                             .foregroundColor(Color(hex: "#8E8E93"))
                     }
+                    .fixedSize(horizontal: true, vertical: false)
                 }
                 
                 // 下段: 大きなタイマー数字 ＆ 全体設定分数（改行せず1行で綺麗に収まる）
                 HStack(alignment: .firstTextBaseline) {
                     if item.isPreCountingDown {
                         Text(formatSeconds(item.prepRemainingSeconds))
-                            .font(.system(size: 20, weight: .black, design: .rounded))
+                            .font(.system(size: WatchLayout.font(20), weight: .black, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(Color(hex: "#FFD60A"))
                             .lineLimit(1)
-                            .minimumScaleFactor(0.85)
+                            .minimumScaleFactor(0.75)
                     } else if isRunning {
                         Text(formatSeconds(rem))
-                            .font(.system(size: 20, weight: .black, design: .rounded))
+                            .font(.system(size: WatchLayout.font(20), weight: .black, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(stateColor.text)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.85)
+                            .minimumScaleFactor(0.75)
                     } else if isOvertime {
                         Text("+\(formatSeconds(abs(rem)))")
-                            .font(.system(size: 20, weight: .black, design: .rounded))
+                            .font(.system(size: WatchLayout.font(20), weight: .black, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(Color(hex: "#FF453A"))
                             .lineLimit(1)
-                            .minimumScaleFactor(0.85)
+                            .minimumScaleFactor(0.75)
                     } else {
                         let pausedSec = max(0, item.pausedRemainingSeconds)
                         Text(formatSeconds(pausedSec))
-                            .font(.system(size: 20, weight: .bold, design: .rounded))
+                            .font(.system(size: WatchLayout.font(20), weight: .bold, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(Color(hex: "#8E8E93"))
                             .lineLimit(1)
-                            .minimumScaleFactor(0.85)
+                            .minimumScaleFactor(0.75)
                     }
                     
-                    Spacer()
+                    Spacer(minLength: 4)
                     
                     Text("\(max(1, item.totalSeconds / 60))分設定")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(Color(hex: "#8E8E93"))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
             }
-            .padding(.horizontal, 9)
+            .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
             .padding(.vertical, 7)
             .background(stateColor.bg)
             .cornerRadius(9)
@@ -8884,7 +9943,7 @@ struct ThumbnailSeatCard: View {
                     .foregroundColor(.white)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .minimumScaleFactor(0.8)
+                    .minimumScaleFactor(0.72)
                 
                 Spacer(minLength: 2)
                 
@@ -8892,6 +9951,8 @@ struct ThumbnailSeatCard: View {
                     Text("超過")
                         .font(.system(size: 8, weight: .heavy))
                         .foregroundColor(.white)
+                        .lineLimit(1)
+                        .fixedSize()
                         .padding(.horizontal, 3)
                         .padding(.vertical, 1)
                         .background(Color(hex: "#FF453A"))
@@ -8900,6 +9961,8 @@ struct ThumbnailSeatCard: View {
                     Text("まもなく")
                         .font(.system(size: 7.5, weight: .heavy))
                         .foregroundColor(.white)
+                        .lineLimit(1)
+                        .fixedSize()
                         .padding(.horizontal, 3)
                         .padding(.vertical, 1)
                         .background(Color(hex: "#FF453A"))
@@ -8908,6 +9971,8 @@ struct ThumbnailSeatCard: View {
                     Text("残3分")
                         .font(.system(size: 7.5, weight: .heavy))
                         .foregroundColor(.black)
+                        .lineLimit(1)
+                        .fixedSize()
                         .padding(.horizontal, 3)
                         .padding(.vertical, 1)
                         .background(Color(hex: "#FFD60A"))
@@ -8924,6 +9989,8 @@ struct ThumbnailSeatCard: View {
                     Text("停止")
                         .font(.system(size: 7.5, weight: .medium))
                         .foregroundColor(Color(hex: "#8E8E93"))
+                        .lineLimit(1)
+                        .fixedSize()
                         .padding(.horizontal, 3)
                         .padding(.vertical, 1)
                         .background(Color.white.opacity(0.12))
@@ -8934,28 +10001,28 @@ struct ThumbnailSeatCard: View {
             // 中段: 時間数字（稼働中は大きく、超過時は赤、停止中は薄く）
             if isRunning {
                 Text(formatSeconds(rem))
-                    .font(.system(size: 15, weight: .black, design: .rounded))
+                    .font(.system(size: WatchLayout.font(15), weight: .black, design: .rounded))
                     .monospacedDigit()
                     .foregroundColor(stateColor.text)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.85)
+                    .minimumScaleFactor(0.75)
             } else if isOvertime {
                 Text("+\(formatSeconds(abs(rem)))")
-                    .font(.system(size: 14.5, weight: .black, design: .rounded))
+                    .font(.system(size: WatchLayout.font(14.5), weight: .black, design: .rounded))
                     .monospacedDigit()
                     .foregroundColor(Color(hex: "#FF453A"))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.85)
+                    .minimumScaleFactor(0.75)
             } else {
                 Text("00:00")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .font(.system(size: WatchLayout.font(14), weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundColor(Color(hex: "#636366"))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.85)
+                    .minimumScaleFactor(0.75)
             }
             
-            // ★ チェック体制（途中チェックタイマー稼働中のみ中段下部に表示）
+            // ★ チェック体制（チェックタイマー稼働中のみ中段下部に表示）
             if let checkRem = item.checkRemainingSeconds, !item.isCheckCompleted {
                 let checkStaff = item.checkStaff ?? (item.isRecruiting ? "募集中" : "未定")
                 let isCheckOver = checkRem <= 0
@@ -8968,9 +10035,12 @@ struct ThumbnailSeatCard: View {
                     Text("検:\(formatSeconds(checkRem))")
                         .font(.system(size: 7.5, weight: .bold, design: .rounded))
                         .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize()
                     Text(checkStaff == currentUserName ? "あなた" : checkStaff)
                         .font(.system(size: 7, weight: .bold))
                         .lineLimit(1)
+                        .minimumScaleFactor(0.68)
                 }
                 .foregroundColor(checkColor)
                 .padding(.horizontal, 2.5)
@@ -8990,6 +10060,7 @@ struct ThumbnailSeatCard: View {
                         .font(.system(size: 8, weight: item.creatorName == currentUserName ? .heavy : .bold))
                         .foregroundColor(item.creatorName == currentUserName ? Color(hex: "#FFD60A") : Color(hex: "#E5E5EA"))
                         .lineLimit(1)
+                        .minimumScaleFactor(0.68)
                 }
                 
                 // ② ヘルプ担当（アシスタント / 一人施術 / 募集中）
@@ -9003,11 +10074,13 @@ struct ThumbnailSeatCard: View {
                             .font(.system(size: 8, weight: .medium))
                             .foregroundColor(Color(hex: "#8E8E93"))
                             .lineLimit(1)
+                            .minimumScaleFactor(0.68)
                     } else if (!isRunning && rem <= 0) || item.isZero || item.isCollapsed {
                         Text("助:待機中")
                             .font(.system(size: 8, weight: .medium))
                             .foregroundColor(Color(hex: "#8E8E93"))
                             .lineLimit(1)
+                            .minimumScaleFactor(0.68)
                     } else if item.isRecruiting {
                         Image(systemName: "megaphone.fill")
                             .font(.system(size: 6.5))
@@ -9016,6 +10089,7 @@ struct ThumbnailSeatCard: View {
                             .font(.system(size: 8, weight: .heavy))
                             .foregroundColor(Color(hex: "#FFD60A"))
                             .lineLimit(1)
+                            .minimumScaleFactor(0.68)
                     } else if let staff = item.shampooStaff, !staff.isEmpty {
                         Image(systemName: "hands.sparkles.fill")
                             .font(.system(size: 6.5))
@@ -9024,6 +10098,7 @@ struct ThumbnailSeatCard: View {
                             .font(.system(size: 8, weight: staff == currentUserName ? .heavy : .bold))
                             .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : Color(hex: "#64D2FF"))
                             .lineLimit(1)
+                            .minimumScaleFactor(0.68)
                     } else if isRunning {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 6.5))
@@ -9032,18 +10107,20 @@ struct ThumbnailSeatCard: View {
                             .font(.system(size: 8, weight: .bold))
                             .foregroundColor(Color(hex: "#FF9F0A"))
                             .lineLimit(1)
+                            .minimumScaleFactor(0.68)
                     } else {
                         Text("助:待機中")
                             .font(.system(size: 8, weight: .medium))
                             .foregroundColor(Color(hex: "#8E8E93"))
                             .lineLimit(1)
+                            .minimumScaleFactor(0.68)
                     }
                 }
             }
             .padding(.top, 1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 6)
+        .padding(.horizontal, WatchLayout.isSmall ? 4.5 : 6)
         .padding(.vertical, 5)
         .background(stateColor.bg)
         .cornerRadius(9)

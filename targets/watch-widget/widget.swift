@@ -376,6 +376,7 @@ struct ComplicationView: View {
                             .font(.system(size: 13, weight: .bold))
                             .foregroundColor(Color(red: 0.19, green: 0.82, blue: 0.35))
                             .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                     } else {
                         Image(systemName: "timer")
                             .font(.system(size: 11, weight: .bold))
@@ -420,11 +421,13 @@ struct ComplicationView: View {
                         .font(.system(size: 13, weight: .bold))
                         .widgetAccentable()
                         .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                     Spacer(minLength: 2)
                     Text("稼働中0席")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                         .fixedSize(horizontal: true, vertical: false)
                 }
             }
@@ -436,6 +439,8 @@ struct ComplicationView: View {
                     Text(isPreCountingDown ? "準備" : (isOver ? "超過" : "残り"))
                         .font(.system(size: hasActiveCheck ? 11 : 12, weight: .bold))
                         .foregroundColor(timeColor)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     timerText(for: seat)
                         .font(.system(size: timeFontSize, weight: .bold, design: .rounded))
                         .monospacedDigit()
@@ -457,9 +462,12 @@ struct ComplicationView: View {
             } else {
                 Text("00:00")
                     .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .lineLimit(1)
                 Text("稼働中のタイマーなし")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -599,6 +607,8 @@ struct ComplicationView: View {
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(seat.isMainTimer ? Color(red: 0.19, green: 0.82, blue: 0.35) : nil)
                         .widgetAccentable(!seat.isMainTimer)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                     timerText(for: seat)
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .monospacedDigit()
