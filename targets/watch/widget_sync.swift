@@ -49,10 +49,16 @@ enum WidgetSync {
                 lastTouchedId = touched
             }
         }
-        // 削除された席の ID は忘れる
-        if let id = lastTouchedId, !allItems.contains(where: { $0.id == id }), !allItems.isEmpty {
-            lastTouchedId = nil
+        // 削除された席、または停止した席の ID は忘れる
+        if let id = lastTouchedId {
+            let isStillActive = allItems.contains(where: { $0.id == id && ($0.isRunning || $0.isPreCountingDown) })
+            if !isStillActive && !allItems.isEmpty {
+                lastTouchedId = nil
+            }
         }
+        let prevMainActive = (prevStates?["main-timer"]?.first ?? 0) > 0.5
+        let curMainActive = (mainTimer?.isRunning == true || mainTimer?.isPreCountingDown == true)
+        let mainActiveChanged = (prevMainActive != curMainActive)
         var newStates: [String: [Double]] = [:]
         for t in allItems {
             let active = t.isRunning || t.isPreCountingDown
@@ -137,10 +143,11 @@ enum WidgetSync {
             payload["lastTouchedId"] = id
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
-        if data == lastPayload { return }
+        if data == lastPayload && !mainActiveChanged { return }
         lastPayload = data
 
         defaults.set(data, forKey: snapshotKey)
+        defaults.synchronize()
         WidgetCenter.shared.reloadAllTimelines()
     }
 }

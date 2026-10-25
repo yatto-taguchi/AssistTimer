@@ -1369,8 +1369,8 @@ export default function SalonWorkScreen() {
       if (!Number.isFinite(expected)) return false;
       if (s.status !== 'running') return false; // すでに止まっている席はそのまま反映
       if (expected <= 0) return true; // Watch では停止中だった席が、今は稼働中 → 後から再スタートされた
-      // Watch と iPhone の時計・通信のずれを考えて 5 秒まで同じ終了時刻とみなす
-      return Math.abs((Number(s.targetEndTimestamp) || 0) - expected) > 5000;
+      // Watch と iPhone の時計・通信のずれを考えて 15 秒まで同じ終了時刻とみなす（Watch側の15秒許容幅と完全統一）
+      return Math.abs((Number(s.targetEndTimestamp) || 0) - expected) > 15000;
     };
 
     setSeats((prevSeats) => {
@@ -1467,7 +1467,7 @@ export default function SalonWorkScreen() {
             if (extra?.isSubCheck === true) {
               return {
                 ...s,
-                checkStaffName: '',
+                checkStaffName: '募集中',
                 checkProcess: extra?.checkProcess || extra?.helpProcess || s.checkProcess || 'チェック',
               };
             }
@@ -1589,12 +1589,12 @@ export default function SalonWorkScreen() {
                 ],
               };
             }
-            // 終了時刻を過ぎて稼働中の席だけ止める（すでに停止・タイム再入力済みなら何もしない）
-            if (s.status !== 'running' || !s.targetEndTimestamp || Date.now() < s.targetEndTimestamp) {
+            // 終了時刻に達している（またはWatchとiPhoneの時計差15秒以内で稼働中の）席だけ止める（すでに停止・新しく未来へ再入力済みなら何もしない）
+            if (s.status !== 'running' || !s.targetEndTimestamp || Date.now() + 15000 < s.targetEndTimestamp) {
               hasChanged = false;
               return s;
             }
-            return stopSeat(s, 'アラーム停止');
+            return { ...stopSeat(s, 'アラーム停止'), collapsedAtEnd: s.targetEndTimestamp || Date.now() };
           }
           case 'START_TIMER': {
             const targetSec = Number(extra?.targetSeconds) || 600;

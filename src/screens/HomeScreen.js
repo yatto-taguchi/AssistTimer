@@ -1219,6 +1219,8 @@ export default function HomeScreen({ navigation }) {
             if (Platform.OS === 'ios') {
               const stoppedOverState = {
                 explicitStop: true,
+                isExplicitReset: true,
+                isAutoFinished: false,
                 remainingTime: currentTarget,
                 targetTime: currentTarget,
                 targetEndTimestamp: 0,
@@ -1383,6 +1385,7 @@ export default function HomeScreen({ navigation }) {
       && (Date.now() - lastMainTimerResetAtRef.current < 5000);
 
     const newState = {
+      explicitStop: isExplicitResetNow || !!saveModalVisible,
       remainingTime: effectiveRemaining,
       targetTime,
       targetEndTimestamp: endMs,
@@ -1889,6 +1892,7 @@ export default function HomeScreen({ navigation }) {
     const isAutoFinishedNow = !isRunning && !isPre && lastAutoFinishedAtRef.current > 0 && lastAutoFinishedAtRef.current > lastMainTimerResetAtRef.current;
     const isExplicitResetNow = !isRunning && !isPre && !isAutoFinishedNow && (now - lastMainTimerResetAtRef.current < 5000);
     return {
+      explicitStop: isExplicitResetNow,
       remainingTime: currentRemaining,
       targetTime: currentTarget,
       targetEndTimestamp: endMs,
@@ -2502,6 +2506,7 @@ export default function HomeScreen({ navigation }) {
       lastResetTargetEndRef.current = overStartTimeRef.current;
     }
     lastMainTimerResetAtRef.current = Date.now();
+    lastAutoFinishedAtRef.current = 0;
     WatchConnectivity.notifyLocalStopOrReset('main-timer', lastResetTargetEndRef.current || 0);
     targetEndTimeRef.current = null;
     prepEndTimeRef.current = null;
@@ -2521,6 +2526,8 @@ export default function HomeScreen({ navigation }) {
     if (Platform.OS === 'ios') {
       const stoppedState = {
         explicitStop: true,
+        isExplicitReset: true,
+        isAutoFinished: false,
         remainingTime: snapTarget,
         targetTime: snapTarget,
         targetEndTimestamp: 0,
@@ -2579,6 +2586,7 @@ export default function HomeScreen({ navigation }) {
       lastResetTargetEndRef.current = overStartTimeRef.current;
     }
     lastMainTimerResetAtRef.current = Date.now();
+    lastAutoFinishedAtRef.current = 0;
     WatchConnectivity.notifyLocalStopOrReset('main-timer', lastResetTargetEndRef.current || 0);
     targetEndTimeRef.current = null;
     prepEndTimeRef.current = null;
@@ -2598,6 +2606,8 @@ export default function HomeScreen({ navigation }) {
     if (Platform.OS === 'ios') {
       const stoppedState = {
         explicitStop: true,
+        isExplicitReset: true,
+        isAutoFinished: false,
         remainingTime: snapTarget,
         targetTime: snapTarget,
         targetEndTimestamp: 0,

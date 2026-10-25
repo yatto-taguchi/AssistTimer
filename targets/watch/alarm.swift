@@ -101,7 +101,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private var lastSessionEnd: String = "-"
     private var notificationAuth: String = "?"
 
-    private var notificationSignature = ""
+    private var notificationSignature = "__INIT__"
     private var authRequested = false
     private var hapticStep = 0
     private var hapticTimer: Timer?
@@ -306,7 +306,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                         key: checkKey,
                         seatId: t.id,
                         date: finalCheckEnd,
-                        title: "\(label) チェック時間"
+                        title: "\(label) \(t.displayCheckProcess)時間"
                     ))
                 }
             }
@@ -353,7 +353,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
 
         // 3. 通知署名をリセットして残りの全体タイマー通知を確実に再構成・再登録する
-        notificationSignature = ""
+        notificationSignature = "__FORCE__"
         update(timers: timers, mainTimer: mainTimer, soundOn: soundOn, currentUserName: currentUserName)
 
         // 4. 前のセッションの破棄完了およびシステムアラート消去アニメーション完了に備えて段階的に再確認
@@ -397,6 +397,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         if let key = sessionKey, key.hasPrefix("main-timer") {
             invalidateCurrentSession()
         }
+        notificationSignature = "__FORCE__"
         refresh()
     }
 
@@ -425,7 +426,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 invalidateCurrentSession()
             }
         }
-        notificationSignature = ""
+        notificationSignature = "__FORCE__"
         refresh()
         scheduleRetryAfterInvalidation(delay: 0.25)
     }
@@ -657,37 +658,100 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         updateStatusText()
     }
 
+    private func eventFromKey(_ key: String) -> WatchAlarmEvent? {
+        if let existing = events.first(where: { isSameTarget(key1: $0.key, key2: key) }) {
+            return existing
+        }
+        if let r = ringing.first(where: { isSameTarget(key1: $0.key, key2: key) }) {
+            return r
+        }
+        let separator = key.contains("-check@") ? "-check@" : (key.contains("-main@") ? "-main@" : nil)
+        guard let sep = separator,
+              let range = key.range(of: sep, options: .backwards) else {
+            return nil
+        }
+        let seatId = String(key[..<range.lowerBound])
+        let epStr = String(key[range.upperBound...])
+        let ts = Double(epStr) ?? Date().timeIntervalSince1970
+        return WatchAlarmEvent(key: key, seatId: seatId, date: Date(timeIntervalSince1970: ts), title: "")
+    }
+
     private func acknowledgeRinging(sendToPhone: Bool, completeCheckIfNeeded: Bool = true) {
         let now = Date()
-        let targets = currentRinging(now)
+        var mergedTargets = currentRinging(now)
+        for r in ringing where !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: r.key) }) {
+            mergedTargets.append(r)
+        }
+        for (_, r) in restoredOverlayEvents where !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: r.key) }) {
+            mergedTargets.append(r)
+        }
+        for key in forceRingingKeys where !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: key) }) {
+            if let ev = eventFromKey(key) {
+                mergedTargets.append(ev)
+            }
+        }
+        let targets = mergedTargets
         guard !targets.isEmpty else {
             if !ringing.isEmpty { ringing = [] }
+            if sendToPhone, var m = WatchSessionManager.shared.mainTimer, (m.isOvertime || m.isPreCountingDown) {
+                let stoppedEnd = m.targetEndTime.timeIntervalSince1970
+                m.isRunning = false
+                m.isPreCountingDown = false
+                m.preCountdownSeconds = 0
+                m.prepEndTime = nil
+                m.pausedRemainingSeconds = 0
+                m.helpProcess = ""
+                m.isNoHelpNeeded = false
+                m.targetEndTime = Date().addingTimeInterval(TimeInterval(m.totalSeconds))
+                WatchSessionManager.shared.mainTimer = m
+                WatchSessionManager.shared.clearWatchStartedMainTimer()
+                events.removeAll { $0.seatId == "main-timer" }
+                persistEvents()
+                WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: m, userName: WatchSessionManager.shared.currentUserName)
+                WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_RESET", stoppedEndTime: stoppedEnd)
+            }
             return
         }
+        var allAckKeys = Set<String>()
         for e in targets {
             acknowledged[e.key] = e.date.timeIntervalSince1970
+            allAckKeys.insert(e.key)
+            let isCheckTarget = e.key.contains("-check@")
+            let kindTag = isCheckTarget ? "-check@" : "-main@"
+            for ev in events where ev.seatId == e.seatId && ev.key.contains(kindTag) {
+                acknowledged[ev.key] = ev.date.timeIntervalSince1970
+                allAckKeys.insert(ev.key)
+            }
+            for k in scheduledNotificationEventKeys where k.hasPrefix("\(e.seatId)\(kindTag)") {
+                acknowledged[k] = e.date.timeIntervalSince1970
+                allAckKeys.insert(k)
+            }
             removeForceRinging(matching: e.key)
             restoredOverlayEvents = restoredOverlayEvents.filter { !isSameTarget(key1: $0.key, key2: e.key) }
         }
         persist()
-        let ids = targets.flatMap { e in repeatOffsets.indices.map { "\(notificationPrefix)\(e.key).\($0)" } }
+        let ids = allAckKeys.flatMap { k in repeatOffsets.indices.map { "\(notificationPrefix)\(k).\($0)" } }
         let center = UNUserNotificationCenter.current()
         center.removePendingNotificationRequests(withIdentifiers: ids)
         center.removeDeliveredNotifications(withIdentifiers: ids)
         ringing = []
 
         // ★ 放置タイム終了のアラーム（-main@）と途中チェック時間のアラーム（-check@）を分離して処理:
-        //   1. 本放置・メインタイマー（-main@）: ユーザーがアプリ内で明示的に「止める / タイム終了 / シャンプーに入る」を選んだ時（sendToPhone == true）のみ00:00に戻す。
-        //      通知の「開く」やスマートアラーム停止（sendToPhone == false）では振動とオーバーレイだけ消火し、超過カウントアップ（+00:01...）を継続させる。
+        //   1. 本放置・メインタイマー（-main@）: ユーザーが明示的に「止める / タイム終了 / シャンプーに入る」等を選んだ時（sendToPhone == true）は00:00に戻す。
         //   2. 途中チェック時間（-check@）: 通知やスマートアラームで開いた場合でもチェック完了として扱い、残りの本放置タイマー（第2段階スマートアラーム）を即座に再予約する。
         let mainSeatIds = Set(targets.filter { $0.key.contains("-main@") }.map { $0.seatId })
         let seatIds = Set(targets.map { $0.seatId })
         for id in seatIds {
+            if let snap = lastSystemDismissedSnapshot, (snap.event.seatId == id || (id == "main-timer" && snap.event.seatId == "main-timer")) {
+                lastSystemDismissedSnapshot = nil
+                pendingSystemDismissPhoneSyncWorkItem?.cancel()
+                pendingSystemDismissPhoneSyncWorkItem = nil
+            }
             let isMainTimer = (id == "main-timer" || id == WatchSessionManager.shared.mainTimer?.id)
             if isMainTimer {
                 if sendToPhone {
-                    // ★ メインタイマーのアラーム消火: ユーザーが明示的に「タイマーを止める / シャンプーに入る」等を押した時（sendToPhone == true）のみ
-                    //   00:00 停止状態へ戻し、文字盤モジュールも即時更新する。システムアラーム画面の「開く」「終了」では超過（カウントアップ）を維持する。
+                    // ★ メインタイマーのアラーム消火: 明示的に止めた時（sendToPhone == true）は
+                    //   00:00 停止状態へ即座に戻し、予定リストからも除去して文字盤モジュールを即時更新する。
                     let stoppedEnd = targets.first(where: { $0.seatId == id })?.date.timeIntervalSince1970
                         ?? (WatchSessionManager.shared.mainTimer?.targetEndTime.timeIntervalSince1970 ?? 0)
                     if var m = WatchSessionManager.shared.mainTimer {
@@ -703,6 +767,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                         WatchSessionManager.shared.clearWatchStartedMainTimer()
                         WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: m, userName: WatchSessionManager.shared.currentUserName)
                     }
+                    events.removeAll { $0.seatId == "main-timer" || $0.seatId == id }
+                    persistEvents()
                     WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_RESET", stoppedEndTime: stoppedEnd)
                 }
             } else {
@@ -715,7 +781,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                             "kind": "main",
                             "expectedEnd": mainEvent.date.timeIntervalSince1970 * 1000.0
                         ]
-                        WatchSessionManager.shared.applyLocalStop(seatId: id)
+                        events.removeAll { $0.seatId == id && $0.key.contains("-main@") }
+                        persistEvents()
+                        WatchSessionManager.shared.applyLocalStop(seatId: id, fallbackEndTime: mainEvent.date)
                         WatchSessionManager.shared.sendActionToPhone(
                             action: "STOP_ALARM",
                             seatId: id,
@@ -724,7 +792,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     }
                 } else if completeCheckIfNeeded {
                     // ★ チェック時間アラームの停止: Watch側でも即座にチェック完了を反映し、残りの全体タイマーを新しく入れ直す
-                    WatchSessionManager.shared.applyLocalCheckComplete(seatId: id)
+                    let checkEvent = targets.first(where: { $0.seatId == id && $0.key.contains("-check@") })
+                    WatchSessionManager.shared.applyLocalCheckComplete(seatId: id, fallbackCheckEndTime: checkEvent?.date)
                     WatchSessionManager.shared.sendActionToPhone(
                         action: "STOP_ALARM",
                         seatId: id,
@@ -1116,9 +1185,21 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             //     もし「開く」が押されて直後に appBecameActive() が呼ばれた場合はスナップショットからオーバーレイ（次の画面）を復元する！
             if !wasInvalidating && (wasStarted || endedKey != nil) && reason == WKExtendedRuntimeSessionInvalidationReason.none {
                 self.allowBackgroundHandoffScheduleUntil = Date().addingTimeInterval(2.5)
-                let alreadyActive = (WKApplication.shared().applicationState == .active)
-                    || (Date().timeIntervalSince(self.lastAppBecameActiveAt) < 0.8)
-                if alreadyActive {
+                let now = Date()
+                let matchedEv: WatchAlarmEvent? = {
+                    if let k = endedKey, let ev = self.events.first(where: { self.isSameTarget(key1: $0.key, key2: k) }) {
+                        return ev
+                    }
+                    return self.currentRinging(now).last
+                }()
+                let isMainTimerEv = (matchedEv?.seatId == "main-timer" || matchedEv?.seatId == WatchSessionManager.shared.mainTimer?.id || (endedKey?.hasPrefix("main-timer") == true))
+                let justBecameActiveFromOpen = (now.timeIntervalSince(self.lastAppBecameActiveAt) < 0.8)
+                let isAppCurrentlyActive = (WKApplication.shared().applicationState == .active)
+                let alreadyActive = isAppCurrentlyActive || justBecameActiveFromOpen
+
+                // ★ メインタイマー以外の客席タイマーのみ、アクティブ時は alarmOverlay を優先表示。
+                //   メインタイマーはシステムアラームのボタン押下（1回目）で即座に 00:00 へ戻し、2度押し不要にする！
+                if alreadyActive && !isMainTimerEv {
                     if let k = endedKey, !self.isAcknowledged(k) {
                         self.forceRingingKeys.insert(k)
                     }
@@ -1127,35 +1208,57 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     return
                 }
 
-                let now = Date()
-                let matchedEv: WatchAlarmEvent? = {
-                    if let k = endedKey, let ev = self.events.first(where: { self.isSameTarget(key1: $0.key, key2: k) }) {
-                        return ev
-                    }
-                    return self.currentRinging(now).last
-                }()
-
                 if let ev = matchedEv {
                     let isCheck = ev.key.contains("-check@")
+                    let isMainTimer = (ev.seatId == "main-timer" || ev.seatId == WatchSessionManager.shared.mainTimer?.id)
                     let preMain = WatchSessionManager.shared.mainTimer
                     let preSeat = WatchSessionManager.shared.timers.first(where: { $0.id == ev.seatId })
-                    self.lastSystemDismissedSnapshot = SystemDismissedSnapshot(
-                        event: ev,
-                        dismissedAt: now,
-                        isCheckEvent: isCheck,
-                        preMainTimer: preMain,
-                        preSeatTimer: preSeat
-                    )
+                    if !isAppCurrentlyActive && !isMainTimer {
+                        self.lastSystemDismissedSnapshot = SystemDismissedSnapshot(
+                            event: ev,
+                            dismissedAt: now,
+                            isCheckEvent: isCheck,
+                            preMainTimer: preMain,
+                            preSeatTimer: preSeat
+                        )
+                    } else {
+                        self.lastSystemDismissedSnapshot = nil
+                    }
                     self.forceRingingKeys.insert(ev.key)
 
                     if isCheck {
                         // ★ チェックタイマーは遅延ゼロで即座にチェック完了＆残りの本タイマー予約まで完結させる
                         self.acknowledgeRinging(sendToPhone: true, completeCheckIfNeeded: true)
+                    } else if isMainTimer {
+                        // ★ メインタイマー終了時にアラームのボタンが押された場合:
+                        //   1回目の押下で即座にメインタイマーと文字盤モジュールを 00:00 に戻し、直後の appBecameActive() で超過へ先祖返りさせない！
+                        let stoppedEnd = ev.date.timeIntervalSince1970
+                        self.pendingSystemDismissPhoneSyncWorkItem?.cancel()
+                        self.pendingSystemDismissPhoneSyncWorkItem = nil
+                        self.lastSystemDismissedSnapshot = nil
+                        self.acknowledgeRinging(sendToPhone: false, completeCheckIfNeeded: false)
+                        if var m = WatchSessionManager.shared.mainTimer {
+                            m.isRunning = false
+                            m.isPreCountingDown = false
+                            m.preCountdownSeconds = 0
+                            m.prepEndTime = nil
+                            m.pausedRemainingSeconds = 0
+                            m.helpProcess = ""
+                            m.isNoHelpNeeded = false
+                            m.targetEndTime = Date().addingTimeInterval(TimeInterval(m.totalSeconds))
+                            WatchSessionManager.shared.mainTimer = m
+                            WatchSessionManager.shared.clearWatchStartedMainTimer()
+                            WidgetSync.save(
+                                timers: WatchSessionManager.shared.timers,
+                                mainTimer: m,
+                                userName: WatchSessionManager.shared.currentUserName
+                            )
+                        }
+                        self.events.removeAll { $0.seatId == "main-timer" || $0.seatId == ev.seatId }
+                        self.persistEvents()
+                        WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_RESET", stoppedEndTime: stoppedEnd)
                     } else {
-                        // ★ システムアラーム画面（「"AssistTimer" からのアラームです。 [開く] [終了]」）では、
-                        //   「開く」「終了」のどちらを押しても 00:00 には戻さず、超過（カウントアップ）状態を維持する。
-                        //   アラーム音・振動・保留通知のみを消火し、「開く」でアプリが前面に来た場合は appBecameActive() で
-                        //   消化タイム・オーバーレイ表示（「シャンプーに入る」「タイマーを止める」等）を復元する。
+                        // ★ 客席タイマー: システムアラーム画面では超過（カウントアップ）状態を維持し、アラーム音・振動のみを消火する
                         self.acknowledgeRinging(sendToPhone: false, completeCheckIfNeeded: false)
                         WidgetSync.save(
                             timers: WatchSessionManager.shared.timers,
@@ -1164,9 +1267,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                         )
                     }
                 } else {
-                    self.acknowledgeRinging(sendToPhone: false, completeCheckIfNeeded: true)
+                    self.acknowledgeRinging(sendToPhone: isMainTimerEv, completeCheckIfNeeded: true)
                 }
-                self.notificationSignature = ""
+                self.notificationSignature = "__FORCE__"
                 self.refresh()
                 self.scheduleRetryAfterInvalidation(delay: 0.25)
                 return
@@ -1279,10 +1382,14 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
 
         // ★ 2. 不要になった古い通知IDのみ非同期で掃除（新規予約の登録をブロック・遅延させない）
+        if targets.isEmpty {
+            center.removeAllDeliveredNotifications()
+        }
         center.getPendingNotificationRequests { requests in
             let stale = requests.map(\.identifier).filter { $0.hasPrefix(prefix) && !newIdentifiers.contains($0) }
             if !stale.isEmpty {
                 center.removePendingNotificationRequests(withIdentifiers: stale)
+                center.removeDeliveredNotifications(withIdentifiers: stale)
             }
         }
     }
@@ -1312,31 +1419,35 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
     }
 
-    // ★ 通知タップ（「開く」）または「アラーム停止」ボタン押下時:
-    //   アラーム音・振動およびオーバーレイのみを消火して一覧画面（赤色の超過カウント +00:xx カード表示）を直接見せ、
-    //   超過カウントアップ（超過 00:01...）は自動終了させない！
-    //   アプリ画面でカードをタップして「タイム終了」「止める」「シャンプーに入る」等を明示的に選んだ時のみ 00:00 に戻る仕様。
+    // ★ 通知タップ（「開く」）または「アラーム停止」ボタン（STOP_ACTION）押下時:
+    //   1. 「アラーム停止」（STOP_ACTION）が押された場合は、対象タイマー（客席・チェック・メインタイマー）を即座に停止・リセットし、
+    //      後続の連続リピート通知（13秒・18秒・25秒・40秒・60秒）もすべて消去する。
+    //   2. 通知本体をタップして「開く」した場合は、アラーム音・振動・リピート通知のみを消火して一覧画面を表示する。
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let reqId = response.notification.request.identifier
+        let isStopAction = (response.actionIdentifier == "STOP_ACTION")
         DispatchQueue.main.async {
+            self.pendingSystemDismissPhoneSyncWorkItem?.cancel()
+            self.pendingSystemDismissPhoneSyncWorkItem = nil
+            self.lastSystemDismissedSnapshot = nil
             if self.events.isEmpty, let rawEvents = UserDefaults.standard.array(forKey: self.eventsStoreKey) as? [[String: Any]] {
                 self.events = rawEvents.compactMap { WatchAlarmEvent(dictionary: $0) }
             }
             // 通知ID（"assisttimer.alarm.<eventKey>.<index>"）から対象イベントキーを特定し、
-            // コールドスタート時などでも確実に消火対象（forceRingingKeys）へ含めてオーバーレイを閉じ、チェック完了処理等を通す
+            // コールドスタート時やイベント時刻更新後でも確実に通知削除・停止処理（forceRingingKeys）へ通す
             if reqId.hasPrefix(self.notificationPrefix) {
                 let stripped = String(reqId.dropFirst(self.notificationPrefix.count))
                 if let dotIdx = stripped.lastIndex(of: ".") {
                     let eventKey = String(stripped[..<dotIdx])
-                    if !self.isAcknowledged(eventKey) {
-                        self.forceRingingKeys.insert(eventKey)
-                    }
+                    let directIds = self.repeatOffsets.indices.map { "\(self.notificationPrefix)\(eventKey).\($0)" }
+                    center.removePendingNotificationRequests(withIdentifiers: directIds)
+                    center.removeDeliveredNotifications(withIdentifiers: directIds)
+                    self.forceRingingKeys.insert(eventKey)
                 }
             }
-            let shouldSendStopToPhone = false
-            self.stop(sendToPhone: shouldSendStopToPhone)
+            self.stop(sendToPhone: isStopAction, completeCheckIfNeeded: true)
             completionHandler()
         }
     }
