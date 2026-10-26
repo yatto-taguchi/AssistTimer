@@ -2778,7 +2778,7 @@ TestFlight Build 68の実機テストにおいて、以下の致命的な不具�
 - **客席タイマー操作画面（`timerActionBranchScrollView`）**:
   - 上から順に：① タイマー数字 ➔ ② 微調整ボタン（`+1分 / +3分 / +5分`、`-30秒 / +30秒` ＋ 黄色確定バー） ➔ ③ `[ 💧 シャンプーに入る ]`（連動メニュー） ➔ ④ `[ ⏹️ タイマーを止める ]` ➔ ⑤ `[ 🔄 タイム再入力。 ]` を配置（概要画面からは微調整・タイム再入力を移動してスッキリ化）。
 - **メインタイマー操作画面（`MainTimerActionSheet.timerActionBranchScrollView`）**:
-  - 上から順に：① タイマー数字 ➔ ② 微調整ボタン（`+1分 / +3分 / +5分`、`-30秒 / +30秒` ＋ 黄色確定バー） ➔ ③ `[ 💧 シャンプーに入る ]`（連動メニュー設定時） ➔ ④ `[ ⏸️ 一時停止 / ▶️ 再開・スタート ]` ➔ ⑤ `[ ⏹️ タイマーを止める ]` ➔ ⑥ `[ 🔄 タイム再入力。 ]` を配置。
+  - 上から順に：① タイマー数字 ➔ ② 微調整ボタン（`+1分 / +3分 / +5分`、`-30秒 / +30秒` ＋ 黄色確定バー） ➔ ③ `[ ⏹️ タイマーを止める ]`（メインタイマーにはシャンプー・コーミング等の定義がないため停止ボタンのみ表示） ➔ ④ `[ 🔄 タイム再入力。 ]` ➔ ⑤ `[ ⏸️ 一時停止 / ▶️ 再開・スタート ]`（稼働中・超過前のみ） ➔ ⑥ `[ 🔊 携帯の音 ON/OFF ]` を配置。
 - **チェックタイマー操作画面（`TimeActionSheet.subCheckActionBranchScrollView`）**:
   - カードリスト上のチェックタイマー行タップ時（`onOpenCheckAction`）および概要画面のチェックタイマー行タップ時の双方で同一の `subCheckActionBranchScrollView` を表示。
   - 上から順に：① チェックタイマー数字（緑色） ➔ ② チェック用微調整ボタン（`+1分 / +3分 / +5分`、`-30秒 / +30秒` ＋ 黄色確定バー、`ADJUST_TIME` with `isSubCheck: true` でiPhoneとも双方向同期） ➔ ③ 工程連動ボタン（`[ 🔍 チェックに入る ]` / `[ 🪮 コーミングに入る ]` / `[ 💧 1液2液に入る ]` / `[ 🔔 担当を呼ぶ（完了） ]`、タップで全体タイマーを止めずにチェックのみ完了） ➔ ④ **`[ 👤 ヘルプ変更 ]`** ボタン（「タイマーを止める」「タイム再入力」の代わりに配置）を配置。
@@ -2842,8 +2842,54 @@ emovePendingNotificationRequests）は通知IDの <終了秒> が1秒でもズ�
   - 
 emoveNotifications(forEventKey:) において、対象エポック秒の前後31秒間（±15秒）の全通知ID（計248件）を同期一括削除し、さらにプレフィックス前方一致で予約済み・配信済み通知を完全パージ。1秒のズレによる消し残りを物理的に根絶。
 
-#### 5. Watch停止後のiPhone側タイマー受付＆Watch側タイマー開始保護 (	argets/watch/content.swift)
+#### 5. Watch停止後のiPhone側タイマー受付＆Watch側タイマー開始保護 (`targets/watch/content.swift`)
 - **確定仕様**:
   - Watchでメインタイマーを停止した後、iPhone側で新しい未来の終了時刻でスタートされたタイマーを無条件15秒ブロックしていた処理を是正し、即時受付・アラーム予約へ移行。
-  - Watch側で席タイマーを開始した際（START_TIMER）も clearLocalStop と watchStartedSeatTimes 保護を即時実行し、すれ違い通信による誤消火を鉄壁防御。
+  - Watch側で席タイマーを開始した際（`START_TIMER`）も `clearLocalStop` と `watchStartedSeatTimes` 保護を即時実行し、すれ違い通信による誤消火を鉄壁防御。
+
+---
+
+## 39. メインタイマー1分等の短時間スマートアラーム確実発動、システムアラーム「開く」／「終了」分岐、およびメイン・共有タイマー停止ボタン最適化仕様
+
+#### 1. 1分等の短時間メインタイマーにおけるスマートアラーム（振動）不発の完全解消 (`targets/watch/alarm.swift`, `targets/watch/content.swift`)
+- **背景・原因**:
+  - `WKExtendedRuntimeSession.start(at:)` の呼び出し直後、watchOS側で `.notStarted` から `.scheduled` へ遷移するまでの数ミリ秒〜数百ミリ秒の間に0.5秒周期の `tick()` やiPhoneからの往復同期が走ると、「予約失敗（`.notStarted`）」と誤判定してセッションを破棄・再作成する競合が発生していた。
+  - また、超過カウントアップ突入時にiPhone側の `overStartTimeRef` との1〜2秒の丸め差でイベントキーが変わり、鳴動直後のスマートアラームが `removedFromList` 判定で即座に破棄されるケースがあった。
+- **確定仕様**:
+  - `scheduleSmartAlarmIfPossible` にて `.notStarted` 状態のセッションを **3.0秒間保護** し、予約直後の誤破棄・再作成ループを根絶。
+  - `extendedRuntimeSessionDidStart` にて、セッション参照が入れ替わっていた場合でも未消火の期限到来イベントがあれば破棄せず正規セッションとして引き継いで確実に振動させる。
+  - `WatchAlarmCoordinator.update()` および `WatchSessionManager.processReceivedData` にて、超過突入後も既存の終了時刻（`existing.date`）を維持し、同一席・同一種別のイベントが継続している間は `removedFromList` によるセッション破棄を行わない。
+  - スマートアラーム予約中も0秒以外のフェイルセーフ通知（+4秒以降）を並行保持し、スマートアラームが正常起動した瞬間にのみ全削除する二段構えで1分タイマーでも100%振動を保証。
+
+#### 2. システムアラーム画面（「"AssistTimer" からのアラームです。 [開く] [終了]」）のボタン分岐仕様 (`targets/watch/alarm.swift`, `targets/watch/content.swift`)
+- **確定仕様**:
+  - **右側の `[終了]` を押したとき**:
+    - アラーム（振動・音）を即座に停止し、メインタイマー・共有タイマーの表示もその場で即座に `00:00` にリセットして文字盤コンプリケーションおよびiPhoneへ同期する（追加タップ不要）。
+  - **左側の `[開く]` を押したとき**:
+    - アラームの振動のみを止め、`00:00` にはリセットせず **超過タイム（`+00:xx`）のカウントアップ表示を維持したまま**、即座にタイマー操作分岐画面（`MainTimerActionSheet` / `TimeActionSheet` の `.timerActionBranch`）を自動で開く。
+    - 文字盤（バックグラウンド）から `[開く]` を押して `didInvalidateWith` が `appBecameActive` より先に呼ばれた場合でも、直前スナップショット（`lastSystemDismissedSnapshot`）と遅延送信キャンセル（`pendingSystemDismissPhoneSyncWorkItem`）により、iPhoneへ誤ってリセットや再スタートを送ることなく超過状態をシームレスに復元する。
+
+#### 3. メインタイマー操作画面における「タイマーを止める」単独化（工程ボタン廃止） (`targets/watch/content.swift`)
+- **確定仕様**:
+  - メインタイマーには「シャンプー」や「コーミング」といったヘルプ工程の概念がないため、`MainTimerActionSheet`（`.timerActionBranch`）、`MainTimerCard`、および `alarmOverlay` から「シャンプーに入る」等の工程ボタンおよび終了後メニュー選択欄をすべて廃止。
+  - メインタイマーの操作分岐画面では、停止アクションとして **`[ ⏹️ タイマーを止める ]` のみ**（＋時間微調整・タイム再入力・携帯の音切替）を表示する。
+  - 稼働中・超過中のメインタイマーカードをタップした際は、中間画面（`.standard`）を挟まず直接 `.timerActionBranch` 画面を開く。
+
+#### 4. 共有タイマー（客席タイマー）操作画面における工程選択有無に応じた自然なボタン分岐 (`targets/watch/content.swift`)
+- **確定仕様**:
+  - `TimeActionSheet.timerActionBranchScrollView` における `helpProcess` 空文字時の `"シャンプー"` デフォルトフォールバックを撤廃。
+  - **工程が選ばれている場合**（`!isNoHelpNeeded && !helpProcess.isEmpty`）:
+    - シャンプー選択時 ➔ `[ 💧 シャンプーに入る ]` ＋ `[ ⏹️ タイマーを止める ]`
+    - コーミング選択時 ➔ `[ 🪮 コーミングに入る ]` ＋ `[ ⏹️ タイマーを止める ]`
+    - チェック選択時 ➔ `[ 🔍 チェックに入る ]` ＋ `[ ⏹️ タイマーを止める ]`
+    - その他選択時 ➔ `[ ⋯ その他に入る ]` ＋ `[ ⏹️ タイマーを止める ]`
+  - **何も選ばれていない場合 / ヘルプなしの場合**:
+    - **`[ ⏹️ タイマーを止める ]` のみ** を表示する。
+
+#### 5. メインタイマー超過後に「タイマーを止める」を押した際の1回での確実な `00:00` リセット保証 (`targets/watch/content.swift`)
+- **確定仕様**:
+  - `handleResetMainTimer()` にて、`self.mainTimer` と `sessionManager.mainTimer` の双方から稼働中・超過中の `targetEndTime` を確実に取得して `stoppedEnd` に記録し、`acknowledgeMainTimer()` と `WatchAlarmCoordinator.shared.stop(sendToPhone: false)` を即時実行。
+  - モーダルシート（`MainTimerActionSheet`）の `dismiss()` アニメーションと親画面 `@State mainTimer` 更新の競合による再描画スキップを防ぐため、ボタン押下時の `displayItem` 即時ゼロ化に加え、シートの `onDismiss`・`deferMainTimerSheetCloseAction`・`0.12秒後` の3段階で `self.mainTimer = sessionManager.mainTimer` を同期し、1回目のタップで確実に `00:00` 表示へ戻す。
+  - `WatchSessionManager.processReceivedData` にて、ローカル `RESET` 後にiPhone側から遅延到着する超過パケット（`parsedMain.targetEndTime <= nowDate`）による上書き復活を完全ブロック。
+
 

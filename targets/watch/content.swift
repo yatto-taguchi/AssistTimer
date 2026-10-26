@@ -560,6 +560,28 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
         persistMainTimerStopState()
     }
+
+    // ★ システムのスマートアラーム画面で「開く」が押された際、直前の超過カウントアップ状態を復元する
+    func restoreMainTimerForOpenedAlarm(_ item: SeatTimerItem) {
+        self.lastMainTimerLocalActionTime = .distantPast
+        self.lastMainTimerLocalActionType = ""
+        self.lastMainTimerLocalStopEndTime = 0
+        var restored = item
+        restored.isRunning = true
+        restored.isPreCountingDown = false
+        self.watchStartedMainTimerEndTime = restored.targetEndTime
+        self.persistMainTimerStopState()
+        self.mainTimer = restored
+    }
+
+    func restoreSeatTimerForOpenedAlarm(_ item: SeatTimerItem) {
+        self.clearLocalStop(seatId: item.id)
+        if let idx = self.timers.firstIndex(where: { $0.id == item.id }) {
+            var restored = item
+            restored.isRunning = true
+            self.timers[idx] = restored
+        }
+    }
     
     override init() {
         super.init()
@@ -947,13 +969,14 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                (cur.isRunning || cur.isPreCountingDown),
                (parsedMain.isRunning || parsedMain.isPreCountingDown),
                cur.totalSeconds == parsedMain.totalSeconds {
-                if (cur.targetEndTime > nowDate) == (parsedMain.targetEndTime > nowDate),
-                   abs(cur.targetEndTime.timeIntervalSince(parsedMain.targetEndTime)) <= 2 {
+                if ((cur.targetEndTime > nowDate) == (parsedMain.targetEndTime > nowDate) &&
+                    abs(cur.targetEndTime.timeIntervalSince(parsedMain.targetEndTime)) <= 10) ||
+                   (cur.targetEndTime <= nowDate && parsedMain.targetEndTime <= nowDate.addingTimeInterval(2)) {
                     parsedMain.targetEndTime = cur.targetEndTime
                 }
                 if cur.isPreCountingDown && parsedMain.isPreCountingDown,
                    let curPrep = cur.prepEndTime, let incPrep = parsedMain.prepEndTime,
-                   abs(curPrep.timeIntervalSince(incPrep)) <= 2 {
+                   abs(curPrep.timeIntervalSince(incPrep)) <= 10 {
                     parsedMain.prepEndTime = curPrep
                 }
             }
@@ -990,11 +1013,11 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 guard timeSinceLocalAction < self.mainTimerStopHoldSeconds else { return false }
                 guard parsedMain.isRunning || parsedMain.isPreCountingDown else { return false }
                 if self.lastMainTimerLocalStopEndTime > 0 {
-                    if abs(parsedMain.targetEndTime.timeIntervalSince1970 - self.lastMainTimerLocalStopEndTime) <= 2 {
+                    if abs(parsedMain.targetEndTime.timeIntervalSince1970 - self.lastMainTimerLocalStopEndTime) <= 10 || parsedMain.targetEndTime <= nowDate {
                         return true
                     }
-                    // 新しい未来の終了時刻（停止したタイマーと2秒超異なる）で稼働開始された場合はブロックしない
-                    if parsedMain.targetEndTime > nowDate && !isStaleSnapshot {
+                    // 新しい未来の終了時刻（停止したタイマーと10秒超異なる未来の時刻）で稼働開始された場合はブロックしない
+                    if parsedMain.targetEndTime > nowDate.addingTimeInterval(2) && !isStaleSnapshot {
                         return false
                     }
                 }
@@ -1016,8 +1039,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     self.mainTimer = cur
                 }
             } else if isRecentlyModifiedOnWatch {
+                let isNewFutureTimerFromPhone = (parsedMain.isRunning && parsedMain.targetEndTime > nowDate.addingTimeInterval(2)) || parsedMain.isPreCountingDown
                 if self.lastMainTimerLocalActionType == "RESET" {
-                    if parsedMain.isRunning || parsedMain.isPreCountingDown {
+                    if isNewFutureTimerFromPhone {
                         // Watch停止後にiPhone等で新しい未来の終了時刻を持つタイマーが開始された場合は即時反映
                         self.mainTimer = parsedMain
                         self.lastMainTimerLocalActionTime = Date.distantPast
@@ -1025,6 +1049,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         self.persistMainTimerStopState()
                         didUpdateMain = true
                     } else {
+                        parsedMain.isRunning = false
+                        parsedMain.isPreCountingDown = false
                         parsedMain.pausedRemainingSeconds = 0
                         parsedMain.helpProcess = ""
                         parsedMain.isNoHelpNeeded = false
@@ -1033,13 +1059,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         didUpdateMain = true
                     }
                 } else if self.lastMainTimerLocalActionType == "PAUSE" {
-                    if parsedMain.isRunning || parsedMain.isPreCountingDown {
+                    if isNewFutureTimerFromPhone {
                         self.mainTimer = parsedMain
                         self.lastMainTimerLocalActionTime = Date.distantPast
                         self.lastMainTimerLocalStopEndTime = 0
                         self.persistMainTimerStopState()
                         didUpdateMain = true
                     } else {
+                        parsedMain.isRunning = false
+                        parsedMain.isPreCountingDown = false
                         if parsedMain.pausedRemainingSeconds <= 0 {
                             parsedMain.pausedRemainingSeconds = 0
                         }
@@ -1791,6 +1819,9 @@ struct ContentView: View {
             // ★ メインタイマー専用操作・時間設定シート（メイン画面・一覧画面のカードタップ用）
             .sheet(isPresented: $showingMainTimerSheet, onDismiss: {
                 executePendingMainTimerSheetAction()
+                if let latestMain = sessionManager.mainTimer {
+                    self.mainTimer = latestMain
+                }
                 mapCrownFocusTrigger += 1
             }) {
                 mainTimerSheetView
@@ -1839,6 +1870,13 @@ struct ContentView: View {
             }
             .onReceive(WatchRealtimeClock.shared.publisher) { input in
                 now = input
+                // ★ システムアラームの「終了」等で WatchSessionManager 側が 00:00 リセットされた場合も、追加タップなしで即座に画面へ反映
+                if let latestMain = sessionManager.mainTimer, self.mainTimer != latestMain {
+                    self.mainTimer = latestMain
+                }
+                if self.timers != sessionManager.timers {
+                    self.timers = sessionManager.timers
+                }
                 // ★ 準備中カウントダウンが0秒に到達したらローカルでも即座に本番タイマー稼働へ移行
                 if var m = sessionManager.mainTimer ?? self.mainTimer,
                    m.isPreCountingDown,
@@ -1859,6 +1897,10 @@ struct ContentView: View {
                 alarm.tick()
                 // ★ メインタイマーが終了時刻（00:00）に到達した際、自動で00:00に戻さず、
                 //   「タイマーを止める」等が押されるまでは超過（カウントアップ）状態を継続する
+            }
+            .onReceive(alarm.$pendingOpenedAlarmEvent) { openedEvent in
+                guard let ev = openedEvent else { return }
+                handleOpenedAlarmEvent(ev)
             }
             .onReceive(sessionManager.$timers) { received in
                 if self.timers != received {
@@ -1935,6 +1977,42 @@ struct ContentView: View {
                let seatId = components.queryItems?.first(where: { $0.name == "id" })?.value,
                !seatId.isEmpty {
                 triggerScroll(to: seatId)
+            }
+        }
+    }
+
+    // ★ システムのスマートアラーム画面（「"AssistTimer" からのアラームです。 [開く] [終了]」）で
+    //   左側の「開く」を押した時の分岐遷移ハンドラ:
+    //   超過カウントアップ（+00:xx）を表示したまま、「タイマーを止める」「シャンプーに入る」「時間延長」等の操作画面へ即座に移行する！
+    private func handleOpenedAlarmEvent(_ event: WatchAlarmEvent) {
+        alarm.clearPendingOpenedAlarmEvent()
+        if let latestMain = sessionManager.mainTimer {
+            self.mainTimer = latestMain
+        }
+        if self.timers != sessionManager.timers {
+            self.timers = sessionManager.timers
+        }
+        showingAddSeatSheet = false
+        checkActionTargetId = nil
+        shampooActionTargetId = nil
+        selectHelpStaffTargetId = nil
+        selectCheckStaffTargetId = nil
+
+        if event.seatId == "main-timer" {
+            timeActionTargetId = nil
+            mainTimerSheetInitialSubMode = .timerActionBranch
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                self.mainTimerSheetInitialSubMode = .timerActionBranch
+                self.showingMainTimerSheet = true
+            }
+        } else {
+            showingMainTimerSheet = false
+            let isCheck = event.key.contains("-check@")
+            triggerScroll(to: event.seatId)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                self.timeActionInitialBranchMode = !isCheck
+                self.timeActionInitialSubCheckBranchMode = isCheck
+                self.timeActionTargetId = event.seatId
             }
         }
     }
@@ -2040,13 +2118,11 @@ struct ContentView: View {
 
     private var activeRingingAction: (item: SeatTimerItem, action: RingingHelpAction)? {
         guard let firstEvent = alarm.ringing.first else { return nil }
-        let targetItem: SeatTimerItem? = {
-            if firstEvent.seatId == "main-timer" || firstEvent.seatId == (self.mainTimer ?? sessionManager.mainTimer)?.id {
-                return self.mainTimer ?? sessionManager.mainTimer
-            }
-            return timers.first(where: { $0.id == firstEvent.seatId })
-        }()
-        guard let seat = targetItem else { return nil }
+        if firstEvent.seatId == "main-timer" || firstEvent.seatId == (self.mainTimer ?? sessionManager.mainTimer)?.id {
+            // メインタイマーにはシャンプー・コーミング等の工程概念がないため、常に「タイマーを止める」のみを表示
+            return nil
+        }
+        guard let seat = timers.first(where: { $0.id == firstEvent.seatId }) else { return nil }
         
         let isCheckAlarm = firstEvent.key.contains("-check@")
         if isCheckAlarm {
@@ -2681,6 +2757,9 @@ struct ContentView: View {
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START", extra: ["totalSeconds": main.totalSeconds])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            WatchAlarmCoordinator.shared.update(timers: self.timers, mainTimer: self.mainTimer ?? self.sessionManager.mainTimer, soundOn: self.sessionManager.alarmSoundEnabled, currentUserName: self.currentUserName)
+        }
     }
     
     private func handlePauseMainTimer() {
@@ -2715,8 +2794,11 @@ struct ContentView: View {
     
     private func handleResetMainTimer() {
         playHaptic(.click)
-        var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
-        let stoppedEnd = (main.isRunning || main.isPreCountingDown) ? main.targetEndTime.timeIntervalSince1970 : 0
+        let curState = self.mainTimer
+        let curSession = sessionManager.mainTimer
+        var main = curSession ?? curState ?? defaultMainTimer()
+        let activeCandidate = [curState, curSession].compactMap { $0 }.first(where: { $0.isRunning || $0.isPreCountingDown || $0.isOvertime })
+        let stoppedEnd = activeCandidate?.targetEndTime.timeIntervalSince1970 ?? main.targetEndTime.timeIntervalSince1970
         main.isRunning = false
         main.isPreCountingDown = false
         main.preCountdownSeconds = 0
@@ -2728,9 +2810,22 @@ struct ContentView: View {
         self.mainTimer = main
         sessionManager.mainTimer = main
         WatchAlarmCoordinator.shared.acknowledgeMainTimer()
+        WatchAlarmCoordinator.shared.stop(sendToPhone: false)
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET", stoppedEndTime: stoppedEnd)
+        // ★ モーダルシート（MainTimerActionSheet）の dismiss アニメーションと親画面 @State 更新が競合しても、
+        //   1回目のタップで確実に 00:00 表示へ切り替わるようシート閉鎖直後にも再同期する
+        deferMainTimerSheetCloseAction {
+            if let latest = self.sessionManager.mainTimer {
+                self.mainTimer = latest
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            if let latest = self.sessionManager.mainTimer {
+                self.mainTimer = latest
+            }
+        }
     }
     
     private func handleSetMainTimerTime(totalSec: Int, autoStart: Bool = true) {
@@ -2768,6 +2863,11 @@ struct ContentView: View {
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerSetTime(seconds: totalSec, autoStart: shouldAutoStart)
+        if shouldAutoStart {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                WatchAlarmCoordinator.shared.update(timers: self.timers, mainTimer: self.mainTimer ?? self.sessionManager.mainTimer, soundOn: self.sessionManager.alarmSoundEnabled, currentUserName: self.currentUserName)
+            }
+        }
     }
     
     private func handleAdjustMainTimer(deltaSec: Int) {
@@ -2837,7 +2937,7 @@ struct ContentView: View {
             },
             onSelectMainTimer: {
                 let currentMain = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
-                mainTimerSheetInitialSubMode = currentMain.isZero ? .reinput : (currentMain.isOvertime ? .timerActionBranch : .standard)
+                mainTimerSheetInitialSubMode = currentMain.isZero ? .reinput : .timerActionBranch
                 showingMainTimerSheet = true
             },
             onToggleMainTimer: { handleToggleMainTimer() },
@@ -3938,9 +4038,6 @@ struct MainTimerCard: View {
                 )
             }
             .buttonStyle(.plain)
-            
-            // ③ 2番目（タイマー数字の下）: タイマー全体の最後に何をするか（シャンプー・コーミング等）を選べる場所
-            mainHelpMenuSection
         }
         .padding(WatchLayout.cardPadding)
         .background(Color(hex: "#1C1C1E"))
@@ -5001,10 +5098,8 @@ struct MainTimerActionSheet: View {
         } else if initialItem.isZero {
             // ★ 00:00（未稼働・リセット状態）で開いた時は共有タイマーと同じく最初からトグル（Digital Crown）入力モードで開く
             self._subMode = State(initialValue: .reinput)
-        } else if initialItem.isOvertime {
-            self._subMode = State(initialValue: .timerActionBranch)
         } else {
-            self._subMode = State(initialValue: .standard)
+            self._subMode = State(initialValue: .timerActionBranch)
         }
         self._crownSeconds = State(initialValue: initialItem.isZero ? 0.0 : Double(initSec))
         self.onStart = onStart
@@ -5308,13 +5403,12 @@ struct MainTimerActionSheet: View {
         }
     }
     
-    // MARK: - ★ 標準操作画面（共有タイマーの上2階層と同じ構成: 1番目=タイマー数字[タップで分岐]、2番目=終了後メニュー選択）
+    // MARK: - ★ 標準操作画面
     @ViewBuilder
     private var standardMainActionScrollView: some View {
         ScrollView {
             VStack(spacing: 6) {
                 mainStandardTopTimerSection
-                mainStandardHelpMenuSection
                 
                 Divider()
                     .padding(.vertical, 2)
@@ -5525,9 +5619,7 @@ struct MainTimerActionSheet: View {
                 HStack {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            subMode = .standard
-                        }
+                        dismiss()
                     }) {
                         HStack(spacing: 2) {
                             Image(systemName: "chevron.left")
@@ -5574,56 +5666,23 @@ struct MainTimerActionSheet: View {
                 }
                 .padding(.vertical, 2)
                 
-                // ★ 微調整ボタン（+1分 / +3分 / +5分、-30秒 / +30秒）を「シャンプーに入る」の上に配置
+                // ★ 微調整ボタン（+1分 / +3分 / +5分、-30秒 / +30秒）を「タイマーを止める」の上に配置
                 mainActionDeltaButtonsSection
                 
                 if accumulatedDelta != 0 {
                     mainActionConfirmSection
                 }
                 
-                // ① シャンプーに入る / 選択メニューに入るボタン（ヘルプなし以外で表示、00:00に戻す）
-                if !currentItem.isNoHelpNeeded {
-                    let rawP = currentItem.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let p = rawP.isEmpty ? "シャンプー" : rawP
-                    let iconName: String = (p == "コーミング") ? "comb.fill" : ((p == "チェック") ? "magnifyingglass" : ((p == "その他") ? "ellipsis.circle.fill" : "drop.fill"))
-                    let isCheckProc = (p == "チェック")
-                    Button(action: {
-                        WKInterfaceDevice.current().play(.success)
-                        accumulatedDelta = 0
-                        if let enter = onEnterHelp {
-                            enter(p)
-                        } else {
-                            onReset()
-                        }
-                        dismiss()
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: iconName)
-                                .font(.system(size: 14, weight: .heavy))
-                            Text("\(p)に入る")
-                                .font(.system(size: 14, weight: .heavy))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.75)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
-                        .background(
-                            LinearGradient(
-                                colors: isCheckProc ? [Color(hex: "#30D158"), Color(hex: "#248A3D")] : [Color(hex: "#0A84FF"), Color(hex: "#0062D2")],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .foregroundColor(.white)
-                        .cornerRadius(10)
-                    }
-                    .buttonStyle(.plain)
-                }
-                
-                // ② タイマーを止める（00:00に戻す）
+                // ★ メインタイマーにはシャンプー・コーミング等の定義がないため、「タイマーを止める」のみを表示
                 Button(action: {
                     WKInterfaceDevice.current().play(.stop)
                     accumulatedDelta = 0
+                    var resetItem = currentItem
+                    resetItem.isRunning = false
+                    resetItem.isPreCountingDown = false
+                    resetItem.pausedRemainingSeconds = 0
+                    resetItem.targetEndTime = Date().addingTimeInterval(TimeInterval(resetItem.totalSeconds))
+                    displayItem = resetItem
                     onReset()
                     dismiss()
                 }) {
@@ -5673,6 +5732,11 @@ struct MainTimerActionSheet: View {
                     }
                     .buttonStyle(.plain)
                 }
+                
+                Divider()
+                    .padding(.vertical, 2)
+                
+                phoneSoundToggleButton
             }
             .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
@@ -6706,13 +6770,15 @@ struct TimeActionSheet: View {
                     standardConfirmSection
                 }
                 
-                // ① シャンプーに入る / 選択メニューに入るボタン（ヘルプなし以外で表示、00:00に戻す）
-                if !liveItem.isNoHelpNeeded {
-                    let rawP = liveItem.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let p = rawP.isEmpty ? "シャンプー" : rawP
+                // ① 選択されたヘルプ工程に入る・止めるボタン（シャンプー・コーミング・チェック等が明示選択されている場合のみ表示、未選択時は「タイマーを止める」のみ表示）
+                let rawP = liveItem.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !liveItem.isNoHelpNeeded && !rawP.isEmpty {
+                    let p = rawP
                     if p == "チェック" {
                         Button(action: {
                             WKInterfaceDevice.current().play(.success)
+                            liveItem.isRunning = false
+                            liveItem.pausedRemainingSeconds = 0
                             onCompleteCheck?()
                             dismiss()
                         }) {
@@ -6741,6 +6807,8 @@ struct TimeActionSheet: View {
                         let iconName: String = (p == "コーミング") ? "comb.fill" : ((p == "その他") ? "ellipsis.circle.fill" : "drop.fill")
                         Button(action: {
                             WKInterfaceDevice.current().play(.success)
+                            liveItem.isRunning = false
+                            liveItem.pausedRemainingSeconds = 0
                             onEnterHelp?()
                             dismiss()
                         }) {
@@ -6771,6 +6839,8 @@ struct TimeActionSheet: View {
                 // ② タイマーを止める（00:00に戻す）
                 Button(action: {
                     WKInterfaceDevice.current().play(.stop)
+                    liveItem.isRunning = false
+                    liveItem.pausedRemainingSeconds = 0
                     onStop()
                     dismiss()
                 }) {
