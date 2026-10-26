@@ -15,7 +15,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.assisttimer",
-      "buildNumber": "83",
+      "buildNumber": "84",
       "infoPlist": {
         "NSCameraUsageDescription": "練習の記録にウィッグや施術の写真を撮影・添付するためにカメラを使用します。",
         "NSPhotoLibraryUsageDescription": "練習の記録にアルバムから写真を選択・添付するために写真ライブラリを使用します。",
