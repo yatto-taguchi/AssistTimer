@@ -29,6 +29,10 @@ import {
   fetchSalonMembers,
   subscribeSalonMembers,
   updateMemberDisplayName,
+  fetchSalonTimers,
+  upsertCloudTimer,
+  deleteCloudTimer,
+  subscribeSalonTimers,
 } from '../utils/salonCloudService';
 
 const playTimeUpSound = async () => {
@@ -1030,12 +1034,36 @@ export default function SalonWorkScreen() {
     return Array.from(list);
   }, [staffMembers, seats]);
 
+  // ★ クラウド同期制御用Ref（他端末からの受信時ループ防止＆差分検知）
+  const isRemoteSyncRef = useRef(false);
+  const lastSyncedSeatsStateRef = useRef({});
+
+  // ★ 席の状態変化を検知して Supabase クラウドへ差分同期
+  const syncChangedSeatsToCloud = async (newSeats) => {
+    if (isRemoteSyncRef.current) return;
+    if (!currentSalon?.id || currentSalon.id === 'workspace-free') return;
+
+    for (const seat of newSeats) {
+      if (!seat || !seat.id) continue;
+      const label = seat.seatLabel || seat.name || '';
+      const sig = `${label}_${seat.status}_${seat.targetSeconds || seat.targetTime}_${seat.targetEndTimestamp}_${seat.assistantStaffName}_${seat.helpProcess}_${seat.checkEndTimestamp}_${seat.checkStatus}_${seat.comment}_${seat.isShampooing}`;
+      if (lastSyncedSeatsStateRef.current[seat.id] !== sig) {
+        lastSyncedSeatsStateRef.current[seat.id] = sig;
+        upsertCloudTimer(currentSalon.id, seat).catch((e) =>
+          console.warn('upsertCloudTimer error:', e)
+        );
+      }
+    }
+  };
+
   // ストレージ保存ヘルパー
   const saveSeatsToStorage = async (newSeats) => {
     try {
       await AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(newSeats));
       // ★ Apple Watchへ即時同期 (登録メンバーも含めて送信)
       syncSeatsToWatch(newSeats, userName, staffMembers);
+      // ★ クラウド（Supabase）へ差分同期！
+      syncChangedSeatsToCloud(newSeats);
     } catch (e) {
       console.warn('Failed to save seats to AsyncStorage', e);
     }
@@ -2073,17 +2101,79 @@ export default function SalonWorkScreen() {
           AsyncStorage.setItem('@salon_staff_members', JSON.stringify(normalized)).catch(() => {});
           syncSeatsToWatch(seats, userName, normalized, { immediate: true });
         });
+
+        // 4. クラウド上の客席タイマーを取得して反映
+        const cloudTimers = await fetchSalonTimers(cloudSalon.id);
+        if (isMounted && Array.isArray(cloudTimers) && cloudTimers.length > 0) {
+          isRemoteSyncRef.current = true;
+          setSeats(cloudTimers);
+          await AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(cloudTimers)).catch(() => {});
+          syncSeatsToWatch(cloudTimers, userName, staffMembers);
+          setTimeout(() => {
+            isRemoteSyncRef.current = false;
+          }, 300);
+        } else if (isMounted && seats.length > 0) {
+          // クラウドがまだ空の場合は現在の初期席をクラウドへ初期登録
+          for (const s of seats) {
+            upsertCloudTimer(cloudSalon.id, s).catch(() => {});
+          }
+        }
+
+        // 5. Supabase Realtimeで客席タイマーの変更（開始・延長・停止・ヘルプ指定）をリアルタイム監視！
+        unsubscribeTimers = subscribeSalonTimers(cloudSalon.id, ({ eventType, newSeat, oldSeat }) => {
+          if (!isMounted) return;
+
+          if (eventType === 'INSERT' || eventType === 'UPDATE') {
+            if (!newSeat) return;
+            isRemoteSyncRef.current = true;
+            setSeats((prev) => {
+              const idx = prev.findIndex((s) => s.id === newSeat.id || (s.seatLabel && s.seatLabel === newSeat.seatLabel) || (s.name && s.name === newSeat.name));
+              let updated;
+              if (idx >= 0) {
+                updated = [...prev];
+                updated[idx] = { ...prev[idx], ...newSeat };
+              } else {
+                updated = [...prev, newSeat];
+              }
+              AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(updated)).catch(() => {});
+              syncSeatsToWatch(updated, userName, staffMembers);
+              return updated;
+            });
+            setTimeout(() => {
+              isRemoteSyncRef.current = false;
+            }, 300);
+          } else if (eventType === 'DELETE') {
+            const delId = oldSeat?.id;
+            const delLabel = oldSeat?.seatLabel || oldSeat?.name;
+            if (delId || delLabel) {
+              isRemoteSyncRef.current = true;
+              setSeats((prev) => {
+                const updated = prev.filter((s) => s.id !== delId && s.seatLabel !== delLabel && s.name !== delLabel);
+                AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(updated)).catch(() => {});
+                syncSeatsToWatch(updated, userName, staffMembers);
+                return updated;
+              });
+              setTimeout(() => {
+                isRemoteSyncRef.current = false;
+              }, 300);
+            }
+          }
+        });
       } catch (err) {
         console.warn('initCloudSalon failed:', err);
       }
     };
 
+    let unsubscribeTimers = null;
     initCloudSalon();
 
     return () => {
       isMounted = false;
       if (typeof unsubscribeMembers === 'function') {
         unsubscribeMembers();
+      }
+      if (typeof unsubscribeTimers === 'function') {
+        unsubscribeTimers();
       }
     };
   }, [currentSalon?.id, currentSalon?.inviteCode, isDataLoaded, myUserId]);
@@ -4383,6 +4473,9 @@ export default function SalonWorkScreen() {
               syncSeatsToWatch(updated, userName, staffMembers, { immediate: true, forceEmpty: updated.length === 0 });
               return updated;
             });
+            if (currentSalon?.id) {
+              deleteCloudTimer(currentSalon.id, seatId).catch(() => {});
+            }
           },
         },
       ]

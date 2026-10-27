@@ -33,7 +33,6 @@ export const syncOrCreateSalonInCloud = async ({ salonName, inviteCode, isPro, u
   const cleanCode = inviteCode.replace(/\s+/g, '').toUpperCase();
 
   try {
-    // 1. 既存のサロンを招待コードで検索
     const { data: existing, error: searchErr } = await supabase
       .from('salons')
       .select('*')
@@ -46,7 +45,6 @@ export const syncOrCreateSalonInCloud = async ({ salonName, inviteCode, isPro, u
 
     let salonData = existing;
 
-    // 2. 存在しない場合は新規作成（自分がオーナー）
     if (!salonData) {
       const { data: created, error: insertErr } = await supabase
         .from('salons')
@@ -60,7 +58,6 @@ export const syncOrCreateSalonInCloud = async ({ salonName, inviteCode, isPro, u
         .single();
 
       if (insertErr) {
-        // 重複などで失敗した場合は再度検索を試みる
         console.warn('Error creating salon:', insertErr);
         const { data: retry } = await supabase
           .from('salons')
@@ -75,7 +72,6 @@ export const syncOrCreateSalonInCloud = async ({ salonName, inviteCode, isPro, u
 
     if (!salonData) return null;
 
-    // 3. 自分を salon_members に登録/更新（UPSERT）
     const role = salonData.owner_user_id === userId ? 'owner' : 'stylist';
     await supabase
       .from('salon_members')
@@ -107,7 +103,6 @@ export const joinSalonByInviteCode = async ({ inviteCode, userName }) => {
   const userId = await getOrCreateUserId();
   const cleanCode = inviteCode.replace(/\s+/g, '').toUpperCase();
 
-  // 1. サロンを招待コードで検索
   const { data: salon, error: searchErr } = await supabase
     .from('salons')
     .select('*')
@@ -122,7 +117,6 @@ export const joinSalonByInviteCode = async ({ inviteCode, userName }) => {
     throw new Error('該当するサロンが見つかりませんでした。招待コードをご確認ください。');
   }
 
-  // 2. 自分を salon_members に参加登録（UPSERT）
   const role = salon.owner_user_id === userId ? 'owner' : 'assistant';
   const { error: joinErr } = await supabase
     .from('salon_members')
@@ -140,9 +134,7 @@ export const joinSalonByInviteCode = async ({ inviteCode, userName }) => {
     throw new Error(`メンバー登録に失敗しました: ${joinErr.message}`);
   }
 
-  // 3. 最新のメンバー一覧を取得
   const members = await fetchSalonMembers(salon.id);
-
   return { salon, members };
 };
 
@@ -186,7 +178,6 @@ export const subscribeSalonMembers = (salonId, onMembersChange) => {
         filter: `salon_id=eq.${salonId}`,
       },
       async (payload) => {
-        // メンバーに変更（追加・更新・離脱）があったら最新のメンバー一覧を再取得して通知
         const updatedMembers = await fetchSalonMembers(salonId);
         if (typeof onMembersChange === 'function') {
           onMembersChange(updatedMembers, payload);
@@ -195,7 +186,6 @@ export const subscribeSalonMembers = (salonId, onMembersChange) => {
     )
     .subscribe();
 
-  // クリーンアップ関数を返却
   return () => {
     supabase.removeChannel(channel);
   };
@@ -216,4 +206,198 @@ export const updateMemberDisplayName = async ({ salonId, displayName }) => {
   } catch (e) {
     console.warn('updateMemberDisplayName failed:', e);
   }
+};
+
+// ============================================================================
+// ★ 客席タイマー（salon_timers）クラウド同期機能
+// ============================================================================
+
+/**
+ * ローカルのSeatItemをクラウドsalon_timersのレコード形式にマッピング
+ */
+export const mapSeatToCloudTimer = (seat, salonId, userId) => {
+  const seatLabel = (seat.seatLabel || seat.name || '席').trim();
+  const targetSeconds = Number(seat.targetSeconds || seat.targetTime || 0);
+  const checkTotalSeconds = Number(seat.checkTargetSeconds || seat.checkTotalSeconds || 0);
+
+  return {
+    salon_id: salonId,
+    seat_label: seatLabel,
+    color_staff_name: seat.colorStaffName || 'スタッフ',
+    assistant_staff_name: seat.assistantStaffName || null,
+    help_process: seat.helpProcess || null,
+    is_shampooing: !!seat.isShampooing,
+    status: seat.status || 'idle',
+    target_seconds: targetSeconds,
+    target_end_timestamp: Number(seat.targetEndTimestamp || 0),
+    paused_remaining_seconds: Number(seat.pausedRemainingSeconds || 0),
+    comment: seat.comment || null,
+    sort_order: typeof seat.sortOrder === 'number' ? seat.sortOrder : 0,
+    created_by: seat.createdBy || userId,
+    check_target_end_timestamp: seat.checkEndTimestamp ? Number(seat.checkEndTimestamp) : null,
+    check_total_seconds: checkTotalSeconds > 0 ? checkTotalSeconds : null,
+    check_process: seat.checkProcess || null,
+    check_staff_name: seat.checkStaffName || seat.checkStaff || null,
+    updated_at: new Date().toISOString(),
+  };
+};
+
+/**
+ * クラウドsalon_timersのレコードをローカルSeatItem形式にマッピング
+ */
+export const mapCloudTimerToSeat = (cloudTimer) => {
+  const name = cloudTimer.seat_label || '席';
+  const targetSeconds = Number(cloudTimer.target_seconds || 0);
+  const checkSec = cloudTimer.check_total_seconds ? Number(cloudTimer.check_total_seconds) : 0;
+
+  return {
+    id: cloudTimer.id,
+    cloudTimerId: cloudTimer.id,
+    seatLabel: name,
+    name: name,
+    targetSeconds: targetSeconds,
+    targetTime: targetSeconds,
+    targetEndTimestamp: Number(cloudTimer.target_end_timestamp || 0),
+    pausedRemainingSeconds: Number(cloudTimer.paused_remaining_seconds || 0),
+    status: cloudTimer.status || 'idle',
+    colorStaffName: cloudTimer.color_staff_name || 'スタッフ',
+    assistantStaffName: cloudTimer.assistant_staff_name || null,
+    helpProcess: cloudTimer.help_process || null,
+    isShampooing: !!cloudTimer.is_shampooing,
+    comment: cloudTimer.comment || '',
+    sortOrder: cloudTimer.sort_order || 0,
+    createdBy: cloudTimer.created_by,
+    checkEndTimestamp: cloudTimer.check_target_end_timestamp ? Number(cloudTimer.check_target_end_timestamp) : null,
+    checkTargetSeconds: checkSec,
+    checkTotalSeconds: checkSec,
+    checkProcess: cloudTimer.check_process || null,
+    checkStaffName: cloudTimer.check_staff_name || null,
+    checkStaff: cloudTimer.check_staff_name || null,
+    isCheckCompleted: false,
+    updatedAt: cloudTimer.updated_at ? new Date(cloudTimer.updated_at).getTime() : Date.now(),
+  };
+};
+
+/**
+ * サロンに所属する全客席タイマーを取得
+ */
+export const fetchSalonTimers = async (salonId) => {
+  if (!salonId) return [];
+  try {
+    const { data, error } = await supabase
+      .from('salon_timers')
+      .select('*')
+      .eq('salon_id', salonId)
+      .order('sort_order', { ascending: true })
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      console.warn('fetchSalonTimers error:', error);
+      return [];
+    }
+    return (data || []).map(mapCloudTimerToSeat);
+  } catch (e) {
+    console.warn('fetchSalonTimers failed:', e);
+    return [];
+  }
+};
+
+/**
+ * 1席のタイマー状態をクラウドへ保存/更新（UPSERT）
+ */
+export const upsertCloudTimer = async (salonId, seat) => {
+  if (!salonId || !seat) return null;
+  const userId = await getOrCreateUserId();
+  const payload = mapSeatToCloudTimer(seat, salonId, userId);
+
+  try {
+    const isUUID = (seat.cloudTimerId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seat.cloudTimerId))
+      || (seat.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seat.id));
+
+    if (isUUID) {
+      payload.id = seat.cloudTimerId || seat.id;
+      const { data, error } = await supabase
+        .from('salon_timers')
+        .upsert(payload)
+        .select()
+        .single();
+      if (error) console.warn('upsertCloudTimer update error:', error);
+      return data ? mapCloudTimerToSeat(data) : null;
+    } else {
+      // 席名で同一サロン内の席を検索して既存があればIDを再利用
+      const { data: existing } = await supabase
+        .from('salon_timers')
+        .select('id')
+        .eq('salon_id', salonId)
+        .eq('seat_label', payload.seat_label)
+        .maybeSingle();
+
+      if (existing) {
+        payload.id = existing.id;
+      }
+      const { data, error } = await supabase
+        .from('salon_timers')
+        .upsert(payload)
+        .select()
+        .single();
+
+      if (error) console.warn('upsertCloudTimer insert error:', error);
+      return data ? mapCloudTimerToSeat(data) : null;
+    }
+  } catch (e) {
+    console.warn('upsertCloudTimer failed:', e);
+    return null;
+  }
+};
+
+/**
+ * 客席タイマーの削除（席マスター削除時）
+ */
+export const deleteCloudTimer = async (salonId, timerIdOrLabel) => {
+  if (!salonId || !timerIdOrLabel) return;
+  try {
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(timerIdOrLabel);
+    if (isUUID) {
+      await supabase.from('salon_timers').delete().eq('salon_id', salonId).eq('id', timerIdOrLabel);
+    } else {
+      await supabase.from('salon_timers').delete().eq('salon_id', salonId).eq('seat_label', timerIdOrLabel);
+    }
+  } catch (e) {
+    console.warn('deleteCloudTimer failed:', e);
+  }
+};
+
+/**
+ * 客席タイマー（salon_timers）の変更をリアルタイム（Realtime WebSocket）で監視
+ */
+export const subscribeSalonTimers = (salonId, onTimerEvent) => {
+  if (!salonId) return () => {};
+
+  const channel = supabase
+    .channel(`salon_timers_${salonId}`)
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'salon_timers',
+        filter: `salon_id=eq.${salonId}`,
+      },
+      (payload) => {
+        if (typeof onTimerEvent === 'function') {
+          const { eventType, new: newRec, old: oldRec } = payload;
+          onTimerEvent({
+            eventType,
+            newSeat: newRec ? mapCloudTimerToSeat(newRec) : null,
+            oldSeat: oldRec ? mapCloudTimerToSeat(oldRec) : null,
+            rawPayload: payload,
+          });
+        }
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
 };
