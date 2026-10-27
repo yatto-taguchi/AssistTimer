@@ -1384,6 +1384,10 @@ export default function HomeScreen({ navigation }) {
     const isExplicitResetNow = !effectiveIsRunning && !effectiveIsPre && !isAutoFinishedNow
       && (Date.now() - lastMainTimerResetAtRef.current < 5000);
 
+    if (!endMs && isAutoFinishedNow && lastAutoFinishedEndTimestampRef.current > 0) {
+      endMs = lastAutoFinishedEndTimestampRef.current;
+    }
+
     const newState = {
       explicitStop: isExplicitResetNow || !!saveModalVisible,
       remainingTime: effectiveRemaining,
@@ -1489,8 +1493,9 @@ export default function HomeScreen({ navigation }) {
     }
 
     if (cleanAction === 'start') {
+      const isFromPhone = payload?.fromPhone === true;
       const rawSound = payload?.playSoundOnPhone ?? payload?.extra?.playSoundOnPhone;
-      const playPhoneSound = !(rawSound === false || rawSound === 0 || rawSound === 'false');
+      const playPhoneSound = isFromPhone || (rawSound === true || rawSound === 1 || rawSound === 'true');
       setWatchMutedState(!playPhoneSound);
       console.log('[HomeScreen] MAIN_TIMER_START received. playSoundOnPhone:', playPhoneSound, 'isMuted:', !playPhoneSound);
       const watchTiming = {
@@ -1652,7 +1657,7 @@ export default function HomeScreen({ navigation }) {
       if (sec > 0 && applyTimeInSecondsRef.current) {
         const isFromPhone = payload?.fromPhone === true;
         const rawSound = payload?.playSoundOnPhone ?? payload?.extra?.playSoundOnPhone;
-        const playPhoneSound = isFromPhone || !(rawSound === false || rawSound === 0 || rawSound === 'false');
+        const playPhoneSound = isFromPhone || (rawSound === true || rawSound === 1 || rawSound === 'true');
         setWatchMutedState(!playPhoneSound);
         console.log('[HomeScreen] MAIN_TIMER_SET_TIME applied:', sec, 'autoStart:', autoStart, 'playSoundOnPhone:', playPhoneSound);
 

@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import WatchKit
 import UserNotifications
+import AVFoundation
 
 // MARK: - タイムアップのアラーム（止めるまで鳴り続ける）
 //
@@ -24,21 +25,24 @@ struct WatchAlarmEvent: Equatable {
     let seatId: String
     let date: Date
     let title: String
+    let watchSoundOn: Bool
 
     func toDictionary() -> [String: Any] {
         return [
             "key": key,
             "seatId": seatId,
             "timestamp": date.timeIntervalSince1970,
-            "title": title
+            "title": title,
+            "watchSoundOn": watchSoundOn
         ]
     }
 
-    init(key: String, seatId: String, date: Date, title: String) {
+    init(key: String, seatId: String, date: Date, title: String, watchSoundOn: Bool = false) {
         self.key = key
         self.seatId = seatId
         self.date = date
         self.title = title
+        self.watchSoundOn = watchSoundOn
     }
 
     init?(dictionary: [String: Any]) {
@@ -52,6 +56,7 @@ struct WatchAlarmEvent: Equatable {
         self.seatId = seatId
         self.date = Date(timeIntervalSince1970: ts)
         self.title = title
+        self.watchSoundOn = (dictionary["watchSoundOn"] as? NSNumber)?.boolValue ?? (dictionary["watchSoundOn"] as? Bool) ?? false
     }
 }
 
@@ -116,6 +121,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private var authRequested = false
     private var hapticStep = 0
     private var hapticTimer: Timer?
+    private var audioPlayer: AVAudioPlayer?
+    private static let alarmWavData: Data = WatchAlarmCoordinator.generateAlarmWavData()
 
     private let armedStoreKey = "assisttimer.alarm.armed"
     private let ackStoreKey = "assisttimer.alarm.ack"
@@ -235,7 +242,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     key: mainKey,
                     seatId: m.id,
                     date: finalMainEnd,
-                    title: "⏱️ メインタイマー 終了"
+                    title: "⏱️ メインタイマー 終了",
+                    watchSoundOn: m.watchAlarmSoundEnabled || soundOn
                 ))
             }
         } else if let existingRingingMain = ringing.first(where: { $0.seatId == "main-timer" }), !isAcknowledged(existingRingingMain.key) {
@@ -289,7 +297,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     key: mainKey,
                     seatId: t.id,
                     date: finalSeatEnd,
-                    title: "\(label) タイム終了"
+                    title: "\(label) タイム終了",
+                    watchSoundOn: t.watchAlarmSoundEnabled || soundOn
                 ))
             }
             if !t.isCheckCompleted, let checkEnd = t.checkTargetEndTime, (t.checkTotalSeconds ?? 0) > 0 {
@@ -330,7 +339,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                         key: checkKey,
                         seatId: t.id,
                         date: finalCheckEnd,
-                        title: "\(label) \(t.displayCheckProcess)時間"
+                        title: "\(label) \(t.displayCheckProcess)時間",
+                        watchSoundOn: t.watchAlarmSoundEnabled || soundOn
                     ))
                 }
             }
@@ -761,6 +771,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
 
         scheduleSmartAlarmIfPossible(now)
         updateForegroundHaptics()
+        updateAlarmAudio()
         rescheduleNotifications(now)
         updateStatusText()
     }
@@ -780,7 +791,16 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         let seatId = String(key[..<range.lowerBound])
         let epStr = String(key[range.upperBound...])
         let ts = Double(epStr) ?? Date().timeIntervalSince1970
-        return WatchAlarmEvent(key: key, seatId: seatId, date: Date(timeIntervalSince1970: ts), title: "")
+        let wSound: Bool = {
+            if seatId == "main-timer" {
+                return WatchSessionManager.shared.mainTimer?.watchAlarmSoundEnabled ?? ((UserDefaults.standard.object(forKey: "assisttimer.mainTimerWatchSound.v2") as? Bool) ?? false)
+            }
+            if let seat = WatchSessionManager.shared.timers.first(where: { $0.id == seatId }) {
+                return seat.watchAlarmSoundEnabled
+            }
+            return self.soundOn
+        }()
+        return WatchAlarmEvent(key: key, seatId: seatId, date: Date(timeIntervalSince1970: ts), title: "", watchSoundOn: wSound)
     }
 
     /// 指定されたイベントキー（および同一席・同一種別の±15秒ウィンドウを含む全キー）に紐づくローカル通知を即座に全削除する
@@ -1147,6 +1167,131 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private func stopForegroundHaptics() {
         hapticTimer?.invalidate()
         hapticTimer = nil
+        stopAlarmAudio()
+    }
+
+    // MARK: - ★ ウォッチ本体スピーカーからの強制アラーム音再生（消音モードでも強制鳴動、OFF時はバイブのみ）
+
+    private func shouldPlayWatchAlarmSound() -> Bool {
+        if ringing.contains(where: { $0.watchSoundOn || self.soundOn }) {
+            return true
+        }
+        if sessionStarted, let key = sessionKey, !isAcknowledged(key) {
+            if let ev = eventFromKey(key), (ev.watchSoundOn || self.soundOn) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func updateAlarmAudio() {
+        if shouldPlayWatchAlarmSound() {
+            startAlarmAudioIfNeeded()
+        } else {
+            stopAlarmAudio()
+        }
+    }
+
+    private func startAlarmAudioIfNeeded() {
+        if let player = audioPlayer, player.isPlaying {
+            return
+        }
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            // ★ .playback カテゴリを指定することで watchOS の消音モード（サイレントモード）を貫通して強制的にスピーカーから鳴らす
+            try audioSession.setCategory(.playback, mode: .default, options: [.duckOthers])
+            try audioSession.setActive(true)
+            let player = try AVAudioPlayer(data: Self.alarmWavData)
+            player.numberOfLoops = -1
+            player.volume = 1.0
+            player.prepareToPlay()
+            player.play()
+            self.audioPlayer = player
+        } catch {
+            // オーディオ初期化失敗時はハプティック振動が継続してカバーする
+        }
+    }
+
+    private func stopAlarmAudio() {
+        if let player = audioPlayer {
+            if player.isPlaying {
+                player.stop()
+            }
+            audioPlayer = nil
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
+    }
+
+    /// 外部音源ファイル不要で100%確実に鳴らせる高明瞭デジタルアラーム音（ピピピピッ♪周期）の16bit PCM WAVデータをメモリ生成
+    private static func generateAlarmWavData() -> Data {
+        let sampleRate: Int = 22050
+        let durationSeconds: Double = 1.0
+        let totalSamples = Int(Double(sampleRate) * durationSeconds)
+        var pcm = [Int16](repeating: 0, count: totalSamples)
+
+        // 1秒間に4回の明瞭な電子アラームビープ（0.00〜0.11s, 0.15〜0.26s, 0.30〜0.41s, 0.45〜0.60s）
+        let beepWindows: [(start: Double, end: Double, freq1: Double, freq2: Double)] = [
+            (0.00, 0.11, 2800.0, 3400.0),
+            (0.15, 0.26, 2800.0, 3400.0),
+            (0.30, 0.41, 2800.0, 3400.0),
+            (0.45, 0.60, 3200.0, 3800.0)
+        ]
+
+        for i in 0..<totalSamples {
+            let t = Double(i) / Double(sampleRate)
+            var sampleValue: Double = 0.0
+            for w in beepWindows where t >= w.start && t <= w.end {
+                let localT = t - w.start
+                let len = w.end - w.start
+                let fade = 0.006
+                var env = 1.0
+                if localT < fade {
+                    env = localT / fade
+                } else if (len - localT) < fade {
+                    env = max(0.0, (len - localT) / fade)
+                }
+                let wave = 0.65 * sin(2.0 * Double.pi * w.freq1 * t) + 0.35 * sin(2.0 * Double.pi * w.freq2 * t)
+                sampleValue = wave * env * 0.92
+                break
+            }
+            let clamped = max(-1.0, min(1.0, sampleValue))
+            pcm[i] = Int16(clamped * Double(Int16.max))
+        }
+
+        let dataBytesCount = totalSamples * 2
+        let riffChunkSize = 36 + dataBytesCount
+        var data = Data(capacity: 44 + dataBytesCount)
+
+        func appendASCII(_ s: String) {
+            if let d = s.data(using: .ascii) { data.append(d) }
+        }
+        func appendUInt32LE(_ v: UInt32) {
+            var le = v.littleEndian
+            withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+        }
+        func appendUInt16LE(_ v: UInt16) {
+            var le = v.littleEndian
+            withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
+        }
+
+        appendASCII("RIFF")
+        appendUInt32LE(UInt32(riffChunkSize))
+        appendASCII("WAVE")
+        appendASCII("fmt ")
+        appendUInt32LE(16) // PCM fmt chunk size
+        appendUInt16LE(1)  // AudioFormat = 1 (PCM)
+        appendUInt16LE(1)  // NumChannels = 1 (Mono)
+        appendUInt32LE(UInt32(sampleRate))
+        appendUInt32LE(UInt32(sampleRate * 2)) // ByteRate
+        appendUInt16LE(2)  // BlockAlign
+        appendUInt16LE(16) // BitsPerSample
+        appendASCII("data")
+        appendUInt32LE(UInt32(dataBytesCount))
+
+        pcm.withUnsafeBufferPointer { ptr in
+            data.append(UnsafeBufferPointer(start: UnsafeRawPointer(ptr.baseAddress!).assumingMemoryBound(to: UInt8.self), count: dataBytesCount))
+        }
+        return data
     }
 
     // MARK: - スマートアラーム（WKExtendedRuntimeSession）
@@ -1244,6 +1389,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private func startNotifyUser(_ s: WKExtendedRuntimeSession) {
         notifiedSessions.insert(s)
         sessionNotifyStartTimes[s] = Date()
+        updateAlarmAudio()
         let appState = WKApplication.shared().applicationState
         if appState != .active {
             sessionPresentedSystemAlert = true

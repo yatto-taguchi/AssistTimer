@@ -2893,3 +2893,50 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
   - `WatchSessionManager.processReceivedData` にて、ローカル `RESET` 後にiPhone側から遅延到着する超過パケット（`parsedMain.targetEndTime <= nowDate`）による上書き復活を完全ブロック。
 
 
+---
+
+## 40. ウォッチ＆スマホのアラーム音ON/OFF二段ボタン（デフォルトOFF・消音モード強制鳴動）、稼働中共有タイマーへのチェックタイマー後から追加、およびチェックタイマー鳴動時の「開く」画面最適化仕様
+
+#### 1. ウォッチのアラーム音 ON/OFF（上段）＆ スマホのアラーム音 ON/OFF（下段）二段ボタンとデフォルトOFF仕様 (`src/screens/HomeScreen.js`, `src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`)
+- **確定仕様**:
+  - メインタイマー・共有タイマー（客席タイマー）・チェックタイマーのすべてにおいて、**バイブレーション（振動）は常時ON（100%作動）** とし、**「ウォッチのアラーム音」と「スマホのアラーム音」はともにデフォルト `OFF`（`false`）** に統一。
+  - ボタン配置順序:
+    - **上段**: `⌚ ウォッチのアラーム音 ON / OFF`（Watch画面では `ウォッチの音 ON (強制) / OFF (バイブのみ)`）
+    - **下段**: `🔊 スマホのアラーム音 ON / OFF`（Watch画面では `スマホの音 ON / OFF` または `携帯の音 ON / OFF`）
+  - **iPhone側 (`src/screens/SalonWorkScreen.js`, `src/screens/HomeScreen.js`)**:
+    - 共有タイマー設定・変更モーダル（`isSetTimerModalVisible`）の最下部に、上段「ウォッチのアラーム音 ON/OFF」、下段「スマホのアラーム音 ON/OFF」を縦並びで配置。
+    - 各席データ（`watchAlarmSoundEnabled`, `alarmSoundEnabled`）の初期値を `false` とし、新規作成・リセット・タイマー開始・Watch同期（`START_TIMER`, `ADD_SEAT`, `UPDATE_SOUND_SETTINGS`）のすべてで保持・同期する。
+    - メインタイマー（`HomeScreen.js`）の `isSoundEnabled` 初期値も `false`（デフォルトOFF）とし、OFF時はiPhone本体のバイブレーションのみ作動、ON時のみアラーム音＋バイブレーションを作動させる。
+  - **Apple Watch側 (`targets/watch/content.swift`)**:
+    - `MainTimerActionSheet`（メインタイマーのタイム入力画面・稼働中画面・停止分岐画面）、`TimeActionSheet`（共有席タイマーのタイム入力画面・停止分岐画面）、`AddSeatSheet`（新規席追加画面）のすべてにおいて、上段に「ウォッチの音 ON/OFF」、下段に「スマホの音（携帯の音） ON/OFF」を配置し、デフォルトを `OFF`（`false`）に統一。
+
+#### 2. Apple Watch消音モード（マナーモード）時の内蔵スピーカー強制アラーム音再生仕様 (`targets/watch/alarm.swift`)
+- **背景・原因**:
+  - watchOS標準の `WKInterfaceDevice.current().play(...)` や `WKExtendedRuntimeSession.notifyUser(hapticType:)`、ローカル通知（`UNMutableNotificationContent.sound = .default`）は、Apple Watchが消音モード（マナーモード）になっているとOSによって音声出力がミュートされ、振動のみになっていた。
+- **確定仕様**:
+  - `WatchAlarmEvent` に `watchSoundOn: Bool` を持たせ、メインタイマー・共有タイマー・チェックタイマーそれぞれの `watchAlarmSoundEnabled` 設定を引き継ぐ。
+  - `WatchAlarmCoordinator` にて、外部音源ファイル不要で100%確実に再生できる高明瞭デジタルアラーム音（2800Hz〜3800Hzの4連ピピピピッ周期・16bit PCM 22050Hz WAV）をメモリ生成（`generateAlarmWavData()`）。
+  - **「ウォッチの音 ON」時**:
+    - アラーム鳴動開始時（フォアグラウンドおよび `WKExtendedRuntimeSession` 起動時）に `AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])` および `setActive(true)` を設定し、`AVAudioPlayer` でループ再生（`numberOfLoops = -1`, `volume = 1.0`）を行う。
+    - `.playback` カテゴリにより **watchOSの消音モード（マナーモード）を貫通してApple Watch内蔵スピーカーから強制的にアラーム音を鳴らす** とともに、手首のバイブレーションも同時に作動させる。
+  - **「ウォッチの音 OFF」時（デフォルト）**:
+    - `AVAudioPlayer` は一切起動せず、**バイブレーション（振動）のみ** で通知する。
+  - アラーム停止時（`stop()`, `acknowledgeMainTimer()`, `stopForegroundHaptics()`, システムアラーム終了時）には即座に `stopAlarmAudio()` を呼び出して音声再生を停止し、オーディオセッションを非アクティブ化する。
+
+#### 3. 稼働中の共有タイマーの「タイマーを止める」画面最下部への「＋ チェックタイマーを追加」機能 (`src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`)
+- **確定仕様**:
+  - 共有タイマー（客席タイマー）を最初からチェックタイマー無しでスタートした後でも、稼働途中に後からチェックタイマーを追加・再設定できるよう、**「タイマーを止める」画面の一番下** に **`[ ＋ チェックタイマーを追加 ]`**（設定済みの場合は「チェックタイマーを変更・再設定」）ボタンをiPhone・Apple Watch双方に配置。
+  - ボタンをタップすると専用のチェックタイマー追加画面が開き、以下の3項目を指定して即時スタートできる:
+    1. **何分後にチェックするか**（3分・5分・7分・10分ピル、および1分単位の微調整）
+    2. **チェック時のヘルプ内容**（チェック・コーミング・1液2液・担当を呼ぶ）
+    3. **誰にヘルプに入ってもらうか**（スタッフ個別指定・全員に募集・未定）
+  - Watch側で追加された場合は `SET_CHECK_TIMER` アクションでiPhoneへ即時同期し、iPhone側で追加された場合も即座にWatchへ同期・スマートアラーム予約を行う。
+
+#### 4. チェックタイマー鳴動時に「開く」を押した際の「コーミング」誤表示修正および「タイマーを止める」即時停止仕様 (`src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`)
+- **背景・原因**:
+  - 過去に「コーミング」等を設定した席で新規タイマーを開始した際、古い `checkProcess` がリセットされず残っていたこと、およびApple Watch側の `subCheckActionBranchScrollView` で「コーミングに入る」ボタンがハードコード表示されていたことにより、チェック内容を選択していないにもかかわらず鳴動時に「開く」を押すと「コーミング」と表示されていた。
+- **確定仕様**:
+  - 新規タイマー開始時・タイマー停止時・チェック解除時に `checkProcess` を必ずデフォルトの `'チェック'` にリセットし、前回の「コーミング」等の幽霊残りを完全根絶。
+  - チェックタイマー鳴動時に「開く」を押した後の画面（Watchの `subCheckActionBranchScrollView` およびiPhoneのチェック確認画面）では:
+    - チェック工程として「コーミング」「1液2液」「担当を呼ぶ」が明示的に選ばれている場合のみその工程ボタンを表示し、未選択（または標準「チェック」）時は「コーミング」を一切表示しない。
+    - 赤い **`[ ⏹️ タイマーを止める ]`** ボタンを大きく表示し、タップ1回でチェックタイマーのアラームを即座に停止・完了させつつ、残りの全体タイマー（本タイマー）をそのまま継続させる。

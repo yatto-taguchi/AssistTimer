@@ -116,7 +116,10 @@ export const getDefaultInitialSeats = (staffName = 'スタイリスト') => [
     checkInitialMinutes: 0,
     checkEndTimestamp: null,
     checkStatus: 'stopped',
+    checkProcess: 'チェック',
     checkStaffName: '',
+    watchAlarmSoundEnabled: false,
+    alarmSoundEnabled: false,
     comment: 'サンプルタイマー (タップして操作・編集できます)',
     timeUpTimestamp: null,
     mainStaffConfirmed: true,
@@ -253,6 +256,8 @@ export const formatSeatsPayload = (seatsList) => {
         checkProcess: s.checkProcess || 'チェック',
         checkStaffName: s.checkStaffName || '',
         isCheckCompleted: s.checkStatus === 'completed',
+        watchAlarmSoundEnabled: !!s.watchAlarmSoundEnabled,
+        alarmSoundEnabled: !!s.alarmSoundEnabled,
         isCollapsed: isCollapsedSeat,
       };
     })
@@ -330,19 +335,18 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
     const prepEnd = isPreCountingDown
       ? (state.prepEndTimestamp || (Date.now() + (state.preCountdownSeconds || state.countdownConfigSeconds || 5) * 1000))
       : 0;
+    let isAutoFinished = !!state.isAutoFinished;
     let targetEnd = isRunning
       ? (state.targetEndTimestamp || (
           isCountUp ? Date.now() - (state.remainingTime || 0) * 1000 : Date.now() + (state.remainingTime || 0) * 1000
         ))
       : (isPreCountingDown
           ? (state.targetEndTimestamp || (prepEnd + (state.targetTime || state.remainingTime || 600) * 1000))
-          : 0);
+          : (isAutoFinished ? (state.targetEndTimestamp || 0) : 0));
 
-    let isAutoFinished = !!state.isAutoFinished;
     if (isRunning && !isPreCountingDown && !isCountUpEnabled && targetEnd > 0 && targetEnd <= Date.now()) {
       isRunning = false;
       isCountUp = false;
-      targetEnd = 0;
       isAutoFinished = true;
     }
 
@@ -453,19 +457,18 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
       const prepEnd = isPreCountingDown
         ? (_cachedMainTimerState.prepEndTimestamp || (Date.now() + (_cachedMainTimerState.preCountdownSeconds || _cachedMainTimerState.countdownConfigSeconds || 5) * 1000))
         : 0;
+      let isAutoFinished = !!_cachedMainTimerState.isAutoFinished;
       let targetEnd = isRunning
         ? (_cachedMainTimerState.targetEndTimestamp || (
             isCountUp ? Date.now() - (_cachedMainTimerState.remainingTime || 0) * 1000 : Date.now() + (_cachedMainTimerState.remainingTime || 0) * 1000
           ))
         : (isPreCountingDown
             ? (_cachedMainTimerState.targetEndTimestamp || (prepEnd + (_cachedMainTimerState.targetTime || _cachedMainTimerState.remainingTime || 600) * 1000))
-            : 0);
+            : (isAutoFinished ? (_cachedMainTimerState.targetEndTimestamp || 0) : 0));
 
-      let isAutoFinished = !!_cachedMainTimerState.isAutoFinished;
       if (isRunning && !isPreCountingDown && !isCountUpEnabled && targetEnd > 0 && targetEnd <= Date.now()) {
         isRunning = false;
         isCountUp = false;
-        targetEnd = 0;
         isAutoFinished = true;
       }
 
@@ -717,6 +720,15 @@ export default function SalonWorkScreen() {
   const [modalCheckMinutes, setModalCheckMinutes] = useState(0); // 0は「なし」
   const [modalCheckSeconds, setModalCheckSeconds] = useState(0);
   const [modalCheckStaffName, setModalCheckStaffName] = useState(''); // チェック担当スタッフ
+  const [modalCheckProcess, setModalCheckProcess] = useState('チェック'); // チェック時のヘルプ内容（既定: チェック）
+  // ★ ユーザー指定: 共有タイマー入力画面一番下のウォッチ＆スマホアラーム音ON/OFF（どちらもデフォルトOFF）
+  const [modalWatchAlarmSoundEnabled, setModalWatchAlarmSoundEnabled] = useState(false);
+  const [modalAlarmSoundEnabled, setModalAlarmSoundEnabled] = useState(false);
+  // ★ ユーザー指定: 稼働中の共有タイマーの「タイマーを止める」画面一番下から「チェックタイマーを追加」するステート
+  const [isAddingLateCheck, setIsAddingLateCheck] = useState(false);
+  const [lateCheckMinutes, setLateCheckMinutes] = useState(5);
+  const [lateCheckProcess, setLateCheckProcess] = useState('チェック');
+  const [lateCheckStaffName, setLateCheckStaffName] = useState('');
   const [modalColorStaff, setModalColorStaff] = useState('');
   const [modalAssistantStaff, setModalAssistantStaff] = useState('');
   const [modalComment, setModalComment] = useState('');
@@ -856,8 +868,10 @@ export default function SalonWorkScreen() {
               hasChanges = true;
               if (checkAlertedRef.current[s.id] !== s.checkEndTimestamp) {
                 checkAlertedRef.current[s.id] = s.checkEndTimestamp;
-                if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
+                // ★ 共有タイマーのアラーム音がONの時のみスマホで鳴動させる（デフォルトOFF、Watchは必ず振動）
+                if (Platform.OS !== 'web' && !!s.alarmSoundEnabled) {
                   Vibration.vibrate([0, 500, 150, 500]);
+                  playTimeUpSound();
                 }
                 const chkMins = s.checkInitialMinutes || Math.round(s.checkTargetSeconds / 60);
                 Alert.alert(
@@ -901,13 +915,15 @@ export default function SalonWorkScreen() {
           if (!timeUpTs) {
             timeUpTs = s.targetEndTimestamp;
             hasChanges = true;
-            // 初回タイムアップ時の強い振動
-            if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
+            // ★ ユーザー指定: 共有タイマーはデフォルトでスマホから音が鳴らないようにし、入力画面でアラーム音ONにした席のみスマホから鳴らす（Watchは必ず振動）
+            if (Platform.OS !== 'web' && !!s.alarmSoundEnabled) {
               Vibration.vibrate([0, 500, 200, 500, 200, 500]);
             }
             if (mainTimeupAlertedRef.current[s.id] !== s.targetEndTimestamp) {
               mainTimeupAlertedRef.current[s.id] = s.targetEndTimestamp;
-              playTimeUpSound();
+              if (s.alarmSoundEnabled) {
+                playTimeUpSound();
+              }
               const mins = s.initialMinutes || Math.round((s.targetSeconds || 600) / 60);
               Alert.alert(
                 '⏰【放置タイム終了】',
@@ -926,7 +942,7 @@ export default function SalonWorkScreen() {
           if (elapsedOverSec >= 30 && escLevel < 1 && !isConfirmed) {
             escLevel = 1;
             hasChanges = true;
-            if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
+            if (Platform.OS !== 'web' && !!s.alarmSoundEnabled) {
               Vibration.vibrate([0, 400, 150, 400]);
             }
           }
@@ -934,7 +950,7 @@ export default function SalonWorkScreen() {
           else if (elapsedOverSec >= 60 && escLevel < 2 && !isConfirmed) {
             escLevel = 2;
             hasChanges = true;
-            if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
+            if (Platform.OS !== 'web' && !!s.alarmSoundEnabled) {
               Vibration.vibrate([0, 400, 150, 400, 150, 400]);
             }
           }
@@ -942,7 +958,7 @@ export default function SalonWorkScreen() {
           else if (elapsedOverSec >= 180 && escLevel < 3 && !isConfirmed) {
             escLevel = 3;
             hasChanges = true;
-            if (Platform.OS !== 'web' && phoneAlarmAllowedRef.current) {
+            if (Platform.OS !== 'web' && !!s.alarmSoundEnabled) {
               Vibration.vibrate([0, 800, 200, 800, 200, 800]);
             }
             if (!escalatedAlertRef.current[s.id]) {
@@ -1038,7 +1054,10 @@ export default function SalonWorkScreen() {
     checkEndTimestamp: null,
     checkPausedRemainingSeconds: null,
     checkStaffName: '',
+    checkProcess: 'チェック',
     checkStatus: 'stopped',
+    watchAlarmSoundEnabled: false,
+    alarmSoundEnabled: false,
     collapsedAtEnd: null,
     history: [
       ...(s.history || []),
@@ -1286,9 +1305,12 @@ export default function SalonWorkScreen() {
         checkInitialMinutes: checkSec ? Math.round(checkSec / 60) : null,
         checkEndTimestamp: checkEnd,
         checkPausedRemainingSeconds: null,
-        checkStaffName: '',
+        checkStaffName: checkSec ? (extra?.checkStaffName || '') : '',
+        checkProcess: checkSec ? (extra?.checkProcess || 'チェック') : 'チェック',
         checkStatus: checkSec ? 'running' : 'stopped',
         checkAlerted: false,
+        watchAlarmSoundEnabled: !!extra?.watchAlarmSoundEnabled,
+        alarmSoundEnabled: !!extra?.alarmSoundEnabled,
         actionStatus: null,
         isShampooing: false,
         assistantStaffName: '',
@@ -1523,7 +1545,51 @@ export default function SalonWorkScreen() {
               checkTargetSeconds: null,
               checkEndTimestamp: null,
               checkStaffName: '',
+              checkProcess: 'チェック',
               checkStatus: 'stopped',
+            };
+          }
+          case 'SET_CHECK_TIMER': {
+            const rawCheckSec = Number(extra?.checkTotalSeconds || extra?.checkSeconds || 0);
+            if (rawCheckSec <= 0) {
+              hasChanged = false;
+              return s;
+            }
+            const defaultCheckEnd = Date.now() + rawCheckSec * 1000;
+            const incomingCheckEnd = Number(extra?.checkEndTimestamp || 0);
+            const checkEnd = (incomingCheckEnd > Date.now() && Math.abs(incomingCheckEnd - defaultCheckEnd) <= 15000)
+              ? incomingCheckEnd
+              : defaultCheckEnd;
+            const chkProcess = extra?.checkProcess || 'チェック';
+            const chkStaff = extra?.checkStaffName !== undefined && extra?.checkStaffName !== null
+              ? String(extra.checkStaffName)
+              : '';
+            const prevHist = s.history || [];
+            const chkMins = Math.max(1, Math.round(rawCheckSec / 60));
+            const staffNote = chkStaff ? ` (${chkStaff === '募集中' ? '全員募集' : `担当:${chkStaff}`})` : '';
+            if (checkAlertedRef.current) {
+              checkAlertedRef.current[s.id] = false;
+            }
+            return {
+              ...s,
+              checkTargetSeconds: rawCheckSec,
+              checkInitialMinutes: chkMins,
+              checkEndTimestamp: checkEnd,
+              checkPausedRemainingSeconds: null,
+              checkStatus: 'running',
+              isCheckCompleted: false,
+              checkProcess: chkProcess,
+              checkStaffName: chkStaff,
+              checkAlerted: false,
+              history: [
+                ...prevHist,
+                {
+                  id: `h-${Date.now()}`,
+                  time: getCurrentTimeFormatted(),
+                  text: `チェックタイマー追加 (${chkMins}分 / ${chkProcess}${staffNote})`,
+                  type: 'check',
+                },
+              ],
             };
           }
           case 'RESET_ZERO': {
@@ -1638,14 +1704,17 @@ export default function SalonWorkScreen() {
               actionStatus: null,
               isShampooing: false,
               isRecruiting: false,
-              // ★ Watch から指定された途中チェック（サブタイマー）を反映
+              // ★ Watch から指定された途中チェック（サブタイマー）を反映（前回のコーミング等の幽霊残りをリセット）
               checkTargetSeconds: checkSec,
               checkInitialMinutes: checkSec ? Math.round(checkSec / 60) : null,
               checkEndTimestamp: checkEnd,
               checkPausedRemainingSeconds: null,
-              checkStaffName: '',
+              checkStaffName: checkSec ? (extra?.checkStaffName || '') : '',
+              checkProcess: checkSec ? (extra?.checkProcess || 'チェック') : 'チェック',
               checkStatus: checkSec ? 'running' : 'stopped',
               checkAlerted: false,
+              watchAlarmSoundEnabled: extra?.watchAlarmSoundEnabled !== undefined ? !!extra.watchAlarmSoundEnabled : !!s.watchAlarmSoundEnabled,
+              alarmSoundEnabled: extra?.alarmSoundEnabled !== undefined ? !!extra.alarmSoundEnabled : false,
               // 前回のタイムアップ記録を消す（新しいタイマーとして扱う）
               timeUpTimestamp: null,
               escalationLevel: 0,
@@ -1710,8 +1779,16 @@ export default function SalonWorkScreen() {
               helpProcess: '',
               isRecruiting: false,
               checkStaffName: '',
+              checkProcess: 'チェック',
               isShampooing: false,
               actionStatus: null,
+            };
+          }
+          case 'UPDATE_SOUND_SETTINGS': {
+            return {
+              ...s,
+              watchAlarmSoundEnabled: extra?.watchAlarmSoundEnabled !== undefined ? !!extra.watchAlarmSoundEnabled : !!s.watchAlarmSoundEnabled,
+              alarmSoundEnabled: extra?.alarmSoundEnabled !== undefined ? !!extra.alarmSoundEnabled : !!s.alarmSoundEnabled,
             };
           }
           default:
@@ -1759,6 +1836,12 @@ export default function SalonWorkScreen() {
         case 'RECRUIT_HELP':
           watchNotif = { text: `📢 【${seatLabel}】がヘルプを募集中です！`, color: '#FF453A', sourceUser: actor };
           break;
+        case 'SET_CHECK_TIMER': {
+          const chkMins = Math.max(1, Math.round(Number(extra?.checkTotalSeconds || 300) / 60));
+          const chkStaff = extra?.checkStaffName ? ` (${extra.checkStaffName === '募集中' ? '全員募集' : extra.checkStaffName})` : '';
+          watchNotif = { text: `🔍 【${seatLabel}】に${chkMins}分チェックタイマーが追加されました${chkStaff}`, color: '#0A84FF', sourceUser: actor };
+          break;
+        }
         default:
           break;
       }
@@ -1846,15 +1929,13 @@ export default function SalonWorkScreen() {
   }, [isDataLoaded, seats, userName, staffMembers, isWatchAlarmSoundEnabled]);
 
   // ★ サロン席の終了時刻を iPhone 純正アラーム（AlarmKit）に予約
-  // 画面ロック中・バックグラウンドでも、止めるまで鳴り続ける。
-  // 席の停止・リセット・チェック完了で一覧から消えると、鳴っているアラームも止める。
-  // Watch 連動中（かつ「Watch連動中もiPhoneで鳴らす」が OFF）は iPhone では鳴らさない。
+  // 共有タイマーはデフォルトでスマホから音が鳴らないようにし、入力画面で「アラーム音 ON」にした席（alarmSoundEnabled === true）のみ予約する。
   useEffect(() => {
     if (Platform.OS !== 'ios' || !isDataLoaded) return;
     const desired = [];
-    if (phoneAlarmAllowed && Array.isArray(seats)) {
+    if (Array.isArray(seats)) {
       seats.forEach((s) => {
-        if (!s || !s.id) return;
+        if (!s || !s.id || !s.alarmSoundEnabled) return;
         const label = s.seatLabel || '席';
         if (s.status === 'running' && s.targetEndTimestamp) {
           desired.push({ key: `${s.id}-main`, timestamp: Number(s.targetEndTimestamp), title: `${label} 放置タイム終了` });
@@ -1864,8 +1945,8 @@ export default function SalonWorkScreen() {
         }
       });
     }
-    setAlarms('salon', desired, { soundOn: isAlarmSoundEnabled, stopPassedOnRemove: true });
-  }, [seats, phoneAlarmAllowed, isAlarmSoundEnabled, isDataLoaded]);
+    setAlarms('salon', desired, { soundOn: true, stopPassedOnRemove: true });
+  }, [seats, isDataLoaded]);
 
   const loadInitialData = async () => {
     try {
@@ -2466,6 +2547,9 @@ export default function SalonWorkScreen() {
     setModalCheckMinutes(0);
     setModalCheckSeconds(0);
     setModalCheckStaffName('');
+    setModalCheckProcess('チェック');
+    setModalWatchAlarmSoundEnabled(false);
+    setModalAlarmSoundEnabled(false);
     setModalColorStaff(userName || 'スタイリスト');
     setModalAssistantStaff('');
     setModalComment('');
@@ -2481,8 +2565,82 @@ export default function SalonWorkScreen() {
       handleOpenQuickTimeAdjustModal(seat);
       return;
     }
+    setIsAddingLateCheck(false);
     setActionTargetSeat(seat);
     setIsTimeActionModalVisible(true);
+  };
+
+  // ★ ユーザー指定: 稼働中の共有タイマーの「タイマーを止める」画面一番下から「チェックタイマーを追加」を開く
+  const handleOpenLateCheckPanel = () => {
+    if (!actionTargetSeat) return;
+    const existingMins = actionTargetSeat.checkTargetSeconds > 0
+      ? Math.max(1, Math.round(actionTargetSeat.checkTargetSeconds / 60))
+      : 5;
+    setLateCheckMinutes(existingMins);
+    setLateCheckProcess(actionTargetSeat.checkProcess || 'チェック');
+    setLateCheckStaffName(actionTargetSeat.checkStaffName || '');
+    setIsAddingLateCheck(true);
+  };
+
+  // ★ ユーザー指定: 後から追加したチェックタイマー（分数・ヘルプ内容・担当者）を確定反映
+  const handleApplyLateCheckTimer = () => {
+    if (!actionTargetSeat) return;
+    const seat = actionTargetSeat;
+    const mins = Math.max(1, Number(lateCheckMinutes) || 5);
+    const checkSec = mins * 60;
+    const checkEndTs = Date.now() + checkSec * 1000;
+    const chkProcess = (lateCheckProcess || 'チェック').trim();
+    const chkStaff = (lateCheckStaffName || '').trim();
+    const currentUser = (userName || 'スタッフ').trim();
+    const nowStr = getCurrentTimeFormatted();
+    const staffNote = chkStaff ? ` (${chkStaff === '募集中' ? '全員募集' : `担当:${chkStaff}`})` : '';
+
+    if (checkAlertedRef.current) {
+      checkAlertedRef.current[seat.id] = false;
+    }
+
+    const updatedSeats = seats.map((s) => {
+      if (s.id !== seat.id) return s;
+      const prevHist = s.history || [];
+      return {
+        ...s,
+        checkTargetSeconds: checkSec,
+        checkInitialMinutes: mins,
+        checkEndTimestamp: checkEndTs,
+        checkPausedRemainingSeconds: null,
+        checkStatus: 'running',
+        isCheckCompleted: false,
+        checkProcess: chkProcess,
+        checkStaffName: chkStaff || null,
+        checkAlerted: false,
+        history: [
+          ...prevHist,
+          {
+            id: `h-${Date.now()}`,
+            time: nowStr,
+            text: `チェックタイマー追加 (${mins}分 / ${chkProcess}${staffNote})`,
+            type: 'check',
+          },
+        ],
+      };
+    });
+
+    setSeats(updatedSeats);
+    saveSeatsToStorage(updatedSeats);
+    syncSeatsToWatch(updatedSeats, userName, staffMembers, {
+      immediate: true,
+      notification: {
+        text: `🔍 ${currentUser}が【${seat.seatLabel || '席'}】に${mins}分チェックタイマーを追加しました${staffNote}`,
+        color: '#0A84FF',
+        sourceUser: currentUser,
+      },
+    });
+
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 80, 50, 80]);
+    }
+    setIsAddingLateCheck(false);
+    setIsTimeActionModalVisible(false);
   };
 
   // モーダルから「変更する」を選択した時（稼働中のタイマー変更）
@@ -2500,6 +2658,9 @@ export default function SalonWorkScreen() {
     setModalCheckMinutes(Math.floor(chkSec / 60));
     setModalCheckSeconds(chkSec % 60);
     setModalCheckStaffName(seat.checkStaffName || '');
+    setModalCheckProcess(seat.checkProcess || 'チェック');
+    setModalWatchAlarmSoundEnabled(!!seat.watchAlarmSoundEnabled);
+    setModalAlarmSoundEnabled(!!seat.alarmSoundEnabled);
     setModalColorStaff(seat.colorStaffName || userName || 'スタイリスト');
     setModalAssistantStaff(seat.assistantStaffName || '');
     setModalComment(seat.comment || '');
@@ -2521,6 +2682,9 @@ export default function SalonWorkScreen() {
     setModalCheckMinutes(0);
     setModalCheckSeconds(0);
     setModalCheckStaffName('');
+    setModalCheckProcess('チェック');
+    setModalWatchAlarmSoundEnabled(false);
+    setModalAlarmSoundEnabled(false);
     setModalColorStaff(seat.colorStaffName || userName || 'スタイリスト');
     setModalAssistantStaff('');
     setModalComment('');
@@ -2542,6 +2706,9 @@ export default function SalonWorkScreen() {
     setModalCheckMinutes(0);
     setModalCheckSeconds(0);
     setModalCheckStaffName('');
+    setModalCheckProcess('チェック');
+    setModalWatchAlarmSoundEnabled(!!seat.watchAlarmSoundEnabled);
+    setModalAlarmSoundEnabled(!!seat.alarmSoundEnabled);
     setModalColorStaff(seat.colorStaffName || userName || 'スタイリスト');
     setModalAssistantStaff(seat.assistantStaffName || '');
     setModalComment(seat.comment || '');
@@ -3126,7 +3293,10 @@ export default function SalonWorkScreen() {
             checkPausedRemainingSeconds: null,
             checkStatus: hasCheckTimer ? 'running' : null,
             checkStaffName: hasCheckTimer ? (modalCheckStaffName || null) : null,
+            checkProcess: hasCheckTimer ? (modalCheckProcess || 'チェック') : 'チェック',
             checkAlerted: false,
+            watchAlarmSoundEnabled: !!modalWatchAlarmSoundEnabled,
+            alarmSoundEnabled: !!modalAlarmSoundEnabled,
             stoppedBy: null,
             mainStaffConfirmed: true,
             assistantStaffConfirmed: false,
@@ -3163,7 +3333,10 @@ export default function SalonWorkScreen() {
             checkPausedRemainingSeconds: null,
             checkStatus: hasCheckTimer ? 'running' : null,
             checkStaffName: hasCheckTimer ? (modalCheckStaffName || s.checkStaffName || null) : null,
+            checkProcess: hasCheckTimer ? (modalCheckProcess || s.checkProcess || 'チェック') : 'チェック',
             checkAlerted: false,
+            watchAlarmSoundEnabled: !!modalWatchAlarmSoundEnabled,
+            alarmSoundEnabled: !!modalAlarmSoundEnabled,
             stoppedBy: null,
             mainStaffConfirmed: true,
             assistantStaffConfirmed: false,
@@ -3199,7 +3372,10 @@ export default function SalonWorkScreen() {
             checkPausedRemainingSeconds: null,
             checkStatus: hasCheckTimer ? 'running' : null,
             checkStaffName: hasCheckTimer ? (modalCheckStaffName || s.checkStaffName || null) : null,
+            checkProcess: hasCheckTimer ? (modalCheckProcess || s.checkProcess || 'チェック') : 'チェック',
             checkAlerted: false,
+            watchAlarmSoundEnabled: !!modalWatchAlarmSoundEnabled,
+            alarmSoundEnabled: !!modalAlarmSoundEnabled,
             comment: s.comment || '',
             history: [...prevHistory, historyItem],
           };
@@ -3236,7 +3412,10 @@ export default function SalonWorkScreen() {
           checkPausedRemainingSeconds: null,
           checkStatus: hasCheckTimer ? 'running' : null,
           checkStaffName: hasCheckTimer ? (modalCheckStaffName || null) : null,
+          checkProcess: hasCheckTimer ? (modalCheckProcess || 'チェック') : 'チェック',
           checkAlerted: false,
+          watchAlarmSoundEnabled: !!modalWatchAlarmSoundEnabled,
+          alarmSoundEnabled: !!modalAlarmSoundEnabled,
           stoppedBy: null,
           mainStaffConfirmed: true,
           assistantStaffConfirmed: false,
@@ -3652,7 +3831,10 @@ export default function SalonWorkScreen() {
         checkStatus: null,
         checkInitialMinutes: null,
         checkStaffName: null,
+        checkProcess: 'チェック',
         checkAlerted: false,
+        watchAlarmSoundEnabled: false,
+        alarmSoundEnabled: false,
         // 停止・確認情報
         stoppedBy: currentUser,
         mainStaffConfirmed: true,
@@ -3999,7 +4181,11 @@ export default function SalonWorkScreen() {
                     checkEndTimestamp: null,
                     checkPausedRemainingSeconds: null,
                     checkStatus: null,
+                    checkStaffName: null,
+                    checkProcess: 'チェック',
                     checkAlerted: false,
+                    watchAlarmSoundEnabled: false,
+                    alarmSoundEnabled: false,
                     comment: '',
                   };
                 });
@@ -6232,8 +6418,127 @@ export default function SalonWorkScreen() {
                 </ScrollView>
               </View>
 
+              {/* ★ ユーザー指定: 共有タイマーのタイマー入力画面一番下に、上段「ウォッチのアラーム音 ON/OFF」、下段「スマホのアラーム音 ON/OFF」を並べて配置（どちらもデフォルトOFF） */}
               <TouchableOpacity
-                style={[styles.submitButton, { backgroundColor: theme.accent, marginTop: 18 }]}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginTop: 14,
+                  paddingVertical: 11,
+                  paddingHorizontal: 14,
+                  borderRadius: 12,
+                  backgroundColor: modalWatchAlarmSoundEnabled
+                    ? (isEcoMode ? 'rgba(14, 165, 233, 0.16)' : '#F0F9FF')
+                    : theme.inputBg,
+                  borderWidth: 1.5,
+                  borderColor: modalWatchAlarmSoundEnabled ? '#0EA5E9' : theme.cardBorder,
+                }}
+                onPress={() => {
+                  setModalWatchAlarmSoundEnabled((prev) => !prev);
+                  if (Platform.OS !== 'web') Vibration.vibrate(25);
+                }}
+                activeOpacity={0.75}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 10 }}>
+                  <Ionicons
+                    name={modalWatchAlarmSoundEnabled ? 'watch' : 'watch-outline'}
+                    size={20}
+                    color={modalWatchAlarmSoundEnabled ? '#0EA5E9' : theme.textSecondary}
+                    style={{ marginRight: 10 }}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 13.5, fontWeight: '700', color: theme.textPrimary }}>
+                      ウォッチのアラーム音
+                    </Text>
+                    <Text style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
+                      {modalWatchAlarmSoundEnabled
+                        ? '消音モードでもウォッチから強制的に音が鳴ります（＋振動）'
+                        : 'ウォッチから音は出さず、振動のみでお知らせ（デフォルト）'}
+                    </Text>
+                  </View>
+                </View>
+                <View
+                  style={{
+                    paddingHorizontal: 12,
+                    paddingVertical: 5,
+                    borderRadius: 999,
+                    backgroundColor: modalWatchAlarmSoundEnabled ? '#0EA5E9' : (isEcoMode ? '#3A3A3C' : '#E5E7EB'),
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      fontWeight: '800',
+                      color: modalWatchAlarmSoundEnabled ? '#FFFFFF' : theme.textSecondary,
+                    }}
+                  >
+                    {modalWatchAlarmSoundEnabled ? 'ON' : 'OFF'}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginTop: 8,
+                  paddingVertical: 11,
+                  paddingHorizontal: 14,
+                  borderRadius: 12,
+                  backgroundColor: modalAlarmSoundEnabled
+                    ? (isEcoMode ? 'rgba(16, 185, 129, 0.16)' : '#ECFDF5')
+                    : theme.inputBg,
+                  borderWidth: 1.5,
+                  borderColor: modalAlarmSoundEnabled ? '#10B981' : theme.cardBorder,
+                }}
+                onPress={() => {
+                  setModalAlarmSoundEnabled((prev) => !prev);
+                  if (Platform.OS !== 'web') Vibration.vibrate(25);
+                }}
+                activeOpacity={0.75}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, marginRight: 10 }}>
+                  <Ionicons
+                    name={modalAlarmSoundEnabled ? 'volume-high' : 'volume-mute'}
+                    size={20}
+                    color={modalAlarmSoundEnabled ? '#10B981' : theme.textSecondary}
+                    style={{ marginRight: 10 }}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 13.5, fontWeight: '700', color: theme.textPrimary }}>
+                      スマホのアラーム音
+                    </Text>
+                    <Text style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
+                      {modalAlarmSoundEnabled
+                        ? 'タイム終了時にスマホからも音が鳴ります（Watchも振動）'
+                        : 'スマホは消音・Apple Watchの振動でお知らせ（デフォルト）'}
+                    </Text>
+                  </View>
+                </View>
+                <View
+                  style={{
+                    paddingHorizontal: 12,
+                    paddingVertical: 5,
+                    borderRadius: 999,
+                    backgroundColor: modalAlarmSoundEnabled ? '#10B981' : (isEcoMode ? '#3A3A3C' : '#E5E7EB'),
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      fontWeight: '800',
+                      color: modalAlarmSoundEnabled ? '#FFFFFF' : theme.textSecondary,
+                    }}
+                  >
+                    {modalAlarmSoundEnabled ? 'ON' : 'OFF'}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.submitButton, { backgroundColor: theme.accent, marginTop: 14 }]}
                 onPress={handleStartSeatTimer}
               >
                 <Text style={styles.submitButtonText}>
@@ -6982,6 +7287,193 @@ export default function SalonWorkScreen() {
                 <Text style={[styles.actionModalNote, { color: theme.textTertiary }]}>
                   ※停止するとメイン担当・ヘルプ担当の両者に停止・確認通知が届きます
                 </Text>
+
+                {/* ★ ユーザー指定: 共有タイマーの止める画面の一番下に「＋ チェックタイマーを追加」ボタン＆追加フォームを配置 */}
+                <View
+                  style={{
+                    marginTop: 12,
+                    paddingTop: 12,
+                    borderTopWidth: 1,
+                    borderTopColor: theme.cardBorder,
+                  }}
+                >
+                  {!isAddingLateCheck ? (
+                    <TouchableOpacity
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        paddingVertical: 11,
+                        paddingHorizontal: 14,
+                        borderRadius: 12,
+                        backgroundColor: isEcoMode ? 'rgba(14, 165, 233, 0.16)' : '#F0F9FF',
+                        borderWidth: 1.5,
+                        borderColor: '#0EA5E9',
+                      }}
+                      onPress={handleOpenLateCheckPanel}
+                      activeOpacity={0.75}
+                    >
+                      <Ionicons name="add-circle" size={19} color="#0EA5E9" style={{ marginRight: 6 }} />
+                      <Text style={{ fontSize: 13.5, fontWeight: '800', color: '#0EA5E9' }}>
+                        {actionTargetSeat?.checkTargetSeconds > 0 && actionTargetSeat?.checkStatus === 'running'
+                          ? 'チェックタイマーを変更・再設定'
+                          : '＋ チェックタイマーを追加'}
+                      </Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <View
+                      style={{
+                        padding: 12,
+                        borderRadius: 12,
+                        backgroundColor: isEcoMode ? '#1C1C1E' : '#F8FAFC',
+                        borderWidth: 1,
+                        borderColor: '#0EA5E9',
+                      }}
+                    >
+                      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                        <Text style={{ fontSize: 13.5, fontWeight: '800', color: '#0EA5E9' }}>
+                          🔍 チェックタイマーを追加
+                        </Text>
+                        <TouchableOpacity onPress={() => setIsAddingLateCheck(false)}>
+                          <Text style={{ fontSize: 12, fontWeight: '600', color: theme.textSecondary }}>閉じる</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {/* ① 分数選択 */}
+                      <Text style={{ fontSize: 11.5, fontWeight: '700', color: theme.textSecondary, marginBottom: 6 }}>
+                        1. チェック分数（現在: {lateCheckMinutes}分後）
+                      </Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                        {[3, 5, 7, 10, 15].map((m) => {
+                          const isSel = Number(lateCheckMinutes) === m;
+                          return (
+                            <TouchableOpacity
+                              key={m}
+                              style={{
+                                paddingHorizontal: 11,
+                                paddingVertical: 6,
+                                borderRadius: 8,
+                                backgroundColor: isSel ? '#0EA5E9' : theme.inputBg,
+                                borderWidth: 1,
+                                borderColor: isSel ? '#0EA5E9' : theme.cardBorder,
+                              }}
+                              onPress={() => setLateCheckMinutes(m)}
+                            >
+                              <Text style={{ fontSize: 12.5, fontWeight: '700', color: isSel ? '#FFFFFF' : theme.textPrimary }}>
+                                {m}分
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                        <TouchableOpacity
+                          style={{
+                            paddingHorizontal: 9,
+                            paddingVertical: 6,
+                            borderRadius: 8,
+                            backgroundColor: theme.inputBg,
+                            borderWidth: 1,
+                            borderColor: theme.cardBorder,
+                          }}
+                          onPress={() => setLateCheckMinutes((prev) => Math.max(1, (Number(prev) || 5) - 1))}
+                        >
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: theme.textSecondary }}>-1分</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={{
+                            paddingHorizontal: 9,
+                            paddingVertical: 6,
+                            borderRadius: 8,
+                            backgroundColor: theme.inputBg,
+                            borderWidth: 1,
+                            borderColor: theme.cardBorder,
+                          }}
+                          onPress={() => setLateCheckMinutes((prev) => Math.min(90, (Number(prev) || 5) + 1))}
+                        >
+                          <Text style={{ fontSize: 12, fontWeight: '700', color: '#0EA5E9' }}>+1分</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {/* ② ヘルプ内容（工程）選択 */}
+                      <Text style={{ fontSize: 11.5, fontWeight: '700', color: theme.textSecondary, marginBottom: 6 }}>
+                        2. チェック内容（任意）
+                      </Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                        {['チェック', 'コーミング', '1液2液', '担当を呼ぶ'].map((proc) => {
+                          const isSel = lateCheckProcess === proc;
+                          return (
+                            <TouchableOpacity
+                              key={proc}
+                              style={{
+                                paddingHorizontal: 10,
+                                paddingVertical: 5,
+                                borderRadius: 8,
+                                backgroundColor: isSel ? '#0EA5E9' : theme.inputBg,
+                                borderWidth: 1,
+                                borderColor: isSel ? '#0EA5E9' : theme.cardBorder,
+                              }}
+                              onPress={() => setLateCheckProcess(proc)}
+                            >
+                              <Text style={{ fontSize: 12, fontWeight: '700', color: isSel ? '#FFFFFF' : theme.textPrimary }}>
+                                {proc}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+
+                      {/* ③ 誰にヘルプに入ってもらうか */}
+                      <Text style={{ fontSize: 11.5, fontWeight: '700', color: theme.textSecondary, marginBottom: 6 }}>
+                        3. 誰にヘルプに入ってもらうか
+                      </Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                        {[
+                          { label: '指定なし', value: '' },
+                          { label: '📢 全員に募集', value: '募集中' },
+                          { label: `🙋 自分 (${userName || 'スタイリスト'})`, value: userName || 'スタイリスト' },
+                          ...staffMembers.map((m) => {
+                            const name = getMemberDisplayName(m);
+                            return { label: `👤 ${name}`, value: name };
+                          }),
+                        ].map((opt) => {
+                          const isSel = (lateCheckStaffName || '') === opt.value;
+                          return (
+                            <TouchableOpacity
+                              key={`late-chk-staff-${opt.label}`}
+                              style={{
+                                paddingHorizontal: 10,
+                                paddingVertical: 5,
+                                borderRadius: 8,
+                                backgroundColor: isSel ? '#10B981' : theme.inputBg,
+                                borderWidth: 1,
+                                borderColor: isSel ? '#10B981' : theme.cardBorder,
+                              }}
+                              onPress={() => setLateCheckStaffName(opt.value)}
+                            >
+                              <Text style={{ fontSize: 12, fontWeight: '700', color: isSel ? '#FFFFFF' : theme.textPrimary }}>
+                                {opt.label}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+
+                      <TouchableOpacity
+                        style={{
+                          paddingVertical: 10,
+                          borderRadius: 10,
+                          backgroundColor: '#0EA5E9',
+                          alignItems: 'center',
+                        }}
+                        onPress={handleApplyLateCheckTimer}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={{ fontSize: 13.5, fontWeight: '800', color: '#FFFFFF' }}>
+                          この内容でチェックタイマーを開始 ({lateCheckMinutes}分)
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </View>
               </>
             )}
           </View>
