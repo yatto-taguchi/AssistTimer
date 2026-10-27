@@ -22,6 +22,14 @@ import WatchConnectivity from 'watch-connectivity';
 import { AppContext } from '../utils/AppContext';
 import WatchDiagnosticsBar from '../components/WatchDiagnosticsBar';
 import { setAlarms, stopAlarm, subscribeUserStoppedAlarms } from '../utils/alarmScheduler';
+import {
+  getOrCreateUserId,
+  syncOrCreateSalonInCloud,
+  joinSalonByInviteCode,
+  fetchSalonMembers,
+  subscribeSalonMembers,
+  updateMemberDisplayName,
+} from '../utils/salonCloudService';
 
 const playTimeUpSound = async () => {
   try {
@@ -172,7 +180,7 @@ export const sanitizeLoadedSeats = (seatsList) => {
 };
 
 // ★ スタッフメンバーの正規化ヘルパー（一意のID管理・相手ニックネーム・任意設定の呼び名を両立）
-export const normalizeStaffMembers = (list) => {
+export const normalizeStaffMembers = (list, currentUserId = null) => {
   if (!Array.isArray(list)) return [];
   return list.map((m, idx) => {
     if (!m) return null;
@@ -181,15 +189,23 @@ export const normalizeStaffMembers = (list) => {
         id: `mem_legacy_${idx}_${m}`,
         originalNickname: m,
         customNickname: m,
+        role: 'assistant',
         joinedAt: Date.now(),
       };
     }
+    const uid = m.user_id || m.id || `mem_${Date.now()}_${idx}`;
+    const name = m.display_name || m.originalNickname || m.customNickname || m.name || m.nickname || 'スタッフ';
+    const isMe = currentUserId ? (m.user_id === currentUserId || uid === currentUserId) : false;
     return {
-      id: m.id || `mem_${Date.now()}_${idx}`,
-      originalNickname: m.originalNickname || m.name || m.nickname || 'スタッフ',
-      customNickname: m.customNickname || m.originalNickname || m.name || m.nickname || 'スタッフ',
+      id: uid,
+      cloudMemberId: m.id,
+      user_id: m.user_id,
+      originalNickname: name,
+      customNickname: m.customNickname || name,
       inviteCode: m.inviteCode || '',
-      joinedAt: m.joinedAt || Date.now(),
+      role: m.role || 'assistant',
+      isMe: isMe,
+      joinedAt: m.joined_at ? new Date(m.joined_at).getTime() : (m.joinedAt || Date.now()),
     };
   }).filter(Boolean);
 };
@@ -197,7 +213,7 @@ export const normalizeStaffMembers = (list) => {
 export const getMemberDisplayName = (m) => {
   if (!m) return '';
   if (typeof m === 'string') return m;
-  return m.customNickname || m.originalNickname || m.name || 'スタッフ';
+  return m.customNickname || m.display_name || m.originalNickname || m.name || 'スタッフ';
 };
 
 // キャッシュされた最新スタッフメンバー・座席・ユーザー名・メインタイマー一覧
@@ -602,6 +618,7 @@ export default function SalonWorkScreen() {
 
   // ユーザー・サロン状態
   const [userName, setUserName] = useState('スタイリスト');
+  const [myUserId, setMyUserId] = useState(null);
   const [currentSalon, setCurrentSalon] = useState(DEFAULT_FREE_SALON);
   const [savedSalons, setSavedSalons] = useState([DEFAULT_FREE_SALON]);
   const [filterMode, setFilterMode] = useState('all'); // 'all' | 'my'
@@ -2007,8 +2024,75 @@ export default function SalonWorkScreen() {
     setAlarms('salon', desired, { soundOn: true, stopPassedOnRemove: true });
   }, [seats, isDataLoaded]);
 
+  // ★ サロンのクラウド登録＆メンバーリアルタイム同期 (Supabase Realtime)
+  useEffect(() => {
+    if (!isDataLoaded || !currentSalon?.inviteCode || !myUserId) return;
+
+    let isMounted = true;
+    let unsubscribeMembers = null;
+
+    const initCloudSalon = async () => {
+      try {
+        // 1. サロンをSupabaseクラウドへ確保・登録（未登録時は新規作成＆オーナー登録）
+        const cloudSalon = await syncOrCreateSalonInCloud({
+          salonName: currentSalon.name,
+          inviteCode: currentSalon.inviteCode,
+          isPro: currentSalon.isPro,
+          userName: userName,
+        });
+
+        if (!cloudSalon || !isMounted) return;
+
+        // クラウド側UUIDへIDを同期
+        if (currentSalon.id !== cloudSalon.id) {
+          const updatedSalon = { ...currentSalon, id: cloudSalon.id };
+          setCurrentSalon(updatedSalon);
+          setSavedSalons((prev) =>
+            prev.map((s) => (s.id === currentSalon.id ? updatedSalon : s))
+          );
+          saveSalonsToStorage(
+            savedSalons.map((s) => (s.id === currentSalon.id ? updatedSalon : s)),
+            cloudSalon.id
+          );
+        }
+
+        // 2. クラウド上のメンバー一覧を取得して反映
+        const cloudMembers = await fetchSalonMembers(cloudSalon.id);
+        if (isMounted && Array.isArray(cloudMembers) && cloudMembers.length > 0) {
+          const normalized = normalizeStaffMembers(cloudMembers, myUserId);
+          setStaffMembers(normalized);
+          AsyncStorage.setItem('@salon_staff_members', JSON.stringify(normalized)).catch(() => {});
+          syncSeatsToWatch(seats, userName, normalized);
+        }
+
+        // 3. Supabase Realtimeでメンバー変更（参加・更新）をリアルタイム監視
+        unsubscribeMembers = subscribeSalonMembers(cloudSalon.id, (updatedMembers) => {
+          if (!isMounted) return;
+          const normalized = normalizeStaffMembers(updatedMembers, myUserId);
+          setStaffMembers(normalized);
+          AsyncStorage.setItem('@salon_staff_members', JSON.stringify(normalized)).catch(() => {});
+          syncSeatsToWatch(seats, userName, normalized, { immediate: true });
+        });
+      } catch (err) {
+        console.warn('initCloudSalon failed:', err);
+      }
+    };
+
+    initCloudSalon();
+
+    return () => {
+      isMounted = false;
+      if (typeof unsubscribeMembers === 'function') {
+        unsubscribeMembers();
+      }
+    };
+  }, [currentSalon?.id, currentSalon?.inviteCode, isDataLoaded, myUserId]);
+
   const loadInitialData = async () => {
     try {
+      const activeUserId = await getOrCreateUserId();
+      setMyUserId(activeUserId);
+
       const savedName = await AsyncStorage.getItem('@assist_timer_user_name');
       const activeUserName = savedName || 'スタイリスト';
       if (savedName) setUserName(savedName);
@@ -2151,6 +2235,14 @@ export default function SalonWorkScreen() {
       const oldName = userName;
       setUserName(trimmed);
       setIsEditingUserName(false);
+
+      // Supabaseクラウド上のメンバー表示名も同期更新
+      if (currentSalon?.id) {
+        updateMemberDisplayName({
+          salonId: currentSalon.id,
+          displayName: trimmed,
+        }).catch((e) => console.warn('updateMemberDisplayName error:', e));
+      }
 
       // 既存席の担当者名に旧名が設定されていた場合、新名へ同期
       const updatedSeats = seats.map((s) => ({
@@ -2384,8 +2476,8 @@ export default function SalonWorkScreen() {
     setInputNewInviteCode(newCode);
   };
 
-  // 招待コードで新規参加（ワークスペース追加）
-  const handleJoinByCode = () => {
+  // 招待コードで新規参加（Supabaseクラウド連携）
+  const handleJoinByCode = async () => {
     const code = sanitizeInviteCode(inputInviteCode);
     if (!code) {
       Alert.alert('入力エラー', '招待コードを入力してください');
@@ -2399,35 +2491,50 @@ export default function SalonWorkScreen() {
       return;
     }
 
-    // 既に保存されているサロン一覧に同じコードがあるかチェック
-    const existing = savedSalons.find((s) => s.inviteCode === code);
-    if (existing) {
-      setCurrentSalon(existing);
-      AsyncStorage.setItem('@salon_current_salon_id', existing.id).catch((e) => console.warn(e));
+    try {
+      // Supabaseクラウドへ招待コードで参加！
+      const currentUserName = (userName || 'アシスタント').trim();
+      const { salon, members } = await joinSalonByInviteCode({
+        inviteCode: code,
+        userName: currentUserName,
+      });
+
+      const uid = myUserId || (await getOrCreateUserId());
+      const newSalonItem = {
+        id: salon.id,
+        name: salon.name || (inputSalonName || '').trim() || `サロン (${code})`,
+        type: 'salon',
+        inviteCode: salon.invite_code,
+        isPro: !!salon.is_pro,
+        role: salon.owner_user_id === uid ? 'owner' : 'assistant',
+        description: `${members.length}名参加中 (クラウド同期中)`,
+      };
+
+      const updatedSalons = [newSalonItem, ...savedSalons.filter((s) => s.id !== salon.id && s.inviteCode !== salon.invite_code)];
+      setSavedSalons(updatedSalons);
+      setCurrentSalon(newSalonItem);
+      saveSalonsToStorage(updatedSalons, newSalonItem.id);
+
+      // クラウドのメンバー一覧を即時反映
+      const normalizedMembers = normalizeStaffMembers(members, uid);
+      setStaffMembers(normalizedMembers);
+      AsyncStorage.setItem('@salon_staff_members', JSON.stringify(normalizedMembers)).catch(() => {});
+      syncSeatsToWatch(seats, currentUserName, normalizedMembers, { immediate: true });
+
       setIsJoinCodeModalVisible(false);
       setInputInviteCode('');
       setInputSalonName('');
-      Alert.alert('サロン切り替え', `既に登録済みの「${existing.name}」に切り替えました！`);
-      return;
-    }
 
-    const newSalonItem = {
-      id: `salon-${Date.now()}`,
-      name: (inputSalonName || '').trim() || `サロン (${code})`,
-      type: 'salon',
-      inviteCode: code,
-      isPro: false,
-      role: 'assistant',
-      description: 'コード参加サロン (メンバー共有中)',
-    };
-    const updatedSalons = [newSalonItem, ...savedSalons];
-    setSavedSalons(updatedSalons);
-    setCurrentSalon(newSalonItem);
-    saveSalonsToStorage(updatedSalons, newSalonItem.id);
-    setIsJoinCodeModalVisible(false);
-    setInputInviteCode('');
-    setInputSalonName('');
-    Alert.alert('参加完了', `「${newSalonItem.name}」に接続しました！`);
+      if (Platform.OS !== 'web') {
+        Vibration.vibrate([0, 100, 50, 100]);
+      }
+      Alert.alert(
+        '🎉 サロン参加完了',
+        `「${newSalonItem.name}」に参加しました！\n\n現在 ${members.length} 名のスタッフとタイマーをリアルタイム共有できます。`
+      );
+    } catch (err) {
+      Alert.alert('参加エラー', err.message || 'サロンへの接続に失敗しました');
+    }
   };
 
   // 🧪 サロン共有モード（PRO）テスト用サロンの作成・切り替え
@@ -9070,11 +9177,26 @@ export default function SalonWorkScreen() {
                           }}
                         >
                           <View style={{ flex: 1, marginRight: 8 }}>
-                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                              <Ionicons name="person" size={14} color={theme.accent} style={{ marginRight: 6 }} />
+                            <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4 }}>
+                              <Ionicons
+                                name={member.role === 'owner' ? 'ribbon' : 'person'}
+                                size={14}
+                                color={member.role === 'owner' ? '#FF9500' : theme.accent}
+                                style={{ marginRight: 2 }}
+                              />
                               <Text style={{ fontSize: 15, fontWeight: '700', color: theme.textPrimary }}>
                                 {displayName}
                               </Text>
+                              {member.isMe ? (
+                                <View style={{ backgroundColor: theme.accent, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 }}>
+                                  <Text style={{ color: '#fff', fontSize: 9, fontWeight: 'bold' }}>あなた</Text>
+                                </View>
+                              ) : null}
+                              {member.role === 'owner' ? (
+                                <View style={{ backgroundColor: '#FF9500', paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 }}>
+                                  <Text style={{ color: '#fff', fontSize: 9, fontWeight: 'bold' }}>オーナー</Text>
+                                </View>
+                              ) : null}
                             </View>
                             <Text style={{ fontSize: 10, color: theme.textTertiary, marginTop: 2, marginLeft: 20 }}>
                               登録名: {origName} {hasCustom ? '(呼び名変更中)' : ''} | ID: #{memberId}
