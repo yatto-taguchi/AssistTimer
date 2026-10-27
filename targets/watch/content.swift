@@ -369,12 +369,14 @@ extension SeatTimerItem {
         } else {
             self.prepEndTime = nil
         }
+        self.hasAlertedHelpUnassigned = (dictionary["hasAlertedHelpUnassigned"] as? NSNumber)?.boolValue ?? (dictionary["hasAlertedHelpUnassigned"] as? Bool) ?? false
         
         // ★ 00:00席またはアコーディオン収納席はヘルプ・助手を完全クリア（固定残り防止）
         if !self.isRunning && (self.pausedRemainingSeconds <= 0 || self.isCollapsed) {
             self.shampooStaff = nil
             self.isRecruiting = false
             self.isNoHelpNeeded = false
+            self.hasAlertedHelpUnassigned = false
         }
     }
 
@@ -408,7 +410,8 @@ extension SeatTimerItem {
             "countdownConfigSeconds": countdownConfigSeconds,
             "isCountUpEnabled": isCountUpEnabled,
             "watchAlarmSoundEnabled": watchAlarmSoundEnabled,
-            "alarmSoundEnabled": alarmSoundEnabled
+            "alarmSoundEnabled": alarmSoundEnabled,
+            "hasAlertedHelpUnassigned": hasAlertedHelpUnassigned
         ]
         if let seatLabel = seatLabel { dict["seatLabel"] = seatLabel }
         if let shampooStaff = shampooStaff { dict["shampooStaff"] = shampooStaff }
@@ -1260,9 +1263,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                            (prev.targetEndTime > nowDate) == (parsed[i].targetEndTime > nowDate),
                            abs(prev.targetEndTime.timeIntervalSince(parsed[i].targetEndTime)) <= 2 {
                             parsed[i].targetEndTime = prev.targetEndTime
-                            if prev.hasAlertedHelpUnassigned {
-                                parsed[i].hasAlertedHelpUnassigned = true
-                            }
+                        }
+                        if prev.hasAlertedHelpUnassigned && parsed[i].remainingSeconds <= 180 {
+                            parsed[i].hasAlertedHelpUnassigned = true
                         }
                         if !prev.isCheckCompleted && !parsed[i].isCheckCompleted {
                             if prev.checkTotalSeconds == parsed[i].checkTotalSeconds,
@@ -1628,6 +1631,7 @@ struct ContentView: View {
     @State private var timeActionTargetId: String? = nil
     @State private var timeActionInitialBranchMode: Bool = false
     @State private var timeActionInitialSubCheckBranchMode: Bool = false
+    @State private var pendingOpenStandardSeatIdAfterAdd: String? = nil
     
     // チェック操作シート対象席
     @State private var checkActionTargetId: String? = nil
@@ -1644,6 +1648,8 @@ struct ContentView: View {
     // 共有通知バナー（トースト表示）
     @State private var notificationBannerText: String? = nil
     @State private var notificationBannerColor: Color = Color(hex: "#0A84FF")
+    @State private var notificationDismissWorkItem: DispatchWorkItem? = nil
+    @State private var alertedUnassignedHelpKeys: Set<String> = []
     
     // 客席サムネイル・バードビュー（一覧）表示フラグ（起動時およびモジュラー文字盤タップ時は一覧をデフォルト表示）
     @State private var showingThumbnailMap = true
@@ -1717,19 +1723,27 @@ struct ContentView: View {
     
     // 通知バナー表示ヘルパー
     private func showNotification(text: String, color: Color = Color(hex: "#0A84FF")) {
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
-            notificationBannerText = text
+        notificationDismissWorkItem?.cancel()
+        let isSameBannerShowing = (notificationBannerText == text)
+        if !isSameBannerShowing {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                notificationBannerText = text
+                notificationBannerColor = color
+            }
+            playHaptic(.notification)
+        } else {
             notificationBannerColor = color
         }
-        playHaptic(.notification)
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+        let workItem = DispatchWorkItem {
             withAnimation(.easeOut(duration: 0.3)) {
                 if notificationBannerText == text {
                     notificationBannerText = nil
                 }
             }
         }
+        notificationDismissWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: workItem)
     }
     
     // シート用のバインディング
@@ -1880,6 +1894,14 @@ struct ContentView: View {
                     triggerScroll(to: targetId)
                 }
                 mapCrownFocusTrigger += 1
+                if let pendingSeatId = pendingOpenStandardSeatIdAfterAdd {
+                    pendingOpenStandardSeatIdAfterAdd = nil
+                    timeActionInitialBranchMode = false
+                    timeActionInitialSubCheckBranchMode = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                        timeActionTargetId = pendingSeatId
+                    }
+                }
             }) {
                 addSeatSheetView
             }
@@ -3139,7 +3161,9 @@ struct ContentView: View {
                     timeActionInitialBranchMode = false
                     timeActionInitialSubCheckBranchMode = true
                 } else {
-                    timeActionInitialBranchMode = !selectedSeat.isZero
+                    // ★ 超過中（isOvertime）のみ直接「タイマーを止める」分岐画面（2番目の画面）を開き、
+                    //   稼働中（非超過）の共有タイマーは1番目の標準画面（.standard: タイマー数字＋ヘルプ指定＋チェック担当指定）を開く
+                    timeActionInitialBranchMode = selectedSeat.isOvertime
                     timeActionInitialSubCheckBranchMode = false
                 }
                 timeActionTargetId = selectedSeat.id
@@ -3199,6 +3223,7 @@ struct ContentView: View {
             suggestedSeatNumber: (timers.map { $0.seatNumber }.max() ?? 0) + 1,
             onAdd: { newSeat in
                 triggerScroll(to: newSeat.id)
+                pendingOpenStandardSeatIdAfterAdd = newSeat.id
                 withAnimation {
                     timers.append(newSeat)
                 }
@@ -3953,6 +3978,9 @@ struct ContentView: View {
                         }
                         timers[idx].isRecruiting = true
                         timers[idx].isNoHelpNeeded = false
+                        if timers[idx].remainingSeconds <= 180 {
+                            timers[idx].hasAlertedHelpUnassigned = true
+                        }
                     }
                     sessionManager.timers = timers
                     sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": process])
@@ -3988,6 +4016,9 @@ struct ContentView: View {
                         timers[idx].shampooStaff = nil
                         timers[idx].isRecruiting = false
                         timers[idx].isNoHelpNeeded = false
+                        if timers[idx].remainingSeconds <= 180 {
+                            timers[idx].hasAlertedHelpUnassigned = true
+                        }
                     }
                     sessionManager.timers = timers
                     sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
@@ -4002,15 +4033,29 @@ struct ContentView: View {
     }
     
     private func checkUnassignedHelpAlerts() {
+        var didMutate = false
         for idx in timers.indices {
             let rem = timers[idx].remainingSeconds
-            if timers[idx].isRunning && timers[idx].totalSeconds > 180 && rem <= 180 && rem > 0 && timers[idx].shampooStaff == nil && !timers[idx].isNoHelpNeeded && !timers[idx].hasAlertedHelpUnassigned {
-                timers[idx].hasAlertedHelpUnassigned = true
-                showNotification(
-                    text: "🚨 【\(timers[idx].displaySeatName)】ヘルプ未定！全員へ通知しました",
-                    color: Color(hex: "#FF453A")
-                )
+            let seatId = timers[idx].id
+            if !timers[idx].isRunning || rem > 180 {
+                alertedUnassignedHelpKeys = alertedUnassignedHelpKeys.filter { !$0.hasPrefix("\(seatId)|") }
+                continue
             }
+            if timers[idx].isRunning && timers[idx].totalSeconds > 180 && rem <= 180 && rem > 0 && timers[idx].shampooStaff == nil && !timers[idx].isNoHelpNeeded && !timers[idx].isRecruiting && !timers[idx].hasAlertedHelpUnassigned {
+                timers[idx].hasAlertedHelpUnassigned = true
+                didMutate = true
+                let alertKey = "\(seatId)|\(timers[idx].totalSeconds)"
+                if !alertedUnassignedHelpKeys.contains(alertKey) {
+                    alertedUnassignedHelpKeys.insert(alertKey)
+                    showNotification(
+                        text: "🚨 【\(timers[idx].displaySeatName)】ヘルプ未定！全員へ通知しました",
+                        color: Color(hex: "#FF453A")
+                    )
+                }
+            }
+        }
+        if didMutate {
+            sessionManager.timers = timers
         }
     }
     
@@ -5955,15 +6000,32 @@ struct MainTimerActionSheet: View {
                 }
                 .padding(.horizontal, 4)
                 
-                // 現在のタイム表示
-                VStack(spacing: 2) {
-                    if isOvertime && accumulatedDelta <= 0 {
-                        Text("超過タイム")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(Color(hex: "#FF453A"))
+                // 現在のタイム表示（どのタイマーか一目でわかるよう「メインタイマー」バッジを大きく表示）
+                VStack(spacing: 3) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "stopwatch.fill")
+                            .font(.system(size: 12, weight: .heavy))
+                            .foregroundColor(isOvertime && accumulatedDelta <= 0 ? Color(hex: "#FF453A") : Color(hex: "#30D158"))
+                        Text("メインタイマー")
+                            .font(.system(size: WatchLayout.font(15), weight: .black, design: .rounded))
+                            .foregroundColor(.white)
                             .lineLimit(1)
-                        Text("+\(formatSeconds(currentSeconds))")
-                            .font(.system(size: WatchLayout.font(26), weight: .black, design: .rounded))
+                            .minimumScaleFactor(0.75)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule()
+                            .fill(isOvertime && accumulatedDelta <= 0 ? Color(hex: "#FF453A").opacity(0.28) : Color(hex: "#30D158").opacity(0.22))
+                    )
+                    .overlay(
+                        Capsule()
+                            .stroke(isOvertime && accumulatedDelta <= 0 ? Color(hex: "#FF453A").opacity(0.75) : Color(hex: "#30D158").opacity(0.6), lineWidth: 1)
+                    )
+
+                    if isOvertime && accumulatedDelta <= 0 {
+                        Text("超過 +\(formatSeconds(currentSeconds))")
+                            .font(.system(size: WatchLayout.font(23), weight: .black, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(Color(hex: "#FF453A"))
                             .lineLimit(1)
@@ -6562,6 +6624,8 @@ struct TimeActionSheet: View {
     @State private var checkAccumulatedDelta: Int = 0
     // チェック操作画面からヘルプ変更を開いたかどうかの戻り先フラグ
     @State private var cameFromSubCheckBranch: Bool = false
+    // 標準画面（.standard）からチェック追加画面を開いたかどうかの戻り先フラグ
+    @State private var cameFromStandardAddCheck: Bool = false
     
     // シート内サブ画面モード
     @State private var subMode: SubMode
@@ -6774,6 +6838,50 @@ struct TimeActionSheet: View {
         }
     }
     
+    // MARK: - ★ タイム入力確定時に liveItem を即座に反映し、そのまま標準画面（.standard: ヘルプ指定＆チェック担当指定）へ遷移する共通ヘルパー
+    private func applyReinputAndShowStandard(totalSec: Int) {
+        let sec = max(10, totalSec)
+        let chkSec = (checkMinutes > 0 && (checkMinutes * 60) < sec) ? checkMinutes * 60 : nil
+        let startBase = Date()
+        now = startBase
+        accumulatedDelta = 0
+        checkAccumulatedDelta = 0
+        
+        liveItem.totalSeconds = sec
+        liveItem.targetEndTime = startBase.addingTimeInterval(Double(sec))
+        liveItem.pausedRemainingSeconds = sec
+        liveItem.isRunning = true
+        liveItem.status = .normal
+        liveItem.isCollapsed = false
+        liveItem.helpProcess = ""
+        liveItem.shampooStaff = nil
+        liveItem.isRecruiting = false
+        liveItem.isNoHelpNeeded = false
+        liveItem.hasAlertedHelpUnassigned = false
+        liveItem.watchAlarmSoundEnabled = watchSoundEnabled
+        liveItem.alarmSoundEnabled = phoneSoundEnabled
+        
+        if let chk = chkSec, chk > 0 {
+            liveItem.checkTotalSeconds = chk
+            liveItem.checkTargetEndTime = startBase.addingTimeInterval(Double(chk))
+            liveItem.checkStaff = nil
+            liveItem.checkProcess = "チェック"
+            liveItem.isCheckCompleted = false
+            lateCheckMinutes = chk / 60
+            lateCheckProcess = "チェック"
+            lateCheckStaff = ""
+        } else {
+            liveItem.clearCheck()
+        }
+        
+        onUpdateSoundSettings?(watchSoundEnabled, phoneSoundEnabled)
+        onReinputTime(sec, chkSec)
+        
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+            subMode = .standard
+        }
+    }
+
     // MARK: - ★ 任意タイム設定 ＆ クイックパネル統合画面（ダイレクト表示 ＆ スクロール対応）
     @ViewBuilder
     private var unifiedReinputScrollView: some View {
@@ -6782,7 +6890,7 @@ struct TimeActionSheet: View {
                 // ① ナビバー（戻る ＆ 任意タイム設定）
                 HStack {
                     Button(action: {
-                        if initialReinputMode {
+                        if initialReinputMode && liveItem.isZero {
                             dismiss()
                         } else {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
@@ -6805,7 +6913,7 @@ struct TimeActionSheet: View {
                     
                     Spacer(minLength: 4)
                     
-                    Text("任意タイム設定")
+                    Text("\(liveItem.displaySeatName) タイム設定")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
                         .lineLimit(1)
@@ -6943,10 +7051,7 @@ struct TimeActionSheet: View {
                         let sec = Int(crownSeconds)
                         if sec > 0 {
                             WKInterfaceDevice.current().play(.click)
-                            let chkSec = (checkMinutes > 0 && (checkMinutes * 60) < sec) ? checkMinutes * 60 : nil
-                            onUpdateSoundSettings?(watchSoundEnabled, phoneSoundEnabled)
-                            onReinputTime(sec, chkSec)
-                            dismiss()
+                            applyReinputAndShowStandard(totalSec: sec)
                         }
                     }) {
                         HStack(spacing: 4) {
@@ -7009,12 +7114,7 @@ struct TimeActionSheet: View {
                     ForEach(reinputMinutes, id: \.self) { min in
                         Button(action: {
                             WKInterfaceDevice.current().play(.click)
-                            let totalSec = min * 60
-                            // ★ 安全ガード: チェック時間は全体タイムより短い場合のみ有効
-                            let chkSec = (checkMinutes > 0 && (checkMinutes * 60) < totalSec) ? checkMinutes * 60 : nil
-                            onUpdateSoundSettings?(watchSoundEnabled, phoneSoundEnabled)
-                            onReinputTime(totalSec, chkSec)
-                            dismiss()
+                            applyReinputAndShowStandard(totalSec: min * 60)
                         }) {
                             Text("\(min)分")
                                 .font(.system(size: 13, weight: .heavy))
@@ -7053,6 +7153,31 @@ struct TimeActionSheet: View {
                 standardTopTimerSection
                 standardHelpSection
                 standardSubCheckSection
+                
+                Button(action: {
+                    WKInterfaceDevice.current().play(.click)
+                    dismiss()
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 12, weight: .bold))
+                        Text("完了（一覧へ戻る）")
+                            .font(.system(size: 11.5, weight: .heavy))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.14))
+                    .foregroundColor(.white)
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.white.opacity(0.22), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
             }
             .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
@@ -7142,7 +7267,7 @@ struct TimeActionSheet: View {
                 HStack {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
-                        if initialTimerBranchMode {
+                        if initialTimerBranchMode && isOvertime {
                             dismiss()
                         } else {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
@@ -7171,23 +7296,46 @@ struct TimeActionSheet: View {
                 }
                 .padding(.horizontal, 4)
                 
-                if isOvertime {
-                    Text("超過 +\(formatSeconds(overtimeSeconds))")
-                        .font(.system(size: WatchLayout.font(22), weight: .black, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundColor(Color(hex: "#FF453A"))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .padding(.vertical, 2)
-                } else {
-                    Text(formatSeconds(currentDisplaySeconds))
-                        .font(.system(size: WatchLayout.font(26), weight: .black, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundColor(Color(hex: "#64D2FF"))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .padding(.vertical, 2)
+                // 現在のタイム表示（どこの席のタイマーか一目でわかるよう「1番席」等の名前バッジを大きく表示）
+                VStack(spacing: 3) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "timer")
+                            .font(.system(size: 12, weight: .heavy))
+                            .foregroundColor(isOvertime ? Color(hex: "#FF453A") : Color(hex: "#64D2FF"))
+                        Text(liveItem.displaySeatName)
+                            .font(.system(size: WatchLayout.font(16), weight: .black, design: .rounded))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule()
+                            .fill(isOvertime ? Color(hex: "#FF453A").opacity(0.28) : Color(hex: "#0A84FF").opacity(0.24))
+                    )
+                    .overlay(
+                        Capsule()
+                            .stroke(isOvertime ? Color(hex: "#FF453A").opacity(0.75) : Color(hex: "#64D2FF").opacity(0.65), lineWidth: 1)
+                    )
+
+                    if isOvertime {
+                        Text("超過 +\(formatSeconds(overtimeSeconds))")
+                            .font(.system(size: WatchLayout.font(23), weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(Color(hex: "#FF453A"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                    } else {
+                        Text(formatSeconds(currentDisplaySeconds))
+                            .font(.system(size: WatchLayout.font(26), weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(Color(hex: "#64D2FF"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                    }
                 }
+                .padding(.vertical, 2)
                 
                 // ★ 超過中は「〇〇に入る」「タイマーを止める」を最上部（超過タイム表示の直下）に配置してスクロール無しで即座に押せるようにする
                 if isOvertime && accumulatedDelta <= 0 {
@@ -7211,6 +7359,7 @@ struct TimeActionSheet: View {
                 // ★ ユーザー指定: 止める画面の一番下に「＋ チェックタイマーを追加」ボタンを配置（分数・ヘルプ担当者も選択可能）
                 Button(action: {
                     WKInterfaceDevice.current().play(.click)
+                    cameFromStandardAddCheck = false
                     let existingCheckMin = (liveItem.checkTotalSeconds ?? 0) / 60
                     lateCheckMinutes = existingCheckMin > 0 ? existingCheckMin : 5
                     lateCheckProcess = liveItem.displayCheckProcess
@@ -7423,7 +7572,7 @@ struct TimeActionSheet: View {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            subMode = .timerActionBranch
+                            subMode = cameFromStandardAddCheck ? .standard : .timerActionBranch
                         }
                     }) {
                         HStack(spacing: 2) {
@@ -7438,7 +7587,7 @@ struct TimeActionSheet: View {
                     }
                     .buttonStyle(.plain)
                     Spacer(minLength: 4)
-                    Text("チェックタイマー追加")
+                    Text("\(liveItem.displaySeatName) チェック追加")
                         .font(.system(size: 11.5, weight: .heavy))
                         .foregroundColor(.white)
                         .lineLimit(1)
@@ -7641,9 +7790,23 @@ struct TimeActionSheet: View {
                 Button(action: {
                     WKInterfaceDevice.current().play(.success)
                     let sec = max(60, lateCheckMinutes * 60)
+                    let resolvedProc = lateCheckProcess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "チェック" : lateCheckProcess
                     let staffVal: String? = lateCheckStaff.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : lateCheckStaff
-                    onAddLateCheck?(sec, lateCheckProcess, staffVal)
-                    dismiss()
+                    let checkEnd = Date().addingTimeInterval(Double(sec))
+                    liveItem.checkTotalSeconds = sec
+                    liveItem.checkTargetEndTime = checkEnd
+                    liveItem.checkProcess = resolvedProc
+                    liveItem.checkStaff = staffVal
+                    liveItem.isCheckCompleted = false
+                    checkAccumulatedDelta = 0
+                    onAddLateCheck?(sec, resolvedProc, staffVal)
+                    if cameFromStandardAddCheck {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            subMode = .standard
+                        }
+                    } else {
+                        dismiss()
+                    }
                 }) {
                     HStack(spacing: 5) {
                         Image(systemName: "checkmark.circle.fill")
@@ -7774,7 +7937,7 @@ struct TimeActionSheet: View {
                     }
                     .buttonStyle(.plain)
                     Spacer(minLength: 4)
-                    Text("チェック操作")
+                    Text("\(liveItem.displaySeatName) チェック")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundColor(.white)
                         .lineLimit(1)
@@ -7783,23 +7946,46 @@ struct TimeActionSheet: View {
                 }
                 .padding(.horizontal, 4)
                 
-                if isCheckOvertime {
-                    Text("超過 +\(formatSeconds(checkOvertimeSeconds))")
-                        .font(.system(size: WatchLayout.font(22), weight: .black, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundColor(Color(hex: "#FF453A"))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .padding(.vertical, 2)
-                } else if let checkRem = currentCheckDisplaySeconds {
-                    Text(formatSeconds(checkRem))
-                        .font(.system(size: WatchLayout.font(26), weight: .black, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundColor(Color(hex: "#30D158"))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .padding(.vertical, 2)
+                // 現在のチェックタイム表示（どこの席のチェックタイマーか一目でわかるよう席名＋チェックバッジを大きく表示）
+                VStack(spacing: 3) {
+                    HStack(spacing: 4) {
+                        Image(systemName: liveItem.checkProcessIconName)
+                            .font(.system(size: 11.5, weight: .heavy))
+                            .foregroundColor(isCheckOvertime ? Color(hex: "#FF453A") : Color(hex: "#30D158"))
+                        Text("\(liveItem.displaySeatName)（\(liveItem.displayCheckProcess)）")
+                            .font(.system(size: WatchLayout.font(15), weight: .black, design: .rounded))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule()
+                            .fill(isCheckOvertime ? Color(hex: "#FF453A").opacity(0.28) : Color(hex: "#30D158").opacity(0.22))
+                    )
+                    .overlay(
+                        Capsule()
+                            .stroke(isCheckOvertime ? Color(hex: "#FF453A").opacity(0.75) : Color(hex: "#30D158").opacity(0.6), lineWidth: 1)
+                    )
+
+                    if isCheckOvertime {
+                        Text("超過 +\(formatSeconds(checkOvertimeSeconds))")
+                            .font(.system(size: WatchLayout.font(23), weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(Color(hex: "#FF453A"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                    } else if let checkRem = currentCheckDisplaySeconds {
+                        Text(formatSeconds(checkRem))
+                            .font(.system(size: WatchLayout.font(26), weight: .black, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(Color(hex: "#30D158"))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                    }
                 }
+                .padding(.vertical, 2)
                 
                 // ★ チェック超過中は「〇〇に入る」「タイマーを止める」を最上部（超過タイム表示の直下）に配置してスクロール無しで即座に押せるようにする
                 if isCheckOvertime && checkAccumulatedDelta <= 0 {
@@ -8055,6 +8241,43 @@ struct TimeActionSheet: View {
                 RoundedRectangle(cornerRadius: 9)
                     .stroke(Color(hex: "#30D158").opacity(0.35), lineWidth: 1)
             )
+        } else if !isOvertime && liveItem.totalSeconds > 0 {
+            Button(action: {
+                WKInterfaceDevice.current().play(.click)
+                cameFromStandardAddCheck = true
+                let existingCheckMin = (liveItem.checkTotalSeconds ?? 0) / 60
+                lateCheckMinutes = existingCheckMin > 0 ? existingCheckMin : 5
+                lateCheckProcess = liveItem.displayCheckProcess
+                lateCheckStaff = liveItem.checkStaff ?? ""
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    subMode = .addLateCheck
+                }
+            }) {
+                HStack(spacing: 5) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(Color(hex: "#30D158"))
+                    Text("＋ チェックタイマー・担当を追加")
+                        .font(.system(size: 10.5, weight: .heavy))
+                        .foregroundColor(Color(hex: "#30D158"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundColor(Color(hex: "#8E8E93"))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
+                .padding(.vertical, 7)
+                .background(Color(hex: "#30D158").opacity(0.12))
+                .cornerRadius(8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color(hex: "#30D158").opacity(0.45), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
         }
     }
     
