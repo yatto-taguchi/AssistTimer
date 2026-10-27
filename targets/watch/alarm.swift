@@ -532,7 +532,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             if let ev = matchedEv {
                 removeNotifications(forEventKey: ev.key)
             }
-            // sendToPhone: false, completeCheckIfNeeded: false にすることで、00:00へリセットせず超過カウントアップを維持！
+            // sendToPhone: false, completeCheckIfNeeded: false にすることで、00:00へリセットせず超過カウントアップを維持したまま「タイマーを止める」画面へ移行
             acknowledgeRinging(sendToPhone: false, completeCheckIfNeeded: false, explicitTarget: matchedEv)
             stopForegroundHaptics()
             invalidateCurrentSession()
@@ -547,20 +547,12 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
 
         // ★ ケースB: 文字盤（.background）でシステムアラームの「開く」を押した際、watchOSの順序で didInvalidateWith が
-        //   appBecameActive より数十〜数百ミリ秒先に呼ばれて一度 00:00 リセットが走っていた場合:
-        //   直前スナップショットから超過カウントアップ状態を即座に復元し、アクション分岐画面へ移行する！
+        //   appBecameActive より数十〜数百ミリ秒先に呼ばれていた場合も、直前スナップショットからアクション分岐画面へ移行する！
         if let snap = lastSystemDismissedSnapshot,
-           now.timeIntervalSince(snap.dismissedAt) < 1.2 {
+           now.timeIntervalSince(snap.dismissedAt) < 1.5 {
             lastSystemDismissedSnapshot = nil
             pendingSystemDismissPhoneSyncWorkItem?.cancel()
             pendingSystemDismissPhoneSyncWorkItem = nil
-            if snap.event.seatId == "main-timer", let preMain = snap.preMainTimer {
-                WatchSessionManager.shared.restoreMainTimerForOpenedAlarm(preMain)
-                WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: preMain, userName: WatchSessionManager.shared.currentUserName)
-            } else if let preSeat = snap.preSeatTimer {
-                WatchSessionManager.shared.restoreSeatTimerForOpenedAlarm(preSeat)
-                WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: WatchSessionManager.shared.mainTimer, userName: WatchSessionManager.shared.currentUserName)
-            }
             pendingOpenedAlarmEvent = snap.event
         } else {
             lastSystemDismissedSnapshot = nil
@@ -888,7 +880,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 WatchSessionManager.shared.clearWatchStartedMainTimer()
                 events.removeAll { $0.seatId == "main-timer" }
                 persistEvents()
-                WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: m, userName: WatchSessionManager.shared.currentUserName)
+                WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: m, userName: WatchSessionManager.shared.currentUserName, forceReload: true)
                 if !deferPhoneSend {
                     WatchSessionManager.shared.sendMainTimerAction(action: "MAIN_TIMER_RESET", stoppedEndTime: stoppedEnd)
                 }
@@ -962,8 +954,10 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                         m.isNoHelpNeeded = false
                         m.targetEndTime = Date().addingTimeInterval(TimeInterval(m.totalSeconds))
                         WatchSessionManager.shared.mainTimer = m
-                        WatchSessionManager.shared.clearWatchStartedMainTimer()
-                        WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: m, userName: WatchSessionManager.shared.currentUserName)
+                        WatchSessionManager.shared.recordMainTimerLocalAction("RESET", endTime: stoppedEnd)
+                        WidgetSync.save(timers: WatchSessionManager.shared.timers, mainTimer: m, userName: WatchSessionManager.shared.currentUserName, forceReload: true)
+                    } else {
+                        WatchSessionManager.shared.recordMainTimerLocalAction("RESET", endTime: stoppedEnd)
                     }
                     events.removeAll { $0.seatId == "main-timer" || $0.seatId == id }
                     persistEvents()
@@ -1523,7 +1517,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             //   1. 左側の「開く」を押してフォアグラウンド復帰した場合:
             //      アラームの振動のみを止め、超過カウントアップ（+00:xx）を維持したままアクション分岐画面（「タイマーを止める」等）へ移行する。
             //   2. 右側の「終了」を押した場合（またはデジタルクラウン等で閉じた場合）:
-            //      アラームを止めると同時に、タイマー表示も即座に 00:00 に切り替え、iPhone・文字盤コンプリケーションへも即時反映する！
+            //      アラームの振動・音・通知のみを消火し、超過カウントアップ（+00:xx）は継続させる！
+            //      その後、超過タイムをタップした時に「タイマーを止める」ボタンが表示され、明示的に止めると 00:00 に戻る。
             if !wasInvalidating && reason != .sessionInProgress && (wasStarted || (endedKey != nil && reason == .none)) {
                 self.allowBackgroundHandoffScheduleUntil = Date().addingTimeInterval(2.5)
                 self.suppressSmartAlarmUntil = Date().addingTimeInterval(3.0)
@@ -1579,42 +1574,17 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                         preMainTimer: preMain,
                         preSeatTimer: preSeat
                     )
-                    // Watch画面および文字盤は即座に 00:00 に切り替え、「開く」ではなく「終了」だった場合は 0.2秒後に iPhone へも停止を送信
-                    self.acknowledgeRinging(sendToPhone: true, completeCheckIfNeeded: true, explicitTarget: matchedEv, deferPhoneSend: true)
-                    self.stopForegroundHaptics()
-                    self.notificationSignature = "__FORCE__"
-                    self.refresh()
-                    self.scheduleRetryAfterInvalidation(delay: 0.25)
-                    let work = DispatchWorkItem { [weak self] in
-                        guard let self = self, let snap = self.lastSystemDismissedSnapshot else { return }
-                        self.lastSystemDismissedSnapshot = nil
-                        self.pendingSystemDismissPhoneSyncWorkItem = nil
-                        self.sendDeferredStopToPhone(for: snap)
-                    }
-                    self.pendingSystemDismissPhoneSyncWorkItem = work
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
-                    ProcessInfo.processInfo.performExpiringActivity(withReason: "AssistTimerSystemAlarmDismiss") { expired in
-                        if !expired {
-                            Thread.sleep(forTimeInterval: 0.4)
-                        }
-                    }
-                    return
                 } else {
                     self.lastSystemDismissedSnapshot = nil
                 }
 
-                // ★ 「終了」押下時: バックグラウンドでもOSに中断されないよう performExpiringActivity で保護し、
-                //   対象タイマー（メイン・客席・チェック）を即座に 00:00 へリセットして文字盤＆iPhoneへ同期する！
-                self.acknowledgeRinging(sendToPhone: true, completeCheckIfNeeded: true, explicitTarget: matchedEv)
+                // ★ 「終了」押下時: アラーム振動・音・通知のみを消火し、メインタイマー・客席タイマー・中間チェックタイマーすべて超過カウントアップ（+00:xx）を継続させる！
+                //   （チェックタイマーのイベントも acknowledged に記録されるため、残りの本タイマーの第2段階スマートアラームへ自動で引き継がれる）
+                self.acknowledgeRinging(sendToPhone: false, completeCheckIfNeeded: false, explicitTarget: matchedEv)
                 self.stopForegroundHaptics()
                 self.notificationSignature = "__FORCE__"
                 self.refresh()
                 self.scheduleRetryAfterInvalidation(delay: 0.25)
-                ProcessInfo.processInfo.performExpiringActivity(withReason: "AssistTimerSystemAlarmDismiss") { expired in
-                    if !expired {
-                        Thread.sleep(forTimeInterval: 0.35)
-                    }
-                }
                 return
             }
             // ★ 前セッション破棄完了の瞬間に、残っている次の予定（チェック後の本タイマーなど）を即座に再スケジュール！

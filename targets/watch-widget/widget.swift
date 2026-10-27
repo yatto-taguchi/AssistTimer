@@ -271,7 +271,7 @@ struct ComplicationProvider: TimelineProvider {
                 if tOverMax > now { entryDates.insert(tOverMax) }
             }
             
-            // ★ チェックタイマーのエントリー（終了時刻 ＆ 残り1分前で赤切り替え ＆ 終了1分後で自動消去切り替え）
+            // ★ チェックタイマーのエントリー（終了時刻 ＆ 残り1分前で赤切り替え）
             if let checkEnd = seat.checkEndDate, !seat.isCheckCompleted {
                 if checkEnd > now {
                     entryDates.insert(checkEnd)
@@ -279,11 +279,6 @@ struct ComplicationProvider: TimelineProvider {
                     if checkRedTime > now {
                         entryDates.insert(checkRedTime)
                     }
-                }
-                // チェック終了から60秒後にチェック行を非表示にして特大メインタイマーへ自動復帰するエントリー
-                let checkAutoDismissTime = checkEnd.addingTimeInterval(60)
-                if checkAutoDismissTime > now {
-                    entryDates.insert(checkAutoDismissTime)
                 }
             }
         }
@@ -360,8 +355,8 @@ struct ComplicationView: View {
             guard let seat = activeSeat, seat.isRunning, !seat.isCheckCompleted, let checkEnd = seat.checkEndDate else {
                 return false
             }
-            // チェック終了時刻から60秒以上経過した後は自動的に非表示化し、メインタイマーの特大表示に戻す
-            return checkEnd.addingTimeInterval(60) > entry.date
+            // チェックタイマーも「タイマーを止める」が押されるまで超過カウントアップ表示を継続（最大3時間保護）
+            return checkEnd.addingTimeInterval(10800) > entry.date
         }()
         
         return VStack(alignment: .leading, spacing: hasActiveCheck ? 1 : 3) {
@@ -547,6 +542,13 @@ struct ComplicationView: View {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundColor(checkBarColor)
+                if isCheckOver {
+                    Text("超過")
+                        .font(.system(size: 8.5, weight: .heavy))
+                        .foregroundColor(checkBarColor)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
                 Text(checkEnd, style: .timer)
                     .font(.system(size: 10, weight: .bold, design: .rounded))
                     .monospacedDigit()

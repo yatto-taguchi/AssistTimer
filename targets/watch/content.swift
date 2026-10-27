@@ -184,6 +184,19 @@ struct SeatTimerItem: Identifiable, Equatable {
         return diff > 0 ? Int(ceil(diff)) : 0
     }
     
+    // チェックタイマー超過秒数（超過中は正の秒数、未超過なら0）
+    var checkOvertimeSeconds: Int {
+        guard isRunning, !isCheckCompleted, let checkEnd = checkTargetEndTime else { return 0 }
+        let diff = checkEnd.timeIntervalSince(Date())
+        return diff <= 0 ? abs(Int(diff)) : 0
+    }
+    
+    // チェックタイマー超過判定
+    var isCheckOvertime: Bool {
+        guard isRunning, !isCheckCompleted, let checkEnd = checkTargetEndTime else { return false }
+        return checkEnd.timeIntervalSince(Date()) <= 0
+    }
+    
     // タイム超過判定（残り0秒未満、または稼働中で0秒以下）
     var isOvertime: Bool {
         return remainingSeconds < 0 || (isRunning && remainingSeconds <= 0)
@@ -858,7 +871,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             timers[idx].isNoHelpNeeded = false
             let snapshot = timers
             WatchAlarmCoordinator.shared.update(timers: snapshot, mainTimer: self.mainTimer, soundOn: self.alarmSoundEnabled, currentUserName: self.currentUserName)
-            WidgetSync.save(timers: snapshot, mainTimer: self.mainTimer, userName: self.currentUserName)
+            WidgetSync.save(timers: snapshot, mainTimer: self.mainTimer, userName: self.currentUserName, forceReload: true)
         } else if let fallbackEndTime = fallbackEndTime {
             markLocalStop(seatId: seatId, endTime: fallbackEndTime)
         }
@@ -880,7 +893,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 soundOn: self.alarmSoundEnabled,
                 currentUserName: self.currentUserName
             )
-            WidgetSync.save(timers: snapshot, mainTimer: self.mainTimer, userName: self.currentUserName)
+            WidgetSync.save(timers: snapshot, mainTimer: self.mainTimer, userName: self.currentUserName, forceReload: true)
         } else {
             markLocalCheckClear(seatId: seatId, checkEndTime: fallbackCheckEndTime)
         }
@@ -999,30 +1012,40 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
             }
             let msgType = (data["type"] as? String) ?? ""
+            let isExplicitStop = (rawMain["explicitStop"] as? NSNumber)?.boolValue ?? (rawMain["explicitStop"] as? Bool) ?? false
+            let isExplicitReset = (rawMain["isExplicitReset"] as? NSNumber)?.boolValue ?? (rawMain["isExplicitReset"] as? Bool) ?? false
+            let isAutoFinished = (rawMain["isAutoFinished"] as? Bool) == true || (rawMain["isAutoFinished"] as? NSNumber)?.boolValue == true
+            let incomingLastResetEndMs = (rawMain["lastResetTargetEndTimestamp"] as? NSNumber)?.doubleValue ?? (rawMain["lastResetTargetEndTimestamp"] as? Double) ?? 0
+            let incomingLastResetEndSec = incomingLastResetEndMs > 0 ? incomingLastResetEndMs / 1000.0 : 0
+            let incomingLastResetAtMs = (rawMain["lastResetAt"] as? NSNumber)?.doubleValue ?? (rawMain["lastResetAt"] as? Double) ?? 0
+            let incomingLastResetAtSec = incomingLastResetAtMs > 0 ? incomingLastResetAtMs / 1000.0 : 0
+            let curEndSec = self.mainTimer?.targetEndTime.timeIntervalSince1970 ?? 0
+            let curStartSec = curEndSec > 0 ? (curEndSec - Double(self.mainTimer?.totalSeconds ?? 600)) : 0
+            let isCurrentTimerStoppedOnPhone = !isStaleSnapshot && !isAutoFinished && !parsedMain.isRunning && !parsedMain.isPreCountingDown && (
+                (incomingLastResetEndSec > 0 && curEndSec > 0 && abs(incomingLastResetEndSec - curEndSec) <= 15) ||
+                (incomingLastResetAtSec > 0 && curStartSec > 0 && incomingLastResetAtSec > curStartSec + 1.0)
+            )
             // ★ iPhone側が同一メインタイマーの稼働（isRunning または isPreCountingDown）に追いついたか、
-            //   またはリアルタイムの SYNC_MAIN_TIMER で明示的にリセット・終了されたら、Watch単独保護フラグを解除して以降の双方向停止を有効化
+            //   またはiPhone側で明示的にリセット・終了されたら、Watch単独保護フラグを解除して以降の双方向停止を有効化
             if let watchEnd = self.watchStartedMainTimerEndTime {
                 if parsedMain.isRunning || parsedMain.isPreCountingDown {
                     if abs(parsedMain.targetEndTime.timeIntervalSince(watchEnd)) <= 20 || parsedMain.totalSeconds == self.mainTimer?.totalSeconds {
                         self.watchStartedMainTimerEndTime = parsedMain.targetEndTime
                     }
-                } else if !isStaleSnapshot && msgType == "SYNC_MAIN_TIMER" {
-                    // Watchで開始後、十分な時間（8秒以上）経過した後または終了予定時刻到達後にiPhoneから直接SYNC_MAIN_TIMERの停止が届いた場合は正式な停止・終了として受け入れる
-                    if watchEnd <= nowDate || nowDate.timeIntervalSince(self.lastMainTimerLocalActionTime) >= 8.0 {
-                        self.watchStartedMainTimerEndTime = nil
-                    }
+                } else if !isStaleSnapshot && (isExplicitStop || isExplicitReset || isCurrentTimerStoppedOnPhone) {
+                    // iPhone側で明示的にリセット・停止された場合のみ Watch単独保護フラグを解除する（REQUEST_SYNCの未稼働返信では超過タイマーを消さない）
+                    self.watchStartedMainTimerEndTime = nil
                 }
             }
             let isWatchOwnedActive: Bool = {
                 guard let watchEnd = self.watchStartedMainTimerEndTime,
-                      watchEnd > nowDate,
+                      watchEnd > nowDate.addingTimeInterval(-10800),
                       let cur = self.mainTimer,
                       (cur.isRunning || cur.isPreCountingDown) else { return false }
-                let isExplicitStop = (rawMain["explicitStop"] as? NSNumber)?.boolValue ?? (rawMain["explicitStop"] as? Bool) ?? false
-                if isExplicitStop && !isStaleSnapshot && msgType == "SYNC_MAIN_TIMER" { return false }
+                if (isExplicitStop || isExplicitReset || isCurrentTimerStoppedOnPhone) && !isStaleSnapshot { return false }
                 let isUnstartedInitial = !parsedMain.isRunning && !parsedMain.isPreCountingDown && (parsedMain.pausedRemainingSeconds == parsedMain.totalSeconds || parsedMain.pausedRemainingSeconds <= 0 || !isExplicitStop)
-                // iPhoneがスリープ中・未反映のまま送られてきた SYNC_SEATS 同梱データや保存データ、開始直後(8秒以内)の未反映初期スナップショットによる強制停止をブロック
-                return msgType == "SYNC_SEATS" || isStaleSnapshot || (isUnstartedInitial && nowDate.timeIntervalSince(self.lastMainTimerLocalActionTime) < 8.0)
+                // iPhoneがスリープ中・未反映のまま送られてきた SYNC_SEATS 同梱データや保存データ、未反映初期スナップショットによる強制停止をブロック
+                return msgType == "SYNC_SEATS" || isStaleSnapshot || isUnstartedInitial
             }()
             let timeSinceLocalAction = nowDate.timeIntervalSince(self.lastMainTimerLocalActionTime)
             let isRecentlyModifiedOnWatch = timeSinceLocalAction < self.mainTimerLocalHoldSeconds
@@ -1108,8 +1131,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     }
                 } else if self.lastMainTimerLocalActionType == "ADJUST" {
                     let curRem = self.mainTimer?.remainingSeconds ?? parsedMain.remainingSeconds
+                    let sameRunningAdjusted = (parsedMain.isRunning == (self.mainTimer?.isRunning ?? false) && abs(curRem - parsedMain.remainingSeconds) <= 5)
                     let sameStoppedTotal = (!parsedMain.isRunning && !(self.mainTimer?.isRunning ?? false) && parsedMain.totalSeconds == self.mainTimer?.totalSeconds)
-                    if parsedMain.isRunning != self.mainTimer?.isRunning || abs(curRem - parsedMain.remainingSeconds) <= 5 || sameStoppedTotal {
+                    if sameRunningAdjusted || sameStoppedTotal || ((isExplicitStop || isExplicitReset || isCurrentTimerStoppedOnPhone) && !isStaleSnapshot) {
                         self.mainTimer = parsedMain
                         self.lastMainTimerLocalActionTime = Date.distantPast
                         didUpdateMain = true
@@ -1124,11 +1148,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 didUpdateMain = false
             } else {
                 // 通常同期: iPhone側で明示的にリセット・一時停止された場合はWatchのアラームも消火し、停止した終了時刻を4時間記録してゾンビ復活を防ぐ
-                let isExplicitReset = (rawMain["isExplicitReset"] as? Bool) == true || (rawMain["isExplicitReset"] as? NSNumber)?.boolValue == true
-                let isAutoFinished = (rawMain["isAutoFinished"] as? Bool) == true || (rawMain["isAutoFinished"] as? NSNumber)?.boolValue == true
-                let isExplicitStop = (rawMain["explicitStop"] as? NSNumber)?.boolValue ?? (rawMain["explicitStop"] as? Bool) ?? false
-                let isDirectPhoneStop = (msgType == "SYNC_MAIN_TIMER" && !parsedMain.isRunning && !parsedMain.isPreCountingDown && !isAutoFinished && parsedMain.pausedRemainingSeconds == 0 && self.watchStartedMainTimerEndTime == nil)
                 let isLocalOvertime = (self.mainTimer?.isRunning == true && (self.mainTimer?.targetEndTime ?? nowDate) <= nowDate)
+                let isDirectPhoneStop = isCurrentTimerStoppedOnPhone || (msgType == "SYNC_MAIN_TIMER" && !parsedMain.isRunning && !parsedMain.isPreCountingDown && !isAutoFinished && parsedMain.pausedRemainingSeconds == 0 && self.watchStartedMainTimerEndTime == nil && !isLocalOvertime)
                 // ★ メインタイマーが00:00に到達しただけで「タイマーを止める」が押されていない場合（isAutoFinished または Watch側で超過継続中）は、
                 //   明示的な停止・リセット（isExplicitReset / isExplicitStop / isDirectPhoneStop）でない限り Watch側では00:00に戻さず超過（カウントアップ）状態を維持する
                 if (isAutoFinished || isLocalOvertime) && !isExplicitReset && !isExplicitStop && !isDirectPhoneStop,
@@ -1591,6 +1612,7 @@ private final class PendingSheetActionBox {
 
 // MARK: - メイン画面
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var sessionManager = WatchSessionManager.shared
     // ★ タイムアップのアラーム（止めるまで鳴り続ける）
     @ObservedObject private var alarm = WatchAlarmCoordinator.shared
@@ -1630,6 +1652,7 @@ struct ContentView: View {
     @State private var hasInitialOpenedMap = false
     @State private var pendingSelectedSeatId: String? = nil
     @State private var pendingOpenMainTimerSheet: Bool = false
+    @State private var pendingOvertimeSheetWorkItem: DispatchWorkItem? = nil
     
     // 客席タイマー一覧（永続化データから即座に復元し、バックグラウンド再起動時の予定消滅を防止）
     @State private var timers: [SeatTimerItem] = WatchSessionManager.shared.timers
@@ -1667,7 +1690,12 @@ struct ContentView: View {
                 return aMine && !bMine
             }
             
-            // ③ 同じグループ内では超過中の席を最優先
+            // ③ 同じグループ内では超過中の席（本タイマー超過・中間チェック超過）を最優先
+            let aAnyOver = a.isOvertime || a.isCheckOvertime
+            let bAnyOver = b.isOvertime || b.isCheckOvertime
+            if aAnyOver != bAnyOver {
+                return aAnyOver && !bAnyOver
+            }
             if a.isOvertime != b.isOvertime {
                 return a.isOvertime && !b.isOvertime
             }
@@ -1742,6 +1770,8 @@ struct ContentView: View {
     
     // ★ アラーム鳴動時に前面のモーダルシートがアラーム停止画面（alarmOverlay）を覆い隠さないよう全シートを即座に閉じる
     private func dismissAllSheetsForAlarm() {
+        pendingOvertimeSheetWorkItem?.cancel()
+        pendingOvertimeSheetWorkItem = nil
         executePendingMainTimerSheetAction()
         pendingSelectedSeatId = nil
         pendingOpenMainTimerSheet = false
@@ -1855,6 +1885,10 @@ struct ContentView: View {
             }
             // タイム操作シート
             .sheet(item: bindingTimeAction, onDismiss: {
+                if self.timers != sessionManager.timers && !sessionManager.timers.isEmpty {
+                    self.timers = sessionManager.timers
+                }
+                WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                 if let targetId = scrollToSeatId {
                     triggerScroll(to: targetId)
                 }
@@ -1864,12 +1898,20 @@ struct ContentView: View {
             }
             // チェック操作シート
             .sheet(item: bindingCheckAction, onDismiss: {
+                if self.timers != sessionManager.timers && !sessionManager.timers.isEmpty {
+                    self.timers = sessionManager.timers
+                }
+                WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                 mapCrownFocusTrigger += 1
             }) { item in
                 checkActionSheetView(item: item)
             }
             // ★ シャンプー・施術操作シート
             .sheet(item: bindingShampooAction, onDismiss: {
+                if self.timers != sessionManager.timers && !sessionManager.timers.isEmpty {
+                    self.timers = sessionManager.timers
+                }
+                WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                 mapCrownFocusTrigger += 1
             }) { item in
                 shampooActionSheetView(item: item)
@@ -1946,6 +1988,7 @@ struct ContentView: View {
                 if let initialMain = sessionManager.mainTimer {
                     self.mainTimer = initialMain
                 }
+                WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                 alarm.update(timers: timers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                 // ★ 初回起動時は一覧（サロン客席マップ）をインラインで直接表示（モーダルシート競合によるブラックアウトも完全根絶）
                 if !hasInitialOpenedMap {
@@ -1954,6 +1997,37 @@ struct ContentView: View {
                 }
                 if !alarm.ringing.isEmpty {
                     dismissAllSheetsForAlarm()
+                }
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                // ★ デジタルクラウン（トグルスイッチ）を押して文字盤へ戻る際やフォアグラウンド復帰時に、
+                //   文字盤モジュール画面（コンプリケーション）を必ず最新の00:00／稼働状態へ強制リロードして同期する
+                if let latestMain = sessionManager.mainTimer, self.mainTimer != latestMain {
+                    self.mainTimer = latestMain
+                }
+                if self.timers != sessionManager.timers && !sessionManager.timers.isEmpty {
+                    self.timers = sessionManager.timers
+                }
+                let currentMain = self.mainTimer ?? sessionManager.mainTimer
+                let currentTimers = self.timers.isEmpty ? sessionManager.timers : self.timers
+                WidgetSync.save(
+                    timers: currentTimers,
+                    mainTimer: currentMain,
+                    userName: currentUserName,
+                    forceReload: true
+                )
+                // ★ アプリアイコン・ドック・デジタルクラウン等からWatchアプリをアクティブにした際も、
+                //   超過タイム（+00:xx）が継続中かつシート未表示であれば即座に「タイマーを止める」画面を自動表示する
+                if newPhase == .active,
+                   alarm.pendingOpenedAlarmEvent == nil,
+                   !showingMainTimerSheet,
+                   !showingAddSeatSheet,
+                   timeActionTargetId == nil,
+                   checkActionTargetId == nil,
+                   shampooActionTargetId == nil,
+                   selectHelpStaffTargetId == nil,
+                   selectCheckStaffTargetId == nil {
+                    presentOvertimeActionSheetIfNeeded(currentMain: currentMain, currentTimers: currentTimers)
                 }
             }
             .onOpenURL { url in
@@ -1970,11 +2044,67 @@ struct ContentView: View {
     }
 }
 
+    // ★ 超過中（+00:xx）のタイマーが存在する場合に「⏹️ タイマーを止める」が最上部に配置された操作画面を即座に開く共通ヘルパー
+    //   handleOpenURL と scenePhase == .active が連続発火した際も WorkItem をキャンセル・1本化して二重発火を防止する
+    private func presentOvertimeActionSheetIfNeeded(currentMain: SeatTimerItem?, currentTimers: [SeatTimerItem]) {
+        pendingOvertimeSheetWorkItem?.cancel()
+        pendingOvertimeSheetWorkItem = nil
+
+        if let m = currentMain, m.isOvertime {
+            mainTimerSheetInitialSubMode = .timerActionBranch
+            let work = DispatchWorkItem {
+                self.pendingOvertimeSheetWorkItem = nil
+                guard self.alarm.ringing.isEmpty else { return }
+                self.mainTimerSheetInitialSubMode = .timerActionBranch
+                if !self.showingMainTimerSheet {
+                    self.showingMainTimerSheet = true
+                }
+            }
+            pendingOvertimeSheetWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
+        } else if let checkOverSeat = (currentTimers.first(where: { $0.isCheckOvertime && !$0.isOvertime && $0.isRelated(to: currentUserName) }) ?? currentTimers.first(where: { $0.isCheckOvertime && !$0.isOvertime })) {
+            triggerScroll(to: checkOverSeat.id)
+            let work = DispatchWorkItem {
+                self.pendingOvertimeSheetWorkItem = nil
+                guard self.alarm.ringing.isEmpty else { return }
+                self.timeActionInitialBranchMode = false
+                self.timeActionInitialSubCheckBranchMode = true
+                if self.timeActionTargetId != checkOverSeat.id {
+                    self.timeActionTargetId = checkOverSeat.id
+                }
+            }
+            pendingOvertimeSheetWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
+        } else if let overSeat = (currentTimers.first(where: { $0.isOvertime && $0.isRelated(to: currentUserName) }) ?? currentTimers.first(where: { $0.isOvertime })) {
+            triggerScroll(to: overSeat.id)
+            let work = DispatchWorkItem {
+                self.pendingOvertimeSheetWorkItem = nil
+                guard self.alarm.ringing.isEmpty else { return }
+                self.timeActionInitialBranchMode = true
+                self.timeActionInitialSubCheckBranchMode = false
+                if self.timeActionTargetId != overSeat.id {
+                    self.timeActionTargetId = overSeat.id
+                }
+            }
+            pendingOvertimeSheetWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
+        }
+    }
+
     // ★ コンプリケーション（モジュラー文字盤）等からのURL起動ハンドラ（bodyの型推論負荷を軽減するため分離）
     private func handleOpenURL(_ url: URL) {
+        pendingOvertimeSheetWorkItem?.cancel()
+        pendingOvertimeSheetWorkItem = nil
         // ★ モジュラー文字盤タップ時: 未消火アラームがあればアラーム振動のみ消火し、超過カウントアップは止めない（アプリ内で明示操作するまで00:00に戻さない）
         if !alarm.ringing.isEmpty {
             alarm.stop(sendToPhone: false)
+        }
+        // コールドスタート・バックグラウンド復帰直後でも sessionManager の最新状態を即座に反映
+        if let latestMain = sessionManager.mainTimer {
+            self.mainTimer = latestMain
+        }
+        if self.timers != sessionManager.timers && !sessionManager.timers.isEmpty {
+            self.timers = sessionManager.timers
         }
         // 開いている余計なシートを閉じて一覧（サロン客席マップ）を確実に表示
         showingMainTimerSheet = false
@@ -1984,6 +2114,10 @@ struct ContentView: View {
         shampooActionTargetId = nil
         selectHelpStaffTargetId = nil
         selectCheckStaffTargetId = nil
+
+        let currentMain = self.mainTimer ?? sessionManager.mainTimer
+        let currentTimers = self.timers.isEmpty ? sessionManager.timers : self.timers
+        WidgetSync.save(timers: currentTimers, mainTimer: currentMain, userName: currentUserName, forceReload: true)
 
         if url.host == "list" {
             showingThumbnailMap = false
@@ -1997,12 +2131,18 @@ struct ContentView: View {
                 triggerScroll(to: seatId)
             }
         }
+
+        // ★ システムアラーム終了後など、超過タイム（+00:xx）が継続中に文字盤モジュール画面をタップした時は、
+        //   即座に「タイマーを止める」ボタンがある操作画面（.timerActionBranch / .subCheckActionBranch）を表示してワンタップで止められるようにする！
+        presentOvertimeActionSheetIfNeeded(currentMain: currentMain, currentTimers: currentTimers)
     }
 
     // ★ システムのスマートアラーム画面（「"AssistTimer" からのアラームです。 [開く] [終了]」）で
     //   左側の「開く」を押した時の分岐遷移ハンドラ:
     //   超過カウントアップ（+00:xx）を表示したまま、「タイマーを止める」「シャンプーに入る」「時間延長」等の操作画面へ即座に移行する！
     private func handleOpenedAlarmEvent(_ event: WatchAlarmEvent) {
+        pendingOvertimeSheetWorkItem?.cancel()
+        pendingOvertimeSheetWorkItem = nil
         alarm.clearPendingOpenedAlarmEvent()
         if let latestMain = sessionManager.mainTimer {
             self.mainTimer = latestMain
@@ -2010,28 +2150,35 @@ struct ContentView: View {
         if self.timers != sessionManager.timers {
             self.timers = sessionManager.timers
         }
+        // ★ 既にシートが開いていた場合でも確実に初期サブモード（.timerActionBranch / .subCheckActionBranch）で再構築されるよう一旦すべて閉じる
+        showingMainTimerSheet = false
         showingAddSeatSheet = false
+        timeActionTargetId = nil
         checkActionTargetId = nil
         shampooActionTargetId = nil
         selectHelpStaffTargetId = nil
         selectCheckStaffTargetId = nil
 
         if event.seatId == "main-timer" {
-            timeActionTargetId = nil
             mainTimerSheetInitialSubMode = .timerActionBranch
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            let work = DispatchWorkItem {
+                self.pendingOvertimeSheetWorkItem = nil
                 self.mainTimerSheetInitialSubMode = .timerActionBranch
                 self.showingMainTimerSheet = true
             }
+            pendingOvertimeSheetWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
         } else {
-            showingMainTimerSheet = false
             let isCheck = event.key.contains("-check@")
             triggerScroll(to: event.seatId)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            let work = DispatchWorkItem {
+                self.pendingOvertimeSheetWorkItem = nil
                 self.timeActionInitialBranchMode = !isCheck
                 self.timeActionInitialSubCheckBranchMode = isCheck
                 self.timeActionTargetId = event.seatId
             }
+            pendingOvertimeSheetWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
         }
     }
     
@@ -2746,7 +2893,7 @@ struct ContentView: View {
         }
         self.mainTimer = main
         sessionManager.mainTimer = main
-        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(
             action: willPause ? (wasOvertime ? "MAIN_TIMER_RESET" : "MAIN_TIMER_PAUSE") : "MAIN_TIMER_START",
@@ -2774,7 +2921,7 @@ struct ContentView: View {
         }
         self.mainTimer = main
         sessionManager.mainTimer = main
-        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START", extra: ["totalSeconds": main.totalSeconds])
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -2804,12 +2951,24 @@ struct ContentView: View {
         self.mainTimer = main
         sessionManager.mainTimer = main
         WatchAlarmCoordinator.shared.acknowledgeMainTimer()
-        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(
             action: wasOvertime ? "MAIN_TIMER_RESET" : "MAIN_TIMER_PAUSE",
             stoppedEndTime: stoppedEnd
         )
+        deferMainTimerSheetCloseAction {
+            if let latest = self.sessionManager.mainTimer {
+                self.mainTimer = latest
+                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            if let latest = self.sessionManager.mainTimer {
+                self.mainTimer = latest
+                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
+            }
+        }
     }
     
     private func handleResetMainTimer() {
@@ -2831,19 +2990,27 @@ struct ContentView: View {
         sessionManager.mainTimer = main
         WatchAlarmCoordinator.shared.acknowledgeMainTimer()
         WatchAlarmCoordinator.shared.stop(sendToPhone: false)
-        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET", stoppedEndTime: stoppedEnd)
         // ★ モーダルシート（MainTimerActionSheet）の dismiss アニメーションと親画面 @State 更新が競合しても、
-        //   1回目のタップで確実に 00:00 表示へ切り替わるようシート閉鎖直後にも再同期する
+        //   1回目のタップで確実に 00:00 表示および文字盤コンプリケーションへ切り替わるようシート閉鎖直後にも再同期する
         deferMainTimerSheetCloseAction {
             if let latest = self.sessionManager.mainTimer {
                 self.mainTimer = latest
+                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
             if let latest = self.sessionManager.mainTimer {
                 self.mainTimer = latest
+                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            if let latest = self.sessionManager.mainTimer {
+                self.mainTimer = latest
+                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
             }
         }
     }
@@ -2880,7 +3047,7 @@ struct ContentView: View {
         }
         self.mainTimer = main
         sessionManager.mainTimer = main
-        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerSetTime(seconds: totalSec, autoStart: shouldAutoStart)
         if shouldAutoStart {
@@ -2893,6 +3060,7 @@ struct ContentView: View {
     private func handleAdjustMainTimer(deltaSec: Int) {
         playHaptic(.click)
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
+        let wasOvertime = main.isOvertime
         if main.isRunning {
             let baseEnd = main.isOvertime ? Date() : main.targetEndTime
             main.targetEndTime = max(Date().addingTimeInterval(5), baseEnd.addingTimeInterval(Double(deltaSec)))
@@ -2917,9 +3085,25 @@ struct ContentView: View {
         }
         self.mainTimer = main
         sessionManager.mainTimer = main
-        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
+        if main.isRunning && wasOvertime && deltaSec > 0 {
+            WatchAlarmCoordinator.shared.acknowledgeMainTimer()
+            WatchAlarmCoordinator.shared.stop(sendToPhone: false)
+        }
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAdjust(seconds: deltaSec)
+        deferMainTimerSheetCloseAction {
+            if let latest = self.sessionManager.mainTimer {
+                self.mainTimer = latest
+                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            if let latest = self.sessionManager.mainTimer {
+                self.mainTimer = latest
+                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
+            }
+        }
     }
     
     private func handleUpdateMainTimerHelpMenu(process: String, isNoHelp: Bool) {
@@ -2951,8 +3135,13 @@ struct ContentView: View {
             crownFocusTrigger: mapCrownFocusTrigger,
             onSelectSeat: { selectedSeat in
                 triggerScroll(to: selectedSeat.id)
-                timeActionInitialBranchMode = false
-                timeActionInitialSubCheckBranchMode = false
+                if selectedSeat.isCheckOvertime && !selectedSeat.isOvertime {
+                    timeActionInitialBranchMode = false
+                    timeActionInitialSubCheckBranchMode = true
+                } else {
+                    timeActionInitialBranchMode = !selectedSeat.isZero
+                    timeActionInitialSubCheckBranchMode = false
+                }
                 timeActionTargetId = selectedSeat.id
             },
             onSelectMainTimer: {
@@ -3055,6 +3244,8 @@ struct ContentView: View {
                     timers[idx].pausedRemainingSeconds = max(10, timers[idx].pausedRemainingSeconds + deltaSec)
                     timers[idx].isCollapsed = false
                     sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    sessionManager.clearLocalStop(seatId: item.id)
                     sessionManager.setCollapseOverride(seatId: item.id, collapsed: false)
                     if wasOvertime && deltaSec > 0 {
                         WatchAlarmCoordinator.shared.stop(sendToPhone: false)
@@ -3076,13 +3267,20 @@ struct ContentView: View {
             onAdjustCheck: { deltaSec in
                     triggerScroll(to: item.id)
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
-                        let baseCheckEnd = timers[idx].checkTargetEndTime ?? Date()
+                        let wasCheckOvertime = timers[idx].isCheckOvertime
+                        let rawCheckEnd = timers[idx].checkTargetEndTime ?? Date()
+                        let baseCheckEnd = (deltaSec > 0) ? max(Date(), rawCheckEnd) : rawCheckEnd
                         let newCheckEnd = max(Date().addingTimeInterval(5), baseCheckEnd.addingTimeInterval(Double(deltaSec)))
                         timers[idx].checkTargetEndTime = newCheckEnd
                         timers[idx].checkTotalSeconds = max(10, (timers[idx].checkTotalSeconds ?? 0) + deltaSec)
                         timers[idx].isCollapsed = false
                         sessionManager.timers = timers
+                        sessionManager.markLocalSeatMod(seatId: item.id)
+                        sessionManager.clearLocalCheckClear(seatId: item.id)
                         sessionManager.setCollapseOverride(seatId: item.id, collapsed: false)
+                        if wasCheckOvertime && deltaSec > 0 {
+                            WatchAlarmCoordinator.shared.stop(sendToPhone: false, completeCheckIfNeeded: false)
+                        }
                         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                         WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
                         sessionManager.sendActionToPhone(
@@ -3101,6 +3299,7 @@ struct ContentView: View {
                 onStop: {
                     triggerScroll(to: item.id)
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        let clearedCheckEnd = timers[idx].checkTargetEndTime
                         timers[idx].isRunning = false
                         timers[idx].pausedRemainingSeconds = 0
                         timers[idx].helpProcess = ""
@@ -3111,8 +3310,12 @@ struct ContentView: View {
                         timers[idx].clearCheck()
                         sessionManager.timers = timers
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
+                        if let clearedCheckEnd = clearedCheckEnd {
+                            sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: clearedCheckEnd)
+                        }
+                        WatchAlarmCoordinator.shared.stop(sendToPhone: false)
                         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         showNotification(text: "⏹️ \(item.displaySeatName)のタイマーを止めました", color: Color(hex: "#30D158"))
                     }
@@ -3121,6 +3324,7 @@ struct ContentView: View {
                     // ★ タイムが早くても切り上げて指定施術（シャンプー・コーミング等）に入る
                     triggerScroll(to: item.id)
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        let clearedCheckEnd = timers[idx].checkTargetEndTime
                         let rawProcess = timers[idx].helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
                         let process = rawProcess.isEmpty ? "シャンプー" : rawProcess
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
@@ -3135,9 +3339,13 @@ struct ContentView: View {
                         }
                         sessionManager.timers = timers
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
+                        if let clearedCheckEnd = clearedCheckEnd {
+                            sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: clearedCheckEnd)
+                        }
+                        WatchAlarmCoordinator.shared.stop(sendToPhone: false)
                         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                         sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs, "isCompleted": true])
-                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         showNotification(
                             text: "✅ 【\(item.displaySeatName)】\(currentUserName)さんが\(process)に入りました",
                             color: Color(hex: "#30D158")
@@ -3148,6 +3356,7 @@ struct ContentView: View {
                     // ★ タイムが早くても切り上げてチェックに入る（全体タイマー連動のため全体タイマーも00:00停止）
                     triggerScroll(to: item.id)
                     if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                        let clearedCheckEnd = timers[idx].checkTargetEndTime
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].isRunning = false
                             timers[idx].pausedRemainingSeconds = 0
@@ -3162,10 +3371,14 @@ struct ContentView: View {
                         }
                         sessionManager.timers = timers
                         sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
+                        if let clearedCheckEnd = clearedCheckEnd {
+                            sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: clearedCheckEnd)
+                        }
+                        WatchAlarmCoordinator.shared.stop(sendToPhone: false)
                         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                         sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
                         sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         showNotification(
                             text: "✅ 【\(item.displaySeatName)】\(currentUserName)さんがチェックに入りました",
                             color: Color(hex: "#30D158")
@@ -3367,7 +3580,7 @@ struct ContentView: View {
                             currentUserName: currentUserName
                         )
                         sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         showNotification(text: "✅ \(timers[idx].displayCheckProcess)完了（全体タイマー続行）", color: Color(hex: "#30D158"))
                     }
                 },
@@ -3389,7 +3602,7 @@ struct ContentView: View {
                             currentUserName: currentUserName
                         )
                         sessionManager.sendActionToPhone(action: "CANCEL_CHECK", seatId: item.id)
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         showNotification(text: "⏹ チェックタイマーを解除しました", color: Color(hex: "#8E8E93"))
                     }
                 },
@@ -4383,7 +4596,7 @@ struct SeatTimerCard: View {
         .cornerRadius(14)
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .stroke(item.isOvertime ? Color(hex: "#FF453A").opacity(0.6) : (isRelatedToMe ? Color(hex: "#FFD60A").opacity(0.4) : Color.white.opacity(0.12)), lineWidth: isRelatedToMe ? 1.5 : 1)
+                .stroke((item.isOvertime || item.isCheckOvertime) ? Color(hex: "#FF453A").opacity(0.6) : (isRelatedToMe ? Color(hex: "#FFD60A").opacity(0.4) : Color.white.opacity(0.12)), lineWidth: isRelatedToMe ? 1.5 : 1)
         )
     }
     
@@ -4770,24 +4983,25 @@ struct SeatTimerCard: View {
     private var checkTimerSection: some View {
         if let checkSec = item.checkRemainingSeconds {
             let chkProc = item.displayCheckProcess
+            let isCheckOver = item.isCheckOvertime
             VStack(spacing: 5) {
                 // 上段: チェックのタイマーの数字（タップでチェック完了・解除などの操作シートへ分岐）
                 Button(action: onOpenCheckAction) {
                     HStack(alignment: .center, spacing: 4) {
                         Image(systemName: item.checkProcessIconName)
                             .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(Color(hex: item.checkProcessColorHex))
-                        Text(chkProc)
+                            .foregroundColor(isCheckOver ? Color(hex: "#FF453A") : Color(hex: item.checkProcessColorHex))
+                        Text(isCheckOver ? "\(chkProc)超過" : chkProc)
                             .font(.system(size: 10.5, weight: .heavy))
-                            .foregroundColor(Color(hex: "#A0E0B0"))
+                            .foregroundColor(isCheckOver ? Color(hex: "#FF453A") : Color(hex: "#A0E0B0"))
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
                             .fixedSize(horizontal: true, vertical: false)
                         Spacer(minLength: 2)
-                        Text(formatSeconds(checkSec))
+                        Text(isCheckOver ? "+\(formatSeconds(item.checkOvertimeSeconds))" : formatSeconds(checkSec))
                             .font(.system(size: WatchLayout.font(18), weight: .black, design: .rounded))
                             .monospacedDigit()
-                            .foregroundColor(Color(hex: "#30D158"))
+                            .foregroundColor(isCheckOver ? Color(hex: "#FF453A") : Color(hex: "#30D158"))
                             .lineLimit(1)
                             .minimumScaleFactor(0.75)
                         Image(systemName: "chevron.right")
@@ -4797,7 +5011,7 @@ struct SeatTimerCard: View {
                     .frame(maxWidth: .infinity)
                     .padding(.horizontal, WatchLayout.buttonHorizontalPadding)
                     .padding(.vertical, 5)
-                    .background(Color(hex: "#30D158").opacity(0.15))
+                    .background(isCheckOver ? Color(hex: "#FF453A").opacity(0.20) : Color(hex: "#30D158").opacity(0.15))
                     .cornerRadius(7)
                 }
                 .buttonStyle(.plain)
@@ -5183,7 +5397,9 @@ struct MainTimerActionSheet: View {
         let initialItem = WatchSessionManager.shared.mainTimer ?? item
         self._displayItem = State(initialValue: initialItem)
         let initSec = initialItem.totalSeconds > 0 ? initialItem.totalSeconds : 600
-        if let explicitMode = initialSubMode {
+        if initialItem.isOvertime {
+            self._subMode = State(initialValue: .timerActionBranch)
+        } else if let explicitMode = initialSubMode {
             self._subMode = State(initialValue: explicitMode)
         } else if initialItem.isZero {
             // ★ 00:00（未稼働・リセット状態）で開いた時は共有タイマーと同じく最初からトグル（Digital Crown）入力モードで開く
@@ -5272,6 +5488,11 @@ struct MainTimerActionSheet: View {
             now = input
             if subMode != .reinput, accumulatedDelta == 0, let latest = WatchSessionManager.shared.mainTimer, latest != displayItem {
                 displayItem = latest
+            }
+            if subMode == .standard && isOvertime && accumulatedDelta <= 0 {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    subMode = .timerActionBranch
+                }
             }
         }
     }
@@ -5758,41 +5979,22 @@ struct MainTimerActionSheet: View {
                 }
                 .padding(.vertical, 2)
                 
-                // ★ 微調整ボタン（+1分 / +3分 / +5分、-30秒 / +30秒）を「タイマーを止める」の上に配置
+                // ★ 超過中は「タイマーを止める」を最上部（超過タイムの直下）に配置してスクロール無しで即座に押せるようにする
+                if isOvertime && accumulatedDelta <= 0 {
+                    mainActionStopTimerButton
+                }
+                
+                // ★ 微調整ボタン（+1分 / +3分 / +5分、-30秒 / +30秒）
                 mainActionDeltaButtonsSection
                 
                 if accumulatedDelta != 0 {
                     mainActionConfirmSection
                 }
                 
-                // ★ メインタイマーにはシャンプー・コーミング等の定義がないため、「タイマーを止める」のみを表示
-                Button(action: {
-                    WKInterfaceDevice.current().play(.stop)
-                    accumulatedDelta = 0
-                    var resetItem = currentItem
-                    resetItem.isRunning = false
-                    resetItem.isPreCountingDown = false
-                    resetItem.pausedRemainingSeconds = 0
-                    resetItem.targetEndTime = Date().addingTimeInterval(TimeInterval(resetItem.totalSeconds))
-                    displayItem = resetItem
-                    onReset()
-                    dismiss()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 14, weight: .bold))
-                        Text("タイマーを止める")
-                            .font(.system(size: 14, weight: .heavy))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Color(hex: "#FF453A"))
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
+                // ★ 通常カウントダウン中・または時間延長操作中は微調整ボタンの下に「タイマーを止める」を配置
+                if !isOvertime || accumulatedDelta > 0 {
+                    mainActionStopTimerButton
                 }
-                .buttonStyle(.plain)
                 
                 // ★ 「タイマーを止める」の下に「タイム再入力。」を配置
                 mainActionReinputButton
@@ -6128,6 +6330,37 @@ struct MainTimerActionSheet: View {
     }
     
     @ViewBuilder
+    private var mainActionStopTimerButton: some View {
+        Button(action: {
+            WKInterfaceDevice.current().play(.stop)
+            accumulatedDelta = 0
+            var resetItem = currentItem
+            resetItem.isRunning = false
+            resetItem.isPreCountingDown = false
+            resetItem.pausedRemainingSeconds = 0
+            resetItem.targetEndTime = Date().addingTimeInterval(TimeInterval(resetItem.totalSeconds))
+            displayItem = resetItem
+            onReset()
+            dismiss()
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "stop.circle.fill")
+                    .font(.system(size: 14, weight: .bold))
+                Text("タイマーを止める")
+                    .font(.system(size: 14, weight: .heavy))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(Color(hex: "#FF453A"))
+            .foregroundColor(.white)
+            .cornerRadius(10)
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
     private var mainActionReinputButton: some View {
         // 「タイマーを止める」の下に配置する「タイム再入力。」ボタン
         Button(action: {
@@ -6211,37 +6444,30 @@ struct MainTimerActionSheet: View {
                 )
             }
         }) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Image(systemName: watchSoundEnabled ? "applewatch.radiowaves.left.and.right" : "applewatch")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundColor(watchSoundEnabled ? Color(hex: "#0A84FF") : Color(hex: "#8E8E93"))
-                
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack {
-                        Text("ウォッチの音")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(.white)
-                            .lineLimit(1)
-                        Spacer()
-                        Text(watchSoundEnabled ? "ON" : "OFF")
-                            .font(.system(size: 11, weight: .heavy))
-                            .foregroundColor(watchSoundEnabled ? Color(hex: "#0A84FF") : Color(hex: "#8E8E93"))
-                            .lineLimit(1)
-                            .fixedSize()
-                    }
-                    Text(watchSoundEnabled ? "消音モードでもウォッチから音が鳴ります" : "ウォッチは振動のみでお知らせ（デフォルト）")
-                        .font(.system(size: 8))
-                        .foregroundColor(Color(hex: "#8E8E93"))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                }
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(watchSoundEnabled ? Color(hex: "#FF9F0A") : Color(hex: "#8E8E93"))
+                Text("ウォッチの音")
+                    .font(.system(size: 11.5, weight: .bold))
+                    .foregroundColor(watchSoundEnabled ? Color(hex: "#FFD60A") : Color(hex: "#E0E0E5"))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(watchSoundEnabled ? "ON" : "OFF")
+                    .font(.system(size: 10, weight: .black))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2.5)
+                    .background(watchSoundEnabled ? Color(hex: "#FF9F0A") : Color.white.opacity(0.12))
+                    .foregroundColor(watchSoundEnabled ? .black : Color(hex: "#8E8E93"))
+                    .cornerRadius(5)
             }
-            .padding(8)
-            .background(Color.white.opacity(0.08))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(watchSoundEnabled ? Color(hex: "#FF9F0A").opacity(0.18) : Color.white.opacity(0.06))
             .cornerRadius(8)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(watchSoundEnabled ? Color(hex: "#0A84FF").opacity(0.55) : Color.white.opacity(0.1), lineWidth: 1)
+                    .stroke(watchSoundEnabled ? Color(hex: "#FF9F0A").opacity(0.6) : Color.white.opacity(0.12), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -6254,37 +6480,30 @@ struct MainTimerActionSheet: View {
             phoneSoundEnabled.toggle()
             UserDefaults.standard.set(phoneSoundEnabled, forKey: "assisttimer.mainTimerPhoneSound.v2")
         }) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Image(systemName: phoneSoundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundColor(phoneSoundEnabled ? Color(hex: "#30D158") : Color(hex: "#8E8E93"))
-                
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack {
-                        Text("携帯の音")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(.white)
-                            .lineLimit(1)
-                        Spacer()
-                        Text(phoneSoundEnabled ? "ON" : "OFF")
-                            .font(.system(size: 11, weight: .heavy))
-                            .foregroundColor(phoneSoundEnabled ? Color(hex: "#30D158") : Color(hex: "#8E8E93"))
-                            .lineLimit(1)
-                            .fixedSize()
-                    }
-                    Text(phoneSoundEnabled ? "iPhoneからも音・音声アナウンスが鳴ります" : "携帯は消音、ウォッチの振動のみでお知らせ")
-                        .font(.system(size: 8))
-                        .foregroundColor(Color(hex: "#8E8E93"))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                }
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(phoneSoundEnabled ? Color(hex: "#FF9F0A") : Color(hex: "#8E8E93"))
+                Text("スマホの音")
+                    .font(.system(size: 11.5, weight: .bold))
+                    .foregroundColor(phoneSoundEnabled ? Color(hex: "#FFD60A") : Color(hex: "#E0E0E5"))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(phoneSoundEnabled ? "ON" : "OFF")
+                    .font(.system(size: 10, weight: .black))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2.5)
+                    .background(phoneSoundEnabled ? Color(hex: "#FF9F0A") : Color.white.opacity(0.12))
+                    .foregroundColor(phoneSoundEnabled ? .black : Color(hex: "#8E8E93"))
+                    .cornerRadius(5)
             }
-            .padding(8)
-            .background(Color.white.opacity(0.08))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(phoneSoundEnabled ? Color(hex: "#FF9F0A").opacity(0.18) : Color.white.opacity(0.06))
             .cornerRadius(8)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(phoneSoundEnabled ? Color(hex: "#30D158").opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
+                    .stroke(phoneSoundEnabled ? Color(hex: "#FF9F0A").opacity(0.6) : Color.white.opacity(0.12), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -6308,6 +6527,8 @@ struct TimeActionSheet: View {
     @Environment(\.dismiss) var dismiss
     let item: SeatTimerItem
     let initialReinputMode: Bool
+    let initialTimerBranchMode: Bool
+    let initialSubCheckBranchMode: Bool
     let currentUserName: String
     let staffCandidates: [String]
     let onAdjust: (Int) -> Void
@@ -6409,6 +6630,8 @@ struct TimeActionSheet: View {
         self._watchSoundEnabled = State(initialValue: item.watchAlarmSoundEnabled)
         self._phoneSoundEnabled = State(initialValue: item.alarmSoundEnabled)
         self.initialReinputMode = initialReinputMode
+        self.initialTimerBranchMode = initialTimerBranchMode
+        self.initialSubCheckBranchMode = initialSubCheckBranchMode
         let initSubMode: SubMode = initialSubCheckBranchMode ? .subCheckActionBranch : (initialReinputMode ? .reinput : (initialTimerBranchMode ? .timerActionBranch : .standard))
         self._subMode = State(initialValue: initSubMode)
         self.currentUserName = currentUserName
@@ -6474,6 +6697,16 @@ struct TimeActionSheet: View {
         return max(0, baseRem + checkAccumulatedDelta)
     }
     
+    var isCheckOvertime: Bool {
+        guard liveItem.isRunning, !liveItem.isCheckCompleted, let checkEnd = liveItem.checkTargetEndTime else { return false }
+        return checkEnd.timeIntervalSince(now) <= 0 && checkAccumulatedDelta <= 0
+    }
+    
+    var checkOvertimeSeconds: Int {
+        guard liveItem.isRunning, !liveItem.isCheckCompleted, let checkEnd = liveItem.checkTargetEndTime else { return 0 }
+        return abs(min(0, Int(checkEnd.timeIntervalSince(now))))
+    }
+    
     private func formatSeconds(_ seconds: Int) -> String {
         let m = seconds / 60
         let s = seconds % 60
@@ -6524,6 +6757,19 @@ struct TimeActionSheet: View {
             now = input
             if let latest = WatchSessionManager.shared.timers.first(where: { $0.id == liveItem.id }), latest != liveItem {
                 liveItem = latest
+            }
+            if isOvertime && accumulatedDelta <= 0 {
+                if subMode == .standard || subMode == .subCheckActionBranch {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        subMode = .timerActionBranch
+                    }
+                }
+            } else if isCheckOvertime && checkAccumulatedDelta <= 0 && accumulatedDelta <= 0 {
+                if subMode == .standard || subMode == .timerActionBranch {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        subMode = .subCheckActionBranch
+                    }
+                }
             }
         }
     }
@@ -6896,8 +7142,12 @@ struct TimeActionSheet: View {
                 HStack {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            subMode = .standard
+                        if initialTimerBranchMode {
+                            dismiss()
+                        } else {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                subMode = .standard
+                            }
                         }
                     }) {
                         HStack(spacing: 2) {
@@ -6939,102 +7189,21 @@ struct TimeActionSheet: View {
                         .padding(.vertical, 2)
                 }
                 
-                // ★ 微調整ボタン（+1分 / +3分 / +5分、-30秒 / +30秒）を「シャンプーに入る」の上に配置
+                // ★ 超過中は「〇〇に入る」「タイマーを止める」を最上部（超過タイム表示の直下）に配置してスクロール無しで即座に押せるようにする
+                if isOvertime && accumulatedDelta <= 0 {
+                    seatBranchStopAndHelpButtons
+                }
+                
+                // ★ 微調整ボタン（+1分 / +3分 / +5分、-30秒 / +30秒）
                 standardDeltaButtonsSection
                 
                 if accumulatedDelta != 0 {
                     standardConfirmSection
                 }
                 
-                // ① 選択されたヘルプ工程に入る・止めるボタン（シャンプー・コーミング・チェック等が明示選択されている場合のみ表示、未選択時は「タイマーを止める」のみ表示）
-                let rawP = liveItem.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !liveItem.isNoHelpNeeded && !rawP.isEmpty {
-                    let p = rawP
-                    if p == "チェック" {
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.success)
-                            liveItem.isRunning = false
-                            liveItem.pausedRemainingSeconds = 0
-                            onCompleteCheck?()
-                            dismiss()
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "magnifyingglass")
-                                    .font(.system(size: 14, weight: .heavy))
-                                Text("チェックに入る")
-                                    .font(.system(size: 14, weight: .heavy))
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.75)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 11)
-                            .background(
-                                LinearGradient(
-                                    colors: [Color(hex: "#30D158"), Color(hex: "#248A3D")],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        let iconName: String = (p == "コーミング") ? "comb.fill" : ((p == "その他") ? "ellipsis.circle.fill" : "drop.fill")
-                        Button(action: {
-                            WKInterfaceDevice.current().play(.success)
-                            liveItem.isRunning = false
-                            liveItem.pausedRemainingSeconds = 0
-                            onEnterHelp?()
-                            dismiss()
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: iconName)
-                                    .font(.system(size: 14, weight: .heavy))
-                                Text("\(p)に入る")
-                                    .font(.system(size: 14, weight: .heavy))
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.75)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 11)
-                            .background(
-                                LinearGradient(
-                                    colors: [Color(hex: "#0A84FF"), Color(hex: "#0062D2")],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
-                        }
-                        .buttonStyle(.plain)
-                    }
+                if !isOvertime || accumulatedDelta > 0 {
+                    seatBranchStopAndHelpButtons
                 }
-                
-                // ② タイマーを止める（00:00に戻す）
-                Button(action: {
-                    WKInterfaceDevice.current().play(.stop)
-                    liveItem.isRunning = false
-                    liveItem.pausedRemainingSeconds = 0
-                    onStop()
-                    dismiss()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 14, weight: .bold))
-                        Text("タイマーを止める")
-                            .font(.system(size: 14, weight: .heavy))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Color(hex: "#FF453A"))
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
-                }
-                .buttonStyle(.plain)
                 
                 // ★ 「タイマーを止める」の下に「タイム再入力。」を配置
                 standardReinputButton
@@ -7080,6 +7249,98 @@ struct TimeActionSheet: View {
         }
     }
     
+    // MARK: - ★ 共有席タイマー用 ヘルプ開始＆タイマー停止ボタン共通セクション
+    @ViewBuilder
+    private var seatBranchStopAndHelpButtons: some View {
+        let rawP = liveItem.helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !liveItem.isNoHelpNeeded && !rawP.isEmpty {
+            let p = rawP
+            if p == "チェック" {
+                Button(action: {
+                    WKInterfaceDevice.current().play(.success)
+                    liveItem.isRunning = false
+                    liveItem.pausedRemainingSeconds = 0
+                    onCompleteCheck?()
+                    dismiss()
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 14, weight: .heavy))
+                        Text("チェックに入る")
+                            .font(.system(size: 14, weight: .heavy))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .background(
+                        LinearGradient(
+                            colors: [Color(hex: "#30D158"), Color(hex: "#248A3D")],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+                .buttonStyle(.plain)
+            } else {
+                let iconName: String = (p == "コーミング") ? "comb.fill" : ((p == "その他") ? "ellipsis.circle.fill" : "drop.fill")
+                Button(action: {
+                    WKInterfaceDevice.current().play(.success)
+                    liveItem.isRunning = false
+                    liveItem.pausedRemainingSeconds = 0
+                    onEnterHelp?()
+                    dismiss()
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: iconName)
+                            .font(.system(size: 14, weight: .heavy))
+                        Text("\(p)に入る")
+                            .font(.system(size: 14, weight: .heavy))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .background(
+                        LinearGradient(
+                            colors: [Color(hex: "#0A84FF"), Color(hex: "#0062D2")],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        
+        Button(action: {
+            WKInterfaceDevice.current().play(.stop)
+            liveItem.isRunning = false
+            liveItem.pausedRemainingSeconds = 0
+            onStop()
+            dismiss()
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "stop.circle.fill")
+                    .font(.system(size: 14, weight: .bold))
+                Text("タイマーを止める")
+                    .font(.system(size: 14, weight: .heavy))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(Color(hex: "#FF453A"))
+            .foregroundColor(.white)
+            .cornerRadius(10)
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - ★ 共有席タイマー用 ウォッチの音・スマホの音 ON/OFF トグルボタン（ウォッチの音＝上、スマホの音＝下）
     private var seatWatchSoundToggleButton: some View {
         Button(action: {
@@ -7088,20 +7349,19 @@ struct TimeActionSheet: View {
             liveItem.watchAlarmSoundEnabled = watchSoundEnabled
             onUpdateSoundSettings?(watchSoundEnabled, phoneSoundEnabled)
         }) {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 Image(systemName: watchSoundEnabled ? "applewatch.radiowaves.left.and.right" : "applewatch")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 12, weight: .bold))
                     .foregroundColor(watchSoundEnabled ? Color(hex: "#FF9F0A") : Color(hex: "#8E8E93"))
-                Text(watchSoundEnabled ? "ウォッチの音 ON (強制)" : "ウォッチの音 OFF (バイブのみ)")
-                    .font(.system(size: 10.5, weight: .bold))
-                    .foregroundColor(watchSoundEnabled ? Color(hex: "#FFD60A") : Color(hex: "#8E8E93"))
+                Text("ウォッチの音")
+                    .font(.system(size: 11.5, weight: .bold))
+                    .foregroundColor(watchSoundEnabled ? Color(hex: "#FFD60A") : Color(hex: "#E0E0E5"))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-                Spacer(minLength: 2)
+                Spacer(minLength: 4)
                 Text(watchSoundEnabled ? "ON" : "OFF")
-                    .font(.system(size: 9.5, weight: .black))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
+                    .font(.system(size: 10, weight: .black))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2.5)
                     .background(watchSoundEnabled ? Color(hex: "#FF9F0A") : Color.white.opacity(0.12))
                     .foregroundColor(watchSoundEnabled ? .black : Color(hex: "#8E8E93"))
                     .cornerRadius(5)
@@ -7125,20 +7385,19 @@ struct TimeActionSheet: View {
             liveItem.alarmSoundEnabled = phoneSoundEnabled
             onUpdateSoundSettings?(watchSoundEnabled, phoneSoundEnabled)
         }) {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 Image(systemName: phoneSoundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 12, weight: .bold))
                     .foregroundColor(phoneSoundEnabled ? Color(hex: "#FF9F0A") : Color(hex: "#8E8E93"))
-                Text(phoneSoundEnabled ? "スマホの音 ON" : "スマホの音 OFF (バイブのみ)")
-                    .font(.system(size: 10.5, weight: .bold))
-                    .foregroundColor(phoneSoundEnabled ? Color(hex: "#FFD60A") : Color(hex: "#8E8E93"))
+                Text("スマホの音")
+                    .font(.system(size: 11.5, weight: .bold))
+                    .foregroundColor(phoneSoundEnabled ? Color(hex: "#FFD60A") : Color(hex: "#E0E0E5"))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-                Spacer(minLength: 2)
+                Spacer(minLength: 4)
                 Text(phoneSoundEnabled ? "ON" : "OFF")
-                    .font(.system(size: 9.5, weight: .black))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
+                    .font(.system(size: 10, weight: .black))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2.5)
                     .background(phoneSoundEnabled ? Color(hex: "#FF9F0A") : Color.white.opacity(0.12))
                     .foregroundColor(phoneSoundEnabled ? .black : Color(hex: "#8E8E93"))
                     .cornerRadius(5)
@@ -7416,6 +7675,78 @@ struct TimeActionSheet: View {
     
     // MARK: - ★ チェックのタイマーの数字をタップした時の分岐画面（微調整・チェック/コーミングに入る・タイマーを止める・ヘルプ変更）
     @ViewBuilder
+    private var subCheckStopAndHelpButtons: some View {
+        // ① ヘルプ内容（コーミング・1液2液・担当を呼ぶ）またはチェック担当者が明示指定されている場合のみ「〇〇に入る」ボタンを表示（未指定時は勝手にコーミング等を出さない）
+        let checkProcessName: String = liveItem.displayCheckProcess
+        let hasExplicitCheckHelp: Bool = (checkProcessName != "チェック") || !(liveItem.checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if hasExplicitCheckHelp {
+            let checkIconName: String = liveItem.checkProcessIconName
+            let checkActionLabel: String = (checkProcessName == "担当を呼ぶ") ? "担当を呼ぶ（完了）" : "\(checkProcessName)に入る"
+            let checkColors: [Color] = {
+                switch checkProcessName {
+                case "コーミング":
+                    return [Color(hex: "#0A84FF"), Color(hex: "#0062D2")]
+                case "1液2液":
+                    return [Color(hex: "#BF5AF2"), Color(hex: "#8E44AD")]
+                case "担当を呼ぶ":
+                    return [Color(hex: "#FF9F0A"), Color(hex: "#FF8000")]
+                default:
+                    return [Color(hex: "#30D158"), Color(hex: "#248A3D")]
+                }
+            }()
+            
+            Button(action: {
+                WKInterfaceDevice.current().play(.success)
+                onCompleteSubCheck?()
+                dismiss()
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: checkIconName)
+                        .font(.system(size: 14, weight: .heavy))
+                    Text(checkActionLabel)
+                        .font(.system(size: 14, weight: .heavy))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 11)
+                .background(
+                    LinearGradient(
+                        colors: checkColors,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .foregroundColor(.white)
+                .cornerRadius(10)
+            }
+            .buttonStyle(.plain)
+        }
+        
+        // ② チェックタイマーをすぐ止められる「タイマーを止める」ボタン（全体放置タイマーは続行）
+        Button(action: {
+            WKInterfaceDevice.current().play(.stop)
+            onCompleteSubCheck?()
+            dismiss()
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "stop.circle.fill")
+                    .font(.system(size: 14, weight: .bold))
+                Text("タイマーを止める")
+                    .font(.system(size: 14, weight: .heavy))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(Color(hex: "#FF453A"))
+            .foregroundColor(.white)
+            .cornerRadius(10)
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
     private var subCheckActionBranchScrollView: some View {
         ScrollView {
             VStack(spacing: 7) {
@@ -7423,8 +7754,12 @@ struct TimeActionSheet: View {
                     Button(action: {
                         WKInterfaceDevice.current().play(.click)
                         checkAccumulatedDelta = 0
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                            subMode = .standard
+                        if initialSubCheckBranchMode {
+                            dismiss()
+                        } else {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                subMode = .standard
+                            }
                         }
                     }) {
                         HStack(spacing: 2) {
@@ -7448,7 +7783,15 @@ struct TimeActionSheet: View {
                 }
                 .padding(.horizontal, 4)
                 
-                if let checkRem = currentCheckDisplaySeconds {
+                if isCheckOvertime {
+                    Text("超過 +\(formatSeconds(checkOvertimeSeconds))")
+                        .font(.system(size: WatchLayout.font(22), weight: .black, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(Color(hex: "#FF453A"))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .padding(.vertical, 2)
+                } else if let checkRem = currentCheckDisplaySeconds {
                     Text(formatSeconds(checkRem))
                         .font(.system(size: WatchLayout.font(26), weight: .black, design: .rounded))
                         .monospacedDigit()
@@ -7458,81 +7801,21 @@ struct TimeActionSheet: View {
                         .padding(.vertical, 2)
                 }
                 
-                // ★ 微調整ボタン（+1分 / +3分 / +5分、-30秒 / +30秒）を上に配置
+                // ★ チェック超過中は「〇〇に入る」「タイマーを止める」を最上部（超過タイム表示の直下）に配置してスクロール無しで即座に押せるようにする
+                if isCheckOvertime && checkAccumulatedDelta <= 0 {
+                    subCheckStopAndHelpButtons
+                }
+                
+                // ★ 微調整ボタン（+1分 / +3分 / +5分、-30秒 / +30秒）
                 subCheckDeltaButtonsSection
                 
                 if checkAccumulatedDelta != 0 {
                     subCheckConfirmSection
                 }
                 
-                // ① ヘルプ内容（コーミング・1液2液・担当を呼ぶ）またはチェック担当者が明示指定されている場合のみ「〇〇に入る」ボタンを表示（未指定時は勝手にコーミング等を出さない）
-                let checkProcessName: String = liveItem.displayCheckProcess
-                let hasExplicitCheckHelp: Bool = (checkProcessName != "チェック") || !(liveItem.checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                if hasExplicitCheckHelp {
-                    let checkIconName: String = liveItem.checkProcessIconName
-                    let checkActionLabel: String = (checkProcessName == "担当を呼ぶ") ? "担当を呼ぶ（完了）" : "\(checkProcessName)に入る"
-                    let checkColors: [Color] = {
-                        switch checkProcessName {
-                        case "コーミング":
-                            return [Color(hex: "#0A84FF"), Color(hex: "#0062D2")]
-                        case "1液2液":
-                            return [Color(hex: "#BF5AF2"), Color(hex: "#8E44AD")]
-                        case "担当を呼ぶ":
-                            return [Color(hex: "#FF9F0A"), Color(hex: "#FF8000")]
-                        default:
-                            return [Color(hex: "#30D158"), Color(hex: "#248A3D")]
-                        }
-                    }()
-                    
-                    Button(action: {
-                        WKInterfaceDevice.current().play(.success)
-                        onCompleteSubCheck?()
-                        dismiss()
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: checkIconName)
-                                .font(.system(size: 14, weight: .heavy))
-                            Text(checkActionLabel)
-                                .font(.system(size: 14, weight: .heavy))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.75)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
-                        .background(
-                            LinearGradient(
-                                colors: checkColors,
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .foregroundColor(.white)
-                        .cornerRadius(10)
-                    }
-                    .buttonStyle(.plain)
+                if !isCheckOvertime || checkAccumulatedDelta > 0 {
+                    subCheckStopAndHelpButtons
                 }
-                
-                // ② チェックタイマーをすぐ止められる「タイマーを止める」ボタン（全体放置タイマーは続行）
-                Button(action: {
-                    WKInterfaceDevice.current().play(.stop)
-                    onCompleteSubCheck?()
-                    dismiss()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 14, weight: .bold))
-                        Text("タイマーを止める")
-                            .font(.system(size: 14, weight: .heavy))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(Color(hex: "#FF453A"))
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
-                }
-                .buttonStyle(.plain)
                 
                 // ③ 「ヘルプ変更」ボタン（タップで内容選択 ➔ 担当選択リストへ）
                 Button(action: {
@@ -9518,20 +9801,19 @@ struct AddSeatSheet: View {
                     WKInterfaceDevice.current().play(.click)
                     watchSoundEnabled.toggle()
                 }) {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 6) {
                         Image(systemName: watchSoundEnabled ? "applewatch.radiowaves.left.and.right" : "applewatch")
-                            .font(.system(size: 11, weight: .bold))
+                            .font(.system(size: 12, weight: .bold))
                             .foregroundColor(watchSoundEnabled ? Color(hex: "#FF9F0A") : Color(hex: "#8E8E93"))
-                        Text(watchSoundEnabled ? "ウォッチの音 ON (強制)" : "ウォッチの音 OFF (バイブのみ)")
-                            .font(.system(size: 10.5, weight: .bold))
-                            .foregroundColor(watchSoundEnabled ? Color(hex: "#FFD60A") : Color(hex: "#8E8E93"))
+                        Text("ウォッチの音")
+                            .font(.system(size: 11.5, weight: .bold))
+                            .foregroundColor(watchSoundEnabled ? Color(hex: "#FFD60A") : Color(hex: "#E0E0E5"))
                             .lineLimit(1)
-                            .minimumScaleFactor(0.72)
-                        Spacer(minLength: 2)
+                        Spacer(minLength: 4)
                         Text(watchSoundEnabled ? "ON" : "OFF")
-                            .font(.system(size: 9.5, weight: .black))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
+                            .font(.system(size: 10, weight: .black))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2.5)
                             .background(watchSoundEnabled ? Color(hex: "#FF9F0A") : Color.white.opacity(0.12))
                             .foregroundColor(watchSoundEnabled ? .black : Color(hex: "#8E8E93"))
                             .cornerRadius(5)
@@ -9552,20 +9834,19 @@ struct AddSeatSheet: View {
                     WKInterfaceDevice.current().play(.click)
                     phoneSoundEnabled.toggle()
                 }) {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 6) {
                         Image(systemName: phoneSoundEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                            .font(.system(size: 11, weight: .bold))
+                            .font(.system(size: 12, weight: .bold))
                             .foregroundColor(phoneSoundEnabled ? Color(hex: "#FF9F0A") : Color(hex: "#8E8E93"))
-                        Text(phoneSoundEnabled ? "スマホの音 ON" : "スマホの音 OFF (バイブのみ)")
-                            .font(.system(size: 10.5, weight: .bold))
-                            .foregroundColor(phoneSoundEnabled ? Color(hex: "#FFD60A") : Color(hex: "#8E8E93"))
+                        Text("スマホの音")
+                            .font(.system(size: 11.5, weight: .bold))
+                            .foregroundColor(phoneSoundEnabled ? Color(hex: "#FFD60A") : Color(hex: "#E0E0E5"))
                             .lineLimit(1)
-                            .minimumScaleFactor(0.72)
-                        Spacer(minLength: 2)
+                        Spacer(minLength: 4)
                         Text(phoneSoundEnabled ? "ON" : "OFF")
-                            .font(.system(size: 9.5, weight: .black))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
+                            .font(.system(size: 10, weight: .black))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2.5)
                             .background(phoneSoundEnabled ? Color(hex: "#FF9F0A") : Color.white.opacity(0.12))
                             .foregroundColor(phoneSoundEnabled ? .black : Color(hex: "#8E8E93"))
                             .cornerRadius(5)
@@ -10679,14 +10960,16 @@ struct ThumbnailSeatCard: View {
     
     var isRunning: Bool { item.isRunning && item.remainingSeconds > 0 }
     var isOvertime: Bool { item.isOvertime }
+    var isCheckOvertime: Bool { item.isCheckOvertime }
+    var isAnyOvertime: Bool { isOvertime || isCheckOvertime }
     var isMe: Bool { item.isRelated(to: currentUserName) }
     var rem: Int { item.remainingSeconds }
     
     // 時間連動カラー判定（青 ➔ 残り3分: 黄 ➔ 残り1分: 赤 ➔ 超過: 全赤＆パルス発光）
     var stateColor: (border: Color, bg: Color, text: Color) {
-        if isOvertime {
+        if isAnyOvertime {
             let red = Color(hex: "#FF453A")
-            return (red, red.opacity(isPulsing ? 0.38 : 0.18), red)
+            return (red, red.opacity(isPulsing ? 0.38 : 0.18), isOvertime ? red : Color(hex: "#64D2FF"))
         } else if isRunning {
             if rem <= 60 {
                 // 残り1分以内: 赤警告
@@ -10737,6 +11020,16 @@ struct ThumbnailSeatCard: View {
                 if isOvertime {
                     Text("超過")
                         .font(.system(size: 8, weight: .heavy))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 1)
+                        .background(Color(hex: "#FF453A"))
+                        .cornerRadius(3)
+                } else if isCheckOvertime {
+                    Text("検超過")
+                        .font(.system(size: 7.5, weight: .heavy))
                         .foregroundColor(.white)
                         .lineLimit(1)
                         .fixedSize()
@@ -10812,14 +11105,14 @@ struct ThumbnailSeatCard: View {
             // ★ チェック体制（チェックタイマー稼働中のみ中段下部に表示）
             if let checkRem = item.checkRemainingSeconds, !item.isCheckCompleted {
                 let checkStaff = item.checkStaff ?? (item.isRecruiting ? "募集中" : "未定")
-                let isCheckOver = checkRem <= 0
+                let isCheckOver = item.isCheckOvertime
                 let isCheckUnder1Min = checkRem <= 60
                 let checkColor: Color = (isCheckOver || isCheckUnder1Min) ? Color(hex: "#FF453A") : Color(hex: "#FF9F0A")
                 
                 HStack(spacing: 2) {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 6.5, weight: .bold))
-                    Text("検:\(formatSeconds(checkRem))")
+                    Text(isCheckOver ? "検:+\(formatSeconds(item.checkOvertimeSeconds))" : "検:\(formatSeconds(checkRem))")
                         .font(.system(size: 7.5, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .lineLimit(1)
@@ -10913,9 +11206,9 @@ struct ThumbnailSeatCard: View {
         .cornerRadius(9)
         .overlay(
             RoundedRectangle(cornerRadius: 9)
-                .stroke(stateColor.border, lineWidth: isOvertime && isPulsing ? 1.5 : 1)
+                .stroke(stateColor.border, lineWidth: isAnyOvertime && isPulsing ? 1.5 : 1)
         )
-        .shadow(color: isOvertime && isPulsing ? Color(hex: "#FF453A").opacity(0.85) : Color.clear, radius: 4)
+        .shadow(color: isAnyOvertime && isPulsing ? Color(hex: "#FF453A").opacity(0.85) : Color.clear, radius: 4)
         .onAppear {
             withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
                 isPulsing = true

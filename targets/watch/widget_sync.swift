@@ -19,7 +19,7 @@ enum WidgetSync {
 
     private static var lastPayload: Data?
 
-    static func save(timers: [SeatTimerItem], mainTimer: SeatTimerItem? = nil, userName: String) {
+    static func save(timers: [SeatTimerItem], mainTimer: SeatTimerItem? = nil, userName: String, forceReload: Bool = false) {
         guard let defaults = UserDefaults(suiteName: appGroup) else { return }
 
         // メインタイマーも含めた全アイテムリスト
@@ -143,7 +143,7 @@ enum WidgetSync {
             payload["lastTouchedId"] = id
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
-        if data == lastPayload && !mainActiveChanged { return }
+        if !forceReload && data == lastPayload && !mainActiveChanged { return }
         lastPayload = data
 
         defaults.set(data, forKey: snapshotKey)

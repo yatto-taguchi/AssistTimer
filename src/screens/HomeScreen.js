@@ -633,6 +633,8 @@ export default function HomeScreen({ navigation }) {
                 remainingTimeRef.current = overTime;
                 setRemainingTime(overTime);
               } else {
+                lastAutoFinishedAtRef.current = now;
+                lastAutoFinishedEndTimestampRef.current = targetEndTimeRef.current || now;
                 isCountUpRef.current = false;
                 setIsCountUp(false);
                 isRunningRef.current = false;
@@ -1036,6 +1038,8 @@ export default function HomeScreen({ navigation }) {
         : defaultMainEndMs;
       lastAutoFinishedAtRef.current = 0;
       lastAutoFinishedEndTimestampRef.current = 0;
+      lastResetTargetEndRef.current = 0;
+      lastMainTimerResetAtRef.current = 0;
       triggeredPrepVoicesRef.current.clear();
       remainingTimeRef.current = currentTarget;
       setRemainingTime(currentTarget);
@@ -1049,6 +1053,8 @@ export default function HomeScreen({ navigation }) {
           remainingTime: currentTarget,
           targetTime: currentTarget,
           targetEndTimestamp: effectivePrepMainEndMs,
+          lastResetTargetEndTimestamp: 0,
+          lastResetAt: 0,
           isRunning: false,
           isPaused: false,
           isCountUp: false,
@@ -1111,6 +1117,8 @@ export default function HomeScreen({ navigation }) {
             remainingTime: currentRemaining,
             targetTime: currentTarget,
             targetEndTimestamp: 0,
+            lastResetTargetEndTimestamp: lastResetTargetEndRef.current || 0,
+            lastResetAt: lastMainTimerResetAtRef.current || 0,
             isRunning: false,
             isPaused: false,
             isCountUp: false,
@@ -1141,6 +1149,9 @@ export default function HomeScreen({ navigation }) {
         // 通常のタイマートグル
         if (!currentIsRunning) {
           lastAutoFinishedAtRef.current = 0;
+          lastAutoFinishedEndTimestampRef.current = 0;
+          lastResetTargetEndRef.current = 0;
+          lastMainTimerResetAtRef.current = 0;
           // スタート/再開
           if (!currentIsCountUp) {
             const nowMs = Date.now();
@@ -1224,6 +1235,8 @@ export default function HomeScreen({ navigation }) {
                 remainingTime: currentTarget,
                 targetTime: currentTarget,
                 targetEndTimestamp: 0,
+                lastResetTargetEndTimestamp: lastResetTargetEndRef.current || 0,
+                lastResetAt: lastMainTimerResetAtRef.current || 0,
                 isRunning: false,
                 isPaused: false,
                 isCountUp: false,
@@ -1318,6 +1331,8 @@ export default function HomeScreen({ navigation }) {
         remainingTime: finalTarget,
         targetTime: finalTarget,
         targetEndTimestamp: 0,
+        lastResetTargetEndTimestamp: lastResetTargetEndRef.current || 0,
+        lastResetAt: lastMainTimerResetAtRef.current || 0,
         isRunning: false,
         isPaused: false,
         isCountUp: false,
@@ -1390,6 +1405,8 @@ export default function HomeScreen({ navigation }) {
 
     const newState = {
       explicitStop: isExplicitResetNow || !!saveModalVisible,
+      lastResetTargetEndTimestamp: lastResetTargetEndRef.current || 0,
+      lastResetAt: lastMainTimerResetAtRef.current || 0,
       remainingTime: effectiveRemaining,
       targetTime,
       targetEndTimestamp: endMs,
@@ -1542,6 +1559,8 @@ export default function HomeScreen({ navigation }) {
                   ? (overStartTimeRef.current || targetEndTimeRef.current || Date.now())
                   : (targetEndTimeRef.current || (Date.now() + remainingTimeRef.current * 1000)))
               : 0,
+            lastResetTargetEndTimestamp: 0,
+            lastResetAt: 0,
             isRunning: isRunningNow,
             isPaused: false,
             isCountUp: isOverNow,
@@ -1580,6 +1599,8 @@ export default function HomeScreen({ navigation }) {
             remainingTime: remainingTimeRef.current,
             targetTime: pauseTarget,
             targetEndTimestamp: 0,
+            lastResetTargetEndTimestamp: lastResetTargetEndRef.current || 0,
+            lastResetAt: lastMainTimerResetAtRef.current || 0,
             isRunning: false,
             isPaused: remainingTimeRef.current > 0 && remainingTimeRef.current !== pauseTarget,
             isCountUp: false,
@@ -1625,9 +1646,12 @@ export default function HomeScreen({ navigation }) {
       if (Platform.OS === 'ios') {
         const finalTarget = targetTimeRef.current || targetTime || 600;
         const resetState = {
+          explicitStop: true,
           remainingTime: finalTarget,
           targetTime: finalTarget,
           targetEndTimestamp: 0,
+          lastResetTargetEndTimestamp: lastResetTargetEndRef.current || 0,
+          lastResetAt: lastMainTimerResetAtRef.current || 0,
           isRunning: false,
           isPaused: false,
           isCountUp: false,
@@ -1701,6 +1725,8 @@ export default function HomeScreen({ navigation }) {
                     ? (overStartTimeRef.current || targetEndTimeRef.current || Date.now())
                     : (targetEndTimeRef.current || (Date.now() + sec * 1000)))
                 : 0,
+              lastResetTargetEndTimestamp: 0,
+              lastResetAt: 0,
               isRunning: isRunningNow,
               isPaused: false,
               isCountUp: isOverNow,
@@ -1725,16 +1751,34 @@ export default function HomeScreen({ navigation }) {
     } else if (cleanAction === 'adjust') {
       const delta = Number(payload?.secondsToAdd || payload?.extra?.secondsToAdd);
       if (delta) {
+        const isFromPhone = payload?.fromPhone === true;
         console.log('[HomeScreen] MAIN_TIMER_ADJUST applied:', delta);
         let nextRem = 0;
-        if (isRunningRef.current) {
-          const wasOverOrRinging = isCountUpRef.current || triggeredVoicesRef.current.has('alarm');
-          const baseEnd = (!isCountUpRef.current && targetEndTimeRef.current) ? targetEndTimeRef.current : Date.now();
+        const incomingEndMs = Number(payload?.targetEndTimestamp || payload?.extra?.targetEndTimestamp || 0);
+        // ★ Watch側で超過中（+00:xx）に「+1分」「+5分」等の延長が行われた場合、
+        //   iPhone側でカウントアップOFFにより自動終了していた場合でも稼働状態（isRunning = true）へ復帰させて同期する
+        const shouldResumeFromWatchOvertime = !isFromPhone && !isRunningRef.current && delta > 0 && (
+          incomingEndMs > Date.now() || lastAutoFinishedAtRef.current > 0
+        );
+        if (isRunningRef.current || shouldResumeFromWatchOvertime) {
+          const wasOverOrRinging = isCountUpRef.current || triggeredVoicesRef.current.has('alarm') || shouldResumeFromWatchOvertime;
+          const baseEnd = (isRunningRef.current && !isCountUpRef.current && targetEndTimeRef.current) ? targetEndTimeRef.current : Date.now();
           const computedEnd = Math.max(Date.now() + 5000, baseEnd + delta * 1000);
-          const incomingEndMs = Number(payload?.targetEndTimestamp || payload?.extra?.targetEndTimestamp || 0);
           targetEndTimeRef.current = (incomingEndMs > Date.now() && Math.abs(incomingEndMs - computedEnd) <= 15000)
             ? incomingEndMs
             : computedEnd;
+          if (shouldResumeFromWatchOvertime) {
+            isRunningRef.current = true;
+            setIsRunning(true);
+            lastAutoFinishedAtRef.current = 0;
+            lastAutoFinishedEndTimestampRef.current = 0;
+            lastResetTargetEndRef.current = 0;
+            lastMainTimerResetAtRef.current = 0;
+            if (!targetTimeRef.current || targetTimeRef.current <= 0) {
+              targetTimeRef.current = Math.max(60, delta);
+              setTargetTime(targetTimeRef.current);
+            }
+          }
           isCountUpRef.current = false;
           setIsCountUp(false);
           overStartTimeRef.current = null;
@@ -1777,6 +1821,8 @@ export default function HomeScreen({ navigation }) {
             remainingTime: nextRem,
             targetTime: finalTargetSec,
             targetEndTimestamp: adjustedEndMs,
+            lastResetTargetEndTimestamp: isRunningRef.current ? 0 : (lastResetTargetEndRef.current || 0),
+            lastResetAt: isRunningRef.current ? 0 : (lastMainTimerResetAtRef.current || 0),
             isRunning: isRunningRef.current,
             isPaused: !isRunningRef.current && !isPreCountingDownRef.current && nextRem > 0 && nextRem !== finalTargetSec,
             isCountUp: false,
@@ -1824,6 +1870,8 @@ export default function HomeScreen({ navigation }) {
             isOver = true;
             currentRemaining = Math.max(0, Math.floor((now - endMs) / 1000));
           } else {
+            lastAutoFinishedAtRef.current = now;
+            lastAutoFinishedEndTimestampRef.current = endMs;
             isRunning = false;
             isRunningRef.current = false;
             isOver = false;
@@ -1832,7 +1880,6 @@ export default function HomeScreen({ navigation }) {
             prepEndTimeRef.current = null;
             currentRemaining = 0;
             remainingTimeRef.current = 0;
-            endMs = 0;
             setIsPreCountingDown(false);
             setIsRunning(false);
             setIsCountUp(false);
@@ -1849,6 +1896,9 @@ export default function HomeScreen({ navigation }) {
     } else if (isRunning) {
       if (isOver) {
         if (!allowCountUp) {
+          const finishedEnd = overStartTimeRef.current || targetEndTimeRef.current || now;
+          lastAutoFinishedAtRef.current = now;
+          lastAutoFinishedEndTimestampRef.current = finishedEnd;
           isRunning = false;
           isRunningRef.current = false;
           isOver = false;
@@ -1856,7 +1906,7 @@ export default function HomeScreen({ navigation }) {
           targetEndTimeRef.current = null;
           overStartTimeRef.current = null;
           currentRemaining = 0;
-          endMs = 0;
+          endMs = finishedEnd;
           setIsRunning(false);
           setIsCountUp(false);
           setRemainingTime(0);
@@ -1874,13 +1924,14 @@ export default function HomeScreen({ navigation }) {
             isOver = true;
             currentRemaining = Math.max(0, Math.floor((now - endMs) / 1000));
           } else {
+            lastAutoFinishedAtRef.current = now;
+            lastAutoFinishedEndTimestampRef.current = endMs;
             isRunning = false;
             isRunningRef.current = false;
             isOver = false;
             isCountUpRef.current = false;
             targetEndTimeRef.current = null;
             currentRemaining = 0;
-            endMs = 0;
             setIsRunning(false);
             setIsCountUp(false);
             setRemainingTime(0);
@@ -1896,8 +1947,13 @@ export default function HomeScreen({ navigation }) {
     }
     const isAutoFinishedNow = !isRunning && !isPre && lastAutoFinishedAtRef.current > 0 && lastAutoFinishedAtRef.current > lastMainTimerResetAtRef.current;
     const isExplicitResetNow = !isRunning && !isPre && !isAutoFinishedNow && (now - lastMainTimerResetAtRef.current < 5000);
+    if (!endMs && isAutoFinishedNow && lastAutoFinishedEndTimestampRef.current > 0) {
+      endMs = lastAutoFinishedEndTimestampRef.current;
+    }
     return {
       explicitStop: isExplicitResetNow,
+      lastResetTargetEndTimestamp: lastResetTargetEndRef.current || 0,
+      lastResetAt: lastMainTimerResetAtRef.current || 0,
       remainingTime: currentRemaining,
       targetTime: currentTarget,
       targetEndTimestamp: endMs,
@@ -1958,14 +2014,18 @@ export default function HomeScreen({ navigation }) {
             !isSameAsLastReset &&
             !isSameAsLastAutoFinished &&
             !isRecentlyReset &&
-            !isExpiredWithoutCountUp &&
             handleMainTimerActionDispatchRef.current
           ) {
-            handleMainTimerActionDispatchRef.current(
-              'MAIN_TIMER_SET_TIME',
-              { ...payload, autoStart: true },
-              `sync_adopt_${Math.round(Number(payload?.targetEndTimestamp || Date.now()) / 1000)}`
-            );
+            if (isExpiredWithoutCountUp) {
+              lastAutoFinishedAtRef.current = nowMs;
+              lastAutoFinishedEndTimestampRef.current = incomingEndTs;
+            } else {
+              handleMainTimerActionDispatchRef.current(
+                'MAIN_TIMER_SET_TIME',
+                { ...payload, autoStart: true },
+                `sync_adopt_${Math.round(Number(payload?.targetEndTimestamp || Date.now()) / 1000)}`
+              );
+            }
           }
         }
         ensureSalonSeatsCached().then(() => {

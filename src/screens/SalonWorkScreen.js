@@ -157,8 +157,8 @@ export const sanitizeLoadedSeats = (seatsList) => {
           checkPausedRemainingSeconds: null,
         };
       }
-      // 全体タイマーはまだ未来だが、途中チェックタイマーが起動時点ですでに過去になっている場合は完了扱いに正規化（起動直後の誤鳴動防止）
-      if (seat.checkStatus === 'running' && seat.checkEndTimestamp && Number(seat.checkEndTimestamp) <= now) {
+      // 途中チェックタイマーも3時間以内の超過カウントアップは維持し、3時間以上前の古い放置データのみ完了扱いに正規化
+      if (seat.checkStatus === 'running' && seat.checkEndTimestamp && Number(seat.checkEndTimestamp) <= abandonedCutoff) {
         didSanitize = true;
         return {
           ...seat,
@@ -366,6 +366,8 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       creatorName: (_cachedUserName || 'スタイリスト').trim(),
       totalSeconds: state.targetTime || 600,
       targetEndTimestamp: targetEnd,
+      lastResetTargetEndTimestamp: state.lastResetTargetEndTimestamp || 0,
+      lastResetAt: state.lastResetAt || 0,
       isRunning: isRunning,
       pausedRemainingSeconds: pausedRem,
       isCountUp: isCountUp,
@@ -488,6 +490,8 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
         creatorName: (currentName || 'スタイリスト').trim(),
         totalSeconds: _cachedMainTimerState.targetTime || 600,
         targetEndTimestamp: targetEnd,
+        lastResetTargetEndTimestamp: _cachedMainTimerState.lastResetTargetEndTimestamp || 0,
+        lastResetAt: _cachedMainTimerState.lastResetAt || 0,
         isRunning: isRunning,
         pausedRemainingSeconds: pausedRem,
         isCountUp: isCountUp,
@@ -1096,16 +1100,22 @@ export default function SalonWorkScreen() {
       const hasStoppedWatchMain = rawStopped === true || rawStopped === 1 || rawStopped === 'true';
       if (hasStoppedWatchMain && (_cachedMainTimerState?.isRunning || _cachedMainTimerState?.isPreCountingDown || _cachedMainTimerState?.isCountUp)) {
         stopAlarm('main', 'main-timer');
-        WatchConnectivity.notifyLocalStopOrReset('main-timer', _cachedMainTimerState?.targetEndTimestamp || 0);
+        const stoppedEnd = _cachedMainTimerState?.targetEndTimestamp || 0;
+        WatchConnectivity.notifyLocalStopOrReset('main-timer', stoppedEnd);
         const resetTarget = _cachedMainTimerState?.targetTime || 600;
         updateCachedMainTimerState({
           ...(_cachedMainTimerState || {}),
           remainingTime: resetTarget,
           targetTime: resetTarget,
           targetEndTimestamp: 0,
+          lastResetTargetEndTimestamp: stoppedEnd,
+          lastResetAt: Date.now(),
           isRunning: false,
           isPaused: false,
           isCountUp: false,
+          isExplicitReset: true,
+          explicitStop: true,
+          isAutoFinished: false,
           isPreCountingDown: false,
           prepEndTimestamp: 0,
         });
@@ -1123,7 +1133,15 @@ export default function SalonWorkScreen() {
           const isPrep = incomingPrepEnd > nowMs;
           const isPast = !isPrep && incomingTargetEnd > nowMs - 3 * 3600 * 1000 && incomingTargetEnd <= nowMs;
           const isOvertime = isPast && allowCountUp;
-          if (!isStoppedTarget && !isRecentlyStopped && !(isPast && !allowCountUp)) {
+          if (!isStoppedTarget && !isRecentlyStopped && isPast && !allowCountUp) {
+            updateCachedMainTimerState({
+              ...(_cachedMainTimerState || {}),
+              targetEndTimestamp: incomingTargetEnd,
+              isAutoFinished: true,
+              isExplicitReset: false,
+              explicitStop: false,
+            });
+          } else if (!isStoppedTarget && !isRecentlyStopped && !(isPast && !allowCountUp)) {
             const targetEnd = (incomingTargetEnd > nowMs || isOvertime)
               ? incomingTargetEnd
               : (isPrep ? (incomingPrepEnd + incomingSec * 1000) : (nowMs + incomingSec * 1000));
@@ -1137,9 +1155,14 @@ export default function SalonWorkScreen() {
               remainingTime: syncedRem,
               targetTime: incomingSec,
               targetEndTimestamp: targetEnd,
+              lastResetTargetEndTimestamp: 0,
+              lastResetAt: 0,
               isRunning: !isPrep,
               isPaused: false,
               isCountUp: isOvertime,
+              isAutoFinished: false,
+              isExplicitReset: false,
+              explicitStop: false,
               isPreCountingDown: isPrep,
               prepEndTimestamp: isPrep ? incomingPrepEnd : 0,
             });
@@ -1157,27 +1180,39 @@ export default function SalonWorkScreen() {
     if (action.startsWith('MAIN_TIMER_')) {
       if (action === 'MAIN_TIMER_RESET') {
         stopAlarm('main', 'main-timer');
+        const incomingStopEnd = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || extra?.expectedEnd || message?.expectedEnd || _cachedMainTimerState?.targetEndTimestamp || 0);
         const resetTarget = _cachedMainTimerState?.targetTime || 600;
         updateCachedMainTimerState({
           ...(_cachedMainTimerState || {}),
           remainingTime: resetTarget,
           targetTime: resetTarget,
           targetEndTimestamp: 0,
+          lastResetTargetEndTimestamp: incomingStopEnd,
+          lastResetAt: Date.now(),
           isRunning: false,
           isPaused: false,
           isCountUp: false,
+          isExplicitReset: true,
+          explicitStop: true,
+          isAutoFinished: false,
           isPreCountingDown: false,
         });
       } else if (action === 'MAIN_TIMER_PAUSE') {
         const wasOverOrZero = !!_cachedMainTimerState?.isCountUp || (_cachedMainTimerState?.remainingTime != null && _cachedMainTimerState.remainingTime <= 0);
+        const incomingStopEnd = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || extra?.expectedEnd || message?.expectedEnd || _cachedMainTimerState?.targetEndTimestamp || 0);
         const resetTarget = _cachedMainTimerState?.targetTime || 600;
         updateCachedMainTimerState({
           ...(_cachedMainTimerState || {}),
           remainingTime: wasOverOrZero ? resetTarget : (_cachedMainTimerState?.remainingTime ?? resetTarget),
           targetEndTimestamp: 0,
+          lastResetTargetEndTimestamp: incomingStopEnd,
+          lastResetAt: Date.now(),
           isRunning: false,
           isPaused: !wasOverOrZero,
           isCountUp: false,
+          isExplicitReset: wasOverOrZero,
+          explicitStop: true,
+          isAutoFinished: false,
           isPreCountingDown: false,
         });
       } else if (action === 'MAIN_TIMER_START') {
@@ -1200,9 +1235,14 @@ export default function SalonWorkScreen() {
             remainingTime: syncedRem,
             targetTime: curTarget,
             targetEndTimestamp: targetEnd,
+            lastResetTargetEndTimestamp: 0,
+            lastResetAt: 0,
             isRunning: !isPrep,
             isPaused: false,
             isCountUp: false,
+            isAutoFinished: false,
+            isExplicitReset: false,
+            explicitStop: false,
             isPreCountingDown: isPrep,
             prepEndTimestamp: isPrep ? incomingPrepEnd : 0,
           });
@@ -1227,23 +1267,42 @@ export default function SalonWorkScreen() {
             remainingTime: syncedRem,
             targetTime: incomingSec,
             targetEndTimestamp: targetEnd,
+            lastResetTargetEndTimestamp: 0,
+            lastResetAt: 0,
             isRunning: autoStart && !isPrep,
             isPaused: false,
             isCountUp: false,
+            isAutoFinished: false,
+            isExplicitReset: false,
+            explicitStop: false,
             isPreCountingDown: isPrep,
             prepEndTimestamp: isPrep ? incomingPrepEnd : 0,
           });
         }
       } else if (action === 'MAIN_TIMER_ADJUST') {
         const delta = Number(extra?.secondsToAdd || message?.secondsToAdd || 0);
+        const incomingEndMs = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || 0);
         if (delta && _cachedMainTimerState) {
-          const isRunning = !!_cachedMainTimerState.isRunning;
+          const isRunning = !!_cachedMainTimerState.isRunning || (incomingEndMs > Date.now() && delta > 0);
           if (isRunning) {
-            const baseEnd = _cachedMainTimerState.targetEndTimestamp || Date.now();
-            const newEnd = Math.max(Date.now() + 5000, baseEnd + delta * 1000);
+            const baseEnd = (_cachedMainTimerState.isRunning && !_cachedMainTimerState.isCountUp && _cachedMainTimerState.targetEndTimestamp > Date.now())
+              ? _cachedMainTimerState.targetEndTimestamp
+              : Date.now();
+            const computedEnd = Math.max(Date.now() + 5000, baseEnd + delta * 1000);
+            const newEnd = (incomingEndMs > Date.now() && Math.abs(incomingEndMs - computedEnd) <= 15000)
+              ? incomingEndMs
+              : computedEnd;
             const nextRem = Math.max(0, Math.ceil((newEnd - Date.now()) / 1000));
             updateCachedMainTimerState({
               ..._cachedMainTimerState,
+              isRunning: true,
+              isPaused: false,
+              isCountUp: false,
+              isAutoFinished: false,
+              isExplicitReset: false,
+              explicitStop: false,
+              lastResetTargetEndTimestamp: 0,
+              lastResetAt: 0,
               remainingTime: nextRem,
               targetEndTimestamp: newEnd,
             });
