@@ -1232,29 +1232,43 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         parsed[i].clearCheck()
                     }
                     // ★ Watch で直近3.5秒以内に行われた客席操作（ヘルプ募集・担当指名・時間微調整等）は、iPhone側の未反映 SYNC_SEATS パケットで巻き戻されないよう保護
-                    if let modAt = localSeatMods[id] {
+                    //   ※ Supabaseクラウド同期で席ID(UUID)が切り替わった場合も seatNumber で引き継ぎ保護する
+                    let matchedPrevById = self.timers.first(where: { $0.id == id })
+                    let matchedPrevByNum = matchedPrevById ?? self.timers.first(where: { $0.seatNumber == parsed[i].seatNumber })
+                    let prevKey = matchedPrevByNum?.id ?? id
+                    if let modAt = localSeatMods[id] ?? localSeatMods[prevKey] {
                         if nowDate.timeIntervalSince(modAt) < localSeatModHoldSeconds,
-                           let prev = self.timers.first(where: { $0.id == id }) {
+                           let prev = matchedPrevByNum {
                             if parsed[i] != prev {
-                                parsed[i] = prev
+                                var restored = prev
+                                restored.id = id
+                                parsed[i] = restored
+                                localSeatMods[id] = modAt
                             } else {
                                 localSeatMods[id] = nil
+                                localSeatMods[prevKey] = nil
                             }
                         } else {
                             localSeatMods[id] = nil
+                            localSeatMods[prevKey] = nil
                         }
                     }
                     // ★ Watch主導で開始したばかりの席（15秒以内、または古い保存データ到着時）が、iPhone側の未反映データで強制停止されるのを保護
-                    if let startedAt = watchStartedSeatTimes[id] {
+                    if let startedAt = watchStartedSeatTimes[id] ?? watchStartedSeatTimes[prevKey] {
                         if parsed[i].isRunning {
                             watchStartedSeatTimes[id] = nil
+                            watchStartedSeatTimes[prevKey] = nil
                         } else if (nowDate.timeIntervalSince(startedAt) < 15.0 || isStaleSnapshot),
-                                  let prev = self.timers.first(where: { $0.id == id }),
+                                  let prev = matchedPrevByNum,
                                   prev.isRunning,
                                   prev.targetEndTime > nowDate {
-                            parsed[i] = prev
+                            var restored = prev
+                            restored.id = id
+                            parsed[i] = restored
+                            watchStartedSeatTimes[id] = startedAt
                         } else {
                             watchStartedSeatTimes[id] = nil
+                            watchStartedSeatTimes[prevKey] = nil
                         }
                     }
                     // ★ 既存の同一タイマーがWatchで稼働中の場合、往復同期による数秒のズレで終了予定時刻が書き換わってスマートアラームが破棄されるのを防ぐ
@@ -1402,6 +1416,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             "userName": currentUserName,
             "timestamp": Date().timeIntervalSince1970 * 1000.0
         ]
+        if !seatId.isEmpty, seatId != "main-timer", let matchedSeat = self.timers.first(where: { $0.id == seatId }) {
+            payload["seatNumber"] = matchedSeat.seatNumber
+            payload["seatLabel"] = matchedSeat.seatLabel
+        }
         for (k, v) in extra {
             payload[k] = v
         }

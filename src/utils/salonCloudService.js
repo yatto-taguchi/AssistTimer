@@ -217,8 +217,11 @@ export const updateMemberDisplayName = async ({ salonId, displayName }) => {
  */
 export const mapSeatToCloudTimer = (seat, salonId, userId) => {
   const seatLabel = (seat.seatLabel || seat.name || '席').trim();
-  const targetSeconds = Number(seat.targetSeconds || seat.targetTime || 0);
-  const checkTotalSeconds = Number(seat.checkTargetSeconds || seat.checkTotalSeconds || 0);
+  const targetSeconds = Math.round(Number(seat.targetSeconds || seat.targetTime || 0));
+  const checkTotalSeconds = Math.round(Number(seat.checkTargetSeconds || seat.checkTotalSeconds || 0));
+  const targetEndTs = Math.round(Number(seat.targetEndTimestamp || 0));
+  const pausedRemSec = Math.round(Number(seat.pausedRemainingSeconds || 0));
+  const checkEndTs = seat.checkEndTimestamp ? Math.round(Number(seat.checkEndTimestamp)) : null;
 
   return {
     salon_id: salonId,
@@ -229,12 +232,12 @@ export const mapSeatToCloudTimer = (seat, salonId, userId) => {
     is_shampooing: !!seat.isShampooing,
     status: seat.status || 'idle',
     target_seconds: targetSeconds,
-    target_end_timestamp: Number(seat.targetEndTimestamp || 0),
-    paused_remaining_seconds: Number(seat.pausedRemainingSeconds || 0),
+    target_end_timestamp: targetEndTs,
+    paused_remaining_seconds: pausedRemSec,
     comment: seat.comment || null,
-    sort_order: typeof seat.sortOrder === 'number' ? seat.sortOrder : 0,
+    sort_order: typeof seat.sortOrder === 'number' ? Math.round(seat.sortOrder) : 0,
     created_by: seat.createdBy || userId,
-    check_target_end_timestamp: seat.checkEndTimestamp ? Number(seat.checkEndTimestamp) : null,
+    check_target_end_timestamp: checkEndTs,
     check_total_seconds: checkTotalSeconds > 0 ? checkTotalSeconds : null,
     check_process: seat.checkProcess || null,
     check_staff_name: seat.checkStaffName || seat.checkStaff || null,
@@ -245,35 +248,44 @@ export const mapSeatToCloudTimer = (seat, salonId, userId) => {
 /**
  * クラウドsalon_timersのレコードをローカルSeatItem形式にマッピング
  */
-export const mapCloudTimerToSeat = (cloudTimer) => {
+export const mapCloudTimerToSeat = (cloudTimer, index = 0) => {
   const name = cloudTimer.seat_label || '席';
-  const targetSeconds = Number(cloudTimer.target_seconds || 0);
-  const checkSec = cloudTimer.check_total_seconds ? Number(cloudTimer.check_total_seconds) : 0;
+  const targetSeconds = Math.round(Number(cloudTimer.target_seconds || 0));
+  const checkSec = cloudTimer.check_total_seconds ? Math.round(Number(cloudTimer.check_total_seconds)) : 0;
+  const checkEndTs = cloudTimer.check_target_end_timestamp ? Math.round(Number(cloudTimer.check_target_end_timestamp)) : null;
+  const status = cloudTimer.status || 'idle';
+  const hasActiveCheck = status === 'running' && checkSec > 0 && checkEndTs && checkEndTs > 0;
+  const numMatch = String(name).match(/\d+/);
+  const seatNumber = numMatch ? parseInt(numMatch[0], 10) : (index + 1);
 
   return {
     id: cloudTimer.id,
     cloudTimerId: cloudTimer.id,
+    seatNumber: seatNumber,
     seatLabel: name,
     name: name,
     targetSeconds: targetSeconds,
     targetTime: targetSeconds,
-    targetEndTimestamp: Number(cloudTimer.target_end_timestamp || 0),
-    pausedRemainingSeconds: Number(cloudTimer.paused_remaining_seconds || 0),
-    status: cloudTimer.status || 'idle',
+    initialMinutes: targetSeconds > 0 ? Math.max(1, Math.round(targetSeconds / 60)) : 20,
+    targetEndTimestamp: Math.round(Number(cloudTimer.target_end_timestamp || 0)),
+    pausedRemainingSeconds: Math.round(Number(cloudTimer.paused_remaining_seconds || 0)),
+    status: status,
     colorStaffName: cloudTimer.color_staff_name || 'スタッフ',
-    assistantStaffName: cloudTimer.assistant_staff_name || null,
-    helpProcess: cloudTimer.help_process || null,
+    assistantStaffName: cloudTimer.assistant_staff_name || '',
+    helpProcess: cloudTimer.help_process || '',
     isShampooing: !!cloudTimer.is_shampooing,
     comment: cloudTimer.comment || '',
     sortOrder: cloudTimer.sort_order || 0,
     createdBy: cloudTimer.created_by,
-    checkEndTimestamp: cloudTimer.check_target_end_timestamp ? Number(cloudTimer.check_target_end_timestamp) : null,
-    checkTargetSeconds: checkSec,
-    checkTotalSeconds: checkSec,
-    checkProcess: cloudTimer.check_process || null,
-    checkStaffName: cloudTimer.check_staff_name || null,
-    checkStaff: cloudTimer.check_staff_name || null,
-    isCheckCompleted: false,
+    checkEndTimestamp: checkEndTs,
+    checkTargetSeconds: checkSec > 0 ? checkSec : null,
+    checkTotalSeconds: checkSec > 0 ? checkSec : null,
+    checkInitialMinutes: checkSec > 0 ? Math.max(1, Math.round(checkSec / 60)) : null,
+    checkProcess: cloudTimer.check_process || 'チェック',
+    checkStaffName: cloudTimer.check_staff_name || '',
+    checkStaff: cloudTimer.check_staff_name || '',
+    checkStatus: hasActiveCheck ? 'running' : 'stopped',
+    isCheckCompleted: !hasActiveCheck && checkSec > 0,
     updatedAt: cloudTimer.updated_at ? new Date(cloudTimer.updated_at).getTime() : Date.now(),
   };
 };
@@ -324,16 +336,25 @@ export const upsertCloudTimer = async (salonId, seat) => {
       if (error) console.warn('upsertCloudTimer update error:', error);
       return data ? mapCloudTimerToSeat(data) : null;
     } else {
-      // 席名で同一サロン内の席を検索して既存があればIDを再利用
-      const { data: existing } = await supabase
-        .from('salon_timers')
-        .select('id')
-        .eq('salon_id', salonId)
-        .eq('seat_label', payload.seat_label)
-        .maybeSingle();
+      // 席名（変更前ラベルおよび「1番」⇔「1番席」表記ゆれ含む）で同一サロン内の席を検索して既存があればIDを再利用
+      const baseLabel = payload.seat_label;
+      const altLabel1 = baseLabel.endsWith('席') ? baseLabel.slice(0, -1) : `${baseLabel}席`;
+      const oldLabel = seat.oldSeatLabel ? String(seat.oldSeatLabel).trim() : null;
+      const candidates = Array.from(new Set([oldLabel, baseLabel, altLabel1].filter(Boolean)));
 
-      if (existing) {
-        payload.id = existing.id;
+      const { data: existingList } = await supabase
+        .from('salon_timers')
+        .select('id, seat_label')
+        .eq('salon_id', salonId)
+        .in('seat_label', candidates);
+
+      if (Array.isArray(existingList) && existingList.length > 0) {
+        const matched = (oldLabel && existingList.find((r) => r.seat_label === oldLabel))
+          || existingList.find((r) => r.seat_label === baseLabel)
+          || existingList[0];
+        if (matched?.id) {
+          payload.id = matched.id;
+        }
       }
       const { data, error } = await supabase
         .from('salon_timers')

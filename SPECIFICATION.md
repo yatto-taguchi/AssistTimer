@@ -3101,3 +3101,25 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
     - これにより、手元の Apple Watch でタイマーを開始・延長・停止した瞬間、ペア（子端末）の画面も1ミリ秒の遅延もなくリアルタイムに同期連動する。
   - **iPhoneタイマー開始モーダルの即時同期保証**:
     - `handleStartSeatTimer` 内で `saveSeatsToStorage` および `syncSeatsToWatch` を確実に呼び出し、モーダルからタイマースタートした際も即座にクラウドおよびWatchへ送信する。
+
+
+#### 3. 席名変更モーダル「変更を保存」ボタンの未定義変数エラー修正および旧ラベル引き継ぎ更新仕様 (`src/screens/SalonWorkScreen.js`, `src/utils/salonCloudService.js`)
+- **背景・原因**:
+  - `handleSaveSeatRename` 内に未定義変数 `currentWorkspaceId` および `supabaseRef` を参照するコードが残存していたため、「変更を保存」押下時に `ReferenceError` が発生し、モーダル閉鎖（`setIsRenameSeatModalVisible(false)`）まで処理が到達しなかった。
+- **確定仕様**:
+  - 未定義変数の参照を完全撤廃し、ボタン押下と同時にモーダルを即座に閉じ、ローカル保存・Watch即時同期・`upsertCloudTimer`（変更前の `oldSeatLabel` 付き）によるクラウド更新を確実に実行する。
+
+#### 4. PostgreSQL `BIGINT` 小数点タイムスタンプ拒絶エラーの解消仕様 (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)
+- **背景・原因**:
+  - Apple Watch 側（Swift）は `targetEndTimestamp` を `timeIntervalSince1970 * 1000.0`（浮動小数点数、例: `1761614523456.789`）で送信していたが、Supabase の `salon_timers.target_end_timestamp` カラムは `BIGINT`（整数型）であるため、PostgreSQL エラー `22P02: invalid input syntax for type bigint` で更新が100%拒絶され、クラウド側が `00:00` (`idle`) のまま更新されていなかった。
+- **確定仕様**:
+  - `mapSeatToCloudTimer`、`mapCloudTimerToSeat`、および `SalonWorkScreen.js` の `handleWatchAction` におけるすべての秒数・タイムスタンプ値に `Math.round(...)` を適用し、常に整数値として送受信・保存する。
+
+#### 5. 未同期 Watch からのタイマー開始時の空振り・`00:00` 巻き戻り防止仕様 (`src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`)
+- **背景・原因**:
+  - クラウド同期後の iPhone 側の席ID（UUID）と、未同期状態の Watch が持つローカル席ID（`"1"` 等）が不一致の場合、iPhone 側の `handleWatchAction` が `s.id !== seatId` で空振りし、直後の `REQUEST_SYNC` 返信で別IDの `00:00` データが Watch に送り返され（Watch側の15秒保護 `watchStartedSeatTimes[id]` もID不一致ですり抜け）、Watch で入れたタイマーが即座に `00:00` に戻ってしまっていた。
+  - また、`initCloudSalon` にてクラウドの `00:00` データでローカル稼働中のタイマーを無条件上書きしていた。
+- **確定仕様**:
+  - **iPhone側の多段柔軟席マッチング**: Watch からアクションを受信した際、`id` / `cloudTimerId` だけでなく、`seatLabel`（「1番」⇔「1番席」表記ゆれ含む）および `seatNumber`（席番号）で対象席を特定する。該当席がない状態で `START_TIMER` が届いた場合はその席番号の席を自動生成して開始する。
+  - **Watch側の席番号引き継ぎ保護**: Watch 側 `processReceivedData` の `watchStartedSeatTimes`（15秒保護）および `localSeatMods`（3.5秒保護）にて、`id` 一致だけでなく `seatNumber` 一致でも保護を適用し、クラウドUUIDへの切り替え時も稼働中タイマーを維持する。
+  - **クラウド初期取得時の稼働中タイマー保護マージ**: `initCloudSalon` で `cloudTimers` を取得した際、ローカルで現在カウントダウン稼働中（`status === 'running'` かつ `targetEndTimestamp > Date.now()`）の席はクラウドの停止データ（`00:00`）で潰さずローカルの稼働状態を優先保持し、クラウドへ逆同期する。
