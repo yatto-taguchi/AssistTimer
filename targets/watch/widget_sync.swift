@@ -17,9 +17,39 @@ enum WidgetSync {
     /// 終了時刻がこの秒数以上ずれたら「時間変更」とみなす（端末間の通信遅延による小さなずれは無視）
     private static let endChangeThreshold: Double = 2
 
+    private static let syncQueue = DispatchQueue(label: "com.assisttimer.watch.widgetsync", qos: .utility)
+    private static var pendingWorkItem: DispatchWorkItem?
+    private static var pendingForceReload: Bool = false
     private static var lastPayload: Data?
+    private static var lastReloadAt: Date = .distantPast
+    private static var trailingReloadWorkItem: DispatchWorkItem?
 
     static func save(timers: [SeatTimerItem], mainTimer: SeatTimerItem? = nil, userName: String, forceReload: Bool = false) {
+        let timersSnapshot = timers
+        let mainSnapshot = mainTimer
+        let userSnapshot = userName
+
+        syncQueue.async {
+            if forceReload {
+                pendingForceReload = true
+            }
+            pendingWorkItem?.cancel()
+            let work = DispatchWorkItem {
+                let shouldForce = pendingForceReload
+                pendingForceReload = false
+                performSaveOnQueue(
+                    timers: timersSnapshot,
+                    mainTimer: mainSnapshot,
+                    userName: userSnapshot,
+                    forceReload: shouldForce
+                )
+            }
+            pendingWorkItem = work
+            syncQueue.asyncAfter(deadline: .now() + 0.06, execute: work)
+        }
+    }
+
+    private static func performSaveOnQueue(timers: [SeatTimerItem], mainTimer: SeatTimerItem?, userName: String, forceReload: Bool) {
         guard let defaults = UserDefaults(suiteName: appGroup) else { return }
 
         // メインタイマーも含めた全アイテムリスト
@@ -166,7 +196,24 @@ enum WidgetSync {
         lastPayload = data
 
         defaults.set(data, forKey: snapshotKey)
-        defaults.synchronize()
-        WidgetCenter.shared.reloadAllTimelines()
+        scheduleTimelineReloadOnQueue()
+    }
+
+    private static func scheduleTimelineReloadOnQueue() {
+        trailingReloadWorkItem?.cancel()
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastReloadAt)
+        if elapsed >= 0.25 {
+            lastReloadAt = now
+            WidgetCenter.shared.reloadAllTimelines()
+        } else {
+            let delay = max(0.05, 0.25 - elapsed)
+            let work = DispatchWorkItem {
+                lastReloadAt = Date()
+                WidgetCenter.shared.reloadAllTimelines()
+            }
+            trailingReloadWorkItem = work
+            syncQueue.asyncAfter(deadline: .now() + delay, execute: work)
+        }
     }
 }

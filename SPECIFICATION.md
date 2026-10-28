@@ -3164,3 +3164,25 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
      - **共有相手の操作による関係者限定リアルタイム通知**:
        - `salonCloudService.js` で自端末からの直近送信シグネチャ（`isSelfEcho`）を識別して自己通知エコーバックを防止。
        - `SalonWorkScreen.js` の `subscribeSalonTimers` にて、他端末からの更新（チェックタイマー完了・全体タイマー停止/リセット・ヘルプ/チェック全員募集・ヘルプ/チェック担当指名・関係席の新規開始/チェック追加/時間変更）を検知した際、自分がその席の関係者（または未定/募集で入る可能性がある人）である場合のみ、iPhone上部の通知バナー＆触覚振動（`showPeerActionBanner`）を表示するとともに、Apple Watchへ `notification`（`sourceUser: '__remote__'`）を即時プッシュし、Watch画面バナー＋触覚振動＋TimeSensitiveローカル通知（`postPeerActionNotification`）で手首へ即座に知らせる。また、他端末で停止・完了されたタイマーのAlarmKit予約も即座に `stopAlarm` で消火する。
+
+#### 8. Apple Watch モーダルシート操作・タイマー停止時のフリーズ・ラグ完全解消および客席ピンポイントアラーム消火仕様 (`targets/watch/widget_sync.swift`, `targets/watch/alarm.swift`, `targets/watch/content.swift`)
+- **背景・原因**:
+  1. **メインスレッド上での App Group 同期ディスク I/O と WidgetKit IPC 連打**:
+     - `WidgetSync.save()` がメインスレッド上で `UserDefaults(suiteName:).synchronize()`（ブロッキング I/O）と `WidgetCenter.shared.reloadAllTimelines()`（IPC 通信）を同期実行しており、ボタン1タップで最大3〜4回重複呼び出しされていたため、UIスレッドの詰まり・ラグを引き起こしていた。
+  2. **モーダルシート閉鎖トランザクションと親 View 再構築・背面アニメーションの衝突**:
+     - シート内のボタン押下時に、`dismiss()` による閉鎖アニメーションと同一フレームで親の `@State timers` / `@State mainTimer` 更新、背面の `ScrollViewReader.scrollTo`（スプリングアニメーション）、`showNotification` バナー表示、Digital Crown フォーカス奪取、および親側バインディングの即時 `nil`/`false` 代入が同時発生し、watchOS SwiftUI の NavigationStack / Sheet プレゼンテーション制御がデッドロック・フリーズしていた。
+  3. **シート表示中の `.sheet(item:)` スナップショット変化と 0.5秒クロックによるサブ画面の強制引き戻し**:
+     - シート内でスタッフ指定や設定変更を行った瞬間に `.sheet(item:)` に渡す `SeatTimerItem` が変化して SwiftUI がシート全体を再生成しようとしたり、`TimeActionSheet` の 0.5秒クロック（`.onReceive`）が超過中に毎0.5秒 `subMode` を `.timerActionBranch` / `.subCheckActionBranch` へ強制引き戻ししていた。
+  4. **未超過タイマーの切り上げ停止時における別席・後続スマートアラームの誤消火**:
+     - 稼働中（未超過）の客席タイマーを切り上げて「タイマーを止める」「コーミングに入る」等を押した際、全席共通の `WatchAlarmCoordinator.shared.stop()` を呼んでいたため、`ringing` が空のときに `acknowledgeRinging` のフォールバック分岐（`if mergedTargets.isEmpty, let k = sessionKey`）に入り、別席や後続の未発火スマートアラームを誤って消火済み（`acknowledged`）にしてしまっていた。
+- **確定仕様**:
+  - **`WidgetSync.save()` の完全バックグラウンド非同期化＆デバウンス・スロットリング (`targets/watch/widget_sync.swift`)**:
+    - `defaults.synchronize()` を撤廃し、専用バックグラウンドシリアルキュー（`syncQueue`, QoS: `.utility`）上で `0.06秒` デバウンス（`pendingForceReload` 論理和統合）および `0.25秒` 間隔の `reloadAllTimelines()` スロットリングを実行し、メインスレッドのブロッキングをゼロにする。
+  - **シートスナップショット固定と閉鎖後遅延実行 (`targets/watch/content.swift`)**:
+    - `PendingSheetActionBox`（`cachedSheetItems` / `cachedMainTimerItem`）によりシート表示中のアイテムスナップショットを固定し、シートを閉じるボタン操作（`deferMainTimerSheetCloseAction` / `deferSeatSheetCloseAction`）ではシート側の `dismiss()` に閉鎖トランザクションを一本化した上で、`onDismiss`（または `0.15秒` フォールバック）にて親ステート更新・アラーム再構成・文字盤同期（`syncSeatTimersState`）を1回だけクリーンに実行する。
+    - モーダルシート表示中（`isAnyModalSheetPresented == true`）は背面の `triggerScroll`、`showNotification` バナーアニメーション、およびサムネイルマップの Digital Crown フォーカス移動を抑制し、ボタン押下時の二重ハプティック振動も排除する。
+  - **0.5秒クロックの初回超過遷移限定化 (`targets/watch/content.swift`)**:
+    - `TimeActionSheet` に `hasAutoMovedToMainOvertimeBranch` / `hasAutoMovedToCheckOvertimeBranch` を設け、シート表示中に0秒を切って超過へ突入した最初の1回のみ分岐画面へ自動遷移し、その後ユーザーが「担当者を変更」「タイム再入力」等のサブ画面へ移動した際は引き戻さない。
+  - **客席ピンポイント消火メソッド `acknowledgeSeatTimer` と未発火スマートアラームの保護 (`targets/watch/alarm.swift`, `targets/watch/content.swift`)**:
+    - `WatchAlarmCoordinator` に `acknowledgeSeatTimer(seatId:checkOnly:skipRefresh:)` を新設し、客席タイマーの停止・ヘルプ開始・チェック完了・時間延長時は、その席（全体またはチェックのみ）のアラーム・通知・該当セッションのみをピンポイントで消火する。
+    - `acknowledgeRinging` で `mergedTargets.isEmpty` 時に `sessionKey` をフォールバック採用する条件を「`explicitTarget == nil` かつ（`sessionStarted == true` または予定時刻到達済み）」に限定し、未来の予約中スマートアラームを誤って消火しないよう保護する。

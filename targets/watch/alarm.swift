@@ -430,6 +430,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: checkIds)
         }
         ringing.removeAll { $0.seatId == seatId && $0.key.contains("-check@") }
+        if ringing.isEmpty {
+            stopForegroundHaptics()
+        }
         smartAlarmCompletedKeys = smartAlarmCompletedKeys.filter { !$0.hasPrefix("\(seatId)-main@") }
         persist()
 
@@ -447,7 +450,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     }
 
     /// メインタイマーがユーザーによって明示的にリセット・一時停止された時に呼ぶ
-    func acknowledgeMainTimer() {
+    func acknowledgeMainTimer(skipRefresh: Bool = false) {
         suppressSmartAlarmUntil = Date().addingTimeInterval(3.0)
         var changed = false
         var allMainKeys = Set<String>()
@@ -483,7 +486,11 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             pendingSystemDismissPhoneSyncWorkItem?.cancel()
             pendingSystemDismissPhoneSyncWorkItem = nil
         }
-        if changed { persist() }
+        events.removeAll { $0.seatId == "main-timer" }
+        if changed {
+            persist()
+            persistEvents()
+        }
         let mainIds = allMainKeys.flatMap { k in
             repeatOffsets.indices.map { "\(notificationPrefix)\(k).\($0)" }
         }
@@ -499,7 +506,89 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             invalidateCurrentSession()
         }
         notificationSignature = "__FORCE__"
-        refresh()
+        if !skipRefresh {
+            refresh()
+        }
+    }
+
+    /// 客席タイマー（全体またはチェックのみ）がユーザーによって明示的に停止・完了・延長された時にピンポイントで消火する
+    /// （別席や後続の未発火スマートアラームを誤って消火しないための安全な席単位消火メソッド）
+    func acknowledgeSeatTimer(seatId: String, checkOnly: Bool = false, skipRefresh: Bool = false) {
+        let prefix = checkOnly ? "\(seatId)-check@" : "\(seatId)-"
+        var changed = false
+        var matchedKeys = Set<String>()
+
+        func matchesTarget(_ key: String, eventSeatId: String? = nil) -> Bool {
+            if checkOnly {
+                if let sId = eventSeatId {
+                    return sId == seatId && key.contains("-check@")
+                }
+                return key.hasPrefix("\(seatId)-check@")
+            } else {
+                if let sId = eventSeatId {
+                    return sId == seatId
+                }
+                return key.hasPrefix("\(seatId)-main@") || key.hasPrefix("\(seatId)-check@")
+            }
+        }
+
+        for ev in events where matchesTarget(ev.key, eventSeatId: ev.seatId) {
+            acknowledged[ev.key] = ev.date.timeIntervalSince1970
+            matchedKeys.insert(ev.key)
+            removeForceRinging(matching: ev.key)
+            scheduledNotificationEventKeys.remove(ev.key)
+            restoredOverlayEvents = restoredOverlayEvents.filter { !isSameTarget(key1: $0.key, key2: ev.key) }
+            changed = true
+        }
+        for ev in ringing where matchesTarget(ev.key, eventSeatId: ev.seatId) {
+            acknowledged[ev.key] = ev.date.timeIntervalSince1970
+            matchedKeys.insert(ev.key)
+            removeForceRinging(matching: ev.key)
+            scheduledNotificationEventKeys.remove(ev.key)
+            restoredOverlayEvents = restoredOverlayEvents.filter { !isSameTarget(key1: $0.key, key2: ev.key) }
+            changed = true
+        }
+        for (k, ts) in armed where matchesTarget(k) {
+            acknowledged[k] = ts
+            matchedKeys.insert(k)
+            removeForceRinging(matching: k)
+            scheduledNotificationEventKeys.remove(k)
+            changed = true
+        }
+        for k in scheduledNotificationEventKeys where matchesTarget(k) {
+            matchedKeys.insert(k)
+            scheduledNotificationEventKeys.remove(k)
+        }
+        if let snap = lastSystemDismissedSnapshot,
+           snap.event.seatId == seatId,
+           (!checkOnly || snap.isCheckEvent) {
+            lastSystemDismissedSnapshot = nil
+            pendingSystemDismissPhoneSyncWorkItem?.cancel()
+            pendingSystemDismissPhoneSyncWorkItem = nil
+        }
+        events.removeAll { matchesTarget($0.key, eventSeatId: $0.seatId) }
+        if changed {
+            persist()
+            persistEvents()
+        }
+        let notifIds = matchedKeys.flatMap { k in
+            repeatOffsets.indices.map { "\(notificationPrefix)\(k).\($0)" }
+        }
+        if !notifIds.isEmpty {
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: notifIds)
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: notifIds)
+        }
+        ringing.removeAll { matchesTarget($0.key, eventSeatId: $0.seatId) }
+        if ringing.isEmpty {
+            stopForegroundHaptics()
+        }
+        if let key = sessionKey, (key.hasPrefix(prefix) || matchesTarget(key)) {
+            invalidateCurrentSession()
+        }
+        notificationSignature = "__FORCE__"
+        if !skipRefresh {
+            refresh()
+        }
     }
 
     /// アプリ表示中に1秒ごとに呼ぶ
@@ -508,7 +597,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     }
 
     /// 「止める」ボタン（カスタムボタン側で別途アクション送信する場合は sendToPhone: false を指定可能）
-    func stop(sendToPhone: Bool = true, completeCheckIfNeeded: Bool = true, explicitTarget: WatchAlarmEvent? = nil) {
+    func stop(sendToPhone: Bool = true, completeCheckIfNeeded: Bool = true, explicitTarget: WatchAlarmEvent? = nil, skipRefresh: Bool = false) {
         suppressSmartAlarmUntil = Date().addingTimeInterval(3.0)
         pendingSystemDismissPhoneSyncWorkItem?.cancel()
         pendingSystemDismissPhoneSyncWorkItem = nil
@@ -536,8 +625,10 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             backgroundAdoptedSessions.remove(adopted)
         }
         notificationSignature = "__FORCE__"
-        refresh()
-        scheduleRetryAfterInvalidation(delay: 0.25)
+        if !skipRefresh {
+            refresh()
+            scheduleRetryAfterInvalidation(delay: 0.25)
+        }
     }
 
     /// アプリが表示状態になった時（スマートアラームの予約・通知の許可確認はこの時しかできない）
@@ -892,8 +983,10 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             }
         }
         if mergedTargets.isEmpty,
+           explicitTarget == nil,
            let k = sessionKey ?? UserDefaults.standard.string(forKey: sessionKeyStoreKey),
-           let ev = eventFromKey(k) {
+           let ev = eventFromKey(k),
+           (sessionStarted || ev.date <= now.addingTimeInterval(2.0)) {
             mergedTargets.append(ev)
         }
         let targets = mergedTargets

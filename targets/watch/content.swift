@@ -1747,9 +1747,12 @@ enum WatchLayout {
     }
 }
 
-// ★ シート閉鎖中のSwiftUI ViewGraph再評価・クラッシュを防ぐための非リアクティブ遅延実行ボックス
+// ★ シート閉鎖中のSwiftUI ViewGraph再評価・クラッシュや `.sheet(item:)` の再生成デッドロックを防ぐための非リアクティブ管理ボックス
 private final class PendingSheetActionBox {
     var action: (() -> Void)? = nil
+    var seatSheetAction: (() -> Void)? = nil
+    var cachedSheetItems: [String: SeatTimerItem] = [:]
+    var cachedMainTimerItem: SeatTimerItem? = nil
 }
 
 // MARK: - メイン画面
@@ -1810,8 +1813,20 @@ struct ContentView: View {
     // ★ サロン客席マップのDigital Crown（トグル）フォーカス復帰トリガー
     @State private var mapCrownFocusTrigger: Int = 0
     
+    // ★ 現在いずれかのモーダルシートが表示中かどうか（シート表示中に背面ビューのスクロール・バナー・クラウンフォーカスを動かしてSwiftUIをデッドロックさせないためのガード）
+    private var isAnyModalSheetPresented: Bool {
+        showingMainTimerSheet ||
+        showingAddSeatSheet ||
+        timeActionTargetId != nil ||
+        checkActionTargetId != nil ||
+        shampooActionTargetId != nil ||
+        selectHelpStaffTargetId != nil ||
+        selectCheckStaffTargetId != nil
+    }
+    
     private func triggerScroll(to seatId: String) {
         scrollToSeatId = seatId
+        guard !isAnyModalSheetPresented else { return }
         scrollTrigger += 1
         mapCrownFocusTrigger += 1
     }
@@ -1860,16 +1875,24 @@ struct ContentView: View {
         }
     }
     
-    // 通知バナー表示ヘルパー
-    private func showNotification(text: String, color: Color = Color(hex: "#0A84FF")) {
+    // 通知バナー表示ヘルパー（ローカルボタン操作時は二重振動とモーダルシート背面のアニメーション競合を防止）
+    private func showNotification(
+        text: String,
+        color: Color = Color(hex: "#0A84FF"),
+        playHapticFeedback: Bool = false
+    ) {
         notificationDismissWorkItem?.cancel()
+        if playHapticFeedback {
+            playHaptic(.notification)
+        }
+        // モーダルシート表示中に背面のバナーアニメーションを走らせると watchOS SwiftUI のシート制御と競合するためスキップ
+        guard !isAnyModalSheetPresented else { return }
         let isSameBannerShowing = (notificationBannerText == text)
         if !isSameBannerShowing {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                 notificationBannerText = text
                 notificationBannerColor = color
             }
-            playHaptic(.notification)
         } else {
             notificationBannerColor = color
         }
@@ -1885,20 +1908,29 @@ struct ContentView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: workItem)
     }
     
-    // ★ シート表示中や操作コールバック実行中に裏で "seat-1" 等の初期IDからクラウドUUIDへ切り替わっても、
-    //   シートが勝手に閉じたりボタン操作が空振りしないように seatNumber フォールバック解決を行うヘルパー
-    private func resolveSheetItem(for targetId: String?) -> SeatTimerItem? {
-        guard let targetId = targetId else { return nil }
+    // ★ シート表示中に親の `timers` が更新されても `.sheet(item:)` に渡す `SeatTimerItem` が変化して
+    //   SwiftUI のシート再構築・アニメーション競合フリーズを引き起こさないよう、シートオープン時のスナップショットを固定するヘルパー
+    private func resolveSheetItem(for targetId: String?, cacheKey: String) -> SeatTimerItem? {
+        guard let targetId = targetId else {
+            pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: cacheKey)
+            return nil
+        }
+        if let cached = pendingMainTimerSheetActionBox.cachedSheetItems[cacheKey],
+           cached.id == targetId {
+            return cached
+        }
         if let exact = timers.first(where: { $0.id == targetId }) {
+            pendingMainTimerSheetActionBox.cachedSheetItems[cacheKey] = exact
             return exact
         }
         if targetId.hasPrefix("seat-"),
            let num = Int(targetId.replacingOccurrences(of: "seat-", with: "")),
            var matched = timers.first(where: { $0.seatNumber == num }) {
             matched.id = targetId
+            pendingMainTimerSheetActionBox.cachedSheetItems[cacheKey] = matched
             return matched
         }
-        return nil
+        return pendingMainTimerSheetActionBox.cachedSheetItems[cacheKey]
     }
 
     private func findSeatIndex(for item: SeatTimerItem) -> Int? {
@@ -1911,36 +1943,61 @@ struct ContentView: View {
     // シート用のバインディング
     private var bindingTimeAction: Binding<SeatTimerItem?> {
         Binding(
-            get: { resolveSheetItem(for: timeActionTargetId) },
-            set: { _ in timeActionTargetId = nil }
+            get: { resolveSheetItem(for: timeActionTargetId, cacheKey: "timeAction") },
+            set: { newVal in
+                if newVal == nil {
+                    timeActionTargetId = nil
+                    pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: "timeAction")
+                }
+            }
         )
     }
     
     private var bindingCheckAction: Binding<SeatTimerItem?> {
         Binding(
-            get: { resolveSheetItem(for: checkActionTargetId) },
-            set: { _ in checkActionTargetId = nil }
+            get: { resolveSheetItem(for: checkActionTargetId, cacheKey: "checkAction") },
+            set: { newVal in
+                if newVal == nil {
+                    checkActionTargetId = nil
+                    pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: "checkAction")
+                }
+            }
         )
     }
     
     private var bindingShampooAction: Binding<SeatTimerItem?> {
         Binding(
-            get: { resolveSheetItem(for: shampooActionTargetId) },
-            set: { _ in shampooActionTargetId = nil }
+            get: { resolveSheetItem(for: shampooActionTargetId, cacheKey: "shampooAction") },
+            set: { newVal in
+                if newVal == nil {
+                    shampooActionTargetId = nil
+                    pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: "shampooAction")
+                }
+            }
         )
     }
     
     private var bindingSelectHelpStaff: Binding<SeatTimerItem?> {
         Binding(
-            get: { resolveSheetItem(for: selectHelpStaffTargetId) },
-            set: { _ in selectHelpStaffTargetId = nil }
+            get: { resolveSheetItem(for: selectHelpStaffTargetId, cacheKey: "selectHelpStaff") },
+            set: { newVal in
+                if newVal == nil {
+                    selectHelpStaffTargetId = nil
+                    pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: "selectHelpStaff")
+                }
+            }
         )
     }
     
     private var bindingSelectCheckStaff: Binding<SeatTimerItem?> {
         Binding(
-            get: { resolveSheetItem(for: selectCheckStaffTargetId) },
-            set: { _ in selectCheckStaffTargetId = nil }
+            get: { resolveSheetItem(for: selectCheckStaffTargetId, cacheKey: "selectCheckStaff") },
+            set: { newVal in
+                if newVal == nil {
+                    selectCheckStaffTargetId = nil
+                    pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: "selectCheckStaff")
+                }
+            }
         )
     }
     
@@ -1949,6 +2006,9 @@ struct ContentView: View {
         pendingOvertimeSheetWorkItem?.cancel()
         pendingOvertimeSheetWorkItem = nil
         executePendingMainTimerSheetAction()
+        executePendingSeatSheetAction()
+        pendingMainTimerSheetActionBox.cachedSheetItems.removeAll()
+        pendingMainTimerSheetActionBox.cachedMainTimerItem = nil
         pendingSelectedSeatId = nil
         pendingOpenMainTimerSheet = false
         showingAddSeatSheet = false
@@ -1960,10 +2020,10 @@ struct ContentView: View {
         showingMainTimerSheet = false
     }
     
-    // ★ MainTimerActionSheet の dismiss() トランザクションと親画面の @State/@Published 更新が衝突しないよう次RunLoopで即実行（手首を下げる前にスマートアラーム予約を完了させる）
+    // ★ MainTimerActionSheet の dismiss() トランザクションと親画面の @State/@Published 更新が衝突しないようシート閉鎖後に実行（手首を下げる前にスマートアラーム予約を完了させる）
     private func deferMainTimerSheetCloseAction(_ action: @escaping () -> Void) {
         pendingMainTimerSheetActionBox.action = action
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             executePendingMainTimerSheetAction()
         }
     }
@@ -1971,9 +2031,38 @@ struct ContentView: View {
     private func executePendingMainTimerSheetAction() {
         guard let action = pendingMainTimerSheetActionBox.action else { return }
         pendingMainTimerSheetActionBox.action = nil
-        DispatchQueue.main.async {
-            action()
+        action()
+    }
+    
+    // ★ 客席タイマー操作シート（TimeActionSheet 等）を閉じるボタン操作時に、シート閉鎖トランザクションと親 `timers` 更新が衝突して固まるのを防ぐ遅延実行ヘルパー
+    private func deferSeatSheetCloseAction(_ action: @escaping () -> Void) {
+        pendingMainTimerSheetActionBox.seatSheetAction = action
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            executePendingSeatSheetAction()
         }
+    }
+    
+    private func executePendingSeatSheetAction() {
+        guard let action = pendingMainTimerSheetActionBox.seatSheetAction else { return }
+        pendingMainTimerSheetActionBox.seatSheetAction = nil
+        action()
+    }
+    
+    // ★ 客席タイマー変更時にアラーム再構成と文字盤コンプリケーション同期を確実に実行する共通ヘルパー
+    private func syncSeatTimersState(forceWidgetReload: Bool = true) {
+        let currentMain = self.mainTimer ?? sessionManager.mainTimer
+        WatchAlarmCoordinator.shared.update(
+            timers: timers,
+            mainTimer: currentMain,
+            soundOn: sessionManager.alarmSoundEnabled,
+            currentUserName: currentUserName
+        )
+        WidgetSync.save(
+            timers: timers,
+            mainTimer: currentMain,
+            userName: currentUserName,
+            forceReload: forceWidgetReload
+        )
     }
 
     var body: some View {
@@ -2042,6 +2131,7 @@ struct ContentView: View {
             }
             // ★ メインタイマー専用操作・時間設定シート（メイン画面・一覧画面のカードタップ用）
             .sheet(isPresented: $showingMainTimerSheet, onDismiss: {
+                pendingMainTimerSheetActionBox.cachedMainTimerItem = nil
                 executePendingMainTimerSheetAction()
                 if let latestMain = sessionManager.mainTimer {
                     self.mainTimer = latestMain
@@ -2052,6 +2142,7 @@ struct ContentView: View {
             }
             // 新規席追加シート
             .sheet(isPresented: $showingAddSeatSheet, onDismiss: {
+                executePendingSeatSheetAction()
                 if let targetId = scrollToSeatId {
                     triggerScroll(to: targetId)
                 }
@@ -2069,6 +2160,8 @@ struct ContentView: View {
             }
             // タイム操作シート
             .sheet(item: bindingTimeAction, onDismiss: {
+                pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: "timeAction")
+                executePendingSeatSheetAction()
                 if self.timers != sessionManager.timers && !sessionManager.timers.isEmpty {
                     self.timers = sessionManager.timers
                 }
@@ -2082,6 +2175,8 @@ struct ContentView: View {
             }
             // チェック操作シート
             .sheet(item: bindingCheckAction, onDismiss: {
+                pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: "checkAction")
+                executePendingSeatSheetAction()
                 if self.timers != sessionManager.timers && !sessionManager.timers.isEmpty {
                     self.timers = sessionManager.timers
                 }
@@ -2092,22 +2187,28 @@ struct ContentView: View {
             }
             // ★ シャンプー・施術操作シート
             .sheet(item: bindingShampooAction, onDismiss: {
+                pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: "shampooAction")
+                executePendingSeatSheetAction()
                 if self.timers != sessionManager.timers && !sessionManager.timers.isEmpty {
                     self.timers = sessionManager.timers
                 }
-                WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
+                WidgetSync.save(timers: self.timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                 mapCrownFocusTrigger += 1
             }) { item in
                 shampooActionSheetView(item: item)
             }
             // ★ ヘルプ工程選択・スタッフ指定・募集シート
             .sheet(item: bindingSelectHelpStaff, onDismiss: {
+                pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: "selectHelpStaff")
+                executePendingSeatSheetAction()
                 mapCrownFocusTrigger += 1
             }) { item in
                 selectHelpWorkflowSheetView(item: item)
             }
             // ★ チェック担当スタッフ指定・募集シート
             .sheet(item: bindingSelectCheckStaff, onDismiss: {
+                pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: "selectCheckStaff")
+                executePendingSeatSheetAction()
                 mapCrownFocusTrigger += 1
             }) { item in
                 selectCheckStaffSheetView(item: item)
@@ -2163,7 +2264,7 @@ struct ContentView: View {
             }
             .onReceive(sessionManager.$incomingNotification) { notif in
                 if let notif = notif {
-                    showNotification(text: notif.text, color: Color(hex: notif.color))
+                    showNotification(text: notif.text, color: Color(hex: notif.color), playHapticFeedback: true)
                     sessionManager.incomingNotification = nil
                 }
             }
@@ -2204,13 +2305,7 @@ struct ContentView: View {
                 //   超過タイム（+00:xx）が継続中かつシート未表示であれば即座に「タイマーを止める」画面を自動表示する
                 if newPhase == .active,
                    alarm.pendingOpenedAlarmEvent == nil,
-                   !showingMainTimerSheet,
-                   !showingAddSeatSheet,
-                   timeActionTargetId == nil,
-                   checkActionTargetId == nil,
-                   shampooActionTargetId == nil,
-                   selectHelpStaffTargetId == nil,
-                   selectCheckStaffTargetId == nil {
+                   !isAnyModalSheetPresented {
                     presentOvertimeActionSheetIfNeeded(currentMain: currentMain, currentTimers: currentTimers)
                 }
             }
@@ -2279,6 +2374,10 @@ struct ContentView: View {
     private func handleOpenURL(_ url: URL) {
         pendingOvertimeSheetWorkItem?.cancel()
         pendingOvertimeSheetWorkItem = nil
+        executePendingMainTimerSheetAction()
+        executePendingSeatSheetAction()
+        pendingMainTimerSheetActionBox.cachedSheetItems.removeAll()
+        pendingMainTimerSheetActionBox.cachedMainTimerItem = nil
         // ★ モジュラー文字盤タップ時: 未消火アラームがあればアラーム振動のみ消火し、超過カウントアップは止めない（アプリ内で明示操作するまで00:00に戻さない）
         if !alarm.ringing.isEmpty {
             alarm.stop(sendToPhone: false)
@@ -2569,7 +2668,7 @@ struct ContentView: View {
                         }()
                         Button(action: {
                             if isRingingMainTimer {
-                                alarm.stop(sendToPhone: false, completeCheckIfNeeded: false)
+                                alarm.acknowledgeMainTimer(skipRefresh: true)
                                 handleResetMainTimer()
                                 WKInterfaceDevice.current().play(.success)
                                 showNotification(
@@ -2578,7 +2677,7 @@ struct ContentView: View {
                                 )
                                 return
                             }
-                            alarm.stop(sendToPhone: false, completeCheckIfNeeded: false)
+                            alarm.acknowledgeSeatTimer(seatId: ringingInfo.item.id, checkOnly: isCheckOnly, skipRefresh: true)
                             WKInterfaceDevice.current().play(.success)
                             if let idx = timers.firstIndex(where: { $0.id == ringingInfo.item.id }) {
                                 if isCheckOnly {
@@ -2599,7 +2698,7 @@ struct ContentView: View {
                                         currentUserName: currentUserName
                                     )
                                     sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: ringingInfo.item.id)
-                                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                                     showNotification(
                                         text: "✅ 【\(ringingInfo.item.displaySeatName)】\(checkProc)完了（タイマー続行）",
                                         color: Color(hex: "#30D158")
@@ -2620,7 +2719,7 @@ struct ContentView: View {
                                     WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                                     sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: ringingInfo.item.id, extra: ["expectedEnd": ringingInfo.item.expectedEndMs])
                                     sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: ringingInfo.item.id)
-                                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                                     showNotification(
                                         text: "✅ 【\(ringingInfo.item.displaySeatName)】\(currentUserName)さんがチェックに入りました",
                                         color: Color(hex: "#30D158")
@@ -2655,7 +2754,7 @@ struct ContentView: View {
                     case .shampoo(let label):
                         Button(action: {
                             if isRingingMainTimer {
-                                alarm.stop(sendToPhone: false)
+                                alarm.acknowledgeMainTimer(skipRefresh: true)
                                 handleResetMainTimer()
                                 WKInterfaceDevice.current().play(.success)
                                 showNotification(
@@ -2664,7 +2763,7 @@ struct ContentView: View {
                                 )
                                 return
                             }
-                            alarm.stop(sendToPhone: false)
+                            alarm.acknowledgeSeatTimer(seatId: ringingInfo.item.id, checkOnly: false, skipRefresh: true)
                             WKInterfaceDevice.current().play(.success)
                             if let idx = timers.firstIndex(where: { $0.id == ringingInfo.item.id }) {
                                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
@@ -2678,7 +2777,7 @@ struct ContentView: View {
                                 sessionManager.markLocalStop(seatId: ringingInfo.item.id, endTime: ringingInfo.item.targetEndTime)
                                 WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                                 sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: ringingInfo.item.id, extra: ["expectedEnd": ringingInfo.item.expectedEndMs, "isCompleted": true])
-                                WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                                WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                                 showNotification(
                                     text: "✅ 【\(ringingInfo.item.displaySeatName)】\(currentUserName)さんがシャンプーに入りました",
                                     color: Color(hex: "#30D158")
@@ -2714,7 +2813,7 @@ struct ContentView: View {
                         Button(action: {
                             if isRingingMainTimer {
                                 let process = ringingInfo.item.helpProcess
-                                alarm.stop(sendToPhone: false)
+                                alarm.acknowledgeMainTimer(skipRefresh: true)
                                 handleResetMainTimer()
                                 WKInterfaceDevice.current().play(.success)
                                 showNotification(
@@ -2723,7 +2822,7 @@ struct ContentView: View {
                                 )
                                 return
                             }
-                            alarm.stop(sendToPhone: false)
+                            alarm.acknowledgeSeatTimer(seatId: ringingInfo.item.id, checkOnly: false, skipRefresh: true)
                             WKInterfaceDevice.current().play(.success)
                             if let idx = timers.firstIndex(where: { $0.id == ringingInfo.item.id }) {
                                 let process = ringingInfo.item.helpProcess
@@ -2738,7 +2837,7 @@ struct ContentView: View {
                                 sessionManager.markLocalStop(seatId: ringingInfo.item.id, endTime: ringingInfo.item.targetEndTime)
                                 WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                                 sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: ringingInfo.item.id, extra: ["expectedEnd": ringingInfo.item.expectedEndMs, "isCompleted": true])
-                                WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                                WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                                 showNotification(
                                     text: "✅ 【\(ringingInfo.item.displaySeatName)】\(currentUserName)さんが\(process)に入りました",
                                     color: Color(hex: "#30D158")
@@ -3093,8 +3192,10 @@ struct ContentView: View {
         )
     }
     
-    private func handleStartMainTimer() {
-        playHaptic(.click)
+    private func handleStartMainTimer(playHapticFeedback: Bool = true) {
+        if playHapticFeedback {
+            playHaptic(.click)
+        }
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         let isInitialStart = (main.pausedRemainingSeconds <= 0 || main.pausedRemainingSeconds == main.totalSeconds || main.isOvertime)
         if isInitialStart && main.isCountdownConfigEnabled && main.countdownConfigSeconds > 0 {
@@ -3115,13 +3216,12 @@ struct ContentView: View {
         WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
         sessionManager.sendMainTimerAction(action: "MAIN_TIMER_START", extra: ["totalSeconds": main.totalSeconds])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            WatchAlarmCoordinator.shared.update(timers: self.timers, mainTimer: self.mainTimer ?? self.sessionManager.mainTimer, soundOn: self.sessionManager.alarmSoundEnabled, currentUserName: self.currentUserName)
-        }
     }
     
-    private func handlePauseMainTimer() {
-        playHaptic(.click)
+    private func handlePauseMainTimer(playHapticFeedback: Bool = true) {
+        if playHapticFeedback {
+            playHaptic(.click)
+        }
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         let wasOvertime = main.isOvertime
         let stoppedEnd = (main.isRunning || main.isPreCountingDown) ? main.targetEndTime.timeIntervalSince1970 : 0
@@ -3141,29 +3241,19 @@ struct ContentView: View {
         main.prepEndTime = nil
         self.mainTimer = main
         sessionManager.mainTimer = main
-        WatchAlarmCoordinator.shared.acknowledgeMainTimer()
-        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
+        WatchAlarmCoordinator.shared.acknowledgeMainTimer(skipRefresh: true)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         sessionManager.sendMainTimerAction(
             action: wasOvertime ? "MAIN_TIMER_RESET" : "MAIN_TIMER_PAUSE",
             stoppedEndTime: stoppedEnd
         )
-        deferMainTimerSheetCloseAction {
-            if let latest = self.sessionManager.mainTimer {
-                self.mainTimer = latest
-                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            if let latest = self.sessionManager.mainTimer {
-                self.mainTimer = latest
-                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
-            }
-        }
     }
     
-    private func handleResetMainTimer() {
-        playHaptic(.click)
+    private func handleResetMainTimer(playHapticFeedback: Bool = true) {
+        if playHapticFeedback {
+            playHaptic(.click)
+        }
         let curState = self.mainTimer
         let curSession = sessionManager.mainTimer
         var main = curSession ?? curState ?? defaultMainTimer()
@@ -3179,35 +3269,17 @@ struct ContentView: View {
         main.targetEndTime = Date().addingTimeInterval(TimeInterval(main.totalSeconds))
         self.mainTimer = main
         sessionManager.mainTimer = main
-        WatchAlarmCoordinator.shared.acknowledgeMainTimer()
-        WatchAlarmCoordinator.shared.stop(sendToPhone: false)
-        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
+        WatchAlarmCoordinator.shared.acknowledgeMainTimer(skipRefresh: true)
+        WatchAlarmCoordinator.shared.stop(sendToPhone: false, skipRefresh: true)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         sessionManager.sendMainTimerAction(action: "MAIN_TIMER_RESET", stoppedEndTime: stoppedEnd)
-        // ★ モーダルシート（MainTimerActionSheet）の dismiss アニメーションと親画面 @State 更新が競合しても、
-        //   1回目のタップで確実に 00:00 表示および文字盤コンプリケーションへ切り替わるようシート閉鎖直後にも再同期する
-        deferMainTimerSheetCloseAction {
-            if let latest = self.sessionManager.mainTimer {
-                self.mainTimer = latest
-                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            if let latest = self.sessionManager.mainTimer {
-                self.mainTimer = latest
-                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            if let latest = self.sessionManager.mainTimer {
-                self.mainTimer = latest
-                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
-            }
-        }
     }
     
-    private func handleSetMainTimerTime(totalSec: Int, autoStart: Bool = true) {
-        playHaptic(.click)
+    private func handleSetMainTimerTime(totalSec: Int, autoStart: Bool = true, playHapticFeedback: Bool = true) {
+        if playHapticFeedback {
+            playHaptic(.click)
+        }
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         main.totalSeconds = totalSec
         main.pausedRemainingSeconds = totalSec
@@ -3238,18 +3310,15 @@ struct ContentView: View {
         }
         self.mainTimer = main
         sessionManager.mainTimer = main
-        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         sessionManager.sendMainTimerSetTime(seconds: totalSec, autoStart: shouldAutoStart)
-        if shouldAutoStart {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                WatchAlarmCoordinator.shared.update(timers: self.timers, mainTimer: self.mainTimer ?? self.sessionManager.mainTimer, soundOn: self.sessionManager.alarmSoundEnabled, currentUserName: self.currentUserName)
-            }
-        }
     }
     
-    private func handleAdjustMainTimer(deltaSec: Int) {
-        playHaptic(.click)
+    private func handleAdjustMainTimer(deltaSec: Int, playHapticFeedback: Bool = true) {
+        if playHapticFeedback {
+            playHaptic(.click)
+        }
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         let wasOvertime = main.isOvertime
         if main.isRunning {
@@ -3277,39 +3346,28 @@ struct ContentView: View {
         self.mainTimer = main
         sessionManager.mainTimer = main
         if main.isRunning && wasOvertime && deltaSec > 0 {
-            WatchAlarmCoordinator.shared.acknowledgeMainTimer()
-            WatchAlarmCoordinator.shared.stop(sendToPhone: false)
+            WatchAlarmCoordinator.shared.acknowledgeMainTimer(skipRefresh: true)
         }
-        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName, forceReload: true)
         sessionManager.sendMainTimerAdjust(seconds: deltaSec)
-        deferMainTimerSheetCloseAction {
-            if let latest = self.sessionManager.mainTimer {
-                self.mainTimer = latest
-                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
-            }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            if let latest = self.sessionManager.mainTimer {
-                self.mainTimer = latest
-                WidgetSync.save(timers: self.timers, mainTimer: latest, userName: self.currentUserName, forceReload: true)
-            }
-        }
     }
     
-    private func handleUpdateMainTimerHelpMenu(process: String, isNoHelp: Bool) {
-        playHaptic(.click)
+    private func handleUpdateMainTimerHelpMenu(process: String, isNoHelp: Bool, playHapticFeedback: Bool = true) {
+        if playHapticFeedback {
+            playHaptic(.click)
+        }
         var main = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
         main.helpProcess = process
         main.isNoHelpNeeded = isNoHelp
         self.mainTimer = main
         sessionManager.mainTimer = main
-        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
         WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: main, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
+        WidgetSync.save(timers: timers, mainTimer: main, userName: currentUserName)
     }
     
-    private func handleEnterMainTimerHelp(process: String) {
-        handleResetMainTimer()
+    private func handleEnterMainTimerHelp(process: String, playHapticFeedback: Bool = true) {
+        handleResetMainTimer(playHapticFeedback: playHapticFeedback)
         showNotification(
             text: "✅ 【メインタイマー】\(process)に入りました",
             color: Color(hex: "#30D158")
@@ -3324,6 +3382,7 @@ struct ContentView: View {
             currentUserName: currentUserName,
             now: now,
             crownFocusTrigger: mapCrownFocusTrigger,
+            isModalSheetPresented: isAnyModalSheetPresented,
             onSelectSeat: { selectedSeat in
                 triggerScroll(to: selectedSeat.id)
                 if selectedSeat.isCheckOvertime && !selectedSeat.isOvertime {
@@ -3361,26 +3420,54 @@ struct ContentView: View {
     
     @ViewBuilder
     private var mainTimerSheetView: some View {
-        let currentMain = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
+        let initialMain: SeatTimerItem = {
+            if let cached = pendingMainTimerSheetActionBox.cachedMainTimerItem {
+                return cached
+            }
+            let current = self.mainTimer ?? sessionManager.mainTimer ?? defaultMainTimer()
+            pendingMainTimerSheetActionBox.cachedMainTimerItem = current
+            return current
+        }()
         MainTimerActionSheet(
-            item: currentMain,
+            item: initialMain,
             initialSubMode: mainTimerSheetInitialSubMode,
             onStart: {
-                handleStartMainTimer()
+                deferMainTimerSheetCloseAction {
+                    self.handleStartMainTimer(playHapticFeedback: false)
+                }
             },
-            onPause: { handlePauseMainTimer() },
+            onPause: {
+                deferMainTimerSheetCloseAction {
+                    self.handlePauseMainTimer(playHapticFeedback: false)
+                }
+            },
             onReset: {
-                handleResetMainTimer()
+                deferMainTimerSheetCloseAction {
+                    self.handleResetMainTimer(playHapticFeedback: false)
+                }
             },
             onSetTime: { sec in
-                handleSetMainTimerTime(totalSec: sec)
+                deferMainTimerSheetCloseAction {
+                    self.handleSetMainTimerTime(totalSec: sec, playHapticFeedback: false)
+                }
             },
-            onAdjust: { handleAdjustMainTimer(deltaSec: $0) },
+            onAdjust: { deltaSec in
+                let cur = self.mainTimer ?? self.sessionManager.mainTimer ?? initialMain
+                if cur.isRunning || cur.isOvertime {
+                    deferMainTimerSheetCloseAction {
+                        self.handleAdjustMainTimer(deltaSec: deltaSec, playHapticFeedback: false)
+                    }
+                } else {
+                    self.handleAdjustMainTimer(deltaSec: deltaSec, playHapticFeedback: false)
+                }
+            },
             onUpdateHelpMenu: { proc, isNoHelp in
-                handleUpdateMainTimerHelpMenu(process: proc, isNoHelp: isNoHelp)
+                handleUpdateMainTimerHelpMenu(process: proc, isNoHelp: isNoHelp, playHapticFeedback: false)
             },
             onEnterHelp: { proc in
-                handleEnterMainTimerHelp(process: proc)
+                deferMainTimerSheetCloseAction {
+                    self.handleEnterMainTimerHelp(process: proc, playHapticFeedback: false)
+                }
             }
         )
     }
@@ -3391,29 +3478,28 @@ struct ContentView: View {
             currentUserName: currentUserName,
             suggestedSeatNumber: (timers.map { $0.seatNumber }.max() ?? 0) + 1,
             onAdd: { newSeat in
-                triggerScroll(to: newSeat.id)
-                pendingOpenStandardSeatIdAfterAdd = newSeat.id
-                withAnimation {
-                    timers.append(newSeat)
-                }
-                sessionManager.timers = timers
-                WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
-                var extra: [String: Any] = [
-                    "seatNumber": newSeat.seatNumber,
-                    "totalSeconds": newSeat.totalSeconds,
-                    "targetEndTimestamp": newSeat.targetEndTime.timeIntervalSince1970 * 1000.0,
-                    "watchAlarmSoundEnabled": newSeat.watchAlarmSoundEnabled,
-                    "alarmSoundEnabled": newSeat.alarmSoundEnabled
-                ]
-                if let checkSec = newSeat.checkTotalSeconds {
-                    extra["checkTotalSeconds"] = checkSec
-                    if let checkEnd = newSeat.checkTargetEndTime {
-                        extra["checkEndTimestamp"] = checkEnd.timeIntervalSince1970 * 1000.0
+                deferSeatSheetCloseAction {
+                    self.triggerScroll(to: newSeat.id)
+                    self.pendingOpenStandardSeatIdAfterAdd = newSeat.id
+                    self.timers.append(newSeat)
+                    self.sessionManager.timers = self.timers
+                    self.syncSeatTimersState(forceWidgetReload: true)
+                    var extra: [String: Any] = [
+                        "seatNumber": newSeat.seatNumber,
+                        "totalSeconds": newSeat.totalSeconds,
+                        "targetEndTimestamp": newSeat.targetEndTime.timeIntervalSince1970 * 1000.0,
+                        "watchAlarmSoundEnabled": newSeat.watchAlarmSoundEnabled,
+                        "alarmSoundEnabled": newSeat.alarmSoundEnabled
+                    ]
+                    if let checkSec = newSeat.checkTotalSeconds {
+                        extra["checkTotalSeconds"] = checkSec
+                        if let checkEnd = newSeat.checkTargetEndTime {
+                            extra["checkEndTimestamp"] = checkEnd.timeIntervalSince1970 * 1000.0
+                        }
                     }
+                    self.sessionManager.sendActionToPhone(action: "ADD_SEAT", seatId: newSeat.id, extra: extra)
+                    self.showNotification(text: "📤 \(newSeat.displaySeatName)を新規作成しました", color: Color(hex: "#0A84FF"))
                 }
-                sessionManager.sendActionToPhone(action: "ADD_SEAT", seatId: newSeat.id, extra: extra)
-                showNotification(text: "📤 \(newSeat.displaySeatName)を新規作成しました", color: Color(hex: "#0A84FF"))
             }
         )
     }
@@ -3429,55 +3515,56 @@ struct ContentView: View {
             currentUserName: currentUserName,
             staffCandidates: sessionManager.members,
             onAdjust: { deltaSec in
-                triggerScroll(to: item.id)
-                if let idx = findSeatIndex(for: item) {
-                    let wasOvertime = timers[idx].isOvertime
-                    let baseEnd = (deltaSec > 0) ? max(Date(), timers[idx].targetEndTime) : timers[idx].targetEndTime
-                    let newEnd = max(Date().addingTimeInterval(5), baseEnd.addingTimeInterval(Double(deltaSec)))
-                    timers[idx].targetEndTime = newEnd
-                    timers[idx].pausedRemainingSeconds = max(10, timers[idx].pausedRemainingSeconds + deltaSec)
-                    timers[idx].isCollapsed = false
-                    sessionManager.timers = timers
-                    sessionManager.markLocalSeatMod(seatId: item.id)
-                    sessionManager.clearLocalStop(seatId: item.id)
-                    sessionManager.setCollapseOverride(seatId: item.id, collapsed: false)
-                    if wasOvertime && deltaSec > 0 {
-                        WatchAlarmCoordinator.shared.stop(sendToPhone: false)
+                deferSeatSheetCloseAction {
+                    self.triggerScroll(to: item.id)
+                    if let idx = self.findSeatIndex(for: item) {
+                        let wasOvertime = self.timers[idx].isOvertime
+                        let baseEnd = (deltaSec > 0) ? max(Date(), self.timers[idx].targetEndTime) : self.timers[idx].targetEndTime
+                        let newEnd = max(Date().addingTimeInterval(5), baseEnd.addingTimeInterval(Double(deltaSec)))
+                        self.timers[idx].targetEndTime = newEnd
+                        self.timers[idx].pausedRemainingSeconds = max(10, self.timers[idx].pausedRemainingSeconds + deltaSec)
+                        self.timers[idx].isCollapsed = false
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.markLocalSeatMod(seatId: item.id)
+                        self.sessionManager.clearLocalStop(seatId: item.id)
+                        self.sessionManager.setCollapseOverride(seatId: item.id, collapsed: false)
+                        if wasOvertime && deltaSec > 0 {
+                            WatchAlarmCoordinator.shared.acknowledgeSeatTimer(seatId: item.id, checkOnly: false, skipRefresh: true)
+                        }
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(
+                            action: "ADJUST_TIME",
+                            seatId: item.id,
+                            extra: [
+                                "secondsToAdd": deltaSec,
+                                "targetEndTimestamp": newEnd.timeIntervalSince1970 * 1000.0
+                            ]
+                        )
+                        let deltaText = formatDeltaString(deltaSec)
+                        self.showNotification(text: "⏱️ \(item.displaySeatName): \(deltaText)しました", color: Color(hex: "#0A84FF"))
                     }
-                    WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                    WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
-                    sessionManager.sendActionToPhone(
-                        action: "ADJUST_TIME",
-                        seatId: item.id,
-                        extra: [
-                            "secondsToAdd": deltaSec,
-                            "targetEndTimestamp": newEnd.timeIntervalSince1970 * 1000.0
-                        ]
-                    )
-                    let deltaText = formatDeltaString(deltaSec)
-                    showNotification(text: "⏱️ \(item.displaySeatName): \(deltaText)しました", color: Color(hex: "#0A84FF"))
                 }
             },
             onAdjustCheck: { deltaSec in
-                    triggerScroll(to: item.id)
-                    if let idx = findSeatIndex(for: item) {
-                        let wasCheckOvertime = timers[idx].isCheckOvertime
-                        let rawCheckEnd = timers[idx].checkTargetEndTime ?? Date()
+                deferSeatSheetCloseAction {
+                    self.triggerScroll(to: item.id)
+                    if let idx = self.findSeatIndex(for: item) {
+                        let wasCheckOvertime = self.timers[idx].isCheckOvertime
+                        let rawCheckEnd = self.timers[idx].checkTargetEndTime ?? Date()
                         let baseCheckEnd = (deltaSec > 0) ? max(Date(), rawCheckEnd) : rawCheckEnd
                         let newCheckEnd = max(Date().addingTimeInterval(5), baseCheckEnd.addingTimeInterval(Double(deltaSec)))
-                        timers[idx].checkTargetEndTime = newCheckEnd
-                        timers[idx].checkTotalSeconds = max(10, (timers[idx].checkTotalSeconds ?? 0) + deltaSec)
-                        timers[idx].isCollapsed = false
-                        sessionManager.timers = timers
-                        sessionManager.markLocalSeatMod(seatId: item.id)
-                        sessionManager.clearLocalCheckClear(seatId: item.id)
-                        sessionManager.setCollapseOverride(seatId: item.id, collapsed: false)
+                        self.timers[idx].checkTargetEndTime = newCheckEnd
+                        self.timers[idx].checkTotalSeconds = max(10, (self.timers[idx].checkTotalSeconds ?? 0) + deltaSec)
+                        self.timers[idx].isCollapsed = false
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.markLocalSeatMod(seatId: item.id)
+                        self.sessionManager.clearLocalCheckClear(seatId: item.id)
+                        self.sessionManager.setCollapseOverride(seatId: item.id, collapsed: false)
                         if wasCheckOvertime && deltaSec > 0 {
-                            WatchAlarmCoordinator.shared.stop(sendToPhone: false, completeCheckIfNeeded: false)
+                            WatchAlarmCoordinator.shared.acknowledgeSeatTimer(seatId: item.id, checkOnly: true, skipRefresh: true)
                         }
-                        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
-                        sessionManager.sendActionToPhone(
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(
                             action: "ADJUST_TIME",
                             seatId: item.id,
                             extra: [
@@ -3487,430 +3574,383 @@ struct ContentView: View {
                             ]
                         )
                         let deltaText = formatDeltaString(deltaSec)
-                        showNotification(text: "⏱️ \(item.displaySeatName) チェック: \(deltaText)しました", color: Color(hex: "#30D158"))
+                        self.showNotification(text: "⏱️ \(item.displaySeatName) チェック: \(deltaText)しました", color: Color(hex: "#30D158"))
                     }
-                },
-                onStop: {
-                    triggerScroll(to: item.id)
-                    if let idx = findSeatIndex(for: item) {
-                        let clearedCheckEnd = timers[idx].checkTargetEndTime
-                        timers[idx].isRunning = false
-                        timers[idx].pausedRemainingSeconds = 0
-                        timers[idx].helpProcess = ""
-                        timers[idx].shampooStaff = nil
-                        timers[idx].isRecruiting = false
-                        timers[idx].isNoHelpNeeded = false
+                }
+            },
+            onStop: {
+                deferSeatSheetCloseAction {
+                    self.triggerScroll(to: item.id)
+                    if let idx = self.findSeatIndex(for: item) {
+                        let stoppedEndTime = self.timers[idx].targetEndTime
+                        let expectedEndMs = self.timers[idx].expectedEndMs
+                        let clearedCheckEnd = self.timers[idx].checkTargetEndTime
+                        self.timers[idx].isRunning = false
+                        self.timers[idx].pausedRemainingSeconds = 0
+                        self.timers[idx].helpProcess = ""
+                        self.timers[idx].shampooStaff = nil
+                        self.timers[idx].isRecruiting = false
+                        self.timers[idx].isNoHelpNeeded = false
                         // ★ チェックタイマーも解除（Q3）
-                        timers[idx].clearCheck()
-                        sessionManager.timers = timers
-                        sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
+                        self.timers[idx].clearCheck()
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.markLocalStop(seatId: item.id, endTime: stoppedEndTime)
                         if let clearedCheckEnd = clearedCheckEnd {
-                            sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: clearedCheckEnd)
+                            self.sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: clearedCheckEnd)
                         }
-                        WatchAlarmCoordinator.shared.stop(sendToPhone: false)
-                        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                        sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
-                        showNotification(text: "⏹️ \(item.displaySeatName)のタイマーを止めました", color: Color(hex: "#30D158"))
+                        WatchAlarmCoordinator.shared.acknowledgeSeatTimer(seatId: item.id, checkOnly: false, skipRefresh: true)
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id, extra: ["expectedEnd": expectedEndMs])
+                        self.showNotification(text: "⏹️ \(item.displaySeatName)のタイマーを止めました", color: Color(hex: "#30D158"))
                     }
-                },
-                onEnterHelp: {
-                    // ★ タイムが早くても切り上げて指定施術（シャンプー・コーミング等）に入る
-                    triggerScroll(to: item.id)
-                    if let idx = findSeatIndex(for: item) {
-                        let clearedCheckEnd = timers[idx].checkTargetEndTime
-                        let rawProcess = timers[idx].helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            },
+            onEnterHelp: {
+                // ★ タイムが早くても切り上げて指定施術（シャンプー・コーミング等）に入る
+                deferSeatSheetCloseAction {
+                    self.triggerScroll(to: item.id)
+                    if let idx = self.findSeatIndex(for: item) {
+                        let stoppedEndTime = self.timers[idx].targetEndTime
+                        let expectedEndMs = self.timers[idx].expectedEndMs
+                        let clearedCheckEnd = self.timers[idx].checkTargetEndTime
+                        let rawProcess = self.timers[idx].helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
                         let process = rawProcess.isEmpty ? "シャンプー" : rawProcess
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].isRunning = false
-                            timers[idx].pausedRemainingSeconds = 0
-                            timers[idx].status = .normal
-                            timers[idx].shampooStaff = nil
-                            timers[idx].helpProcess = ""
-                            timers[idx].isRecruiting = false
-                            timers[idx].isNoHelpNeeded = false
-                            timers[idx].clearCheck()
-                        }
-                        sessionManager.timers = timers
-                        sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
+                        self.timers[idx].isRunning = false
+                        self.timers[idx].pausedRemainingSeconds = 0
+                        self.timers[idx].status = .normal
+                        self.timers[idx].shampooStaff = nil
+                        self.timers[idx].helpProcess = ""
+                        self.timers[idx].isRecruiting = false
+                        self.timers[idx].isNoHelpNeeded = false
+                        self.timers[idx].clearCheck()
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.markLocalStop(seatId: item.id, endTime: stoppedEndTime)
                         if let clearedCheckEnd = clearedCheckEnd {
-                            sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: clearedCheckEnd)
+                            self.sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: clearedCheckEnd)
                         }
-                        WatchAlarmCoordinator.shared.stop(sendToPhone: false)
-                        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                        sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs, "isCompleted": true])
-                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                        showNotification(
-                            text: "✅ 【\(item.displaySeatName)】\(currentUserName)さんが\(process)に入りました",
+                        WatchAlarmCoordinator.shared.acknowledgeSeatTimer(seatId: item.id, checkOnly: false, skipRefresh: true)
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: item.id, extra: ["expectedEnd": expectedEndMs, "isCompleted": true])
+                        self.showNotification(
+                            text: "✅ 【\(item.displaySeatName)】\(self.currentUserName)さんが\(process)に入りました",
                             color: Color(hex: "#30D158")
                         )
                     }
-                },
-                onCompleteCheck: {
-                    // ★ タイムが早くても切り上げてチェックに入る（全体タイマー連動のため全体タイマーも00:00停止）
-                    triggerScroll(to: item.id)
-                    if let idx = findSeatIndex(for: item) {
-                        let clearedCheckEnd = timers[idx].checkTargetEndTime
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].isRunning = false
-                            timers[idx].pausedRemainingSeconds = 0
-                            timers[idx].helpProcess = ""
-                            timers[idx].shampooStaff = nil
-                            timers[idx].isRecruiting = false
-                            timers[idx].isNoHelpNeeded = false
-                            timers[idx].isCheckCompleted = true
-                            timers[idx].checkStaff = currentUserName
-                            timers[idx].checkTargetEndTime = nil
-                            timers[idx].checkTotalSeconds = nil
-                        }
-                        sessionManager.timers = timers
-                        sessionManager.markLocalStop(seatId: item.id, endTime: item.targetEndTime)
+                }
+            },
+            onCompleteCheck: {
+                // ★ タイムが早くても切り上げてチェックに入る（全体タイマー連動のため全体タイマーも00:00停止）
+                deferSeatSheetCloseAction {
+                    self.triggerScroll(to: item.id)
+                    if let idx = self.findSeatIndex(for: item) {
+                        let stoppedEndTime = self.timers[idx].targetEndTime
+                        let expectedEndMs = self.timers[idx].expectedEndMs
+                        let clearedCheckEnd = self.timers[idx].checkTargetEndTime
+                        self.timers[idx].isRunning = false
+                        self.timers[idx].pausedRemainingSeconds = 0
+                        self.timers[idx].helpProcess = ""
+                        self.timers[idx].shampooStaff = nil
+                        self.timers[idx].isRecruiting = false
+                        self.timers[idx].isNoHelpNeeded = false
+                        self.timers[idx].isCheckCompleted = true
+                        self.timers[idx].checkStaff = self.currentUserName
+                        self.timers[idx].checkTargetEndTime = nil
+                        self.timers[idx].checkTotalSeconds = nil
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.markLocalStop(seatId: item.id, endTime: stoppedEndTime)
                         if let clearedCheckEnd = clearedCheckEnd {
-                            sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: clearedCheckEnd)
+                            self.sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: clearedCheckEnd)
                         }
-                        WatchAlarmCoordinator.shared.stop(sendToPhone: false)
-                        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                        sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id, extra: ["expectedEnd": item.expectedEndMs])
-                        sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
-                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                        showNotification(
-                            text: "✅ 【\(item.displaySeatName)】\(currentUserName)さんがチェックに入りました",
+                        WatchAlarmCoordinator.shared.acknowledgeSeatTimer(seatId: item.id, checkOnly: false, skipRefresh: true)
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "STOP_TIMER", seatId: item.id, extra: ["expectedEnd": expectedEndMs])
+                        self.sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
+                        self.showNotification(
+                            text: "✅ 【\(item.displaySeatName)】\(self.currentUserName)さんがチェックに入りました",
                             color: Color(hex: "#30D158")
                         )
                     }
-                },
-                onReinputTime: { totalSec, checkSec in
-                    triggerScroll(to: item.id)
-                    if let idx = findSeatIndex(for: item) {
-                        let sec = max(10, totalSec)
-                        // ★ 全体タイムより短いチェック時間のみ有効
-                        let validCheckSec = (checkSec != nil && checkSec! < sec) ? checkSec : nil
-                        let m = sec / 60
-                        let s = sec % 60
-                        let timeStr = s > 0 ? "\(m)分\(s)秒" : "\(m)分"
-                        let startBase = Date()
-                        let mainEnd = startBase.addingTimeInterval(Double(sec))
-                        let checkEnd = (validCheckSec != nil && validCheckSec! > 0) ? startBase.addingTimeInterval(Double(validCheckSec!)) : nil
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].totalSeconds = sec
-                            timers[idx].targetEndTime = mainEnd
-                            timers[idx].pausedRemainingSeconds = sec
-                            timers[idx].isRunning = true
-                            timers[idx].status = .normal
-                            timers[idx].isCollapsed = false
-                            timers[idx].helpProcess = ""
-                            timers[idx].shampooStaff = nil
-                            timers[idx].isRecruiting = false
-                            timers[idx].isNoHelpNeeded = false
-                            timers[idx].hasAlertedHelpUnassigned = false
-                            
-                            // ★ 途中チェックタイマーの設定または解除（新規時は前回の「コーミング」等の幽霊残りを必ずリセット）
-                            if let chk = validCheckSec, chk > 0, let cEnd = checkEnd {
-                                timers[idx].checkTotalSeconds = chk
-                                timers[idx].checkTargetEndTime = cEnd
-                                timers[idx].checkStaff = nil
-                                timers[idx].checkProcess = "チェック"
-                                timers[idx].isCheckCompleted = false
-                            } else {
-                                timers[idx].clearCheck()
-                            }
-                        }
-                        sessionManager.timers = timers
-                        sessionManager.clearLocalStop(seatId: item.id)
-                        sessionManager.clearLocalCheckClear(seatId: item.id)
-                        sessionManager.setCollapseOverride(seatId: item.id, collapsed: nil)
-                        WatchAlarmCoordinator.shared.update(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName)
-                        var extraPayload: [String: Any] = [
-                            "targetSeconds": sec,
-                            "targetEndTimestamp": mainEnd.timeIntervalSince1970 * 1000.0,
-                            "watchAlarmSoundEnabled": timers[idx].watchAlarmSoundEnabled,
-                            "alarmSoundEnabled": timers[idx].alarmSoundEnabled
-                        ]
-                        if let chk = validCheckSec, chk > 0, let cEnd = checkEnd {
-                            extraPayload["checkTotalSeconds"] = chk
-                            extraPayload["checkEndTimestamp"] = cEnd.timeIntervalSince1970 * 1000.0
-                        }
-                        sessionManager.sendActionToPhone(action: "START_TIMER", seatId: item.id, extra: extraPayload)
-                        
-                        let checkText = (validCheckSec ?? 0) > 0 ? "（チェック\(validCheckSec! / 60)分）" : ""
-                        showNotification(
-                            text: "⏱️ \(item.displaySeatName): \(timeStr)に開始しました\(checkText)",
-                            color: Color(hex: "#FFD60A")
-                        )
+                }
+            },
+            onReinputTime: { totalSec, checkSec in
+                triggerScroll(to: item.id)
+                if let idx = findSeatIndex(for: item) {
+                    let sec = max(10, totalSec)
+                    // ★ 全体タイムより短いチェック時間のみ有効
+                    let validCheckSec = (checkSec != nil && checkSec! < sec) ? checkSec : nil
+                    let m = sec / 60
+                    let s = sec % 60
+                    let timeStr = s > 0 ? "\(m)分\(s)秒" : "\(m)分"
+                    let startBase = Date()
+                    let mainEnd = startBase.addingTimeInterval(Double(sec))
+                    let checkEnd = (validCheckSec != nil && validCheckSec! > 0) ? startBase.addingTimeInterval(Double(validCheckSec!)) : nil
+                    timers[idx].totalSeconds = sec
+                    timers[idx].targetEndTime = mainEnd
+                    timers[idx].pausedRemainingSeconds = sec
+                    timers[idx].isRunning = true
+                    timers[idx].status = .normal
+                    timers[idx].isCollapsed = false
+                    timers[idx].helpProcess = ""
+                    timers[idx].shampooStaff = nil
+                    timers[idx].isRecruiting = false
+                    timers[idx].isNoHelpNeeded = false
+                    timers[idx].hasAlertedHelpUnassigned = false
+                    
+                    // ★ 途中チェックタイマーの設定または解除（新規時は前回の「コーミング」等の幽霊残りを必ずリセット）
+                    if let chk = validCheckSec, chk > 0, let cEnd = checkEnd {
+                        timers[idx].checkTotalSeconds = chk
+                        timers[idx].checkTargetEndTime = cEnd
+                        timers[idx].checkStaff = nil
+                        timers[idx].checkProcess = "チェック"
+                        timers[idx].isCheckCompleted = false
+                    } else {
+                        timers[idx].clearCheck()
                     }
-                },
-                onAssignHelp: { process, staff in
-                    if let idx = findSeatIndex(for: item) {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].helpProcess = process
-                            timers[idx].shampooStaff = staff
-                            if process == "チェック" {
-                                timers[idx].checkStaff = staff
-                            }
-                            timers[idx].isRecruiting = false
-                            timers[idx].isNoHelpNeeded = false
-                        }
-                        sessionManager.timers = timers
-                        sessionManager.markLocalSeatMod(seatId: item.id)
-                        WatchAlarmCoordinator.shared.update(
-                            timers: timers,
-                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                            soundOn: sessionManager.alarmSoundEnabled,
-                            currentUserName: currentUserName
-                        )
-                        sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": process, "assistantStaffName": staff])
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                        showNotification(
-                            text: "📤 \(staff)さんに【\(process)】を指定しました",
-                            color: Color(hex: "#0A84FF")
-                        )
+                    sessionManager.timers = timers
+                    sessionManager.clearLocalStop(seatId: item.id)
+                    sessionManager.clearLocalCheckClear(seatId: item.id)
+                    sessionManager.setCollapseOverride(seatId: item.id, collapsed: nil)
+                    syncSeatTimersState(forceWidgetReload: true)
+                    var extraPayload: [String: Any] = [
+                        "targetSeconds": sec,
+                        "targetEndTimestamp": mainEnd.timeIntervalSince1970 * 1000.0,
+                        "watchAlarmSoundEnabled": timers[idx].watchAlarmSoundEnabled,
+                        "alarmSoundEnabled": timers[idx].alarmSoundEnabled
+                    ]
+                    if let chk = validCheckSec, chk > 0, let cEnd = checkEnd {
+                        extraPayload["checkTotalSeconds"] = chk
+                        extraPayload["checkEndTimestamp"] = cEnd.timeIntervalSince1970 * 1000.0
                     }
-                },
-                onRecruitHelp: { process in
-                    if let idx = findSeatIndex(for: item) {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].helpProcess = process
-                            timers[idx].shampooStaff = nil
-                            timers[idx].isRecruiting = true
-                            timers[idx].isNoHelpNeeded = false
-                        }
-                        sessionManager.timers = timers
-                        sessionManager.markLocalSeatMod(seatId: item.id)
-                        WatchAlarmCoordinator.shared.update(
-                            timers: timers,
-                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                            soundOn: sessionManager.alarmSoundEnabled,
-                            currentUserName: currentUserName
-                        )
-                        sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": process])
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                        showNotification(
-                            text: "📢 【\(item.displaySeatName)】\(process)担当を全員に募集通知しました！",
-                            color: Color(hex: "#FF9F0A")
-                        )
+                    sessionManager.sendActionToPhone(action: "START_TIMER", seatId: item.id, extra: extraPayload)
+                    
+                    let checkText = (validCheckSec ?? 0) > 0 ? "（チェック\(validCheckSec! / 60)分）" : ""
+                    showNotification(
+                        text: "⏱️ \(item.displaySeatName): \(timeStr)に開始しました\(checkText)",
+                        color: Color(hex: "#FFD60A")
+                    )
+                }
+            },
+            onAssignHelp: { process, staff in
+                if let idx = findSeatIndex(for: item) {
+                    timers[idx].helpProcess = process
+                    timers[idx].shampooStaff = staff
+                    if process == "チェック" {
+                        timers[idx].checkStaff = staff
                     }
-                },
-                onSetNoHelp: {
-                    if let idx = findSeatIndex(for: item) {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].helpProcess = ""
-                            timers[idx].shampooStaff = nil
-                            timers[idx].isRecruiting = false
-                            timers[idx].isNoHelpNeeded = true
-                        }
-                        sessionManager.timers = timers
-                        sessionManager.markLocalSeatMod(seatId: item.id)
-                        WatchAlarmCoordinator.shared.update(
-                            timers: timers,
-                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                            soundOn: sessionManager.alarmSoundEnabled,
-                            currentUserName: currentUserName
-                        )
-                        sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": "ヘルプなし", "assistantStaffName": "ヘルプなし"])
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                        showNotification(
-                            text: "👤 【\(item.displaySeatName)】ヘルプなし（一人施術）に設定しました",
-                            color: Color(hex: "#8E8E93")
-                        )
-                    }
-                },
-                onClearHelp: {
-                    if let idx = findSeatIndex(for: item) {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].helpProcess = ""
-                            timers[idx].shampooStaff = nil
-                            timers[idx].isRecruiting = false
-                            timers[idx].isNoHelpNeeded = false
-                        }
-                        sessionManager.timers = timers
-                        sessionManager.markLocalSeatMod(seatId: item.id)
-                        WatchAlarmCoordinator.shared.update(
-                            timers: timers,
-                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                            soundOn: sessionManager.alarmSoundEnabled,
-                            currentUserName: currentUserName
-                        )
-                        sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                        showNotification(
-                            text: "👤 【\(item.displaySeatName)】ヘルプ指定を未定に戻しました",
-                            color: Color(hex: "#8E8E93")
-                        )
-                    }
-                },
-                onAssignCheckStaff: { checkProcess, staff in
-                    if let idx = findSeatIndex(for: item) {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].checkProcess = checkProcess
-                            timers[idx].checkStaff = staff
-                        }
-                        sessionManager.timers = timers
-                        sessionManager.markLocalSeatMod(seatId: item.id)
-                        WatchAlarmCoordinator.shared.update(
-                            timers: timers,
-                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                            soundOn: sessionManager.alarmSoundEnabled,
-                            currentUserName: currentUserName
-                        )
-                        sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": staff, "checkProcess": checkProcess, "isSubCheck": true])
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                        showNotification(
-                            text: "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
-                            color: Color(hex: "#30D158")
-                        )
-                    }
-                },
-                onRecruitCheckStaff: { checkProcess in
-                    if let idx = findSeatIndex(for: item) {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].checkProcess = checkProcess
-                            timers[idx].checkStaff = "募集中"
-                        }
-                        sessionManager.timers = timers
-                        sessionManager.markLocalSeatMod(seatId: item.id)
-                        WatchAlarmCoordinator.shared.update(
-                            timers: timers,
-                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                            soundOn: sessionManager.alarmSoundEnabled,
-                            currentUserName: currentUserName
-                        )
-                        sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": checkProcess, "checkProcess": checkProcess, "isSubCheck": true])
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                        showNotification(
-                            text: "📢 【\(item.displaySeatName)】\(checkProcess)担当を全員に募集通知しました！",
-                            color: Color(hex: "#FF9F0A")
-                        )
-                    }
-                },
-                onClearCheckStaff: {
-                    if let idx = findSeatIndex(for: item) {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].checkProcess = "チェック"
-                            timers[idx].checkStaff = nil
-                        }
-                        sessionManager.timers = timers
-                        sessionManager.markLocalSeatMod(seatId: item.id)
-                        WatchAlarmCoordinator.shared.update(
-                            timers: timers,
-                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                            soundOn: sessionManager.alarmSoundEnabled,
-                            currentUserName: currentUserName
-                        )
-                        sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": "", "checkProcess": "チェック", "isSubCheck": true])
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                        showNotification(
-                            text: "👤 チェック担当を未定に戻しました",
-                            color: Color(hex: "#8E8E93")
-                        )
-                    }
-                },
-                onCompleteSubCheck: {
-                    if let idx = findSeatIndex(for: item) {
-                        sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].isCheckCompleted = true
-                            timers[idx].checkStaff = currentUserName
-                            timers[idx].checkTargetEndTime = nil
-                            timers[idx].checkTotalSeconds = nil
-                        }
-                        sessionManager.timers = timers
+                    timers[idx].isRecruiting = false
+                    timers[idx].isNoHelpNeeded = false
+                    sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    syncSeatTimersState(forceWidgetReload: true)
+                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": process, "assistantStaffName": staff])
+                    showNotification(
+                        text: "📤 \(staff)さんに【\(process)】を指定しました",
+                        color: Color(hex: "#0A84FF")
+                    )
+                }
+            },
+            onRecruitHelp: { process in
+                if let idx = findSeatIndex(for: item) {
+                    timers[idx].helpProcess = process
+                    timers[idx].shampooStaff = nil
+                    timers[idx].isRecruiting = true
+                    timers[idx].isNoHelpNeeded = false
+                    sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    syncSeatTimersState(forceWidgetReload: true)
+                    sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": process])
+                    showNotification(
+                        text: "📢 【\(item.displaySeatName)】\(process)担当を全員に募集通知しました！",
+                        color: Color(hex: "#FF9F0A")
+                    )
+                }
+            },
+            onSetNoHelp: {
+                if let idx = findSeatIndex(for: item) {
+                    timers[idx].helpProcess = ""
+                    timers[idx].shampooStaff = nil
+                    timers[idx].isRecruiting = false
+                    timers[idx].isNoHelpNeeded = true
+                    sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    syncSeatTimersState(forceWidgetReload: true)
+                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": "ヘルプなし", "assistantStaffName": "ヘルプなし"])
+                    showNotification(
+                        text: "👤 【\(item.displaySeatName)】ヘルプなし（一人施術）に設定しました",
+                        color: Color(hex: "#8E8E93")
+                    )
+                }
+            },
+            onClearHelp: {
+                if let idx = findSeatIndex(for: item) {
+                    timers[idx].helpProcess = ""
+                    timers[idx].shampooStaff = nil
+                    timers[idx].isRecruiting = false
+                    timers[idx].isNoHelpNeeded = false
+                    sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    syncSeatTimersState(forceWidgetReload: true)
+                    sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
+                    showNotification(
+                        text: "👤 【\(item.displaySeatName)】ヘルプ指定を未定に戻しました",
+                        color: Color(hex: "#8E8E93")
+                    )
+                }
+            },
+            onAssignCheckStaff: { checkProcess, staff in
+                if let idx = findSeatIndex(for: item) {
+                    timers[idx].checkProcess = checkProcess
+                    timers[idx].checkStaff = staff
+                    sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    syncSeatTimersState(forceWidgetReload: true)
+                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": staff, "checkProcess": checkProcess, "isSubCheck": true])
+                    showNotification(
+                        text: "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
+                        color: Color(hex: "#30D158")
+                    )
+                }
+            },
+            onRecruitCheckStaff: { checkProcess in
+                if let idx = findSeatIndex(for: item) {
+                    timers[idx].checkProcess = checkProcess
+                    timers[idx].checkStaff = "募集中"
+                    sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    syncSeatTimersState(forceWidgetReload: true)
+                    sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": checkProcess, "checkProcess": checkProcess, "isSubCheck": true])
+                    showNotification(
+                        text: "📢 【\(item.displaySeatName)】\(checkProcess)担当を全員に募集通知しました！",
+                        color: Color(hex: "#FF9F0A")
+                    )
+                }
+            },
+            onClearCheckStaff: {
+                if let idx = findSeatIndex(for: item) {
+                    timers[idx].checkProcess = "チェック"
+                    timers[idx].checkStaff = nil
+                    sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    syncSeatTimersState(forceWidgetReload: true)
+                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": "", "checkProcess": "チェック", "isSubCheck": true])
+                    showNotification(
+                        text: "👤 チェック担当を未定に戻しました",
+                        color: Color(hex: "#8E8E93")
+                    )
+                }
+            },
+            onCompleteSubCheck: {
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        let doneProc = self.timers[idx].displayCheckProcess
+                        self.sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: self.timers[idx].checkTargetEndTime)
+                        self.timers[idx].isCheckCompleted = true
+                        self.timers[idx].checkStaff = self.currentUserName
+                        self.timers[idx].checkTargetEndTime = nil
+                        self.timers[idx].checkTotalSeconds = nil
+                        self.sessionManager.timers = self.timers
                         WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
                             seatId: item.id,
-                            timers: timers,
-                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                            soundOn: sessionManager.alarmSoundEnabled,
-                            currentUserName: currentUserName
+                            timers: self.timers,
+                            mainTimer: self.mainTimer ?? self.sessionManager.mainTimer,
+                            soundOn: self.sessionManager.alarmSoundEnabled,
+                            currentUserName: self.currentUserName
                         )
-                        sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
-                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                        showNotification(text: "✅ \(timers[idx].displayCheckProcess)完了（全体タイマー続行）", color: Color(hex: "#30D158"))
+                        WidgetSync.save(
+                            timers: self.timers,
+                            mainTimer: self.mainTimer ?? self.sessionManager.mainTimer,
+                            userName: self.currentUserName,
+                            forceReload: true
+                        )
+                        self.sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
+                        self.showNotification(text: "✅ \(doneProc)完了（全体タイマー続行）", color: Color(hex: "#30D158"))
                     }
-                },
-                onCancelSubCheck: {
-                    if let idx = findSeatIndex(for: item) {
-                        sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].checkTargetEndTime = nil
-                            timers[idx].checkTotalSeconds = nil
-                            timers[idx].checkStaff = nil
-                            timers[idx].checkProcess = "チェック"
-                        }
-                        sessionManager.timers = timers
+                }
+            },
+            onCancelSubCheck: {
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: self.timers[idx].checkTargetEndTime)
+                        self.timers[idx].checkTargetEndTime = nil
+                        self.timers[idx].checkTotalSeconds = nil
+                        self.timers[idx].checkStaff = nil
+                        self.timers[idx].checkProcess = "チェック"
+                        self.sessionManager.timers = self.timers
                         WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
                             seatId: item.id,
-                            timers: timers,
-                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                            soundOn: sessionManager.alarmSoundEnabled,
-                            currentUserName: currentUserName
+                            timers: self.timers,
+                            mainTimer: self.mainTimer ?? self.sessionManager.mainTimer,
+                            soundOn: self.sessionManager.alarmSoundEnabled,
+                            currentUserName: self.currentUserName
                         )
-                        sessionManager.sendActionToPhone(action: "CANCEL_CHECK", seatId: item.id)
-                        WidgetSync.save(timers: timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                        showNotification(text: "⏹ チェックタイマーを解除しました", color: Color(hex: "#8E8E93"))
+                        WidgetSync.save(
+                            timers: self.timers,
+                            mainTimer: self.mainTimer ?? self.sessionManager.mainTimer,
+                            userName: self.currentUserName,
+                            forceReload: true
+                        )
+                        self.sessionManager.sendActionToPhone(action: "CANCEL_CHECK", seatId: item.id)
+                        self.showNotification(text: "⏹ チェックタイマーを解除しました", color: Color(hex: "#8E8E93"))
                     }
-                },
-                onAddLateCheck: { checkSec, checkProcess, checkStaff in
-                    if let idx = findSeatIndex(for: item) {
+                }
+            },
+            onAddLateCheck: { checkSec, checkProcess, checkStaff, closeSheet in
+                let applyLateCheck = {
+                    if let idx = self.findSeatIndex(for: item) {
                         let validSec = max(60, checkSec)
                         let checkEnd = Date().addingTimeInterval(Double(validSec))
                         let resolvedProc = checkProcess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "チェック" : checkProcess
                         let resolvedStaff: String? = (checkStaff?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? checkStaff : nil
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                            timers[idx].checkTotalSeconds = validSec
-                            timers[idx].checkTargetEndTime = checkEnd
-                            timers[idx].checkProcess = resolvedProc
-                            timers[idx].checkStaff = resolvedStaff
-                            timers[idx].isCheckCompleted = false
-                        }
-                        sessionManager.timers = timers
-                        sessionManager.clearLocalCheckClear(seatId: item.id)
-                        sessionManager.markLocalSeatMod(seatId: item.id)
-                        WatchAlarmCoordinator.shared.update(
-                            timers: timers,
-                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                            soundOn: sessionManager.alarmSoundEnabled,
-                            currentUserName: currentUserName
-                        )
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
+                        self.timers[idx].checkTotalSeconds = validSec
+                        self.timers[idx].checkTargetEndTime = checkEnd
+                        self.timers[idx].checkProcess = resolvedProc
+                        self.timers[idx].checkStaff = resolvedStaff
+                        self.timers[idx].isCheckCompleted = false
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.clearLocalCheckClear(seatId: item.id)
+                        self.sessionManager.markLocalSeatMod(seatId: item.id)
+                        self.syncSeatTimersState(forceWidgetReload: true)
                         let extraPayload: [String: Any] = [
                             "checkTotalSeconds": validSec,
                             "checkEndTimestamp": checkEnd.timeIntervalSince1970 * 1000.0,
                             "checkProcess": resolvedProc,
                             "checkStaffName": resolvedStaff ?? ""
                         ]
-                        sessionManager.sendActionToPhone(action: "SET_CHECK_TIMER", seatId: item.id, extra: extraPayload)
+                        self.sessionManager.sendActionToPhone(action: "SET_CHECK_TIMER", seatId: item.id, extra: extraPayload)
                         let mins = validSec / 60
                         let staffText = resolvedStaff != nil ? " (\(resolvedStaff!))" : ""
-                        showNotification(
+                        self.showNotification(
                             text: "🔍 \(item.displaySeatName): チェック\(mins)分を追加しました\(staffText)",
                             color: Color(hex: "#0A84FF")
                         )
                     }
-                },
-                onUpdateSoundSettings: { watchSound, phoneSound in
-                    if let idx = findSeatIndex(for: item) {
-                        timers[idx].watchAlarmSoundEnabled = watchSound
-                        timers[idx].alarmSoundEnabled = phoneSound
-                        sessionManager.timers = timers
-                        sessionManager.markLocalSeatMod(seatId: item.id)
-                        WatchAlarmCoordinator.shared.update(
-                            timers: timers,
-                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                            soundOn: sessionManager.alarmSoundEnabled,
-                            currentUserName: currentUserName
-                        )
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                        sessionManager.sendActionToPhone(
-                            action: "UPDATE_SOUND_SETTINGS",
-                            seatId: item.id,
-                            extra: [
-                                "watchAlarmSoundEnabled": watchSound,
-                                "alarmSoundEnabled": phoneSound
-                            ]
-                        )
-                    }
                 }
-            )
+                if closeSheet {
+                    deferSeatSheetCloseAction {
+                        applyLateCheck()
+                    }
+                } else {
+                    applyLateCheck()
+                }
+            },
+            onUpdateSoundSettings: { watchSound, phoneSound in
+                if let idx = findSeatIndex(for: item) {
+                    timers[idx].watchAlarmSoundEnabled = watchSound
+                    timers[idx].alarmSoundEnabled = phoneSound
+                    sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    syncSeatTimersState(forceWidgetReload: false)
+                    sessionManager.sendActionToPhone(
+                        action: "UPDATE_SOUND_SETTINGS",
+                        seatId: item.id,
+                        extra: [
+                            "watchAlarmSoundEnabled": watchSound,
+                            "alarmSoundEnabled": phoneSound
+                        ]
+                    )
+                }
+            }
+        )
     }
     
     @ViewBuilder
@@ -3919,48 +3959,61 @@ struct ContentView: View {
             item: item,
             currentUserName: currentUserName,
             onOpenSelectStaff: {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     selectCheckStaffTargetId = findSeatIndex(for: item).map { timers[$0].id } ?? item.id
                 }
             },
             onCompleteCheck: {
-                if let idx = findSeatIndex(for: item) {
-                    sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
-                    timers[idx].isCheckCompleted = true
-                    timers[idx].checkStaff = currentUserName
-                    timers[idx].checkTargetEndTime = nil
-                    timers[idx].checkTotalSeconds = nil
-                    sessionManager.timers = timers
-                    WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
-                        seatId: item.id,
-                        timers: timers,
-                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                        soundOn: sessionManager.alarmSoundEnabled,
-                        currentUserName: currentUserName
-                    )
-                    sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                    showNotification(text: "✅ チェック完了を全員へ通知しました", color: Color(hex: "#30D158"))
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: self.timers[idx].checkTargetEndTime)
+                        self.timers[idx].isCheckCompleted = true
+                        self.timers[idx].checkStaff = self.currentUserName
+                        self.timers[idx].checkTargetEndTime = nil
+                        self.timers[idx].checkTotalSeconds = nil
+                        self.sessionManager.timers = self.timers
+                        WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
+                            seatId: item.id,
+                            timers: self.timers,
+                            mainTimer: self.mainTimer ?? self.sessionManager.mainTimer,
+                            soundOn: self.sessionManager.alarmSoundEnabled,
+                            currentUserName: self.currentUserName
+                        )
+                        WidgetSync.save(
+                            timers: self.timers,
+                            mainTimer: self.mainTimer ?? self.sessionManager.mainTimer,
+                            userName: self.currentUserName,
+                            forceReload: true
+                        )
+                        self.sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
+                        self.showNotification(text: "✅ チェック完了を全員へ通知しました", color: Color(hex: "#30D158"))
+                    }
                 }
             },
             onCancelCheck: {
-                if let idx = findSeatIndex(for: item) {
-                    sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
-                    timers[idx].checkTargetEndTime = nil
-                    timers[idx].checkTotalSeconds = nil
-                    timers[idx].checkStaff = nil
-                    timers[idx].checkProcess = "チェック"
-                    sessionManager.timers = timers
-                    WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
-                        seatId: item.id,
-                        timers: timers,
-                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                        soundOn: sessionManager.alarmSoundEnabled,
-                        currentUserName: currentUserName
-                    )
-                    sessionManager.sendActionToPhone(action: "CANCEL_CHECK", seatId: item.id)
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                    playHaptic(.click)
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: self.timers[idx].checkTargetEndTime)
+                        self.timers[idx].checkTargetEndTime = nil
+                        self.timers[idx].checkTotalSeconds = nil
+                        self.timers[idx].checkStaff = nil
+                        self.timers[idx].checkProcess = "チェック"
+                        self.sessionManager.timers = self.timers
+                        WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
+                            seatId: item.id,
+                            timers: self.timers,
+                            mainTimer: self.mainTimer ?? self.sessionManager.mainTimer,
+                            soundOn: self.sessionManager.alarmSoundEnabled,
+                            currentUserName: self.currentUserName
+                        )
+                        WidgetSync.save(
+                            timers: self.timers,
+                            mainTimer: self.mainTimer ?? self.sessionManager.mainTimer,
+                            userName: self.currentUserName,
+                            forceReload: true
+                        )
+                        self.sessionManager.sendActionToPhone(action: "CANCEL_CHECK", seatId: item.id)
+                    }
                 }
             }
         )
@@ -3974,69 +4027,51 @@ struct ContentView: View {
             currentUserName: currentUserName,
             staffCandidates: sessionManager.members,
             onAssignStaff: { checkProcess, staff in
-                if let idx = findSeatIndex(for: item) {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        timers[idx].checkProcess = checkProcess
-                        timers[idx].checkStaff = staff
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.timers[idx].checkProcess = checkProcess
+                        self.timers[idx].checkStaff = staff
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.markLocalSeatMod(seatId: item.id)
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": staff, "checkProcess": checkProcess, "isSubCheck": true])
+                        self.showNotification(
+                            text: "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
+                            color: Color(hex: "#30D158")
+                        )
                     }
-                    sessionManager.timers = timers
-                    sessionManager.markLocalSeatMod(seatId: item.id)
-                    WatchAlarmCoordinator.shared.update(
-                        timers: timers,
-                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                        soundOn: sessionManager.alarmSoundEnabled,
-                        currentUserName: currentUserName
-                    )
-                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": staff, "checkProcess": checkProcess, "isSubCheck": true])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                    showNotification(
-                        text: "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
-                        color: Color(hex: "#30D158")
-                    )
                 }
             },
             onRecruitAll: { checkProcess in
-                if let idx = findSeatIndex(for: item) {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        timers[idx].checkProcess = checkProcess
-                        timers[idx].checkStaff = "募集中"
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.timers[idx].checkProcess = checkProcess
+                        self.timers[idx].checkStaff = "募集中"
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.markLocalSeatMod(seatId: item.id)
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": checkProcess, "checkProcess": checkProcess, "isSubCheck": true])
+                        self.showNotification(
+                            text: "📢 【\(item.displaySeatName)】\(checkProcess)担当を全員に募集通知しました！",
+                            color: Color(hex: "#FF9F0A")
+                        )
                     }
-                    sessionManager.timers = timers
-                    sessionManager.markLocalSeatMod(seatId: item.id)
-                    WatchAlarmCoordinator.shared.update(
-                        timers: timers,
-                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                        soundOn: sessionManager.alarmSoundEnabled,
-                        currentUserName: currentUserName
-                    )
-                    sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": checkProcess, "checkProcess": checkProcess, "isSubCheck": true])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                    showNotification(
-                        text: "📢 【\(item.displaySeatName)】\(checkProcess)担当を全員に募集通知しました！",
-                        color: Color(hex: "#FF9F0A")
-                    )
                 }
             },
             onClearStaff: {
-                if let idx = findSeatIndex(for: item) {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        timers[idx].checkProcess = "チェック"
-                        timers[idx].checkStaff = nil
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.timers[idx].checkProcess = "チェック"
+                        self.timers[idx].checkStaff = nil
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.markLocalSeatMod(seatId: item.id)
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": "", "checkProcess": "チェック", "isSubCheck": true])
+                        self.showNotification(
+                            text: "👤 チェック担当を未定に戻しました",
+                            color: Color(hex: "#8E8E93")
+                        )
                     }
-                    sessionManager.timers = timers
-                    sessionManager.markLocalSeatMod(seatId: item.id)
-                    WatchAlarmCoordinator.shared.update(
-                        timers: timers,
-                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                        soundOn: sessionManager.alarmSoundEnabled,
-                        currentUserName: currentUserName
-                    )
-                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": "", "checkProcess": "チェック", "isSubCheck": true])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                    showNotification(
-                        text: "👤 チェック担当を未定に戻しました",
-                        color: Color(hex: "#8E8E93")
-                    )
                 }
             }
         )
@@ -4047,135 +4082,160 @@ struct ContentView: View {
         ShampooActionSheet(
             item: item,
             onStartShampoo: {
-                if let idx = findSeatIndex(for: item) {
-                    timers[idx].status = .normal
-                    timers[idx].shampooStaff = nil
-                    timers[idx].helpProcess = ""
-                    timers[idx].isRecruiting = false
-                    sessionManager.timers = timers
-                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                    showNotification(
-                        text: "✅ 【\(item.displaySeatName)】シャンプー完了を全員へ通知しました",
-                        color: Color(hex: "#30D158")
-                    )
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.timers[idx].status = .normal
+                        self.timers[idx].shampooStaff = nil
+                        self.timers[idx].helpProcess = ""
+                        self.timers[idx].isRecruiting = false
+                        self.sessionManager.timers = self.timers
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
+                        self.showNotification(
+                            text: "✅ 【\(item.displaySeatName)】シャンプー完了を全員へ通知しました",
+                            color: Color(hex: "#30D158")
+                        )
+                    }
                 }
             },
             onFinishShampoo: {
-                if let idx = findSeatIndex(for: item) {
-                    timers[idx].status = .normal
-                    timers[idx].shampooStaff = nil
-                    timers[idx].helpProcess = ""
-                    timers[idx].isRecruiting = false
-                    sessionManager.timers = timers
-                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                    showNotification(
-                        text: "✅ 【\(item.displaySeatName)】シャンプー完了を全員へ通知しました",
-                        color: Color(hex: "#30D158")
-                    )
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.timers[idx].status = .normal
+                        self.timers[idx].shampooStaff = nil
+                        self.timers[idx].helpProcess = ""
+                        self.timers[idx].isRecruiting = false
+                        self.sessionManager.timers = self.timers
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
+                        self.showNotification(
+                            text: "✅ 【\(item.displaySeatName)】シャンプー完了を全員へ通知しました",
+                            color: Color(hex: "#30D158")
+                        )
+                    }
                 }
             },
             onStartCombing: {
-                if let idx = findSeatIndex(for: item) {
-                    timers[idx].status = .normal
-                    timers[idx].shampooStaff = nil
-                    timers[idx].helpProcess = ""
-                    timers[idx].isRecruiting = false
-                    sessionManager.timers = timers
-                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                    showNotification(
-                        text: "✅ 【\(item.displaySeatName)】コーミング完了を全員へ通知しました",
-                        color: Color(hex: "#30D158")
-                    )
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.timers[idx].status = .normal
+                        self.timers[idx].shampooStaff = nil
+                        self.timers[idx].helpProcess = ""
+                        self.timers[idx].isRecruiting = false
+                        self.sessionManager.timers = self.timers
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
+                        self.showNotification(
+                            text: "✅ 【\(item.displaySeatName)】コーミング完了を全員へ通知しました",
+                            color: Color(hex: "#30D158")
+                        )
+                    }
                 }
             },
             onFinishCombing: {
-                if let idx = findSeatIndex(for: item) {
-                    timers[idx].status = .normal
-                    timers[idx].shampooStaff = nil
-                    timers[idx].helpProcess = ""
-                    timers[idx].isRecruiting = false
-                    sessionManager.timers = timers
-                    sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                    showNotification(
-                        text: "✅ 【\(item.displaySeatName)】コーミング完了を全員へ通知しました",
-                        color: Color(hex: "#30D158")
-                    )
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.timers[idx].status = .normal
+                        self.timers[idx].shampooStaff = nil
+                        self.timers[idx].helpProcess = ""
+                        self.timers[idx].isRecruiting = false
+                        self.sessionManager.timers = self.timers
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "UPDATE_STATUS", seatId: item.id, extra: ["actionStatus": "normal", "isShampooing": false])
+                        self.showNotification(
+                            text: "✅ 【\(item.displaySeatName)】コーミング完了を全員へ通知しました",
+                            color: Color(hex: "#30D158")
+                        )
+                    }
                 }
             },
             onStartCheck: {
-                if let idx = findSeatIndex(for: item) {
-                    sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
-                    timers[idx].status = .normal
-                    timers[idx].isCheckCompleted = true
-                    timers[idx].checkStaff = currentUserName
-                    timers[idx].checkTargetEndTime = nil
-                    timers[idx].checkTotalSeconds = nil
-                    timers[idx].helpProcess = ""
-                    timers[idx].isRecruiting = false
-                    sessionManager.timers = timers
-                    WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
-                        seatId: item.id,
-                        timers: timers,
-                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                        soundOn: sessionManager.alarmSoundEnabled,
-                        currentUserName: currentUserName
-                    )
-                    sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                    showNotification(
-                        text: "✅ 【\(item.displaySeatName)】チェック完了を全員へ通知しました",
-                        color: Color(hex: "#30D158")
-                    )
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: self.timers[idx].checkTargetEndTime)
+                        self.timers[idx].status = .normal
+                        self.timers[idx].isCheckCompleted = true
+                        self.timers[idx].checkStaff = self.currentUserName
+                        self.timers[idx].checkTargetEndTime = nil
+                        self.timers[idx].checkTotalSeconds = nil
+                        self.timers[idx].helpProcess = ""
+                        self.timers[idx].isRecruiting = false
+                        self.sessionManager.timers = self.timers
+                        WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
+                            seatId: item.id,
+                            timers: self.timers,
+                            mainTimer: self.mainTimer ?? self.sessionManager.mainTimer,
+                            soundOn: self.sessionManager.alarmSoundEnabled,
+                            currentUserName: self.currentUserName
+                        )
+                        WidgetSync.save(
+                            timers: self.timers,
+                            mainTimer: self.mainTimer ?? self.sessionManager.mainTimer,
+                            userName: self.currentUserName,
+                            forceReload: true
+                        )
+                        self.sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
+                        self.showNotification(
+                            text: "✅ 【\(item.displaySeatName)】チェック完了を全員へ通知しました",
+                            color: Color(hex: "#30D158")
+                        )
+                    }
                 }
             },
             onFinishCheck: {
-                if let idx = findSeatIndex(for: item) {
-                    sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
-                    timers[idx].status = .normal
-                    timers[idx].isCheckCompleted = true
-                    timers[idx].checkStaff = currentUserName
-                    timers[idx].checkTargetEndTime = nil
-                    timers[idx].checkTotalSeconds = nil
-                    timers[idx].helpProcess = ""
-                    timers[idx].isRecruiting = false
-                    sessionManager.timers = timers
-                    WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
-                        seatId: item.id,
-                        timers: timers,
-                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                        soundOn: sessionManager.alarmSoundEnabled,
-                        currentUserName: currentUserName
-                    )
-                    sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                    showNotification(
-                        text: "✅ 【\(item.displaySeatName)】チェック完了を全員へ通知しました",
-                        color: Color(hex: "#30D158")
-                    )
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: self.timers[idx].checkTargetEndTime)
+                        self.timers[idx].status = .normal
+                        self.timers[idx].isCheckCompleted = true
+                        self.timers[idx].checkStaff = self.currentUserName
+                        self.timers[idx].checkTargetEndTime = nil
+                        self.timers[idx].checkTotalSeconds = nil
+                        self.timers[idx].helpProcess = ""
+                        self.timers[idx].isRecruiting = false
+                        self.sessionManager.timers = self.timers
+                        WatchAlarmCoordinator.shared.restartRemainingTimerAfterCheck(
+                            seatId: item.id,
+                            timers: self.timers,
+                            mainTimer: self.mainTimer ?? self.sessionManager.mainTimer,
+                            soundOn: self.sessionManager.alarmSoundEnabled,
+                            currentUserName: self.currentUserName
+                        )
+                        WidgetSync.save(
+                            timers: self.timers,
+                            mainTimer: self.mainTimer ?? self.sessionManager.mainTimer,
+                            userName: self.currentUserName,
+                            forceReload: true
+                        )
+                        self.sessionManager.sendActionToPhone(action: "COMPLETE_CHECK", seatId: item.id)
+                        self.showNotification(
+                            text: "✅ 【\(item.displaySeatName)】チェック完了を全員へ通知しました",
+                            color: Color(hex: "#30D158")
+                        )
+                    }
                 }
             },
             onChangeStaff: {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     selectHelpStaffTargetId = findSeatIndex(for: item).map { timers[$0].id } ?? item.id
                 }
             },
             onClearStaff: {
-                if let idx = findSeatIndex(for: item) {
-                    let oldStaff = timers[idx].shampooStaff ?? timers[idx].checkStaff ?? "担当者"
-                    timers[idx].shampooStaff = nil
-                    timers[idx].checkStaff = nil
-                    timers[idx].status = .normal
-                    timers[idx].isRecruiting = false
-                    sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
-                    showNotification(
-                        text: "📤 \(oldStaff)さんに担当解除を通知しました",
-                        color: Color(hex: "#8E8E93")
-                    )
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        let oldStaff = self.timers[idx].shampooStaff ?? self.timers[idx].checkStaff ?? "担当者"
+                        self.timers[idx].shampooStaff = nil
+                        self.timers[idx].checkStaff = nil
+                        self.timers[idx].status = .normal
+                        self.timers[idx].isRecruiting = false
+                        self.sessionManager.timers = self.timers
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
+                        self.showNotification(
+                            text: "📤 \(oldStaff)さんに担当解除を通知しました",
+                            color: Color(hex: "#8E8E93")
+                        )
+                    }
                 }
             }
         )
@@ -4188,112 +4248,88 @@ struct ContentView: View {
             currentUserName: currentUserName,
             staffCandidates: sessionManager.members,
             onAssignStaff: { process, staff in
-                if let idx = findSeatIndex(for: item) {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        timers[idx].helpProcess = process
-                        timers[idx].shampooStaff = staff
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.timers[idx].helpProcess = process
+                        self.timers[idx].shampooStaff = staff
                         if process == "チェック" {
-                            timers[idx].checkStaff = staff
+                            self.timers[idx].checkStaff = staff
                         }
-                        timers[idx].isRecruiting = false
-                        timers[idx].isNoHelpNeeded = false
+                        self.timers[idx].isRecruiting = false
+                        self.timers[idx].isNoHelpNeeded = false
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.markLocalSeatMod(seatId: item.id)
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": process, "assistantStaffName": staff])
+                        self.showNotification(
+                            text: "📤 \(staff)さんに【\(process)】を通知しました",
+                            color: Color(hex: "#0A84FF")
+                        )
                     }
-                    sessionManager.timers = timers
-                    sessionManager.markLocalSeatMod(seatId: item.id)
-                    WatchAlarmCoordinator.shared.update(
-                        timers: timers,
-                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                        soundOn: sessionManager.alarmSoundEnabled,
-                        currentUserName: currentUserName
-                    )
-                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": process, "assistantStaffName": staff])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                    showNotification(
-                        text: "📤 \(staff)さんに【\(process)】を通知しました",
-                        color: Color(hex: "#0A84FF")
-                    )
                 }
             },
             onRecruitAll: { process in
-                if let idx = findSeatIndex(for: item) {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        timers[idx].helpProcess = process
-                        timers[idx].shampooStaff = nil
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.timers[idx].helpProcess = process
+                        self.timers[idx].shampooStaff = nil
                         if process == "チェック" {
-                            timers[idx].checkStaff = nil
+                            self.timers[idx].checkStaff = nil
                         }
-                        timers[idx].isRecruiting = true
-                        timers[idx].isNoHelpNeeded = false
-                        if timers[idx].remainingSeconds <= 180 {
-                            timers[idx].hasAlertedHelpUnassigned = true
+                        self.timers[idx].isRecruiting = true
+                        self.timers[idx].isNoHelpNeeded = false
+                        if self.timers[idx].remainingSeconds <= 180 {
+                            self.timers[idx].hasAlertedHelpUnassigned = true
                         }
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.markLocalSeatMod(seatId: item.id)
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": process])
+                        // 募集するの場合は全員に通知する！
+                        self.showNotification(
+                            text: "📢 【\(item.displaySeatName)】\(process)担当を全員に募集通知しました！",
+                            color: Color(hex: "#FF9F0A")
+                        )
                     }
-                    sessionManager.timers = timers
-                    sessionManager.markLocalSeatMod(seatId: item.id)
-                    WatchAlarmCoordinator.shared.update(
-                        timers: timers,
-                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                        soundOn: sessionManager.alarmSoundEnabled,
-                        currentUserName: currentUserName
-                    )
-                    sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": process])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                    // 募集するの場合は全員に通知する！
-                    showNotification(
-                        text: "📢 【\(item.displaySeatName)】\(process)担当を全員に募集通知しました！",
-                        color: Color(hex: "#FF9F0A")
-                    )
                 }
             },
             onSetNoHelp: {
-                if let idx = findSeatIndex(for: item) {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        timers[idx].helpProcess = ""
-                        timers[idx].shampooStaff = nil
-                        timers[idx].isRecruiting = false
-                        timers[idx].isNoHelpNeeded = true
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.timers[idx].helpProcess = ""
+                        self.timers[idx].shampooStaff = nil
+                        self.timers[idx].isRecruiting = false
+                        self.timers[idx].isNoHelpNeeded = true
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.markLocalSeatMod(seatId: item.id)
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": "ヘルプなし", "assistantStaffName": "ヘルプなし"])
+                        self.showNotification(
+                            text: "👤 【\(item.displaySeatName)】ヘルプなし（一人施術）に設定しました",
+                            color: Color(hex: "#8E8E93")
+                        )
                     }
-                    sessionManager.timers = timers
-                    sessionManager.markLocalSeatMod(seatId: item.id)
-                    WatchAlarmCoordinator.shared.update(
-                        timers: timers,
-                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                        soundOn: sessionManager.alarmSoundEnabled,
-                        currentUserName: currentUserName
-                    )
-                    sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": "ヘルプなし", "assistantStaffName": "ヘルプなし"])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                    showNotification(
-                        text: "👤 【\(item.displaySeatName)】ヘルプなし（一人施術）に設定しました",
-                        color: Color(hex: "#8E8E93")
-                    )
                 }
             },
             onClearHelp: {
-                if let idx = findSeatIndex(for: item) {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        timers[idx].helpProcess = ""
-                        timers[idx].shampooStaff = nil
-                        timers[idx].isRecruiting = false
-                        timers[idx].isNoHelpNeeded = false
-                        if timers[idx].remainingSeconds <= 180 {
-                            timers[idx].hasAlertedHelpUnassigned = true
+                deferSeatSheetCloseAction {
+                    if let idx = self.findSeatIndex(for: item) {
+                        self.timers[idx].helpProcess = ""
+                        self.timers[idx].shampooStaff = nil
+                        self.timers[idx].isRecruiting = false
+                        self.timers[idx].isNoHelpNeeded = false
+                        if self.timers[idx].remainingSeconds <= 180 {
+                            self.timers[idx].hasAlertedHelpUnassigned = true
                         }
+                        self.sessionManager.timers = self.timers
+                        self.sessionManager.markLocalSeatMod(seatId: item.id)
+                        self.syncSeatTimersState(forceWidgetReload: true)
+                        self.sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
+                        self.showNotification(
+                            text: "👤 【\(item.displaySeatName)】ヘルプ指定を未定に戻しました",
+                            color: Color(hex: "#8E8E93")
+                        )
                     }
-                    sessionManager.timers = timers
-                    sessionManager.markLocalSeatMod(seatId: item.id)
-                    WatchAlarmCoordinator.shared.update(
-                        timers: timers,
-                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
-                        soundOn: sessionManager.alarmSoundEnabled,
-                        currentUserName: currentUserName
-                    )
-                    sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
-                    showNotification(
-                        text: "👤 【\(item.displaySeatName)】ヘルプ指定を未定に戻しました",
-                        color: Color(hex: "#8E8E93")
-                    )
                 }
             }
         )
@@ -4316,7 +4352,8 @@ struct ContentView: View {
                     alertedUnassignedHelpKeys.insert(alertKey)
                     showNotification(
                         text: "🚨 【\(timers[idx].displaySeatName)】ヘルプ未定！全員へ通知しました",
-                        color: Color(hex: "#FF453A")
+                        color: Color(hex: "#FF453A"),
+                        playHapticFeedback: true
                     )
                 }
             }
@@ -6663,12 +6700,6 @@ struct MainTimerActionSheet: View {
         Button(action: {
             WKInterfaceDevice.current().play(.stop)
             accumulatedDelta = 0
-            var resetItem = currentItem
-            resetItem.isRunning = false
-            resetItem.isPreCountingDown = false
-            resetItem.pausedRemainingSeconds = 0
-            resetItem.targetEndTime = Date().addingTimeInterval(TimeInterval(resetItem.totalSeconds))
-            displayItem = resetItem
             onReset()
             dismiss()
         }) {
@@ -6875,7 +6906,7 @@ struct TimeActionSheet: View {
     let onCompleteSubCheck: (() -> Void)?
     let onCancelSubCheck: (() -> Void)?
     let onAdjustCheck: ((Int) -> Void)?
-    let onAddLateCheck: ((Int, String, String?) -> Void)?
+    let onAddLateCheck: ((Int, String, String?, Bool) -> Void)?
     let onUpdateSoundSettings: ((Bool, Bool) -> Void)?
     
     // シート内でのリアルタイム表示用アイテム
@@ -6893,6 +6924,9 @@ struct TimeActionSheet: View {
     @State private var cameFromSubCheckBranch: Bool = false
     // 標準画面（.standard）からチェック追加画面を開いたかどうかの戻り先フラグ
     @State private var cameFromStandardAddCheck: Bool = false
+    // ★ シート表示中にカウントダウンが0秒を切って超過に入った瞬間のみ1回だけ分岐画面へ自動遷移させるフラグ（毎0.5秒の強制引き戻しによるフリーズを防止）
+    @State private var hasAutoMovedToMainOvertimeBranch: Bool
+    @State private var hasAutoMovedToCheckOvertimeBranch: Bool
     
     // シート内サブ画面モード
     @State private var subMode: SubMode
@@ -6953,7 +6987,7 @@ struct TimeActionSheet: View {
         onClearCheckStaff: (() -> Void)? = nil,
         onCompleteSubCheck: (() -> Void)? = nil,
         onCancelSubCheck: (() -> Void)? = nil,
-        onAddLateCheck: ((Int, String, String?) -> Void)? = nil,
+        onAddLateCheck: ((Int, String, String?, Bool) -> Void)? = nil,
         onUpdateSoundSettings: ((Bool, Bool) -> Void)? = nil
     ) {
         self.item = item
@@ -6965,6 +6999,8 @@ struct TimeActionSheet: View {
         self.initialSubCheckBranchMode = initialSubCheckBranchMode
         let initSubMode: SubMode = initialSubCheckBranchMode ? .subCheckActionBranch : (initialReinputMode ? .reinput : (initialTimerBranchMode ? .timerActionBranch : .standard))
         self._subMode = State(initialValue: initSubMode)
+        self._hasAutoMovedToMainOvertimeBranch = State(initialValue: item.isOvertime || initialTimerBranchMode)
+        self._hasAutoMovedToCheckOvertimeBranch = State(initialValue: item.isCheckOvertime || initialSubCheckBranchMode)
         self.currentUserName = currentUserName
         self.staffCandidates = staffCandidates
         self.onAdjust = onAdjust
@@ -7089,14 +7125,21 @@ struct TimeActionSheet: View {
             if let latest = WatchSessionManager.shared.timers.first(where: { $0.id == liveItem.id }) ?? WatchSessionManager.shared.timers.first(where: { $0.seatNumber == liveItem.seatNumber }), latest != liveItem {
                 liveItem = latest
             }
-            if isOvertime && accumulatedDelta <= 0 {
-                if subMode == .standard || subMode == .subCheckActionBranch {
+            if !isOvertime {
+                hasAutoMovedToMainOvertimeBranch = false
+            } else if !hasAutoMovedToMainOvertimeBranch && accumulatedDelta <= 0 {
+                hasAutoMovedToMainOvertimeBranch = true
+                if subMode == .standard {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                         subMode = .timerActionBranch
                     }
                 }
-            } else if isCheckOvertime && checkAccumulatedDelta <= 0 && accumulatedDelta <= 0 {
-                if subMode == .standard || subMode == .timerActionBranch {
+            }
+            if !isCheckOvertime {
+                hasAutoMovedToCheckOvertimeBranch = false
+            } else if !hasAutoMovedToCheckOvertimeBranch && !isOvertime && checkAccumulatedDelta <= 0 && accumulatedDelta <= 0 {
+                hasAutoMovedToCheckOvertimeBranch = true
+                if subMode == .standard {
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                         subMode = .subCheckActionBranch
                     }
@@ -7113,6 +7156,8 @@ struct TimeActionSheet: View {
         now = startBase
         accumulatedDelta = 0
         checkAccumulatedDelta = 0
+        hasAutoMovedToMainOvertimeBranch = false
+        hasAutoMovedToCheckOvertimeBranch = false
         
         liveItem.totalSeconds = sec
         liveItem.targetEndTime = startBase.addingTimeInterval(Double(sec))
@@ -7674,8 +7719,6 @@ struct TimeActionSheet: View {
             if p == "チェック" {
                 Button(action: {
                     WKInterfaceDevice.current().play(.success)
-                    liveItem.isRunning = false
-                    liveItem.pausedRemainingSeconds = 0
                     onCompleteCheck?()
                     dismiss()
                 }) {
@@ -7704,8 +7747,6 @@ struct TimeActionSheet: View {
                 let iconName: String = (p == "コーミング") ? "comb.fill" : ((p == "その他") ? "ellipsis.circle.fill" : "drop.fill")
                 Button(action: {
                     WKInterfaceDevice.current().play(.success)
-                    liveItem.isRunning = false
-                    liveItem.pausedRemainingSeconds = 0
                     onEnterHelp?()
                     dismiss()
                 }) {
@@ -7735,8 +7776,6 @@ struct TimeActionSheet: View {
         
         Button(action: {
             WKInterfaceDevice.current().play(.stop)
-            liveItem.isRunning = false
-            liveItem.pausedRemainingSeconds = 0
             onStop()
             dismiss()
         }) {
@@ -8066,7 +8105,9 @@ struct TimeActionSheet: View {
                     liveItem.checkStaff = staffVal
                     liveItem.isCheckCompleted = false
                     checkAccumulatedDelta = 0
-                    onAddLateCheck?(sec, resolvedProc, staffVal)
+                    hasAutoMovedToCheckOvertimeBranch = false
+                    let shouldCloseSheet = !cameFromStandardAddCheck
+                    onAddLateCheck?(sec, resolvedProc, staffVal, shouldCloseSheet)
                     if cameFromStandardAddCheck {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                             subMode = .standard
@@ -8426,6 +8467,7 @@ struct TimeActionSheet: View {
             .buttonStyle(.plain)
             
             Button(action: {
+                WKInterfaceDevice.current().play(.click)
                 onAdjustCheck?(checkAccumulatedDelta)
                 dismiss()
             }) {
@@ -8885,6 +8927,7 @@ struct TimeActionSheet: View {
             
             // 確定ボタン（黄色）
             Button(action: {
+                WKInterfaceDevice.current().play(.click)
                 onAdjust(accumulatedDelta)
                 dismiss()
             }) {
@@ -10975,6 +11018,7 @@ struct SeatThumbnailMapSheet: View {
     let currentUserName: String
     let now: Date
     var crownFocusTrigger: Int = 0
+    var isModalSheetPresented: Bool = false
     let onSelectSeat: (SeatTimerItem) -> Void
     let onSelectMainTimer: () -> Void
     let onToggleMainTimer: () -> Void
@@ -11068,6 +11112,7 @@ struct SeatThumbnailMapSheet: View {
                 isHapticFeedbackEnabled: true
             )
             .onChange(of: crownValue) { oldVal, newVal in
+                guard !isModalSheetPresented else { return }
                 let delta = Int(newVal.rounded()) - Int(oldVal.rounded())
                 guard delta != 0 else { return }
                 let direction = delta > 0 ? 1 : -1
@@ -11081,14 +11126,21 @@ struct SeatThumbnailMapSheet: View {
                 }
             }
             .onAppear {
-                isMapCrownFocused = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                if !isModalSheetPresented {
                     isMapCrownFocused = true
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    if !isModalSheetPresented {
+                        isMapCrownFocused = true
+                    }
                 }
             }
             .onChange(of: crownFocusTrigger) { _, _ in
+                guard !isModalSheetPresented else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    isMapCrownFocused = true
+                    if !isModalSheetPresented {
+                        isMapCrownFocused = true
+                    }
                 }
             }
         }
