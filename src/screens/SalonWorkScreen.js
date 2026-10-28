@@ -1038,19 +1038,26 @@ export default function SalonWorkScreen() {
   // ★ クラウド同期制御用Ref（他端末からの受信時ループ防止＆差分検知）
   const isRemoteSyncRef = useRef(false);
   const lastSyncedSeatsStateRef = useRef({});
+  const currentSalonRef = useRef(currentSalon);
+  currentSalonRef.current = currentSalon;
+  const cloudSalonIdRef = useRef(null);
 
   // ★ 席の状態変化を検知して Supabase クラウドへ差分同期
   const syncChangedSeatsToCloud = async (newSeats) => {
     if (isRemoteSyncRef.current) return;
-    if (!currentSalon?.id || currentSalon.id === 'workspace-free') return;
+    const targetSalonId = cloudSalonIdRef.current || (currentSalonRef.current?.id && currentSalonRef.current.id !== 'workspace-free' ? currentSalonRef.current.id : null);
+    if (!targetSalonId) return;
 
     for (const seat of newSeats) {
       if (!seat || !seat.id) continue;
       const label = seat.seatLabel || seat.name || '';
+      // サンプル席はクラウドに絶対にアップロードしない
+      if (label.includes('サンプル')) continue;
+
       const sig = `${label}_${seat.status}_${seat.targetSeconds || seat.targetTime}_${seat.targetEndTimestamp}_${seat.assistantStaffName}_${seat.helpProcess}_${seat.checkEndTimestamp}_${seat.checkStatus}_${seat.comment}_${seat.isShampooing}`;
       if (lastSyncedSeatsStateRef.current[seat.id] !== sig) {
         lastSyncedSeatsStateRef.current[seat.id] = sig;
-        upsertCloudTimer(currentSalon.id, seat).catch((e) =>
+        upsertCloudTimer(targetSalonId, seat).catch((e) =>
           console.warn('upsertCloudTimer error:', e)
         );
       }
@@ -1906,6 +1913,17 @@ export default function SalonWorkScreen() {
       if (!hasChanged) return prevSeats;
       saveSeatsToStorage(updated);
 
+      // ★ Watchからの操作（タイマー開始・延長・停止・ヘルプ指定）を Supabase クラウドへ直行送信！
+      const targetSalonId = cloudSalonIdRef.current || (currentSalonRef.current?.id && currentSalonRef.current.id !== 'workspace-free' ? currentSalonRef.current.id : null);
+      if (targetSalonId && seatId) {
+        const changedSeat = updated.find((s) => s.id === seatId);
+        if (changedSeat && !changedSeat.seatLabel?.includes('サンプル')) {
+          upsertCloudTimer(targetSalonId, changedSeat).catch((e) =>
+            console.warn('[WatchAction] direct upsertCloudTimer failed:', e)
+          );
+        }
+      }
+
       // ★ 誰かが止めた・変更したアクションを関係者のApple Watchへ即時ブロードキャスト通知
       let watchNotif = null;
       const targetS = prevSeats.find((s) => s.id === seatId);
@@ -2071,11 +2089,13 @@ export default function SalonWorkScreen() {
         });
 
         if (!cloudSalon || !isMounted) return;
+        cloudSalonIdRef.current = cloudSalon.id;
 
         // クラウド側UUIDへIDを同期
         if (currentSalon.id !== cloudSalon.id) {
           const updatedSalon = { ...currentSalon, id: cloudSalon.id };
           setCurrentSalon(updatedSalon);
+          currentSalonRef.current = updatedSalon;
           setSavedSalons((prev) =>
             prev.map((s) => (s.id === currentSalon.id ? updatedSalon : s))
           );
@@ -2113,10 +2133,13 @@ export default function SalonWorkScreen() {
           setTimeout(() => {
             isRemoteSyncRef.current = false;
           }, 300);
-        } else if (isMounted && seats.length > 0) {
-          // クラウドがまだ空の場合は現在の初期席をクラウドへ初期登録
+        } else if (isMounted && seats.length > 0 && cloudSalon.owner_user_id === myUserId) {
+          // クラウドがまだ空の場合はオーナーの初期席のみクラウドへ初期登録（サンプル席は除外）
           for (const s of seats) {
-            upsertCloudTimer(cloudSalon.id, s).catch(() => {});
+            const label = s.seatLabel || s.name || '';
+            if (!label.includes('サンプル')) {
+              upsertCloudTimer(cloudSalon.id, s).catch(() => {});
+            }
           }
         }
 
@@ -2620,19 +2643,20 @@ export default function SalonWorkScreen() {
       setStaffMembers(normalizedMembers);
       AsyncStorage.setItem('@salon_staff_members', JSON.stringify(normalizedMembers)).catch(() => {});
 
-      // クラウドの客席タイマーを即時取得して反映
+      // クラウドサロンIDを即時保持
+      cloudSalonIdRef.current = salon.id;
+
+      // 親サロンの客席タイマーを即時取得して自分のローカル席を100%上書き置換（マージ・増殖防止）
       const cloudTimers = await fetchSalonTimers(salon.id);
+      isRemoteSyncRef.current = true;
       if (Array.isArray(cloudTimers) && cloudTimers.length > 0) {
-        isRemoteSyncRef.current = true;
         setSeats(cloudTimers);
         AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(cloudTimers)).catch(() => {});
         syncSeatsToWatch(cloudTimers, staffName, normalizedMembers, { immediate: true });
-        setTimeout(() => {
-          isRemoteSyncRef.current = false;
-        }, 300);
-      } else {
-        syncSeatsToWatch(seats, staffName, normalizedMembers, { immediate: true });
       }
+      setTimeout(() => {
+        isRemoteSyncRef.current = false;
+      }, 500);
 
       setIsJoinCodeModalVisible(false);
       setInputInviteCode('');
@@ -3535,8 +3559,8 @@ export default function SalonWorkScreen() {
     const timeDisplay = formatModalTargetTime(mins, secs);
     const checkTimeDisplay = hasCheckTimer ? formatModalTargetTime(checkMins, checkSecs) : '';
 
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== targetSeatId) return s;
 
         // ① 新しく測る時（新しく測る時は新しく・履歴リセット）
@@ -3701,8 +3725,11 @@ export default function SalonWorkScreen() {
           comment: s.comment || '',
           history: [...prevHistory, historyItem],
         };
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
+      return updated;
+    });
     if (targetSeatId) {
       oneMinuteHelpAlertRef.current[targetSeatId] = false;
       if (checkAlertedRef.current) {
