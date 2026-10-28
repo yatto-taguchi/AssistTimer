@@ -213,14 +213,14 @@ struct SeatTimerItem: Identifiable, Equatable {
         if cleanUser.isEmpty || cleanUser == "スタイリスト" || cleanUser == "スタッフ" { return true }
         
         let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cName.isEmpty || cName == "スタイリスト" || cName == "スタッフ" { return true }
+        if cName.isEmpty || cName == "スタイリスト" || cName == "スタッフ" || cName == "自分" || cName == "あなた" { return true }
         
         let sStaff = (shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let chkStaff = (checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         
         return cName == cleanUser ||
-               (!sStaff.isEmpty && sStaff == cleanUser) ||
-               (!chkStaff.isEmpty && chkStaff == cleanUser) ||
+               (!sStaff.isEmpty && (sStaff == cleanUser || sStaff == "自分" || sStaff == "あなた")) ||
+               (!chkStaff.isEmpty && (chkStaff == cleanUser || chkStaff == "自分" || chkStaff == "あなた")) ||
                isRecruiting
     }
 
@@ -231,7 +231,7 @@ struct SeatTimerItem: Identifiable, Equatable {
         if cleanUser.isEmpty || cleanUser == "スタイリスト" || cleanUser == "スタッフ" { return true }
 
         let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cName.isEmpty || cName == "スタイリスト" || cName == "スタッフ" || cName == cleanUser {
+        if cName.isEmpty || cName == "スタイリスト" || cName == "スタッフ" || cName == "自分" || cName == "あなた" || cName == cleanUser {
             return true
         }
 
@@ -242,7 +242,7 @@ struct SeatTimerItem: Identifiable, Equatable {
         }
         if !sStaff.isEmpty && sStaff != "募集中" && sStaff != "未定" {
             // 全体ヘルプ担当が決まっている場合は、その担当者本人のみ（またはチェック担当が未定でない限り無関係な人には鳴らさない）
-            return sStaff == cleanUser
+            return sStaff == cleanUser || sStaff == "自分" || sStaff == "あなた"
         }
         // まだ全体ヘルプ担当が未定または募集中の場合は、自分がヘルプに入る可能性があるため通知対象
         return true
@@ -254,14 +254,14 @@ struct SeatTimerItem: Identifiable, Equatable {
         if cleanUser.isEmpty || cleanUser == "スタイリスト" || cleanUser == "スタッフ" { return true }
 
         let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cName.isEmpty || cName == "スタイリスト" || cName == "スタッフ" || cName == cleanUser {
+        if cName.isEmpty || cName == "スタイリスト" || cName == "スタッフ" || cName == "自分" || cName == "あなた" || cName == cleanUser {
             return true
         }
 
         let chkStaff = (checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if !chkStaff.isEmpty && chkStaff != "募集中" && chkStaff != "未定" {
             // チェック担当が決まっている場合は、主担当とチェック担当本人のみ
-            return chkStaff == cleanUser
+            return chkStaff == cleanUser || chkStaff == "自分" || chkStaff == "あなた"
         }
         // チェック担当が未定または募集中の場合は、自分がチェックに入る可能性があるため通知対象
         return true
@@ -1017,11 +1017,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
 
         // ★ 相手からのリアルタイム操作通知（タイマー停止、チェック完了、シャンプー開始等）
         //   保存データ（applicationContext）や15秒以上前の古いデータでは発火させない（アプリ起動直後のバイブ暴発を防止）
+        //   また、sourceUser == "__remote__"（Supabase Realtime経由で届いた共有相手の操作）のときのみ発火し、自分のWatch/iPhone操作の自己エコー通知を完全防止する
         let isRecentNotif = (kind != "保存データ") && (payloadTs <= 0 || abs(nowMs - payloadTs) <= 15_000)
         if isRecentNotif, let notif = data["notification"] as? [String: Any], let text = notif["text"] as? String, !text.isEmpty {
             let colorHex = notif["color"] as? String ?? "#30D158"
             let sourceUser = notif["sourceUser"] as? String ?? ""
-            if sourceUser.isEmpty || sourceUser == "__remote__" || sourceUser != self.currentUserName {
+            if sourceUser == "__remote__" {
                 DispatchQueue.main.async {
                     self.incomingNotification = (text: text, color: colorHex)
                     WatchAlarmCoordinator.shared.postPeerActionNotification(text: text)

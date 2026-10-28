@@ -2098,55 +2098,9 @@ export default function SalonWorkScreen() {
       // ★ 何も変わらなければ元の配列を返す（不要な保存・Watch への同期を起こさない）
       if (!hasChanged) return prevSeats;
       // ★ saveSeatsToStorage 内で syncChangedSeatsToCloud(updated) が呼ばれ、Supabase クラウドへ差分同期される（二重UPSERT防止）
+      //   また、自分のWatchから来た操作に対して自分自身のWatchへ通知（watchNotif）を送り返すと二重通知になるため、データ同期のみ即時送信する
       saveSeatsToStorage(updated);
-
-      // ★ 誰かが止めた・変更したアクションを関係者のApple Watchへ即時ブロードキャスト通知
-      let watchNotif = null;
-      const targetS = matchedIdx >= 0 ? updated[matchedIdx] : prevSeats.find((s) => s.id === seatId);
-      const seatLabel = targetS?.seatLabel || '席';
-      const actor = (watchUser || 'スタッフ').trim();
-      switch (action) {
-        case 'STOP_TIMER':
-        case 'RESET_ZERO':
-          watchNotif = { text: `⏹️ ${actor}が【${seatLabel}】のタイマーを止めました`, color: '#30D158', sourceUser: actor };
-          break;
-        case 'STOP_ALARM':
-          if ((extra?.kind || message?.kind) === 'check') {
-            watchNotif = { text: `✅ ${actor}が【${seatLabel}】のチェックを完了しました`, color: '#30D158', sourceUser: actor };
-          } else {
-            watchNotif = { text: `⏹️ ${actor}が【${seatLabel}】のタイマーを止めました`, color: '#30D158', sourceUser: actor };
-          }
-          break;
-        case 'COMPLETE_CHECK':
-          watchNotif = { text: `✅ ${actor}が【${seatLabel}】のチェックを完了しました`, color: '#30D158', sourceUser: actor };
-          break;
-        case 'FINISH_MEASURE':
-          watchNotif = { text: `⏹️ ${actor}が【${seatLabel}】のタイマーを止めました`, color: '#30D158', sourceUser: actor };
-          break;
-        case 'ENTER_HELP':
-          watchNotif = { text: `🤝 ${actor}が【${seatLabel}】のヘルプ対応を開始しました`, color: '#30D158', sourceUser: actor };
-          break;
-        case 'START_SHAMPOO':
-          watchNotif = { text: `🧴 ${actor}が【${seatLabel}】のシャンプーを開始しました`, color: '#0A84FF', sourceUser: actor };
-          break;
-        case 'ASSIGN_HELP':
-          watchNotif = { text: `👤 【${seatLabel}】にヘルプ担当が指定されました`, color: '#30D158', sourceUser: actor };
-          break;
-        case 'RECRUIT_HELP':
-          watchNotif = { text: `📢 【${seatLabel}】がヘルプを募集中です！`, color: '#FF453A', sourceUser: actor };
-          break;
-        case 'SET_CHECK_TIMER': {
-          const chkMins = Math.max(1, Math.round(Number(extra?.checkTotalSeconds || 300) / 60));
-          const chkStaff = extra?.checkStaffName ? ` (${extra.checkStaffName === '募集中' ? '全員募集' : extra.checkStaffName})` : '';
-          watchNotif = { text: `🔍 【${seatLabel}】に${chkMins}分チェックタイマーが追加されました${chkStaff}`, color: '#0A84FF', sourceUser: actor };
-          break;
-        }
-        default:
-          break;
-      }
-      if (watchNotif) {
-        syncSeatsToWatch(updated, userName, staffMembers, { immediate: true, notification: watchNotif });
-      }
+      syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
 
       return updated;
     });
@@ -2447,17 +2401,20 @@ export default function SalonWorkScreen() {
                     'ヘルプ';
                   const checkProcLabel = newSeat.checkProcess || prevItem.checkProcess || 'チェック';
 
-                  // ① チェックタイマー完了・停止（主担当・ヘルプ担当・チェック担当・チェック未定時のみ通知）
+                  // ① チェックタイマー完了・解除（主担当・ヘルプ担当・チェック担当・チェック未定時のみ通知）
                   if (prevHadActiveCheck && !newHasActiveCheck && newSeat.status === 'running') {
                     const isCheckStakeholder =
                       isAssignedStakeholder ||
                       shouldAlertCheckTimerForUser(prevItem, activeUser, activeUserId, activeMembers) ||
                       shouldAlertCheckTimerForUser(newSeat, activeUser, activeUserId, activeMembers);
                     if (isCheckStakeholder) {
+                      const isCompleted = newSeat.isCheckCompleted || newSeat.checkStatus === 'completed';
                       const staffSuffix = newCheck && newCheck !== '未定' && newCheck !== '募集中' ? `（${newCheck}）` : '';
                       peerNotification = {
-                        text: `✓ ${label}の${checkProcLabel}完了${staffSuffix}`,
-                        color: '#30D158',
+                        text: isCompleted
+                          ? `✓ ${label}の${checkProcLabel}完了${staffSuffix}`
+                          : `⏹ ${label}の${checkProcLabel}タイマーが解除されました`,
+                        color: isCompleted ? '#30D158' : '#8E8E93',
                         sourceUser: '__remote__',
                       };
                     }

@@ -179,7 +179,10 @@ enum ComplicationData {
     static func pick(from snapshot: ComplicationSnapshot, at date: Date) -> ComplicationSeat? {
         // カウントアップOFFのメインタイマーは終了時刻（endDate）に到達した時点で稼働終了とみなす
         let running = snapshot.seats.filter { $0.isRunning && ($0.isCountUpEnabled || $0.endDate > date) }
-        if let id = snapshot.lastTouchedId, let touched = running.first(where: { $0.id == id }) {
+        let hasRelatedRunning = running.contains(where: { $0.related })
+        if let id = snapshot.lastTouchedId,
+           let touched = running.first(where: { $0.id == id }),
+           (touched.related || !hasRelatedRunning) {
             return touched
         }
         let countingDown = running.filter { $0.endDate > date }

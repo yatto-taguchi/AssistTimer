@@ -28,31 +28,48 @@ enum WidgetSync {
             allItems.insert(m, at: 0)
         }
 
-        // ── 最後に操作された席の判定 ──
+        // ── 最後に操作された席の判定（自分が関わる席を最優先し、他人の無関係な席で自分の文字盤が奪われないようにする） ──
         var lastTouchedId = defaults.string(forKey: lastTouchedKey)
-        let prevStates = defaults.dictionary(forKey: prevStatesKey) as? [String: [Double]] // id: [isRunning(0/1), endEpoch]
+        let prevStates = defaults.dictionary(forKey: prevStatesKey) as? [String: [Double]] // id: [isRunning(0/1), endEpoch, checkEndEpoch]
+        let hasAnyRelatedActive = allItems.contains(where: { ($0.isRunning || $0.isPreCountingDown) && ($0.id == "main-timer" || $0.isRelated(to: userName)) })
         if let prev = prevStates {
-            var touched: String?
+            var touchedRelated: String?
+            var touchedOther: String?
             for t in allItems where (t.isRunning || t.isPreCountingDown) {
                 let end = t.targetEndTime.timeIntervalSince1970.rounded()
-                if let p = prev[t.id], p.count == 2 {
+                let checkEnd = (!t.isCheckCompleted ? (t.checkTargetEndTime?.timeIntervalSince1970.rounded() ?? 0) : 0)
+                let isRel = (t.id == "main-timer") || t.isRelated(to: userName)
+                var didChange = false
+                if let p = prev[t.id], p.count >= 2 {
                     let wasRunning = p[0] > 0.5
-                    if !wasRunning || abs(p[1] - end) >= endChangeThreshold {
-                        touched = t.id // スタート（再開含む）・時間変更
+                    let prevCheckEnd = p.count >= 3 ? p[2] : 0
+                    if !wasRunning || abs(p[1] - end) >= endChangeThreshold || (checkEnd > 0 && abs(prevCheckEnd - checkEnd) >= endChangeThreshold) {
+                        didChange = true // スタート（再開含む）・時間変更・チェックタイマー追加/変更
                     }
                 } else if !prev.isEmpty {
                     // 新規作成（起動直後の「空→全席」読み込みは操作とみなさない）
-                    touched = t.id
+                    didChange = true
+                }
+                if didChange {
+                    if isRel {
+                        touchedRelated = t.id
+                    } else {
+                        touchedOther = t.id
+                    }
                 }
             }
-            if let touched = touched {
-                lastTouchedId = touched
+            if let rel = touchedRelated {
+                lastTouchedId = rel
+            } else if !hasAnyRelatedActive, let other = touchedOther {
+                lastTouchedId = other
             }
         }
-        // 削除された席、または停止した席の ID は忘れる
+        // 削除された席、または停止した席の ID は忘れる（また、自分の関係席が稼働中なのに無関係な席が lastTouchedId になっている場合もリセット）
         if let id = lastTouchedId {
-            let isStillActive = allItems.contains(where: { $0.id == id && ($0.isRunning || $0.isPreCountingDown) })
-            if !isStillActive && !allItems.isEmpty {
+            let matchedActive = allItems.first(where: { $0.id == id && ($0.isRunning || $0.isPreCountingDown) })
+            if matchedActive == nil && !allItems.isEmpty {
+                lastTouchedId = nil
+            } else if let m = matchedActive, hasAnyRelatedActive, !(m.id == "main-timer" || m.isRelated(to: userName)) {
                 lastTouchedId = nil
             }
         }
@@ -62,7 +79,8 @@ enum WidgetSync {
         var newStates: [String: [Double]] = [:]
         for t in allItems {
             let active = t.isRunning || t.isPreCountingDown
-            newStates[t.id] = [active ? 1 : 0, t.targetEndTime.timeIntervalSince1970.rounded()]
+            let checkEnd = (!t.isCheckCompleted ? (t.checkTargetEndTime?.timeIntervalSince1970.rounded() ?? 0) : 0)
+            newStates[t.id] = [active ? 1 : 0, t.targetEndTime.timeIntervalSince1970.rounded(), checkEnd]
         }
         defaults.set(newStates, forKey: prevStatesKey)
         if let id = lastTouchedId {
