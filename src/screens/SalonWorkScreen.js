@@ -800,6 +800,7 @@ export default function SalonWorkScreen() {
   // 招待コード参加・新規作成フォーム用
   const [inputInviteCode, setInputInviteCode] = useState('');
   const [inputSalonName, setInputSalonName] = useState('');
+  const [inputStaffName, setInputStaffName] = useState('');
   const [newSeatName, setNewSeatName] = useState('');
 
   // エスカレーション用アラート重複発火ガード
@@ -2526,7 +2527,7 @@ export default function SalonWorkScreen() {
     const isPair = targetSalon.type === 'pair';
     const name = targetSalon.name || (isPair ? 'タイマー同期モード' : 'サロン');
     try {
-      const message = `【Assist Timer】タイマー共有の招待コードです。\n\n🔑 共有コード: ${code}\n\n▼ 連携手順:\n① アプリを開き、サロン画面上部の「👥 メンバー」>「＋ メンバー追加・連携」にこのコードを入力すると、担当者としてタイマーを相互共有・連携できます！\n\n（※ 新規サロンとして接続する場合は、画面上のサロン名をタップ >「＋ コードで参加」からも参加可能です）`;
+      const message = `【Assist Timer】サロンタイマー共有の招待コードです。\n\n🔑 招待コード: ${code}\n\n▼ 参加手順:\n① Assist Timer アプリを開き、上部の「サロン同期」を開きます。\n② ヘッダー右上の「参加」ボタンをタップ。\n③ あなたの名前と招待コード【${code}】を入力して「このサロンに参加する」を押すだけ！\n\nリアルタイムで客席タイマーが相互同期されます。`;
       await Share.share({
         message,
         title: isPair ? `タイマー同期の共有コード: ${code}` : `${name}の共有コード: ${code}`,
@@ -2570,7 +2571,13 @@ export default function SalonWorkScreen() {
   const handleJoinByCode = async () => {
     const code = sanitizeInviteCode(inputInviteCode);
     if (!code) {
-      Alert.alert('入力エラー', '招待コードを入力してください');
+      Alert.alert('入力エラー', '6桁の招待コードを入力してください');
+      return;
+    }
+
+    const staffName = (inputStaffName || userName || 'アシスタント').trim();
+    if (!staffName) {
+      Alert.alert('入力エラー', 'あなたのお名前（スタッフ名）を入力してください');
       return;
     }
 
@@ -2583,11 +2590,14 @@ export default function SalonWorkScreen() {
 
     try {
       // Supabaseクラウドへ招待コードで参加！
-      const currentUserName = (userName || 'アシスタント').trim();
       const { salon, members } = await joinSalonByInviteCode({
         inviteCode: code,
-        userName: currentUserName,
+        userName: staffName,
       });
+
+      // ユーザー名を保存＆更新
+      setUserName(staffName);
+      AsyncStorage.setItem('@assist_timer_user_name', staffName).catch(() => {});
 
       const uid = myUserId || (await getOrCreateUserId());
       const newSalonItem = {
@@ -2609,7 +2619,20 @@ export default function SalonWorkScreen() {
       const normalizedMembers = normalizeStaffMembers(members, uid);
       setStaffMembers(normalizedMembers);
       AsyncStorage.setItem('@salon_staff_members', JSON.stringify(normalizedMembers)).catch(() => {});
-      syncSeatsToWatch(seats, currentUserName, normalizedMembers, { immediate: true });
+
+      // クラウドの客席タイマーを即時取得して反映
+      const cloudTimers = await fetchSalonTimers(salon.id);
+      if (Array.isArray(cloudTimers) && cloudTimers.length > 0) {
+        isRemoteSyncRef.current = true;
+        setSeats(cloudTimers);
+        AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(cloudTimers)).catch(() => {});
+        syncSeatsToWatch(cloudTimers, staffName, normalizedMembers, { immediate: true });
+        setTimeout(() => {
+          isRemoteSyncRef.current = false;
+        }, 300);
+      } else {
+        syncSeatsToWatch(seats, staffName, normalizedMembers, { immediate: true });
+      }
 
       setIsJoinCodeModalVisible(false);
       setInputInviteCode('');
@@ -2620,7 +2643,7 @@ export default function SalonWorkScreen() {
       }
       Alert.alert(
         '🎉 サロン参加完了',
-        `「${newSalonItem.name}」に参加しました！\n\n現在 ${members.length} 名のスタッフとタイマーをリアルタイム共有できます。`
+        `「${newSalonItem.name}」に「${staffName}」として参加しました！\n\n現在 ${members.length} 名のスタッフとリアルタイムにタイマーを共有できます。`
       );
     } catch (err) {
       Alert.alert('参加エラー', err.message || 'サロンへの接続に失敗しました');
@@ -4630,29 +4653,64 @@ export default function SalonWorkScreen() {
           </View>
         </TouchableOpacity>
 
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+          {/* ★ 招待コードで参加ボタン */}
+          <TouchableOpacity
+            style={[
+              styles.addSeatHeaderButton,
+              {
+                backgroundColor: theme.accent,
+                borderColor: theme.accent,
+                paddingHorizontal: 8,
+              },
+            ]}
+            onPress={() => {
+              setInputInviteCode('');
+              setInputStaffName(userName || 'アシスタント');
+              setIsJoinCodeModalVisible(true);
+            }}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="enter-outline" size={14} color="#FFFFFF" />
+            <Text style={[styles.addSeatHeaderText, { color: '#FFFFFF', marginLeft: 2, fontSize: 11 }]}>参加</Text>
+          </TouchableOpacity>
+
           {/* ★ メンバー管理ボタン */}
           <TouchableOpacity
-            style={[styles.addSeatHeaderButton, { backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7', borderColor: theme.cardBorder }]}
+            style={[
+              styles.addSeatHeaderButton,
+              {
+                backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7',
+                borderColor: theme.cardBorder,
+                paddingHorizontal: 7,
+              },
+            ]}
             onPress={() => setIsMemberManageModalVisible(true)}
             activeOpacity={0.7}
           >
-            <Ionicons name="people" size={15} color={theme.textPrimary} />
-            <Text style={[styles.addSeatHeaderText, { color: theme.textPrimary, marginLeft: 2 }]}>
-              メンバー{staffMembers.length > 0 ? ` (${staffMembers.length})` : ''}
+            <Ionicons name="people" size={14} color={theme.textPrimary} />
+            <Text style={[styles.addSeatHeaderText, { color: theme.textPrimary, marginLeft: 2, fontSize: 11 }]}>
+              メンバー{staffMembers.length > 0 ? `(${staffMembers.length})` : ''}
             </Text>
           </TouchableOpacity>
 
           {/* 席追加（席マスターを増やす）ボタン */}
           <TouchableOpacity
-            style={[styles.addSeatHeaderButton, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder }]}
+            style={[
+              styles.addSeatHeaderButton,
+              {
+                backgroundColor: theme.accentLight,
+                borderColor: theme.accentBorder,
+                paddingHorizontal: 7,
+              },
+            ]}
             onPress={() => {
               setNewSeatName(`${seats.length + 1}番席`);
               setIsAddSeatModalVisible(true);
             }}
           >
-            <Ionicons name="add" size={17} color={theme.accent} />
-            <Text style={[styles.addSeatHeaderText, { color: theme.accent }]}>席追加</Text>
+            <Ionicons name="add" size={15} color={theme.accent} />
+            <Text style={[styles.addSeatHeaderText, { color: theme.accent, fontSize: 11 }]}>席追加</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -6119,9 +6177,12 @@ export default function SalonWorkScreen() {
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={styles.modalOverlay}
         >
-          <View style={[styles.modalCard, { backgroundColor: theme.cardBg }]}>
+          <View style={[styles.modalCard, { backgroundColor: theme.cardBg, maxWidth: 400, borderRadius: 16, padding: 20 }]}>
             <View style={styles.modalHeader}>
-              <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>招待コードで参加</Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Ionicons name="enter-outline" size={22} color={theme.accent} style={{ marginRight: 8 }} />
+                <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>サロンに参加する</Text>
+              </View>
               <TouchableOpacity onPress={() => setIsJoinCodeModalVisible(false)}>
                 <Ionicons name="close" size={24} color={theme.textSecondary} />
               </TouchableOpacity>
@@ -6132,10 +6193,55 @@ export default function SalonWorkScreen() {
               keyboardShouldPersistTaps="handled"
               bounces={false}
             >
-              <Text style={[styles.inputLabel, { color: theme.textSecondary }]}>6桁の招待コード</Text>
+              <Text style={{ fontSize: 12, color: theme.textSecondary, marginBottom: 14, lineHeight: 17 }}>
+                親端末（オーナー）に表示されている6桁の招待コードを入力すると、同じサロンの客席タイマーをリアルタイム共有できます。
+              </Text>
+
+              {/* 1. あなたのお名前（スタッフ名） */}
+              <Text style={[styles.inputLabel, { color: theme.textPrimary, fontWeight: '700' }]}>
+                あなたのスタッフ名 <Text style={{ color: '#FF3B30', fontSize: 11 }}>*</Text>
+              </Text>
               <TextInput
-                style={[styles.textInput, { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.cardBorder }]}
-                placeholder="例: 738-921"
+                style={[
+                  styles.textInput,
+                  {
+                    backgroundColor: theme.inputBg,
+                    color: theme.textPrimary,
+                    borderColor: theme.cardBorder,
+                    marginBottom: 12,
+                    fontSize: 15,
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                  },
+                ]}
+                placeholder="例: アシスタント田中、スタイリスト佐藤"
+                placeholderTextColor={theme.textTertiary}
+                value={inputStaffName}
+                onChangeText={setInputStaffName}
+                maxLength={15}
+                returnKeyType="next"
+              />
+
+              {/* 2. 6桁の招待コード */}
+              <Text style={[styles.inputLabel, { color: theme.textPrimary, fontWeight: '700' }]}>
+                6桁の招待コード <Text style={{ color: '#FF3B30', fontSize: 11 }}>*</Text>
+              </Text>
+              <TextInput
+                style={[
+                  styles.textInput,
+                  {
+                    backgroundColor: theme.inputBg,
+                    color: theme.accent,
+                    borderColor: theme.cardBorder,
+                    marginBottom: 12,
+                    fontSize: 22,
+                    fontWeight: '800',
+                    letterSpacing: 2,
+                    textAlign: 'center',
+                    paddingVertical: 10,
+                  },
+                ]}
+                placeholder="358-220"
                 placeholderTextColor={theme.textTertiary}
                 value={inputInviteCode}
                 onChangeText={setInputInviteCode}
@@ -6143,10 +6249,22 @@ export default function SalonWorkScreen() {
                 returnKeyType="next"
               />
 
+              {/* 3. サロンの表示名（任意） */}
               <Text style={[styles.inputLabel, { color: theme.textSecondary }]}>サロンの表示名 (任意)</Text>
               <TextInput
-                style={[styles.textInput, { backgroundColor: theme.inputBg, color: theme.textPrimary, borderColor: theme.cardBorder }]}
-                placeholder="例: 表参道店、2Fチームなど"
+                style={[
+                  styles.textInput,
+                  {
+                    backgroundColor: theme.inputBg,
+                    color: theme.textPrimary,
+                    borderColor: theme.cardBorder,
+                    marginBottom: 18,
+                    fontSize: 14,
+                    paddingHorizontal: 12,
+                    paddingVertical: 10,
+                  },
+                ]}
+                placeholder="例: メインサロン、2Fチームなど (未入力可)"
                 placeholderTextColor={theme.textTertiary}
                 value={inputSalonName}
                 onChangeText={setInputSalonName}
@@ -6155,10 +6273,22 @@ export default function SalonWorkScreen() {
               />
 
               <TouchableOpacity
-                style={[styles.submitButton, { backgroundColor: theme.accent }]}
+                style={[
+                  styles.submitButton,
+                  {
+                    backgroundColor: theme.accent,
+                    paddingVertical: 13,
+                    borderRadius: 10,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  },
+                ]}
                 onPress={handleJoinByCode}
+                activeOpacity={0.8}
               >
-                <Text style={styles.submitButtonText}>サロンに参加する</Text>
+                <Ionicons name="checkmark-circle-outline" size={18} color="#FFFFFF" style={{ marginRight: 6 }} />
+                <Text style={[styles.submitButtonText, { fontSize: 15, fontWeight: '700' }]}>このサロンに参加する</Text>
               </TouchableOpacity>
             </ScrollView>
           </View>
@@ -9097,9 +9227,21 @@ export default function SalonWorkScreen() {
                 borderColor: theme.cardBorder,
               }}
             >
-              <Text style={{ fontSize: 11, fontWeight: '700', color: theme.textSecondary, marginBottom: 4 }}>
-                あなたの共有コード（サロン / ペア）
-              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: theme.textSecondary }}>
+                  このサロンの招待コード（親コード）
+                </Text>
+                <TouchableOpacity
+                  onPress={() => {
+                    setIsMemberManageModalVisible(false);
+                    setInputInviteCode('');
+                    setInputStaffName(userName || 'アシスタント');
+                    setIsJoinCodeModalVisible(true);
+                  }}
+                >
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: theme.accent }}>＋ 別のサロンに参加</Text>
+                </TouchableOpacity>
+              </View>
               <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                 <Text
                   style={{
