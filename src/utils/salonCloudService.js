@@ -212,24 +212,58 @@ export const updateMemberDisplayName = async ({ salonId, displayName }) => {
 // ★ 客席タイマー（salon_timers）クラウド同期機能
 // ============================================================================
 
+const ACTION_ID_TO_LABEL = {
+  call: '呼び出し',
+  combing: 'コーミング',
+  check: 'チェック',
+  shampoo: 'シャンプー',
+  other: 'その他',
+};
+
+const LABEL_TO_ACTION_ID = {
+  呼び出し: 'call',
+  コーミング: 'combing',
+  チェック: 'check',
+  シャンプー: 'shampoo',
+  その他: 'other',
+  call: 'call',
+  combing: 'combing',
+  check: 'check',
+  shampoo: 'shampoo',
+  other: 'other',
+};
+
 /**
  * ローカルのSeatItemをクラウドsalon_timersのレコード形式にマッピング
  */
 export const mapSeatToCloudTimer = (seat, salonId, userId) => {
-  const seatLabel = (seat.seatLabel || seat.name || '席').trim();
+  const rawLabel = (seat.seatLabel || seat.name || '1番席').trim();
+  const seatLabel = rawLabel.replace(/\s*[\(（]サンプル[\)）]/g, '').trim() || '1番席';
   const targetSeconds = Math.round(Number(seat.targetSeconds || seat.targetTime || 0));
-  const checkTotalSeconds = Math.round(Number(seat.checkTargetSeconds || seat.checkTotalSeconds || 0));
+  const rawCheckSec = Math.round(Number(seat.checkTargetSeconds || seat.checkTotalSeconds || 0));
+  const isCheckDone = seat.checkStatus === 'completed' || !!seat.isCheckCompleted;
+  const checkTotalSeconds = isCheckDone
+    ? (rawCheckSec > 0 ? rawCheckSec : Math.max(60, Math.round(Number(seat.checkInitialMinutes || 1) * 60)))
+    : (seat.checkStatus === 'stopped' && !seat.checkEndTimestamp ? 0 : rawCheckSec);
   const targetEndTs = Math.round(Number(seat.targetEndTimestamp || 0));
   const pausedRemSec = Math.round(Number(seat.pausedRemainingSeconds || 0));
-  const checkEndTs = seat.checkEndTimestamp ? Math.round(Number(seat.checkEndTimestamp)) : null;
+  const checkEndTs = (!isCheckDone && seat.checkEndTimestamp) ? Math.round(Number(seat.checkEndTimestamp)) : null;
+
+  const isShampooing = !!seat.isShampooing || seat.actionStatus === 'shampoo' || seat.helpProcess === 'シャンプー';
+  const resolvedHelpProcess =
+    seat.helpProcess ||
+    (seat.actionStatus ? (ACTION_ID_TO_LABEL[seat.actionStatus] || seat.actionStatus) : (isShampooing ? 'シャンプー' : null));
+  const resolvedAssistant = seat.isRecruiting
+    ? '募集中'
+    : (seat.isNoHelpNeeded ? 'ヘルプなし' : (seat.assistantStaffName || null));
 
   return {
     salon_id: salonId,
     seat_label: seatLabel,
     color_staff_name: seat.colorStaffName || 'スタッフ',
-    assistant_staff_name: seat.assistantStaffName || null,
-    help_process: seat.helpProcess || null,
-    is_shampooing: !!seat.isShampooing,
+    assistant_staff_name: resolvedAssistant,
+    help_process: resolvedHelpProcess,
+    is_shampooing: isShampooing,
     status: seat.status || 'idle',
     target_seconds: targetSeconds,
     target_end_timestamp: targetEndTs,
@@ -249,14 +283,29 @@ export const mapSeatToCloudTimer = (seat, salonId, userId) => {
  * クラウドsalon_timersのレコードをローカルSeatItem形式にマッピング
  */
 export const mapCloudTimerToSeat = (cloudTimer, index = 0) => {
-  const name = cloudTimer.seat_label || '席';
+  const rawName = cloudTimer.seat_label || '1番席';
+  const name = String(rawName).replace(/\s*[\(（]サンプル[\)）]/g, '').trim() || '1番席';
   const targetSeconds = Math.round(Number(cloudTimer.target_seconds || 0));
   const checkSec = cloudTimer.check_total_seconds ? Math.round(Number(cloudTimer.check_total_seconds)) : 0;
   const checkEndTs = cloudTimer.check_target_end_timestamp ? Math.round(Number(cloudTimer.check_target_end_timestamp)) : null;
   const status = cloudTimer.status || 'idle';
+  const targetEndTs = Math.round(Number(cloudTimer.target_end_timestamp || 0));
+  const pausedRemSec = Math.round(Number(cloudTimer.paused_remaining_seconds || 0));
   const hasActiveCheck = status === 'running' && checkSec > 0 && checkEndTs && checkEndTs > 0;
+  const isCheckCompleted = !hasActiveCheck && checkSec > 0;
   const numMatch = String(name).match(/\d+/);
   const seatNumber = numMatch ? parseInt(numMatch[0], 10) : (index + 1);
+
+  const rawAssist = cloudTimer.assistant_staff_name || '';
+  const isRecruiting = rawAssist === '募集中';
+  const isNoHelpNeeded = rawAssist === 'ヘルプなし' || rawAssist === 'none';
+  const assistantStaffName = isRecruiting ? '' : rawAssist;
+  const helpProcess = cloudTimer.help_process || '';
+  const isShampooing = !!cloudTimer.is_shampooing || helpProcess === 'シャンプー' || helpProcess === 'shampoo';
+  const actionStatus = isShampooing ? 'shampoo' : (LABEL_TO_ACTION_ID[helpProcess] || null);
+  const isReset = (status === 'paused' || status === 'idle') && pausedRemSec <= 0 && targetEndTs <= 0;
+  const nowMs = Date.now();
+  const isOver = status === 'running' && targetEndTs > 0 && targetEndTs <= nowMs;
 
   return {
     id: cloudTimer.id,
@@ -267,26 +316,33 @@ export const mapCloudTimerToSeat = (cloudTimer, index = 0) => {
     targetSeconds: targetSeconds,
     targetTime: targetSeconds,
     initialMinutes: targetSeconds > 0 ? Math.max(1, Math.round(targetSeconds / 60)) : 20,
-    targetEndTimestamp: Math.round(Number(cloudTimer.target_end_timestamp || 0)),
-    pausedRemainingSeconds: Math.round(Number(cloudTimer.paused_remaining_seconds || 0)),
+    targetEndTimestamp: targetEndTs,
+    pausedRemainingSeconds: pausedRemSec,
     status: status,
+    isReset: isReset,
+    isOver: isOver,
+    timeUpTimestamp: isOver ? targetEndTs : null,
+    escalationLevel: 0,
     colorStaffName: cloudTimer.color_staff_name || 'スタッフ',
-    assistantStaffName: cloudTimer.assistant_staff_name || '',
-    helpProcess: cloudTimer.help_process || '',
-    isShampooing: !!cloudTimer.is_shampooing,
+    assistantStaffName: assistantStaffName,
+    helpProcess: helpProcess,
+    actionStatus: actionStatus,
+    isShampooing: isShampooing,
+    isRecruiting: isRecruiting,
+    isNoHelpNeeded: isNoHelpNeeded,
     comment: cloudTimer.comment || '',
     sortOrder: cloudTimer.sort_order || 0,
     createdBy: cloudTimer.created_by,
     checkEndTimestamp: checkEndTs,
-    checkTargetSeconds: checkSec > 0 ? checkSec : null,
-    checkTotalSeconds: checkSec > 0 ? checkSec : null,
+    checkTargetSeconds: hasActiveCheck ? checkSec : null,
+    checkTotalSeconds: hasActiveCheck ? checkSec : null,
     checkInitialMinutes: checkSec > 0 ? Math.max(1, Math.round(checkSec / 60)) : null,
     checkProcess: cloudTimer.check_process || 'チェック',
     checkStaffName: cloudTimer.check_staff_name || '',
     checkStaff: cloudTimer.check_staff_name || '',
-    checkStatus: hasActiveCheck ? 'running' : 'stopped',
-    isCheckCompleted: !hasActiveCheck && checkSec > 0,
-    updatedAt: cloudTimer.updated_at ? new Date(cloudTimer.updated_at).getTime() : Date.now(),
+    checkStatus: hasActiveCheck ? 'running' : (isCheckCompleted ? 'completed' : 'stopped'),
+    isCheckCompleted: isCheckCompleted,
+    updatedAt: cloudTimer.updated_at ? new Date(cloudTimer.updated_at).getTime() : nowMs,
   };
 };
 
@@ -374,14 +430,17 @@ export const upsertCloudTimer = async (salonId, seat) => {
 /**
  * 客席タイマーの削除（席マスター削除時）
  */
-export const deleteCloudTimer = async (salonId, timerIdOrLabel) => {
-  if (!salonId || !timerIdOrLabel) return;
+export const deleteCloudTimer = async (salonId, timerIdOrLabel, fallbackSeatLabel = null) => {
+  if (!salonId || (!timerIdOrLabel && !fallbackSeatLabel)) return;
   try {
-    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(timerIdOrLabel);
+    const isUUID = timerIdOrLabel && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(timerIdOrLabel));
     if (isUUID) {
       await supabase.from('salon_timers').delete().eq('salon_id', salonId).eq('id', timerIdOrLabel);
     } else {
-      await supabase.from('salon_timers').delete().eq('salon_id', salonId).eq('seat_label', timerIdOrLabel);
+      const targetLabel = (fallbackSeatLabel || timerIdOrLabel || '').trim();
+      if (targetLabel) {
+        await supabase.from('salon_timers').delete().eq('salon_id', salonId).eq('seat_label', targetLabel);
+      }
     }
   } catch (e) {
     console.warn('deleteCloudTimer failed:', e);

@@ -3134,3 +3134,22 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
   - **古い `explicitStop` / `isExplicitReset` フラグの自動失効**: `syncMainTimerToWatch` では `lastResetAt` から5秒以内、`syncSeatsToWatch`（客席同期パケット）では `lastResetAt` から2秒以内の直近リセット時のみ `explicitStop` / `isExplicitReset` を `true` とし、それ以降は自動的に `false` として送信する。また、`HomeScreen.js` でメインタイマーを開始・準備開始した際の `startState` / `prepState` でも明示的に `explicitStop: false, isExplicitReset: false` をクリアする。
   - **Watch側の `watchStartedMainTimerEndTime` 保護強化**: `targets/watch/content.swift` の `processReceivedData` にて、Watchローカル開始操作から3.5秒間（`isHoldingLocalStart`）は `watchStartedMainTimerEndTime` を解除しない。また、`SYNC_SEATS` 同梱データでは単なる `isExplicitStop` フラグで保護を解除せず、`isCurrentTimerStoppedOnPhone`（現在稼働中のその終了時刻に対する停止、または開始時刻より後のリセット）または `SYNC_MAIN_TIMER` 専用停止パケットのときのみ解除する（`isAuthoritativePhoneStop`）。
   - **新規未来タイマーの15秒リセットガード免除**: `HomeScreen.js` および `SalonWorkScreen.js` の `REQUEST_SYNC` 受信時、前回停止した終了時刻と異なる新しい未来の終了時刻（`incomingEndTs > nowMs + 2000 || incomingPrepTs > nowMs`）を持つ Watch メインタイマーは、停止から15秒以内であってもブロックせず即座に iPhone 側へ採用・開始する。
+
+#### 7. 多角的コード再調査による6つの潜在バグ解消・完全双方向同期強化仕様 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`, `src/utils/salonCloudService.js`)
+- **背景・発見された課題と対策**:
+  1. **Watchシート表示中のクラウドUUID到着によるシート強制閉鎖・操作空振りの解消 (`targets/watch/content.swift`)**:
+     - 未同期の Watch で初期席（`id: "seat-1"`）の操作シートを開いている最中に iPhone からクラウドUUID（`id: "c675..."`）が届いた際、シートが勝手に閉じてダイヤル入力がリセットされたり、`timers.firstIndex(where: { $0.id == item.id })` が `nil` になってスタートボタンが空振りしていた問題を修正。
+     - `resolveSheetItem(for:)` にて `seatNumber` フォールバック解決を行いつつシート表示中の `Identifiable.id` を維持し、シート内コールバック（全33箇所）では `findSeatIndex(for: item)`（ID一致優先＋`seatNumber` フォールバック）および `sendActionToPhone` / `canonicalSeatId` による最新UUID自動解決を導入。
+     - `processReceivedData` 内の `localCheckClears`・`localStops`・スマートアラーム保護でも `prevKey` / `matchedPrevByNum` を参照するよう統一。
+  2. **初期席ラベルの `"(サンプル)"` 撤廃によるサロンオーナー初期席の100%クラウド同期保証 (`src/screens/SalonWorkScreen.js`, `src/utils/salonCloudService.js`, `targets/watch/content.swift`)**:
+     - 初期席ラベルに `"(サンプル)"` が含まれていると `syncChangedSeatsToCloud` のサンプル除外ガードに引っかかり、サロンオーナーが初期1番席でタイマーを回してもクラウドへ送信されない問題を解消。
+     - iPhone・Watch 双方の初期席ラベルを `'1番席'` に統一し、既存のローカル保存データやクラウドデータに残存していた `"(サンプル)"` も読み込み時に自動除去するよう改善。
+  3. **クラウド生成UUIDのローカル席ステートへの即時書き戻しによる重複INSERT防止 (`src/screens/SalonWorkScreen.js`)**:
+     - ローカルで新規作成された席（`seat-1` 等）が `upsertCloudTimer` でクラウドに保存された際、返却されたクラウドUUID（`savedCloudSeat.id`）を即座にローカルの `seats`（`id` および `cloudTimerId`）と `lastSyncedSeatsStateRef` に書き戻し、以降の更新が別席として重複作成されたり Realtime `UPDATE`/`DELETE` で不一致になる問題を根絶。
+  4. **iPhoneサロン画面の手動操作全16箇所でのクラウド＆ストレージ即時保存の網羅 (`src/screens/SalonWorkScreen.js`)**:
+     - クイックタイム変更（`handleConfirmQuickTimeAdjust`）、ヘルプ担当指定（`handleAssignAssistant` / `handleAssignAssistantDirectly`）、一時停止/再開（`handleTogglePause`）、施術工程変更（`handleSelectActionStatus`）、チェック担当指定（`handleAssignCheckStaff`）、+5分延長（`handleExtend5Min`）、メモ保存（`handleSaveComment`）、履歴追加（`handleConfirmAddHistory`）、直接/代理確認、SOS発信、メインタイマー席割り当てのすべてで `saveSeatsToStorage(updated)` を呼び出し、iPhone上のあらゆる操作がペア端末のクラウドにも即座にリアルタイム同期されるよう統一。
+     - 席削除（`handleDeleteSeat`）でも `cloudSalonIdRef.current` と `seatLabel` フォールバックを使用してクラウド上の席を確実に削除。
+  5. **クラウドマッピングにおける施術ステータス・ヘルプ募集/不要・チェック完了状態の完全復元 (`src/utils/salonCloudService.js`)**:
+     - `mapSeatToCloudTimer` と `mapCloudTimerToSeat` にて、`actionStatus`（シャンプー・コーミング・チェック・呼び出し・その他）、`isRecruiting`（`'募集中'` 経由）、`isNoHelpNeeded`（`'ヘルプなし'` 経由）、および中間チェック完了状態（`checkStatus === 'completed'` 時は `check_total_seconds` を正数維持し `check_target_end_timestamp: null` とすることで双方向識別）を欠落なくマッピング。
+  6. **クラウド経由でタイマー開始・リセットされた席のスリムバー自動展開 (`src/screens/SalonWorkScreen.js`)**:
+     - `subscribeSalonTimers` でペア端末から稼働開始やリセットを受信した際、`collapsedAtEnd: null` にクリアし、以前計測終了で閉じていたカードが閉じたままにならないよう改善。

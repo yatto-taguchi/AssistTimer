@@ -114,7 +114,8 @@ export const DEFAULT_FREE_SALON = createDefaultFreeSalon();
 export const getDefaultInitialSeats = (staffName = 'スタイリスト') => [
   {
     id: 'seat-1',
-    seatLabel: '1番席 (サンプル)',
+    seatNumber: 1,
+    seatLabel: '1番席',
     status: 'paused',
     colorStaffName: staffName,
     assistantStaffName: '',
@@ -132,7 +133,7 @@ export const getDefaultInitialSeats = (staffName = 'スタイリスト') => [
     checkStaffName: '',
     watchAlarmSoundEnabled: false,
     alarmSoundEnabled: false,
-    comment: 'サンプルタイマー (タップして操作・編集できます)',
+    comment: 'タップして操作・編集できます',
     timeUpTimestamp: null,
     mainStaffConfirmed: true,
     assistantStaffConfirmed: false,
@@ -149,8 +150,19 @@ export const sanitizeLoadedSeats = (seatsList) => {
   const now = Date.now();
   const abandonedCutoff = now - 3 * 3600 * 1000; // 3時間以内の超過カウントアップは維持
   let didSanitize = false;
-  const seats = seatsList.map((seat) => {
-    if (!seat || typeof seat !== 'object') return seat;
+  const seats = seatsList.map(( rawSeat, index ) => {
+    if (!rawSeat || typeof rawSeat !== 'object') return rawSeat;
+    let seat = rawSeat;
+    const rawLabel = String(seat.seatLabel || seat.name || '');
+    if (rawLabel.includes('サンプル')) {
+      const cleanedLabel = rawLabel.replace(/\s*[\(（]サンプル[\)）]/g, '').replace(/サンプル/g, '').trim() || `${seat.seatNumber || index + 1}番席`;
+      didSanitize = true;
+      seat = {
+        ...seat,
+        seatLabel: cleanedLabel,
+        name: cleanedLabel,
+      };
+    }
     if (seat.status === 'running') {
       const endTs = Number(seat.targetEndTimestamp) || 0;
       // 終了時刻が無効、または3時間以上前の古い放置タイマーのみ0:00停止状態へ正規化（超過カウントアップ中は保護）
@@ -1049,6 +1061,12 @@ export default function SalonWorkScreen() {
   const cloudSalonIdRef = useRef(null);
 
   // ★ 席の状態変化を検知して Supabase クラウドへ差分同期
+  const getSeatCloudSignature = (seat) => {
+    if (!seat) return '';
+    const label = (seat.seatLabel || seat.name || '').replace(/\s*[\(（]サンプル[\)）]/g, '').trim();
+    return `${label}_${seat.status}_${seat.targetSeconds || seat.targetTime}_${seat.targetEndTimestamp}_${seat.pausedRemainingSeconds}_${seat.assistantStaffName}_${seat.helpProcess}_${seat.actionStatus}_${seat.isRecruiting}_${seat.isNoHelpNeeded}_${seat.checkEndTimestamp}_${seat.checkStatus}_${seat.checkStaffName}_${seat.comment}_${seat.isShampooing}`;
+  };
+
   const syncChangedSeatsToCloud = async (newSeats) => {
     if (isRemoteSyncRef.current) return;
     const targetSalonId = cloudSalonIdRef.current || (currentSalonRef.current?.id && currentSalonRef.current.id !== 'workspace-free' ? currentSalonRef.current.id : null);
@@ -1056,16 +1074,23 @@ export default function SalonWorkScreen() {
 
     for (const seat of newSeats) {
       if (!seat || !seat.id) continue;
-      const label = seat.seatLabel || seat.name || '';
-      // サンプル席はクラウドに絶対にアップロードしない
-      if (label.includes('サンプル')) continue;
-
-      const sig = `${label}_${seat.status}_${seat.targetSeconds || seat.targetTime}_${seat.targetEndTimestamp}_${seat.assistantStaffName}_${seat.helpProcess}_${seat.checkEndTimestamp}_${seat.checkStatus}_${seat.comment}_${seat.isShampooing}`;
+      const sig = getSeatCloudSignature(seat);
       if (lastSyncedSeatsStateRef.current[seat.id] !== sig) {
         lastSyncedSeatsStateRef.current[seat.id] = sig;
-        upsertCloudTimer(targetSalonId, seat).catch((e) =>
-          console.warn('upsertCloudTimer error:', e)
-        );
+        upsertCloudTimer(targetSalonId, seat)
+          .then((savedCloudSeat) => {
+            if (savedCloudSeat?.id) {
+              lastSyncedSeatsStateRef.current[savedCloudSeat.id] = sig;
+              if (seat.id !== savedCloudSeat.id) {
+                setSeats((curr) =>
+                  curr.map((item) =>
+                    item.id === seat.id ? { ...item, id: savedCloudSeat.id, cloudTimerId: savedCloudSeat.id } : item
+                  )
+                );
+              }
+            }
+          })
+          .catch((e) => console.warn('upsertCloudTimer error:', e));
       }
     }
   };
@@ -1978,15 +2003,20 @@ export default function SalonWorkScreen() {
       // ★ Watchからの操作（タイマー開始・延長・停止・ヘルプ指定）を Supabase クラウドへ直行送信！
       const targetSalonId = cloudSalonIdRef.current || (currentSalonRef.current?.id && currentSalonRef.current.id !== 'workspace-free' ? currentSalonRef.current.id : null);
       const changedSeat = matchedIdx >= 0 ? updated[matchedIdx] : updated.find((s) => s.id === seatId);
-      if (targetSalonId && changedSeat && !changedSeat.seatLabel?.includes('サンプル')) {
+      if (targetSalonId && changedSeat) {
+        const sig = getSeatCloudSignature(changedSeat);
+        lastSyncedSeatsStateRef.current[changedSeat.id] = sig;
         upsertCloudTimer(targetSalonId, changedSeat)
           .then((savedCloudSeat) => {
-            if (savedCloudSeat?.id && changedSeat.id !== savedCloudSeat.id) {
-              setSeats((curr) =>
-                curr.map((item) =>
-                  item.id === changedSeat.id ? { ...item, id: savedCloudSeat.id, cloudTimerId: savedCloudSeat.id } : item
-                )
-              );
+            if (savedCloudSeat?.id) {
+              lastSyncedSeatsStateRef.current[savedCloudSeat.id] = sig;
+              if (changedSeat.id !== savedCloudSeat.id) {
+                setSeats((curr) =>
+                  curr.map((item) =>
+                    item.id === changedSeat.id ? { ...item, id: savedCloudSeat.id, cloudTimerId: savedCloudSeat.id } : item
+                  )
+                );
+              }
             }
           })
           .catch((e) => console.warn('[WatchAction] direct upsertCloudTimer failed:', e));
@@ -2242,12 +2272,20 @@ export default function SalonWorkScreen() {
             isRemoteSyncRef.current = false;
           }, 300);
         } else if (isMounted && seats.length > 0 && cloudSalon.owner_user_id === myUserId) {
-          // クラウドがまだ空の場合はオーナーの初期席のみクラウドへ初期登録（サンプル席は除外）
+          // クラウドがまだ空の場合はオーナーの初期席をクラウドへ初期登録し、発行されたUUIDをローカルへ同期
           for (const s of seats) {
-            const label = s.seatLabel || s.name || '';
-            if (!label.includes('サンプル')) {
-              upsertCloudTimer(cloudSalon.id, s).catch(() => {});
-            }
+            upsertCloudTimer(cloudSalon.id, s)
+              .then((savedCloudSeat) => {
+                if (isMounted && savedCloudSeat?.id) {
+                  lastSyncedSeatsStateRef.current[savedCloudSeat.id] = getSeatCloudSignature(savedCloudSeat);
+                  setSeats((curr) =>
+                    curr.map((item) =>
+                      item.id === s.id ? { ...item, id: savedCloudSeat.id, cloudTimerId: savedCloudSeat.id } : item
+                    )
+                  );
+                }
+              })
+              .catch(() => {});
           }
         }
 
@@ -2258,12 +2296,27 @@ export default function SalonWorkScreen() {
           if (eventType === 'INSERT' || eventType === 'UPDATE') {
             if (!newSeat) return;
             isRemoteSyncRef.current = true;
+            lastSyncedSeatsStateRef.current[newSeat.id] = getSeatCloudSignature(newSeat);
             setSeats((prev) => {
-              const idx = prev.findIndex((s) => s.id === newSeat.id || (s.seatLabel && s.seatLabel === newSeat.seatLabel) || (s.name && s.name === newSeat.name));
+              const newCleanLabel = String(newSeat.seatLabel || newSeat.name || '').replace(/席$/, '').trim();
+              const idx = prev.findIndex((s) => {
+                if (!s) return false;
+                if (s.id === newSeat.id || s.cloudTimerId === newSeat.id) return true;
+                const sClean = String(s.seatLabel || s.name || '').replace(/席$/, '').trim();
+                if (newCleanLabel && sClean === newCleanLabel) return true;
+                if (s.seatNumber && newSeat.seatNumber && Number(s.seatNumber) === Number(newSeat.seatNumber)) return true;
+                return false;
+              });
               let updated;
               if (idx >= 0) {
+                const prevItem = prev[idx];
+                const shouldClearCollapsed = newSeat.status === 'running' || newSeat.isReset;
                 updated = [...prev];
-                updated[idx] = { ...prev[idx], ...newSeat };
+                updated[idx] = {
+                  ...prevItem,
+                  ...newSeat,
+                  collapsedAtEnd: shouldClearCollapsed ? null : prevItem.collapsedAtEnd,
+                };
               } else {
                 updated = [...prev, newSeat];
               }
@@ -2894,12 +2947,20 @@ export default function SalonWorkScreen() {
     setModalSeatLabel(trimmed);
     setIsEditingSeatLabel(false);
     if (targetSeatId) {
+      const oldSeat = seats.find((s) => s.id === targetSeatId);
+      const oldLabel = oldSeat?.seatLabel || '';
       setSeats((prev) => {
         const updated = prev.map((s) => (s.id === targetSeatId ? { ...s, seatLabel: trimmed } : s));
         saveSeatsToStorage(updated);
         syncSeatsToWatch(updated);
         return updated;
       });
+      const targetSalonId =
+        cloudSalonIdRef.current ||
+        (currentSalon?.id && currentSalon.id !== 'workspace-free' ? currentSalon.id : null);
+      if (targetSalonId && oldSeat && oldLabel && oldLabel !== trimmed) {
+        upsertCloudTimer(targetSalonId, { ...oldSeat, seatLabel: trimmed }, { oldSeatLabel: oldLabel }).catch(() => {});
+      }
     }
   };
 
@@ -3239,8 +3300,8 @@ export default function SalonWorkScreen() {
 
   // 本人による直接確認の反映
   const performDirectConfirm = (seatId, role) => {
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== seatId) return s;
         const isNoHelp = s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none';
         let newMain = s.mainStaffConfirmed;
@@ -3258,8 +3319,10 @@ export default function SalonWorkScreen() {
           mainStaffConfirmed: newMain,
           assistantStaffConfirmed: newAssist,
         };
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      return updated;
+    });
 
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 150]);
@@ -3316,8 +3379,8 @@ export default function SalonWorkScreen() {
       roleLabel = `メイン（${colorName}）およびヘルプ（${assistName}）の両者`;
     }
 
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== seatId) return s;
         let newMain = s.mainStaffConfirmed;
         let newAssist = s.assistantStaffConfirmed;
@@ -3337,8 +3400,10 @@ export default function SalonWorkScreen() {
           assistantStaffConfirmed: newAssist,
           proxyConfirmedBy: currentOperator,
         };
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      return updated;
+    });
 
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 150, 80, 150]);
@@ -3359,9 +3424,11 @@ export default function SalonWorkScreen() {
   // SOS要請発信
   const handleTriggerSOS = (seatId) => {
     const targetSeat = seats.find((s) => s.id === seatId);
-    setSeats((prev) =>
-      prev.map((s) => (s.id === seatId ? { ...s, sosTriggered: true } : s))
-    );
+    setSeats((prev) => {
+      const updated = prev.map((s) => (s.id === seatId ? { ...s, sosTriggered: true } : s));
+      saveSeatsToStorage(updated);
+      return updated;
+    });
 
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 300, 100, 300, 100, 300]);
@@ -3864,15 +3931,17 @@ export default function SalonWorkScreen() {
   const handleSaveComment = () => {
     if (!commentTargetSeat) return;
     const newComment = editCommentText.trim();
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== commentTargetSeat.id) return s;
         return {
           ...s,
           comment: newComment,
         };
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      return updated;
+    });
     setIsEditCommentModalVisible(false);
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 40]);
@@ -3906,16 +3975,18 @@ export default function SalonWorkScreen() {
   const handleAssignAssistantDirectly = (seatId, newHelpName) => {
     const targetHelp = (newHelpName || '自分').trim();
     oneMinuteHelpAlertRef.current[seatId] = false;
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== seatId) return s;
         return {
           ...s,
           assistantStaffName: targetHelp,
           assistantStaffConfirmed: true,
         };
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      return updated;
+    });
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 150, 80, 150]);
     }
@@ -3944,8 +4015,8 @@ export default function SalonWorkScreen() {
 
     // ★ ユーザー指定: 「ヘルプなし」を選択した場合
     if (newHelp === 'ヘルプなし') {
-      setSeats((prev) =>
-        prev.map((s) => {
+      setSeats((prev) => {
+        const updated = prev.map((s) => {
           if (s.id !== seat.id) return s;
           return {
             ...s,
@@ -3953,9 +4024,13 @@ export default function SalonWorkScreen() {
             assistantStaffConfirmed: true,
             actionStatus: null,
             isShampooing: false,
+            isNoHelpNeeded: true,
+            isRecruiting: false,
           };
-        })
-      );
+        });
+        saveSeatsToStorage(updated);
+        return updated;
+      });
       if (Platform.OS !== 'web') {
         Vibration.vibrate([0, 80]);
       }
@@ -3968,22 +4043,25 @@ export default function SalonWorkScreen() {
     }
 
     // 席のヘルプ担当および希望ヘルプ内容（ステータス）を更新
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== seat.id) return s;
         return {
           ...s,
           assistantStaffName: newHelp || null,
           actionStatus: chosenAction || s.actionStatus || null,
           isShampooing: chosenAction === 'shampoo' || (chosenAction ? false : s.isShampooing),
+          isNoHelpNeeded: false,
           // もし本人が入った場合はアシスタント確認フラグをONに
           assistantStaffConfirmed:
             newHelp && newHelp.toLowerCase() === assigner.toLowerCase()
               ? true
               : s.assistantStaffConfirmed,
         };
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      return updated;
+    });
 
     // 触覚振動
     if (Platform.OS !== 'web') {
@@ -4047,15 +4125,17 @@ export default function SalonWorkScreen() {
   // ★ ユーザー指定: チェック担当スタッフを指定・保存
   const handleAssignCheckStaff = (seatId, staffName) => {
     const trimmed = (staffName || '').trim();
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== seatId) return s;
         return {
           ...s,
           checkStaffName: trimmed || null,
         };
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      return updated;
+    });
     setIsCheckStaffModalVisible(false);
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 80]);
@@ -4081,16 +4161,18 @@ export default function SalonWorkScreen() {
       setExpandedPausedSeatIds((prev) => ({ ...prev, [seat.id]: !isShampoo }));
     }
 
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== seat.id) return s;
         return {
           ...s,
           actionStatus: statusId || null,
           isShampooing: isShampoo,
         };
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      return updated;
+    });
 
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 80]);
@@ -4112,8 +4194,8 @@ export default function SalonWorkScreen() {
       setExpandedPausedSeatIds((prev) => ({ ...prev, [seatId]: !isShampoo }));
     }
 
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== seatId) return s;
         if (s.status === 'running') {
           const remaining = Math.max(0, Math.floor((s.targetEndTimestamp - Date.now()) / 1000));
@@ -4154,8 +4236,10 @@ export default function SalonWorkScreen() {
             stoppedBy: null,
           };
         }
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      return updated;
+    });
 
     if (isStopping) {
       if (Platform.OS !== 'web') {
@@ -4331,8 +4415,8 @@ export default function SalonWorkScreen() {
   // ＋5分延長（互換性保持）
   const handleExtend5Min = (seatId) => {
     const nowStr = getCurrentTimeFormatted();
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== seatId) return s;
         const historyItem = {
           id: `h-${Date.now()}`,
@@ -4346,8 +4430,10 @@ export default function SalonWorkScreen() {
           targetEndTimestamp: s.targetEndTimestamp + 5 * 60 * 1000,
           history: [...prevHist, historyItem],
         };
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      return updated;
+    });
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 60]);
     }
@@ -4444,8 +4530,8 @@ export default function SalonWorkScreen() {
     const now = Date.now();
     const nowStr = getCurrentTimeFormatted();
 
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== seatId) return s;
 
         let newTargetEnd = s.targetEndTimestamp;
@@ -4502,8 +4588,10 @@ export default function SalonWorkScreen() {
           isOver: false,
           history: [...prevHist, historyItem],
         };
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      return updated;
+    });
 
     setIsQuickAdjustModalVisible(false);
     setQuickAdjustDeltaSeconds(0);
@@ -4532,16 +4620,18 @@ export default function SalonWorkScreen() {
       type: 'action',
     };
 
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== addHistoryTargetSeat.id) return s;
         const prevHist = s.history || [];
         return {
           ...s,
           history: [...prevHist, historyItem],
         };
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      return updated;
+    });
 
     setIsAddHistoryModalVisible(false);
     setInputHistoryText('');
@@ -4632,8 +4722,11 @@ export default function SalonWorkScreen() {
               syncSeatsToWatch(updated, userName, staffMembers, { immediate: true, forceEmpty: updated.length === 0 });
               return updated;
             });
-            if (currentSalon?.id) {
-              deleteCloudTimer(currentSalon.id, seatId).catch(() => {});
+            const targetSalonId =
+              cloudSalonIdRef.current ||
+              (currentSalon?.id && currentSalon.id !== 'workspace-free' ? currentSalon.id : null);
+            if (targetSalonId) {
+              deleteCloudTimer(targetSalonId, seatId, seatLabel).catch(() => {});
             }
           },
         },
@@ -4673,8 +4766,8 @@ export default function SalonWorkScreen() {
       : target;
     const endTs = Date.now() + remaining * 1000;
 
-    setSeats((prev) =>
-      prev.map((s) => {
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
         if (s.id !== seatId) return s;
         return {
           ...s,
@@ -4686,8 +4779,10 @@ export default function SalonWorkScreen() {
           targetEndTimestamp: endTs,
           comment: mainTimerState?.genre ? `ジャンル: ${mainTimerState.genre}` : '',
         };
-      })
-    );
+      });
+      saveSeatsToStorage(updated);
+      return updated;
+    });
     oneMinuteHelpAlertRef.current[seatId] = false;
     setIsAssignMainTimerModalVisible(false);
     Alert.alert('割り当て完了', `メインタイマーを「${seats.find((s) => s.id === seatId)?.seatLabel}」にセットしました！`);
@@ -4715,7 +4810,11 @@ export default function SalonWorkScreen() {
       comment: mainTimerState?.genre ? `ジャンル: ${mainTimerState.genre}` : 'メインタイマー連動 (席指定なし)',
     };
 
-    setSeats((prev) => [freeSeatItem, ...prev]);
+    setSeats((prev) => {
+      const updated = [freeSeatItem, ...prev];
+      saveSeatsToStorage(updated);
+      return updated;
+    });
     setIsAssignMainTimerModalVisible(false);
     Alert.alert('セット完了', 'メインタイマーを席に割り当てずにサロンボードへセットしました！');
   };

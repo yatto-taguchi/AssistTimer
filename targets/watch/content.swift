@@ -348,7 +348,16 @@ extension SeatTimerItem {
         self.isCollapsed = (dictionary["isCollapsed"] as? NSNumber)?.boolValue ?? (dictionary["isCollapsed"] as? Bool) ?? false
         self.isMainTimer = (dictionary["isMainTimer"] as? NSNumber)?.boolValue ?? (dictionary["isMainTimer"] as? Bool) ?? (id == "main-timer")
         self.genre = dictionary["genre"] as? String
-        self.seatLabel = dictionary["seatLabel"] as? String
+        if let rawLabel = dictionary["seatLabel"] as? String {
+            let cleaned = rawLabel
+                .replacingOccurrences(of: " (サンプル)", with: "")
+                .replacingOccurrences(of: "(サンプル)", with: "")
+                .replacingOccurrences(of: "（サンプル）", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            self.seatLabel = cleaned.isEmpty ? nil : cleaned
+        } else {
+            self.seatLabel = nil
+        }
         self.isPreCountingDown = (dictionary["isPreCountingDown"] as? NSNumber)?.boolValue ?? (dictionary["isPreCountingDown"] as? Bool) ?? false
         self.preCountdownSeconds = (dictionary["preCountdownSeconds"] as? NSNumber)?.intValue ?? (dictionary["preCountdownSeconds"] as? Int) ?? 0
         self.isCountdownConfigEnabled = (dictionary["isCountdownConfigEnabled"] as? NSNumber)?.boolValue ?? (dictionary["isCountdownConfigEnabled"] as? Bool) ?? false
@@ -439,7 +448,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         SeatTimerItem(
             id: "seat-1",
             seatNumber: 1,
-            seatLabel: "1番席 (サンプル)",
+            seatLabel: "1番席",
             creatorName: "スタイリスト",
             totalSeconds: 1200,
             targetEndTime: Date().addingTimeInterval(1200),
@@ -828,35 +837,66 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
     
+    // ★ "seat-1" 等の初期ローカルIDで操作された際にも、すでに iPhone から届いた最新UUIDがあれば両方に対して保護キーを適用するヘルパー
+    private func canonicalSeatId(for seatId: String) -> String {
+        if let exact = timers.first(where: { $0.id == seatId }) {
+            return exact.id
+        }
+        if seatId.hasPrefix("seat-"),
+           let num = Int(seatId.replacingOccurrences(of: "seat-", with: "")),
+           let matched = timers.first(where: { $0.seatNumber == num }) {
+            return matched.id
+        }
+        return seatId
+    }
+
     // ★ Watch 上（または iPhone 側同期）で席を止めたことを記録（止める前の終了時刻も保存・永続化。メインスレッドで呼ぶ）
     func markLocalStop(seatId: String, endTime: Date) {
-        localStops[seatId] = (at: Date(), end: endTime.timeIntervalSince1970)
+        let now = Date()
+        let endVal = endTime.timeIntervalSince1970
+        let cid = canonicalSeatId(for: seatId)
+        localStops[seatId] = (at: now, end: endVal)
+        localStops[cid] = (at: now, end: endVal)
         watchStartedSeatTimes[seatId] = nil
+        watchStartedSeatTimes[cid] = nil
         persistLocalStops()
     }
     
     func clearLocalStop(seatId: String) {
+        let cid = canonicalSeatId(for: seatId)
         localStops[seatId] = nil
+        localStops[cid] = nil
         persistLocalStops()
     }
     
     // ★ Watch 上でチェック完了・解除したことを記録（メインスレッドで呼ぶ）
     func markLocalCheckClear(seatId: String, checkEndTime: Date?) {
-        localCheckClears[seatId] = (at: Date(), checkEnd: checkEndTime?.timeIntervalSince1970 ?? 0)
+        let now = Date()
+        let endVal = checkEndTime?.timeIntervalSince1970 ?? 0
+        let cid = canonicalSeatId(for: seatId)
+        localCheckClears[seatId] = (at: now, checkEnd: endVal)
+        localCheckClears[cid] = (at: now, checkEnd: endVal)
     }
     
     func clearLocalCheckClear(seatId: String) {
+        let cid = canonicalSeatId(for: seatId)
         localCheckClears[seatId] = nil
+        localCheckClears[cid] = nil
     }
     
     // ★ Watch 上で客席のヘルプ・チェック担当・時間微調整等を変更したことを記録（すれ違い通信による巻き戻し防止。メインスレッドで呼ぶ）
     func markLocalSeatMod(seatId: String) {
-        localSeatMods[seatId] = Date()
+        let now = Date()
+        let cid = canonicalSeatId(for: seatId)
+        localSeatMods[seatId] = now
+        localSeatMods[cid] = now
     }
     
     // ★ Watch 上で収納・展開したことを記録（nil = 記録を消す。メインスレッドで呼ぶ）
     func setCollapseOverride(seatId: String, collapsed: Bool?) {
+        let cid = canonicalSeatId(for: seatId)
         collapseOverrides[seatId] = collapsed
+        collapseOverrides[cid] = collapsed
     }
     
     // ★ アラームの「止める」など、画面外から席を止める（Watch の表示をすぐ 0:00 の停止にする。チェック＆ヘルプも完全解除）
@@ -1248,6 +1288,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             if parsed[i] != prev {
                                 var restored = prev
                                 restored.id = id
+                                restored.seatNumber = parsed[i].seatNumber
+                                if let newLabel = parsed[i].seatLabel, !newLabel.isEmpty {
+                                    restored.seatLabel = newLabel
+                                }
                                 parsed[i] = restored
                                 localSeatMods[id] = modAt
                             } else {
@@ -1270,6 +1314,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                   prev.targetEndTime > nowDate {
                             var restored = prev
                             restored.id = id
+                            restored.seatNumber = parsed[i].seatNumber
+                            if let newLabel = parsed[i].seatLabel, !newLabel.isEmpty {
+                                restored.seatLabel = newLabel
+                            }
                             parsed[i] = restored
                             watchStartedSeatTimes[id] = startedAt
                         } else {
@@ -1278,7 +1326,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         }
                     }
                     // ★ 既存の同一タイマーがWatchで稼働中の場合、往復同期による数秒のズレで終了予定時刻が書き換わってスマートアラームが破棄されるのを防ぐ
-                    if let prev = self.timers.first(where: { $0.id == id }), prev.isRunning, parsed[i].isRunning {
+                    if let prev = matchedPrevByNum, prev.isRunning, parsed[i].isRunning {
                         if prev.totalSeconds == parsed[i].totalSeconds,
                            (prev.targetEndTime > nowDate) == (parsed[i].targetEndTime > nowDate),
                            abs(prev.targetEndTime.timeIntervalSince(parsed[i].targetEndTime)) <= 2 {
@@ -1303,7 +1351,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         parsed[i].hasAlertedHelpUnassigned = true
                     }
                     // ★ Watch で完了・解除したチェックタイマーが、すれ違いの古い通信パケットで復活するのをブロック
-                    if let chkClear = localCheckClears[id] {
+                    if let chkClear = localCheckClears[id] ?? localCheckClears[prevKey] {
                         let incomingChkEnd = parsed[i].checkTargetEndTime?.timeIntervalSince1970 ?? 0
                         let sameCheck = (chkClear.checkEnd <= 0) || (incomingChkEnd > 0 && abs(incomingChkEnd - chkClear.checkEnd) <= 2)
                         if !parsed[i].isCheckCompleted && parsed[i].checkTargetEndTime != nil && sameCheck && nowDate.timeIntervalSince(chkClear.at) < localCheckClearHoldSeconds {
@@ -1315,16 +1363,18 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             }
                         } else if parsed[i].isCheckCompleted || parsed[i].checkTargetEndTime == nil || !sameCheck || nowDate.timeIntervalSince(chkClear.at) >= localCheckClearHoldSeconds {
                             localCheckClears[id] = nil
+                            localCheckClears[prevKey] = nil
                         }
                     }
                     // ★ iPhone側で計測終了・リセットされた席も終了時刻を記録し、後から届く古い applicationContext 等でゾンビ復活するのを防ぐ
-                    if let prev = self.timers.first(where: { $0.id == id }), prev.isRunning, !parsed[i].isRunning, !isStaleSnapshot {
+                    if let prev = matchedPrevByNum, prev.isRunning, !parsed[i].isRunning, !isStaleSnapshot {
                         markLocalStop(seatId: id, endTime: prev.targetEndTime)
                     }
-                    guard let stop = localStops[id] else { continue }
+                    guard let stop = localStops[id] ?? localStops[prevKey] else { continue }
                     let sameEnd = abs(parsed[i].targetEndTime.timeIntervalSince1970 - stop.end) <= 2
                     if nowDate.timeIntervalSince(stop.at) >= localStopHoldSeconds {
                         localStops[id] = nil
+                        localStops[prevKey] = nil
                         persistLocalStops()
                     } else if parsed[i].isRunning {
                         if sameEnd {
@@ -1334,6 +1384,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         } else {
                             // 異なる新しい終了時刻で再スタートされた場合はブロック解除
                             localStops[id] = nil
+                            localStops[prevKey] = nil
                             persistLocalStops()
                         }
                     }
@@ -1416,15 +1467,24 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     func sendActionToPhone(action: String, seatId: String, extra: [String: Any] = [:]) {
         guard WCSession.isSupported() else { return }
         let session = WCSession.default
+        var resolvedSeatId = seatId
         var payload: [String: Any] = [
             "action": action,
             "seatId": seatId,
             "userName": currentUserName,
             "timestamp": Date().timeIntervalSince1970 * 1000.0
         ]
-        if !seatId.isEmpty, seatId != "main-timer", let matchedSeat = self.timers.first(where: { $0.id == seatId }) {
-            payload["seatNumber"] = matchedSeat.seatNumber
-            payload["seatLabel"] = matchedSeat.seatLabel
+        if !seatId.isEmpty, seatId != "main-timer" {
+            let matchedSeat = self.timers.first(where: { $0.id == seatId })
+                ?? (seatId.hasPrefix("seat-") ? Int(seatId.replacingOccurrences(of: "seat-", with: "")).flatMap { num in self.timers.first(where: { $0.seatNumber == num }) } : nil)
+            if let matchedSeat = matchedSeat {
+                resolvedSeatId = matchedSeat.id
+                payload["seatId"] = matchedSeat.id
+                payload["seatNumber"] = matchedSeat.seatNumber
+                if let label = matchedSeat.seatLabel, !label.isEmpty {
+                    payload["seatLabel"] = label
+                }
+            }
         }
         for (k, v) in extra {
             payload[k] = v
@@ -1432,10 +1492,20 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         
         let executeSend = {
             if !seatId.isEmpty && seatId != "main-timer" && action != "REQUEST_SYNC" {
-                self.markLocalSeatMod(seatId: seatId)
+                self.markLocalSeatMod(seatId: resolvedSeatId)
+                if resolvedSeatId != seatId {
+                    self.markLocalSeatMod(seatId: seatId)
+                }
                 if action == "START_TIMER" {
-                    self.watchStartedSeatTimes[seatId] = Date()
-                    self.clearLocalStop(seatId: seatId)
+                    let now = Date()
+                    self.watchStartedSeatTimes[resolvedSeatId] = now
+                    if resolvedSeatId != seatId {
+                        self.watchStartedSeatTimes[seatId] = now
+                    }
+                    self.clearLocalStop(seatId: resolvedSeatId)
+                    if resolvedSeatId != seatId {
+                        self.clearLocalStop(seatId: seatId)
+                    }
                 }
             }
             self.lastSentAction = action
@@ -1770,38 +1840,61 @@ struct ContentView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: workItem)
     }
     
+    // ★ シート表示中や操作コールバック実行中に裏で "seat-1" 等の初期IDからクラウドUUIDへ切り替わっても、
+    //   シートが勝手に閉じたりボタン操作が空振りしないように seatNumber フォールバック解決を行うヘルパー
+    private func resolveSheetItem(for targetId: String?) -> SeatTimerItem? {
+        guard let targetId = targetId else { return nil }
+        if let exact = timers.first(where: { $0.id == targetId }) {
+            return exact
+        }
+        if targetId.hasPrefix("seat-"),
+           let num = Int(targetId.replacingOccurrences(of: "seat-", with: "")),
+           var matched = timers.first(where: { $0.seatNumber == num }) {
+            matched.id = targetId
+            return matched
+        }
+        return nil
+    }
+
+    private func findSeatIndex(for item: SeatTimerItem) -> Int? {
+        if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+            return idx
+        }
+        return timers.firstIndex(where: { $0.seatNumber == item.seatNumber })
+    }
+
     // シート用のバインディング
     private var bindingTimeAction: Binding<SeatTimerItem?> {
         Binding(
-            get: { timers.first { $0.id == timeActionTargetId } },
+            get: { resolveSheetItem(for: timeActionTargetId) },
             set: { _ in timeActionTargetId = nil }
         )
     }
     
     private var bindingCheckAction: Binding<SeatTimerItem?> {
         Binding(
-            get: { timers.first { $0.id == checkActionTargetId } },
+            get: { resolveSheetItem(for: checkActionTargetId) },
             set: { _ in checkActionTargetId = nil }
         )
     }
     
     private var bindingShampooAction: Binding<SeatTimerItem?> {
         Binding(
-            get: { timers.first { $0.id == shampooActionTargetId } },
+            get: { resolveSheetItem(for: shampooActionTargetId) },
             set: { _ in shampooActionTargetId = nil }
         )
     }
     
     private var bindingSelectHelpStaff: Binding<SeatTimerItem?> {
         Binding(
-            get: { timers.first { $0.id == selectHelpStaffTargetId } },
+            get: { resolveSheetItem(for: selectHelpStaffTargetId) },
             set: { _ in selectHelpStaffTargetId = nil }
         )
     }
     
     private var bindingSelectCheckStaff: Binding<SeatTimerItem?> {
         Binding(
-            get: { timers.first { $0.id == selectCheckStaffTargetId } },
+            get: { resolveSheetItem(for: selectCheckStaffTargetId) },
             set: { _ in selectCheckStaffTargetId = nil }
         )
     }
@@ -3285,7 +3378,7 @@ struct ContentView: View {
             staffCandidates: sessionManager.members,
             onAdjust: { deltaSec in
                 triggerScroll(to: item.id)
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     let wasOvertime = timers[idx].isOvertime
                     let baseEnd = (deltaSec > 0) ? max(Date(), timers[idx].targetEndTime) : timers[idx].targetEndTime
                     let newEnd = max(Date().addingTimeInterval(5), baseEnd.addingTimeInterval(Double(deltaSec)))
@@ -3315,7 +3408,7 @@ struct ContentView: View {
             },
             onAdjustCheck: { deltaSec in
                     triggerScroll(to: item.id)
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         let wasCheckOvertime = timers[idx].isCheckOvertime
                         let rawCheckEnd = timers[idx].checkTargetEndTime ?? Date()
                         let baseCheckEnd = (deltaSec > 0) ? max(Date(), rawCheckEnd) : rawCheckEnd
@@ -3347,7 +3440,7 @@ struct ContentView: View {
                 },
                 onStop: {
                     triggerScroll(to: item.id)
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         let clearedCheckEnd = timers[idx].checkTargetEndTime
                         timers[idx].isRunning = false
                         timers[idx].pausedRemainingSeconds = 0
@@ -3372,7 +3465,7 @@ struct ContentView: View {
                 onEnterHelp: {
                     // ★ タイムが早くても切り上げて指定施術（シャンプー・コーミング等）に入る
                     triggerScroll(to: item.id)
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         let clearedCheckEnd = timers[idx].checkTargetEndTime
                         let rawProcess = timers[idx].helpProcess.trimmingCharacters(in: .whitespacesAndNewlines)
                         let process = rawProcess.isEmpty ? "シャンプー" : rawProcess
@@ -3404,7 +3497,7 @@ struct ContentView: View {
                 onCompleteCheck: {
                     // ★ タイムが早くても切り上げてチェックに入る（全体タイマー連動のため全体タイマーも00:00停止）
                     triggerScroll(to: item.id)
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         let clearedCheckEnd = timers[idx].checkTargetEndTime
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].isRunning = false
@@ -3436,7 +3529,7 @@ struct ContentView: View {
                 },
                 onReinputTime: { totalSec, checkSec in
                     triggerScroll(to: item.id)
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         let sec = max(10, totalSec)
                         // ★ 全体タイムより短いチェック時間のみ有効
                         let validCheckSec = (checkSec != nil && checkSec! < sec) ? checkSec : nil
@@ -3496,7 +3589,7 @@ struct ContentView: View {
                     }
                 },
                 onAssignHelp: { process, staff in
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].helpProcess = process
                             timers[idx].shampooStaff = staff
@@ -3516,7 +3609,7 @@ struct ContentView: View {
                     }
                 },
                 onRecruitHelp: { process in
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].helpProcess = process
                             timers[idx].shampooStaff = nil
@@ -3533,7 +3626,7 @@ struct ContentView: View {
                     }
                 },
                 onSetNoHelp: {
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].helpProcess = ""
                             timers[idx].shampooStaff = nil
@@ -3550,7 +3643,7 @@ struct ContentView: View {
                     }
                 },
                 onClearHelp: {
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].helpProcess = ""
                             timers[idx].shampooStaff = nil
@@ -3567,7 +3660,7 @@ struct ContentView: View {
                     }
                 },
                 onAssignCheckStaff: { checkProcess, staff in
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].checkProcess = checkProcess
                             timers[idx].checkStaff = staff
@@ -3582,7 +3675,7 @@ struct ContentView: View {
                     }
                 },
                 onRecruitCheckStaff: { checkProcess in
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].checkProcess = checkProcess
                             timers[idx].checkStaff = "募集中"
@@ -3597,7 +3690,7 @@ struct ContentView: View {
                     }
                 },
                 onClearCheckStaff: {
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].checkProcess = "チェック"
                             timers[idx].checkStaff = nil
@@ -3612,7 +3705,7 @@ struct ContentView: View {
                     }
                 },
                 onCompleteSubCheck: {
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].isCheckCompleted = true
@@ -3634,7 +3727,7 @@ struct ContentView: View {
                     }
                 },
                 onCancelSubCheck: {
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                             timers[idx].checkTargetEndTime = nil
@@ -3656,7 +3749,7 @@ struct ContentView: View {
                     }
                 },
                 onAddLateCheck: { checkSec, checkProcess, checkStaff in
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         let validSec = max(60, checkSec)
                         let checkEnd = Date().addingTimeInterval(Double(validSec))
                         let resolvedProc = checkProcess.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "チェック" : checkProcess
@@ -3694,7 +3787,7 @@ struct ContentView: View {
                     }
                 },
                 onUpdateSoundSettings: { watchSound, phoneSound in
-                    if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                    if let idx = findSeatIndex(for: item) {
                         timers[idx].watchAlarmSoundEnabled = watchSound
                         timers[idx].alarmSoundEnabled = phoneSound
                         sessionManager.timers = timers
@@ -3726,11 +3819,11 @@ struct ContentView: View {
             currentUserName: currentUserName,
             onOpenSelectStaff: {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    selectCheckStaffTargetId = item.id
+                    selectCheckStaffTargetId = findSeatIndex(for: item).map { timers[$0].id } ?? item.id
                 }
             },
             onCompleteCheck: {
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
                     timers[idx].isCheckCompleted = true
                     timers[idx].checkStaff = currentUserName
@@ -3750,7 +3843,7 @@ struct ContentView: View {
                 }
             },
             onCancelCheck: {
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
                     timers[idx].checkTargetEndTime = nil
                     timers[idx].checkTotalSeconds = nil
@@ -3780,7 +3873,7 @@ struct ContentView: View {
             currentUserName: currentUserName,
             staffCandidates: sessionManager.members,
             onAssignStaff: { checkProcess, staff in
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         timers[idx].checkProcess = checkProcess
                         timers[idx].checkStaff = staff
@@ -3795,7 +3888,7 @@ struct ContentView: View {
                 }
             },
             onRecruitAll: { checkProcess in
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         timers[idx].checkProcess = checkProcess
                         timers[idx].checkStaff = "募集中"
@@ -3810,7 +3903,7 @@ struct ContentView: View {
                 }
             },
             onClearStaff: {
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         timers[idx].checkProcess = "チェック"
                         timers[idx].checkStaff = nil
@@ -3832,7 +3925,7 @@ struct ContentView: View {
         ShampooActionSheet(
             item: item,
             onStartShampoo: {
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     timers[idx].status = .normal
                     timers[idx].shampooStaff = nil
                     timers[idx].helpProcess = ""
@@ -3847,7 +3940,7 @@ struct ContentView: View {
                 }
             },
             onFinishShampoo: {
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     timers[idx].status = .normal
                     timers[idx].shampooStaff = nil
                     timers[idx].helpProcess = ""
@@ -3862,7 +3955,7 @@ struct ContentView: View {
                 }
             },
             onStartCombing: {
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     timers[idx].status = .normal
                     timers[idx].shampooStaff = nil
                     timers[idx].helpProcess = ""
@@ -3877,7 +3970,7 @@ struct ContentView: View {
                 }
             },
             onFinishCombing: {
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     timers[idx].status = .normal
                     timers[idx].shampooStaff = nil
                     timers[idx].helpProcess = ""
@@ -3892,7 +3985,7 @@ struct ContentView: View {
                 }
             },
             onStartCheck: {
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
                     timers[idx].status = .normal
                     timers[idx].isCheckCompleted = true
@@ -3918,7 +4011,7 @@ struct ContentView: View {
                 }
             },
             onFinishCheck: {
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     sessionManager.markLocalCheckClear(seatId: item.id, checkEndTime: timers[idx].checkTargetEndTime)
                     timers[idx].status = .normal
                     timers[idx].isCheckCompleted = true
@@ -3945,11 +4038,11 @@ struct ContentView: View {
             },
             onChangeStaff: {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    selectHelpStaffTargetId = item.id
+                    selectHelpStaffTargetId = findSeatIndex(for: item).map { timers[$0].id } ?? item.id
                 }
             },
             onClearStaff: {
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     let oldStaff = timers[idx].shampooStaff ?? timers[idx].checkStaff ?? "担当者"
                     timers[idx].shampooStaff = nil
                     timers[idx].checkStaff = nil
@@ -3973,7 +4066,7 @@ struct ContentView: View {
             currentUserName: currentUserName,
             staffCandidates: sessionManager.members,
             onAssignStaff: { process, staff in
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         timers[idx].helpProcess = process
                         timers[idx].shampooStaff = staff
@@ -3993,7 +4086,7 @@ struct ContentView: View {
                 }
             },
             onRecruitAll: { process in
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         timers[idx].helpProcess = process
                         timers[idx].shampooStaff = nil
@@ -4017,7 +4110,7 @@ struct ContentView: View {
                 }
             },
             onSetNoHelp: {
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         timers[idx].helpProcess = ""
                         timers[idx].shampooStaff = nil
@@ -4034,7 +4127,7 @@ struct ContentView: View {
                 }
             },
             onClearHelp: {
-                if let idx = timers.firstIndex(where: { $0.id == item.id }) {
+                if let idx = findSeatIndex(for: item) {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         timers[idx].helpProcess = ""
                         timers[idx].shampooStaff = nil
@@ -6843,7 +6936,7 @@ struct TimeActionSheet: View {
         }
         .onReceive(WatchRealtimeClock.shared.publisher) { input in
             now = input
-            if let latest = WatchSessionManager.shared.timers.first(where: { $0.id == liveItem.id }), latest != liveItem {
+            if let latest = WatchSessionManager.shared.timers.first(where: { $0.id == liveItem.id }) ?? WatchSessionManager.shared.timers.first(where: { $0.seatNumber == liveItem.seatNumber }), latest != liveItem {
                 liveItem = latest
             }
             if isOvertime && accumulatedDelta <= 0 {
