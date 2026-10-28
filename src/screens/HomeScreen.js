@@ -1050,6 +1050,9 @@ export default function HomeScreen({ navigation }) {
 
       if (Platform.OS === 'ios') {
         const prepState = {
+          explicitStop: false,
+          isExplicitReset: false,
+          isAutoFinished: false,
           remainingTime: currentTarget,
           targetTime: currentTarget,
           targetEndTimestamp: effectivePrepMainEndMs,
@@ -1552,6 +1555,9 @@ export default function HomeScreen({ navigation }) {
           const isRunningNow = !!isRunningRef.current;
           const isOverNow = isRunningNow && !!isCountUpRef.current;
           const startState = {
+            explicitStop: false,
+            isExplicitReset: false,
+            isAutoFinished: false,
             remainingTime: remainingTimeRef.current,
             targetTime: targetTimeRef.current || targetTime,
             targetEndTimestamp: isRunningNow
@@ -1718,6 +1724,9 @@ export default function HomeScreen({ navigation }) {
             const isRunningNow = !!isRunningRef.current;
             const isOverNow = isRunningNow && !!isCountUpRef.current;
             const startState = {
+              explicitStop: false,
+              isExplicitReset: false,
+              isAutoFinished: false,
               remainingTime: remainingTimeRef.current,
               targetTime: targetTimeRef.current || sec,
               targetEndTimestamp: isRunningNow
@@ -1984,7 +1993,16 @@ export default function HomeScreen({ navigation }) {
       if (action === 'REQUEST_SYNC') {
         const rawStopped = payload?.watchMainTimerStopped ?? payload?.extra?.watchMainTimerStopped;
         const hasStoppedWatchMain = rawStopped === true || rawStopped === 1 || rawStopped === 'true';
-        if (hasStoppedWatchMain && (isRunningRef.current || isPreCountingDownRef.current || isCountUpRef.current) && handleMainTimerActionDispatchRef.current) {
+        const stoppedWatchEndTs = Number(payload?.targetEndTimestamp || payload?.extra?.targetEndTimestamp || 0);
+        const curActiveEndTs = targetEndTimeRef.current || overStartTimeRef.current || 0;
+        const isDifferentNewTimerOnPhone =
+          stoppedWatchEndTs > 0 && curActiveEndTs > Date.now() + 2000 && Math.abs(curActiveEndTs - stoppedWatchEndTs) > 15000;
+        if (
+          hasStoppedWatchMain &&
+          !isDifferentNewTimerOnPhone &&
+          (isRunningRef.current || isPreCountingDownRef.current || isCountUpRef.current) &&
+          handleMainTimerActionDispatchRef.current
+        ) {
           handleMainTimerActionDispatchRef.current(
             'MAIN_TIMER_RESET',
             payload,
@@ -1999,9 +2017,12 @@ export default function HomeScreen({ navigation }) {
           const isSameAsLastReset =
             (lastResetTargetEndRef.current > 0 && incomingEndTs > 0 && Math.abs(incomingEndTs - lastResetTargetEndRef.current) <= 15000) ||
             WatchConnectivity.isMainTimerEndStopped(incomingEndTs);
+          const isNewFutureWatchTimer = !isSameAsLastReset && (incomingEndTs > nowMs + 2000 || incomingPrepTs > nowMs);
           const isRecentlyReset =
-            nowMs - lastMainTimerResetAtRef.current < 15000 ||
-            nowMs - WatchConnectivity.getLastLocalMainTimerStopAt() < 15000;
+            !isNewFutureWatchTimer && (
+              nowMs - lastMainTimerResetAtRef.current < 15000 ||
+              nowMs - WatchConnectivity.getLastLocalMainTimerStopAt() < 15000
+            );
           const isExpiredWithoutCountUp = !isCountUpEnabledRef.current && incomingEndTs > 0 && incomingEndTs <= nowMs && incomingPrepTs <= nowMs;
           const isSameAsLastAutoFinished =
             lastAutoFinishedEndTimestampRef.current > 0 &&

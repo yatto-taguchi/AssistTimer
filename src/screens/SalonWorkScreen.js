@@ -370,7 +370,9 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       isAutoFinished = true;
     }
 
-    const isExplicitReset = !!state.isExplicitReset;
+    const resetAgeMs = state.lastResetAt ? (Date.now() - Number(state.lastResetAt)) : 0;
+    const isExplicitReset = !isRunning && !isPreCountingDown && !!state.isExplicitReset && resetAgeMs < 5000;
+    const isExplicitStop = !isRunning && !isPreCountingDown && !!state.explicitStop && resetAgeMs < 5000;
     const isPausedMidCountdown = !isRunning && !isPreCountingDown && !!state.isPaused && !isExplicitReset && !isAutoFinished;
     const pausedRem = !isRunning
       ? (isPausedMidCountdown && state.remainingTime != null
@@ -385,23 +387,23 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       isMainTimer: true,
       creatorName: (_cachedUserName || 'スタイリスト').trim(),
       totalSeconds: state.targetTime || 600,
-      targetEndTimestamp: targetEnd,
-      lastResetTargetEndTimestamp: state.lastResetTargetEndTimestamp || 0,
-      lastResetAt: state.lastResetAt || 0,
+      targetEndTimestamp: Math.round(targetEnd || 0),
+      lastResetTargetEndTimestamp: Math.round(state.lastResetTargetEndTimestamp || 0),
+      lastResetAt: Math.round(state.lastResetAt || 0),
       isRunning: isRunning,
       pausedRemainingSeconds: pausedRem,
       isCountUp: isCountUp,
       isCountUpEnabled: isCountUpEnabled,
       isAutoFinished: isAutoFinished,
-      isExplicitReset: !!state.isExplicitReset,
+      isExplicitReset: isExplicitReset,
       genre: state.genre || '',
       isPreCountingDown: isPreCountingDown,
       preCountdownSeconds: state.preCountdownSeconds || 0,
       isCountdownConfigEnabled: !!state.isCountdownConfigEnabled,
       countdownConfigSeconds: state.countdownConfigSeconds || 5,
-      prepEndTimestamp: isPreCountingDown ? prepEnd : (state.prepEndTimestamp || 0),
+      prepEndTimestamp: Math.round(isPreCountingDown ? prepEnd : (state.prepEndTimestamp || 0)),
       isPaused: !!state.isPaused,
-      explicitStop: !!state.explicitStop,
+      explicitStop: isExplicitStop,
     };
 
     const flatMembers = Array.isArray(_cachedStaffMembers)
@@ -494,8 +496,12 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
         isAutoFinished = true;
       }
 
-      const isExplicitReset = !!_cachedMainTimerState.isExplicitReset;
-      const isPausedMidCountdown = !isRunning && !isPreCountingDown && !!_cachedMainTimerState.isPaused && !isExplicitReset && !isAutoFinished;
+      // ★ SYNC_SEATS は客席同期パケットであるため、過去のメインタイマー停止フラグ（isExplicitReset / explicitStop）が
+      //   クラウド同期のたびに再送されてWatch主導のメインタイマーを強制停止させないよう、直近2秒以内のリセット時のみ有効化する
+      const resetAgeMs = _cachedMainTimerState.lastResetAt ? (Date.now() - Number(_cachedMainTimerState.lastResetAt)) : Infinity;
+      const isRecentExplicitReset = !isRunning && !isPreCountingDown && !!_cachedMainTimerState.isExplicitReset && resetAgeMs < 2000;
+      const isRecentExplicitStop = !isRunning && !isPreCountingDown && !!_cachedMainTimerState.explicitStop && resetAgeMs < 2000;
+      const isPausedMidCountdown = !isRunning && !isPreCountingDown && !!_cachedMainTimerState.isPaused && !isRecentExplicitReset && !isAutoFinished;
       const pausedRem = !isRunning
         ? (isPausedMidCountdown && _cachedMainTimerState.remainingTime != null
             ? Math.max(0, _cachedMainTimerState.remainingTime)
@@ -509,23 +515,23 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
         isMainTimer: true,
         creatorName: (currentName || 'スタイリスト').trim(),
         totalSeconds: _cachedMainTimerState.targetTime || 600,
-        targetEndTimestamp: targetEnd,
-        lastResetTargetEndTimestamp: _cachedMainTimerState.lastResetTargetEndTimestamp || 0,
-        lastResetAt: _cachedMainTimerState.lastResetAt || 0,
+        targetEndTimestamp: Math.round(targetEnd || 0),
+        lastResetTargetEndTimestamp: Math.round(_cachedMainTimerState.lastResetTargetEndTimestamp || 0),
+        lastResetAt: Math.round(_cachedMainTimerState.lastResetAt || 0),
         isRunning: isRunning,
         pausedRemainingSeconds: pausedRem,
         isCountUp: isCountUp,
         isCountUpEnabled: isCountUpEnabled,
         isAutoFinished: isAutoFinished,
-        isExplicitReset: !!_cachedMainTimerState.isExplicitReset,
+        isExplicitReset: isRecentExplicitReset,
         genre: _cachedMainTimerState.genre || '',
         isPreCountingDown: isPreCountingDown,
         preCountdownSeconds: _cachedMainTimerState.preCountdownSeconds || 0,
         isCountdownConfigEnabled: !!_cachedMainTimerState.isCountdownConfigEnabled,
         countdownConfigSeconds: _cachedMainTimerState.countdownConfigSeconds || 5,
-        prepEndTimestamp: isPreCountingDown ? prepEnd : (_cachedMainTimerState.prepEndTimestamp || 0),
+        prepEndTimestamp: Math.round(isPreCountingDown ? prepEnd : (_cachedMainTimerState.prepEndTimestamp || 0)),
         isPaused: !!_cachedMainTimerState.isPaused,
-        explicitStop: !!_cachedMainTimerState.explicitStop,
+        explicitStop: isRecentExplicitStop,
       };
     }
 
@@ -1182,8 +1188,9 @@ export default function SalonWorkScreen() {
           const incomingPrepEnd = Number(extra?.prepEndTimestamp || message?.prepEndTimestamp || 0);
           const incomingTargetEnd = Number(extra?.targetEndTimestamp || message?.targetEndTimestamp || 0);
           const isStoppedTarget = WatchConnectivity.isMainTimerEndStopped(incomingTargetEnd);
-          const isRecentlyStopped = nowMs - WatchConnectivity.getLastLocalMainTimerStopAt() < 15000;
           const isPrep = incomingPrepEnd > nowMs;
+          const isNewFutureTimer = !isStoppedTarget && (incomingTargetEnd > nowMs + 2000 || isPrep);
+          const isRecentlyStopped = !isNewFutureTimer && (nowMs - WatchConnectivity.getLastLocalMainTimerStopAt() < 15000);
           const isPast = !isPrep && incomingTargetEnd > nowMs - 3 * 3600 * 1000 && incomingTargetEnd <= nowMs;
           const isOvertime = isPast && allowCountUp;
           if (!isStoppedTarget && !isRecentlyStopped && isPast && !allowCountUp) {

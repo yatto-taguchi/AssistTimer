@@ -3123,3 +3123,14 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
   - **iPhone側の多段柔軟席マッチング**: Watch からアクションを受信した際、`id` / `cloudTimerId` だけでなく、`seatLabel`（「1番」⇔「1番席」表記ゆれ含む）および `seatNumber`（席番号）で対象席を特定する。該当席がない状態で `START_TIMER` が届いた場合はその席番号の席を自動生成して開始する。
   - **Watch側の席番号引き継ぎ保護**: Watch 側 `processReceivedData` の `watchStartedSeatTimes`（15秒保護）および `localSeatMods`（3.5秒保護）にて、`id` 一致だけでなく `seatNumber` 一致でも保護を適用し、クラウドUUIDへの切り替え時も稼働中タイマーを維持する。
   - **クラウド初期取得時の稼働中タイマー保護マージ**: `initCloudSalon` で `cloudTimers` を取得した際、ローカルで現在カウントダウン稼働中（`status === 'running'` かつ `targetEndTimestamp > Date.now()`）の席はクラウドの停止データ（`00:00`）で潰さずローカルの稼働状態を優先保持し、クラウドへ逆同期する。
+
+
+#### 6. メインタイマーのサロンクラウド同期巻き添え停止防止および Watch ⇄ iPhone 双方向即時共有の完全復旧仕様 (`src/screens/SalonWorkScreen.js`, `src/screens/HomeScreen.js`, `targets/watch/content.swift`)
+- **背景・原因**:
+  - 一度メインタイマーをリセット・停止すると、`_cachedMainTimerState` に `explicitStop: true, isExplicitReset: true` が残存し続け、サロンクラウド同期（`initCloudSalon` / `subscribeSalonTimers` / `subscribeSalonMembers`）が発火させる `syncSeatsToWatch`（`SYNC_SEATS`）のたびにその古い `explicitStop: true` が Watch へ再送されていた。
+  - Watch 側の `processReceivedData` が `SYNC_SEATS` 内の `isExplicitStop || isExplicitReset` を受けて `watchStartedMainTimerEndTime = nil` に解除してしまい、Watch で新規スタートしたメインタイマーを `00:00` に強制リセットした挙げ句、直後の `REQUEST_SYNC` で `watchMainTimerStopped: true` を iPhone に逆送して iPhone 側のメインタイマーまで停止させていた。
+  - さらに、停止後15秒以内の `isRecentlyReset` / `isRecentlyStopped` ガードが、Watch から新しく開始された未来の終了時刻を持つメインタイマー（`REQUEST_SYNC` の `watchMainTimerActive: true`）まで無条件にブロックしていた。
+- **確定仕様**:
+  - **古い `explicitStop` / `isExplicitReset` フラグの自動失効**: `syncMainTimerToWatch` では `lastResetAt` から5秒以内、`syncSeatsToWatch`（客席同期パケット）では `lastResetAt` から2秒以内の直近リセット時のみ `explicitStop` / `isExplicitReset` を `true` とし、それ以降は自動的に `false` として送信する。また、`HomeScreen.js` でメインタイマーを開始・準備開始した際の `startState` / `prepState` でも明示的に `explicitStop: false, isExplicitReset: false` をクリアする。
+  - **Watch側の `watchStartedMainTimerEndTime` 保護強化**: `targets/watch/content.swift` の `processReceivedData` にて、Watchローカル開始操作から3.5秒間（`isHoldingLocalStart`）は `watchStartedMainTimerEndTime` を解除しない。また、`SYNC_SEATS` 同梱データでは単なる `isExplicitStop` フラグで保護を解除せず、`isCurrentTimerStoppedOnPhone`（現在稼働中のその終了時刻に対する停止、または開始時刻より後のリセット）または `SYNC_MAIN_TIMER` 専用停止パケットのときのみ解除する（`isAuthoritativePhoneStop`）。
+  - **新規未来タイマーの15秒リセットガード免除**: `HomeScreen.js` および `SalonWorkScreen.js` の `REQUEST_SYNC` 受信時、前回停止した終了時刻と異なる新しい未来の終了時刻（`incomingEndTs > nowMs + 2000 || incomingPrepTs > nowMs`）を持つ Watch メインタイマーは、停止から15秒以内であってもブロックせず即座に iPhone 側へ採用・開始する。

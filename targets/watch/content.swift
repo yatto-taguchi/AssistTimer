@@ -1028,6 +1028,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 (incomingLastResetEndSec > 0 && curEndSec > 0 && abs(incomingLastResetEndSec - curEndSec) <= 15) ||
                 (incomingLastResetAtSec > 0 && curStartSec > 0 && incomingLastResetAtSec > curStartSec + 1.0)
             )
+            let isHoldingLocalStart = (nowDate.timeIntervalSince(self.lastMainTimerLocalActionTime) < self.mainTimerLocalHoldSeconds) &&
+                (self.lastMainTimerLocalActionType == "START" || self.lastMainTimerLocalActionType == "SET_TIME")
+            let isAuthoritativePhoneStop = !isStaleSnapshot && !isHoldingLocalStart && (
+                isCurrentTimerStoppedOnPhone ||
+                (msgType == "SYNC_MAIN_TIMER" && (isExplicitStop || isExplicitReset))
+            )
             // ★ iPhone側が同一メインタイマーの稼働（isRunning または isPreCountingDown）に追いついたか、
             //   またはiPhone側で明示的にリセット・終了されたら、Watch単独保護フラグを解除して以降の双方向停止を有効化
             if let watchEnd = self.watchStartedMainTimerEndTime {
@@ -1035,8 +1041,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     if abs(parsedMain.targetEndTime.timeIntervalSince(watchEnd)) <= 20 || parsedMain.totalSeconds == self.mainTimer?.totalSeconds {
                         self.watchStartedMainTimerEndTime = parsedMain.targetEndTime
                     }
-                } else if !isStaleSnapshot && (isExplicitStop || isExplicitReset || isCurrentTimerStoppedOnPhone) {
-                    // iPhone側で明示的にリセット・停止された場合のみ Watch単独保護フラグを解除する（REQUEST_SYNCの未稼働返信では超過タイマーを消さない）
+                } else if isAuthoritativePhoneStop {
+                    // iPhone側で明示的に現在のタイマーがリセット・停止された場合のみ Watch単独保護フラグを解除する（SYNC_SEATSの古いキャッシュやREQUEST_SYNCの未稼働返信では消さない）
                     self.watchStartedMainTimerEndTime = nil
                 }
             }
@@ -1045,8 +1051,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                       watchEnd > nowDate.addingTimeInterval(-10800),
                       let cur = self.mainTimer,
                       (cur.isRunning || cur.isPreCountingDown) else { return false }
-                if (isExplicitStop || isExplicitReset || isCurrentTimerStoppedOnPhone) && !isStaleSnapshot { return false }
-                let isUnstartedInitial = !parsedMain.isRunning && !parsedMain.isPreCountingDown && (parsedMain.pausedRemainingSeconds == parsedMain.totalSeconds || parsedMain.pausedRemainingSeconds <= 0 || !isExplicitStop)
+                if isAuthoritativePhoneStop { return false }
+                let isUnstartedInitial = !parsedMain.isRunning && !parsedMain.isPreCountingDown
                 // iPhoneがスリープ中・未反映のまま送られてきた SYNC_SEATS 同梱データや保存データ、未反映初期スナップショットによる強制停止をブロック
                 return msgType == "SYNC_SEATS" || isStaleSnapshot || isUnstartedInitial
             }()
