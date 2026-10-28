@@ -3153,3 +3153,14 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
      - `mapSeatToCloudTimer` と `mapCloudTimerToSeat` にて、`actionStatus`（シャンプー・コーミング・チェック・呼び出し・その他）、`isRecruiting`（`'募集中'` 経由）、`isNoHelpNeeded`（`'ヘルプなし'` 経由）、および中間チェック完了状態（`checkStatus === 'completed'` 時は `check_total_seconds` を正数維持し `check_target_end_timestamp: null` とすることで双方向識別）を欠落なくマッピング。
   6. **クラウド経由でタイマー開始・リセットされた席のスリムバー自動展開 (`src/screens/SalonWorkScreen.js`)**:
      - `subscribeSalonTimers` でペア端末から稼働開始やリセットを受信した際、`collapsedAtEnd: null` にクリアし、以前計測終了で閉じていたカードが閉じたままにならないよう改善。
+  7. **モジュラー文字盤4行目（チェックタイマー行）におけるチェック担当者と全体ヘルプ（シャンプー等）担当者の完全分離 (`targets/watch/widget_sync.swift`, `targets/watch-widget/widget.swift`)**:
+     - モジュラー文字盤の1行目（`staffFlow`: 作成者 → 全体ヘルプ担当 `shampooStaff`）と4行目（`checkTimerRow`）において、従来4行目が `seat.helpProcess` と `seat.shampooStaff` を参照していたため、シャンプー担当とチェック担当が別々の人でも同じ人（シャンプー担当）が表示されてしまうバグを修正。
+     - `widget_sync.swift` で `checkProcess` を送信し、`widget.swift` の `checkTimerRow` では `seat.checkProcess` と `seat.checkStaff` のみを独立して参照（自分なら `"自分"`、他人ならその名前、募集なら `"募集中"`、未設定なら `"未定"`）するよう修正。
+  8. **その席の関係者（＋ヘルプに入る可能性がある人）限定の時間経過アラーム＆共有相手リアルタイム操作通知 (`src/screens/SalonWorkScreen.js`, `src/utils/salonCloudService.js`, `targets/watch/content.swift`, `targets/watch/alarm.swift`)**:
+     - **背景・目的**: サロン全体で共有使用している際、無関係な他人の席のタイマーで全員のスマホやApple Watchが鳴ると業務の邪魔になる一方、自分が関わっている席（主担当・全体ヘルプ担当・チェック担当、または担当未定/募集中で自分がヘルプに入る可能性がある席）では、相手がチェックタイマーを止めたりタイマーを操作したときにリアルタイムで通知が届く必要がある。
+     - **時間経過アラームの関係者フィルタリング**:
+       - **全体タイマー（`shouldAlertMainTimer` / `shouldAlertMainTimerForUser`）**: 自分が主担当（`creatorName` / `colorStaffName` / `createdBy`）、または自分が全体ヘルプ担当（`shampooStaff` / `assistantStaffName`）、または「ヘルプなし」以外で全体ヘルプが「未定」もしくは「募集中」の場合のみ、Watch振動・ローカル通知・iPhoneアラーム（AlarmKit / 500ms監視アラート）を鳴動させる。
+       - **中間チェックタイマー（`shouldAlertCheckTimer` / `shouldAlertCheckTimerForUser`）**: 自分が主担当、または自分がチェック担当（`checkStaff` / `checkStaffName`）、またはチェック担当が「未定」もしくは「募集中」の場合のみ、Watch振動・ローカル通知・iPhoneアラームを鳴動させる。
+     - **共有相手の操作による関係者限定リアルタイム通知**:
+       - `salonCloudService.js` で自端末からの直近送信シグネチャ（`isSelfEcho`）を識別して自己通知エコーバックを防止。
+       - `SalonWorkScreen.js` の `subscribeSalonTimers` にて、他端末からの更新（チェックタイマー完了・全体タイマー停止/リセット・ヘルプ/チェック全員募集・ヘルプ/チェック担当指名・関係席の新規開始/チェック追加/時間変更）を検知した際、自分がその席の関係者（または未定/募集で入る可能性がある人）である場合のみ、iPhone上部の通知バナー＆触覚振動（`showPeerActionBanner`）を表示するとともに、Apple Watchへ `notification`（`sourceUser: '__remote__'`）を即時プッシュし、Watch画面バナー＋触覚振動＋TimeSensitiveローカル通知（`postPeerActionNotification`）で手首へ即座に知らせる。また、他端末で停止・完了されたタイマーのAlarmKit予約も即座に `stopAlarm` で消火する。

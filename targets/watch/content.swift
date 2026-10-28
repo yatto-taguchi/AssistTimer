@@ -223,6 +223,49 @@ struct SeatTimerItem: Identifiable, Equatable {
                (!chkStaff.isEmpty && chkStaff == cleanUser) ||
                isRecruiting
     }
+
+    // ★ 全体タイマー（放置タイム終了）のアラーム・通知対象か判定（関係者のみ：主担当・全体ヘルプ担当・またはヘルプ未定で自分が入る可能性がある場合）
+    func shouldAlertMainTimer(for userName: String) -> Bool {
+        if isMainTimer { return true }
+        let cleanUser = userName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if cleanUser.isEmpty || cleanUser == "スタイリスト" || cleanUser == "スタッフ" { return true }
+
+        let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if cName.isEmpty || cName == "スタイリスト" || cName == "スタッフ" || cName == cleanUser {
+            return true
+        }
+
+        let sStaff = (shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if isNoHelpNeeded || sStaff == "ヘルプなし" || sStaff == "none" {
+            // ヘルプなし（主担当の一人施術）の場合は主担当のみ
+            return false
+        }
+        if !sStaff.isEmpty && sStaff != "募集中" && sStaff != "未定" {
+            // 全体ヘルプ担当が決まっている場合は、その担当者本人のみ（またはチェック担当が未定でない限り無関係な人には鳴らさない）
+            return sStaff == cleanUser
+        }
+        // まだ全体ヘルプ担当が未定または募集中の場合は、自分がヘルプに入る可能性があるため通知対象
+        return true
+    }
+
+    // ★ 中間チェックタイマーのアラーム・通知対象か判定（関係者のみ：主担当・チェック担当・またはチェック未定で自分が入る可能性がある場合）
+    func shouldAlertCheckTimer(for userName: String) -> Bool {
+        let cleanUser = userName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if cleanUser.isEmpty || cleanUser == "スタイリスト" || cleanUser == "スタッフ" { return true }
+
+        let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if cName.isEmpty || cName == "スタイリスト" || cName == "スタッフ" || cName == cleanUser {
+            return true
+        }
+
+        let chkStaff = (checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !chkStaff.isEmpty && chkStaff != "募集中" && chkStaff != "未定" {
+            // チェック担当が決まっている場合は、主担当とチェック担当本人のみ
+            return chkStaff == cleanUser
+        }
+        // チェック担当が未定または募集中の場合は、自分がチェックに入る可能性があるため通知対象
+        return true
+    }
     
     // ★ iPhone へ送る停止系操作に付ける「操作した時に見ていた終了時刻」(ms)。停止中なら 0。
     //   iPhone は席の終了時刻と照合し、遅れて届いた操作で再スタート後の席を止めないようにする
@@ -978,9 +1021,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         if isRecentNotif, let notif = data["notification"] as? [String: Any], let text = notif["text"] as? String, !text.isEmpty {
             let colorHex = notif["color"] as? String ?? "#30D158"
             let sourceUser = notif["sourceUser"] as? String ?? ""
-            if sourceUser.isEmpty || sourceUser != self.currentUserName {
+            if sourceUser.isEmpty || sourceUser == "__remote__" || sourceUser != self.currentUserName {
                 DispatchQueue.main.async {
                     self.incomingNotification = (text: text, color: colorHex)
+                    WatchAlarmCoordinator.shared.postPeerActionNotification(text: text)
                 }
             }
         }
@@ -2201,7 +2245,7 @@ struct ContentView: View {
             }
             pendingOvertimeSheetWorkItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
-        } else if let checkOverSeat = (currentTimers.first(where: { $0.isCheckOvertime && !$0.isOvertime && $0.isRelated(to: currentUserName) }) ?? currentTimers.first(where: { $0.isCheckOvertime && !$0.isOvertime })) {
+        } else if let checkOverSeat = currentTimers.first(where: { $0.isCheckOvertime && !$0.isOvertime && $0.shouldAlertCheckTimer(for: currentUserName) }) {
             triggerScroll(to: checkOverSeat.id)
             let work = DispatchWorkItem {
                 self.pendingOvertimeSheetWorkItem = nil
@@ -2214,7 +2258,7 @@ struct ContentView: View {
             }
             pendingOvertimeSheetWorkItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: work)
-        } else if let overSeat = (currentTimers.first(where: { $0.isOvertime && $0.isRelated(to: currentUserName) }) ?? currentTimers.first(where: { $0.isOvertime })) {
+        } else if let overSeat = currentTimers.first(where: { $0.isOvertime && $0.shouldAlertMainTimer(for: currentUserName) }) {
             triggerScroll(to: overSeat.id)
             let work = DispatchWorkItem {
                 self.pendingOvertimeSheetWorkItem = nil

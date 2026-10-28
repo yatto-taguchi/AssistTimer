@@ -122,6 +122,7 @@ enum WidgetSync {
                 "creatorName": t.creatorName,
                 "isNoHelpNeeded": t.isNoHelpNeeded,
                 "isCheckCompleted": t.isCheckCompleted,
+                "checkProcess": t.displayCheckProcess,
                 "helpProcess": t.helpProcess,
                 "isRecruiting": t.isRecruiting
             ]

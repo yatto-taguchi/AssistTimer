@@ -371,12 +371,41 @@ export const fetchSalonTimers = async (salonId) => {
 };
 
 /**
+ * 自端末から直近に送信したクラウド更新のシグネチャを記録し、Realtimeエコーバック（自己通知）を判定
+ */
+const _recentLocalPayloadSigs = new Map();
+
+const getCloudPayloadSignature = (p) => {
+  if (!p) return '';
+  return `${p.seat_label || ''}|${p.status || ''}|${Number(p.target_seconds || 0)}|${Number(p.target_end_timestamp || 0)}|${Number(p.paused_remaining_seconds || 0)}|${p.assistant_staff_name || ''}|${p.help_process || ''}|${Number(p.check_target_end_timestamp || 0)}|${Number(p.check_total_seconds || 0)}|${p.check_process || ''}|${p.check_staff_name || ''}`;
+};
+
+const recordLocalCloudPayload = (p) => {
+  const sig = getCloudPayloadSignature(p);
+  if (!sig) return;
+  const now = Date.now();
+  _recentLocalPayloadSigs.set(sig, now);
+  if (_recentLocalPayloadSigs.size > 100) {
+    for (const [k, ts] of _recentLocalPayloadSigs.entries()) {
+      if (now - ts > 15000) _recentLocalPayloadSigs.delete(k);
+    }
+  }
+};
+
+const isRecentLocalCloudPayload = (rec, windowMs = 6000) => {
+  const sig = getCloudPayloadSignature(rec);
+  if (!sig || !_recentLocalPayloadSigs.has(sig)) return false;
+  return Date.now() - _recentLocalPayloadSigs.get(sig) < windowMs;
+};
+
+/**
  * 1席のタイマー状態をクラウドへ保存/更新（UPSERT）
  */
 export const upsertCloudTimer = async (salonId, seat) => {
   if (!salonId || !seat) return null;
   const userId = await getOrCreateUserId();
   const payload = mapSeatToCloudTimer(seat, salonId, userId);
+  recordLocalCloudPayload(payload);
 
   try {
     const isUUID = (seat.cloudTimerId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seat.cloudTimerId))
@@ -466,10 +495,12 @@ export const subscribeSalonTimers = (salonId, onTimerEvent) => {
       (payload) => {
         if (typeof onTimerEvent === 'function') {
           const { eventType, new: newRec, old: oldRec } = payload;
+          const isSelfEcho = newRec ? isRecentLocalCloudPayload(newRec) : false;
           onTimerEvent({
             eventType,
             newSeat: newRec ? mapCloudTimerToSeat(newRec) : null,
             oldSeat: oldRec ? mapCloudTimerToSeat(oldRec) : null,
+            isSelfEcho,
             rawPayload: payload,
           });
         }

@@ -39,6 +39,7 @@ struct ComplicationSeat {
     let prepTotalSeconds: Int?
     let checkEndDate: Date?
     let checkTotalSeconds: Int?
+    let checkProcess: String?
     let checkStaff: String?
     let shampooStaff: String?
     let helpProcess: String?
@@ -126,6 +127,7 @@ enum ComplicationData {
                 checkEnd = Date(timeIntervalSince1970: chkEpoch)
             }
             let checkTot = (d["checkTotalSeconds"] as? NSNumber)?.intValue
+            let checkProc = d["checkProcess"] as? String
             let checkStaff = d["checkStaff"] as? String
             let shampooStaff = d["shampooStaff"] as? String
             let helpProc = d["helpProcess"] as? String
@@ -154,6 +156,7 @@ enum ComplicationData {
                 prepTotalSeconds: prepTot,
                 checkEndDate: checkEnd,
                 checkTotalSeconds: checkTot,
+                checkProcess: checkProc,
                 checkStaff: checkStaff,
                 shampooStaff: shampooStaff,
                 helpProcess: helpProc,
@@ -220,9 +223,10 @@ struct ComplicationProvider: TimelineProvider {
                 prepTotalSeconds: nil,
                 checkEndDate: Date().addingTimeInterval(3 * 60),
                 checkTotalSeconds: 5 * 60,
+                checkProcess: "チェック",
                 checkStaff: "田中",
-                shampooStaff: "田中",
-                helpProcess: "チェック",
+                shampooStaff: "佐藤",
+                helpProcess: "シャンプー",
                 isRecruiting: false,
                 isCheckCompleted: false
             ),
@@ -558,24 +562,20 @@ struct ComplicationView: View {
             
             Spacer(minLength: 2)
             
-            // 真ん中: チェック/シャンプー/コーミング等の担当の名前
+            // 真ん中: チェックタイマーの工程名とチェック担当の名前（1行目の全体ヘルプ・シャンプー担当とは完全分離）
             let staffText: String = {
-                let proc = seat.helpProcess ?? "チェック"
-                let assignedStaff: String? = {
-                    if proc == "チェック" {
-                        if let c = seat.checkStaff, !c.isEmpty { return c }
-                        if let s = seat.shampooStaff, !s.isEmpty { return s }
-                        return nil
-                    } else {
-                        if let s = seat.shampooStaff, !s.isEmpty { return s }
-                        if let c = seat.checkStaff, !c.isEmpty { return c }
-                        return nil
-                    }
-                }()
-                if let staff = assignedStaff, !staff.isEmpty {
-                    return "\(proc) \(staff)"
-                } else {
+                let rawProc = (seat.checkProcess ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let proc = rawProc.isEmpty ? "チェック" : rawProc
+                let me = (seat.currentUserName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let rawCheckStaff = (seat.checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if rawCheckStaff.isEmpty {
+                    return "\(proc) 未定"
+                } else if rawCheckStaff == "募集中" {
                     return "\(proc) 募集中"
+                } else if !me.isEmpty && rawCheckStaff.caseInsensitiveCompare(me) == .orderedSame {
+                    return "\(proc) 自分"
+                } else {
+                    return "\(proc) \(rawCheckStaff)"
                 }
             }()
             Text(staffText)

@@ -73,6 +73,37 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         pendingOpenedAlarmEvent = nil
     }
 
+    private var lastPeerNotifText: String = ""
+    private var lastPeerNotifAt: Date = .distantPast
+
+    /// 共有相手（関係者の席）でチェック完了・タイマー停止・担当指名・募集などが行われた際にWatchへ通知する
+    func postPeerActionNotification(text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let now = Date()
+        if trimmed == lastPeerNotifText && now.timeIntervalSince(lastPeerNotifAt) < 2.5 {
+            return
+        }
+        lastPeerNotifText = trimmed
+        lastPeerNotifAt = now
+
+        // 手首への触覚フィードバック（フォアグラウンド時は showNotification 側でも鳴るためバックグラウンド時のみ直接鳴らす）
+        if WKApplication.shared().applicationState != .active {
+            WKInterfaceDevice.current().play(.notification)
+            let content = UNMutableNotificationContent()
+            content.title = "AssistTimer"
+            content.body = trimmed
+            content.sound = .default
+            if #available(watchOS 8.0, *) {
+                content.interruptionLevel = .timeSensitive
+            }
+            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.2, repeats: false)
+            let reqId = "assisttimer.peer.\(UUID().uuidString)"
+            let req = UNNotificationRequest(identifier: reqId, content: content, trigger: trigger)
+            UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+        }
+    }
+
     private var events: [WatchAlarmEvent] = []
     // 「終了前に一度でも把握していた」予定（アプリ起動時点ですでに過ぎていた古い予定では鳴らさない）
     private var armed: [String: Double] = [:]
@@ -262,10 +293,10 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             list.append(existingDueMain)
         }
 
-        // ★ 2. 共有タイマー（客席タイマー）のアラーム対象登録
+        // ★ 2. 共有タイマー（客席タイマー）のアラーム対象登録（関係者のみ：無関係な他人の席では鳴らさない）
+        let activeUser = currentUserName ?? ""
         for t in timers where t.isRunning {
             let label = t.displaySeatName
-            // 既存の同一席イベントと時刻差が10秒以内（または両方とも超過到達済み）なら既存時刻を維持（通信往復での再予約・セッション衝突を防止）
             let existingSeat = events.first(where: { $0.seatId == t.id && $0.key.contains("-main@") && !isAcknowledged($0.key) })
             let finalSeatEnd: Date
             if let existing = existingSeat,
@@ -275,33 +306,35 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             } else {
                 finalSeatEnd = t.targetEndTime
             }
-            let mainEpoch = Int(finalSeatEnd.timeIntervalSince1970)
-            let mainKey = "\(t.id)-main@\(mainEpoch)"
-            let wasSeatArmed = existingSeat != nil || armed.keys.contains(where: { $0.hasPrefix("\(t.id)-main@") && !isAcknowledged($0) })
-            if finalSeatEnd > nowDate.addingTimeInterval(-2) || (wasSeatArmed && finalSeatEnd > nowDate.addingTimeInterval(-10800)) {
-                if armed[mainKey] == nil {
-                    armed[mainKey] = finalSeatEnd.timeIntervalSince1970
-                    ackChanged = true
+            if t.shouldAlertMainTimer(for: activeUser) {
+                let mainEpoch = Int(finalSeatEnd.timeIntervalSince1970)
+                let mainKey = "\(t.id)-main@\(mainEpoch)"
+                let wasSeatArmed = existingSeat != nil || armed.keys.contains(where: { $0.hasPrefix("\(t.id)-main@") && !isAcknowledged($0) })
+                if finalSeatEnd > nowDate.addingTimeInterval(-2) || (wasSeatArmed && finalSeatEnd > nowDate.addingTimeInterval(-10800)) {
+                    if armed[mainKey] == nil {
+                        armed[mainKey] = finalSeatEnd.timeIntervalSince1970
+                        ackChanged = true
+                    }
+                }
+                if finalSeatEnd > nowDate {
+                    let staleAckKeys = acknowledged.keys.filter { isSameTarget(key1: $0, key2: mainKey) }
+                    if !staleAckKeys.isEmpty {
+                        for k in staleAckKeys { acknowledged.removeValue(forKey: k) }
+                        ackChanged = true
+                    }
+                    smartAlarmCompletedKeys = smartAlarmCompletedKeys.filter { !isSameTarget(key1: $0, key2: mainKey) }
+                }
+                if shouldKeepEvent(mainKey, finalSeatEnd) {
+                    list.append(WatchAlarmEvent(
+                        key: mainKey,
+                        seatId: t.id,
+                        date: finalSeatEnd,
+                        title: "\(label) タイム終了",
+                        watchSoundOn: t.watchAlarmSoundEnabled || soundOn
+                    ))
                 }
             }
-            if finalSeatEnd > nowDate {
-                let staleAckKeys = acknowledged.keys.filter { isSameTarget(key1: $0, key2: mainKey) }
-                if !staleAckKeys.isEmpty {
-                    for k in staleAckKeys { acknowledged.removeValue(forKey: k) }
-                    ackChanged = true
-                }
-                smartAlarmCompletedKeys = smartAlarmCompletedKeys.filter { !isSameTarget(key1: $0, key2: mainKey) }
-            }
-            if shouldKeepEvent(mainKey, finalSeatEnd) {
-                list.append(WatchAlarmEvent(
-                    key: mainKey,
-                    seatId: t.id,
-                    date: finalSeatEnd,
-                    title: "\(label) タイム終了",
-                    watchSoundOn: t.watchAlarmSoundEnabled || soundOn
-                ))
-            }
-            if !t.isCheckCompleted, let checkEnd = t.checkTargetEndTime, (t.checkTotalSeconds ?? 0) > 0 {
+            if !t.isCheckCompleted, let checkEnd = t.checkTargetEndTime, (t.checkTotalSeconds ?? 0) > 0, t.shouldAlertCheckTimer(for: activeUser) {
                 let existingCheck = events.first(where: { $0.seatId == t.id && $0.key.contains("-check@") && !isAcknowledged($0.key) })
                 let finalCheckEnd: Date
                 if let existing = existingCheck,
@@ -1743,6 +1776,15 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         let reqId = notification.request.identifier
         DispatchQueue.main.async {
+            if reqId.hasPrefix("assisttimer.peer.") {
+                if WKApplication.shared().applicationState == .active {
+                    completionHandler([])
+                } else {
+                    WKInterfaceDevice.current().play(.notification)
+                    completionHandler([.banner, .sound, .list])
+                }
+                return
+            }
             if reqId.hasPrefix(self.notificationPrefix) {
                 let stripped = String(reqId.dropFirst(self.notificationPrefix.count))
                 if let dotIdx = stripped.lastIndex(of: ".") {
@@ -1778,6 +1820,10 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let reqId = response.notification.request.identifier
+        if reqId.hasPrefix("assisttimer.peer.") {
+            completionHandler()
+            return
+        }
         let block = {
             self.allowBackgroundHandoffScheduleUntil = Date().addingTimeInterval(2.5)
             self.suppressSmartAlarmUntil = Date().addingTimeInterval(5.0)
