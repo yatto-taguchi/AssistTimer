@@ -241,7 +241,8 @@ export const mapSeatToCloudTimer = (seat, salonId, userId) => {
   const seatLabel = rawLabel.replace(/\s*[\(（]サンプル[\)）]/g, '').trim() || '1番席';
   const targetSeconds = Math.round(Number(seat.targetSeconds || seat.targetTime || 0));
   const rawCheckSec = Math.round(Number(seat.checkTargetSeconds || seat.checkTotalSeconds || 0));
-  const isCheckDone = seat.checkStatus === 'completed' || !!seat.isCheckCompleted;
+  const hasRunningCheck = seat.checkStatus === 'running' && Number(seat.checkEndTimestamp) > 0;
+  const isCheckDone = !hasRunningCheck && (seat.checkStatus === 'completed' || !!seat.isCheckCompleted);
   const checkTotalSeconds = isCheckDone
     ? (rawCheckSec > 0 ? rawCheckSec : Math.max(60, Math.round(Number(seat.checkInitialMinutes || 1) * 60)))
     : (seat.checkStatus === 'stopped' && !seat.checkEndTimestamp ? 0 : rawCheckSec);

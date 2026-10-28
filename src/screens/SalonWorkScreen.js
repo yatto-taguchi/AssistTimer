@@ -1234,11 +1234,13 @@ export default function SalonWorkScreen() {
     isRecruiting: false,
     isNoHelpNeeded: false,
     checkTargetSeconds: null,
+    checkTotalSeconds: null,
     checkEndTimestamp: null,
     checkPausedRemainingSeconds: null,
     checkStaffName: '',
     checkProcess: 'チェック',
     checkStatus: 'stopped',
+    isCheckCompleted: false,
     watchAlarmSoundEnabled: false,
     alarmSoundEnabled: false,
     collapsedAtEnd: null,
@@ -1833,10 +1835,12 @@ export default function SalonWorkScreen() {
             return {
               ...s,
               checkTargetSeconds: null,
+              checkTotalSeconds: null,
               checkEndTimestamp: null,
               checkStaffName: '',
               checkProcess: 'チェック',
               checkStatus: 'stopped',
+              isCheckCompleted: false,
             };
           }
           case 'SET_CHECK_TIMER': {
@@ -2000,12 +2004,14 @@ export default function SalonWorkScreen() {
               isRecruiting: false,
               // ★ Watch から指定された途中チェック（サブタイマー）を反映（前回のコーミング等の幽霊残りをリセット）
               checkTargetSeconds: checkSec,
+              checkTotalSeconds: checkSec,
               checkInitialMinutes: checkSec ? Math.round(checkSec / 60) : null,
               checkEndTimestamp: checkEnd,
               checkPausedRemainingSeconds: null,
               checkStaffName: checkSec ? (extra?.checkStaffName || '') : '',
               checkProcess: checkSec ? (extra?.checkProcess || 'チェック') : 'チェック',
               checkStatus: checkSec ? 'running' : 'stopped',
+              isCheckCompleted: false,
               checkAlerted: false,
               watchAlarmSoundEnabled: extra?.watchAlarmSoundEnabled !== undefined ? !!extra.watchAlarmSoundEnabled : !!s.watchAlarmSoundEnabled,
               alarmSoundEnabled: extra?.alarmSoundEnabled !== undefined ? !!extra.alarmSoundEnabled : false,
@@ -3337,14 +3343,7 @@ export default function SalonWorkScreen() {
 
     setSeats(updatedSeats);
     saveSeatsToStorage(updatedSeats);
-    syncSeatsToWatch(updatedSeats, userName, staffMembers, {
-      immediate: true,
-      notification: {
-        text: `🔍 ${currentUser}が【${seat.seatLabel || '席'}】に${mins}分チェックタイマーを追加しました${staffNote}`,
-        color: '#0A84FF',
-        sourceUser: currentUser,
-      },
-    });
+    syncSeatsToWatch(updatedSeats, userName, staffMembers, { immediate: true });
 
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 80, 50, 80]);
@@ -3498,17 +3497,7 @@ export default function SalonWorkScreen() {
       Vibration.vibrate([0, 250, 100, 250]);
     }
 
-    // ★ 相手のApple Watchへ即時ブロードキャスト通知
-    const notifTitle = actionLabel ? `${actionLabel}移行` : 'タイマー停止';
-    const notifText = `⏹️ ${currentUser}が【${seat.seatLabel || '席'}】の${notifTitle}を行いました`;
-    syncSeatsToWatch(updatedSeats, userName, staffMembers, {
-      immediate: true,
-      notification: {
-        text: notifText,
-        color: '#FF9500',
-        sourceUser: currentUser,
-      },
-    });
+    syncSeatsToWatch(updatedSeats, userName, staffMembers, { immediate: true });
 
     const mainStaff = (seat.colorStaffName || '').trim();
     const assistStaff = (seat.assistantStaffName || '').trim();
@@ -3829,17 +3818,7 @@ export default function SalonWorkScreen() {
       Vibration.vibrate([0, 150, 80, 150]);
     }
 
-    // ★ 相手のApple Watchへ即時ブロードキャスト通知
-    const seatLabel = targetSeat?.seatLabel || '対象席';
-    const notifText = `✅ ${checker}が【${seatLabel}】のチェックを完了しました`;
-    syncSeatsToWatch(updatedSeats, userName, staffMembers, {
-      immediate: true,
-      notification: {
-        text: notifText,
-        color: '#30D158',
-        sourceUser: currentUser,
-      },
-    });
+    syncSeatsToWatch(updatedSeats, userName, staffMembers, { immediate: true });
 
     // ★ ユーザー指定: 「そしたらタイマー設定者の方に通知が送られる」
     const isSelf = creatorName && creatorName.toLowerCase() === currentUser.toLowerCase();
@@ -4006,10 +3985,12 @@ export default function SalonWorkScreen() {
             targetEndTimestamp: endTs,
             pausedRemainingSeconds: null,
             checkTargetSeconds: hasCheckTimer ? checkTargetSec : null,
+            checkTotalSeconds: hasCheckTimer ? checkTargetSec : null,
             checkInitialMinutes: hasCheckTimer ? (checkMins > 0 ? checkMins : Math.round(checkTargetSec / 60)) : null,
             checkEndTimestamp: checkEndTs,
             checkPausedRemainingSeconds: null,
             checkStatus: hasCheckTimer ? 'running' : null,
+            isCheckCompleted: false,
             checkStaffName: hasCheckTimer ? (modalCheckStaffName || null) : null,
             checkProcess: hasCheckTimer ? (modalCheckProcess || 'チェック') : 'チェック',
             checkAlerted: false,
@@ -4046,10 +4027,12 @@ export default function SalonWorkScreen() {
             targetEndTimestamp: endTs,
             pausedRemainingSeconds: null,
             checkTargetSeconds: hasCheckTimer ? checkTargetSec : null,
+            checkTotalSeconds: hasCheckTimer ? checkTargetSec : null,
             checkInitialMinutes: hasCheckTimer ? (checkMins > 0 ? checkMins : Math.round(checkTargetSec / 60)) : null,
             checkEndTimestamp: checkEndTs,
             checkPausedRemainingSeconds: null,
             checkStatus: hasCheckTimer ? 'running' : null,
+            isCheckCompleted: false,
             checkStaffName: hasCheckTimer ? (modalCheckStaffName || s.checkStaffName || null) : null,
             checkProcess: hasCheckTimer ? (modalCheckProcess || s.checkProcess || 'チェック') : 'チェック',
             checkAlerted: false,
@@ -4085,10 +4068,12 @@ export default function SalonWorkScreen() {
             initialMinutes: s.initialMinutes || (mins > 0 ? mins : Math.round(targetSec / 60)),
             targetEndTimestamp: endTs,
             checkTargetSeconds: hasCheckTimer ? checkTargetSec : null,
+            checkTotalSeconds: hasCheckTimer ? checkTargetSec : null,
             checkInitialMinutes: hasCheckTimer ? (checkMins > 0 ? checkMins : Math.round(checkTargetSec / 60)) : null,
             checkEndTimestamp: checkEndTs,
             checkPausedRemainingSeconds: null,
             checkStatus: hasCheckTimer ? 'running' : null,
+            isCheckCompleted: false,
             checkStaffName: hasCheckTimer ? (modalCheckStaffName || s.checkStaffName || null) : null,
             checkProcess: hasCheckTimer ? (modalCheckProcess || s.checkProcess || 'チェック') : 'チェック',
             checkAlerted: false,
@@ -4125,10 +4110,12 @@ export default function SalonWorkScreen() {
           targetEndTimestamp: endTs,
           pausedRemainingSeconds: null,
           checkTargetSeconds: hasCheckTimer ? checkTargetSec : null,
+          checkTotalSeconds: hasCheckTimer ? checkTargetSec : null,
           checkInitialMinutes: hasCheckTimer ? (checkMins > 0 ? checkMins : Math.round(checkTargetSec / 60)) : null,
           checkEndTimestamp: checkEndTs,
           checkPausedRemainingSeconds: null,
           checkStatus: hasCheckTimer ? 'running' : null,
+          isCheckCompleted: false,
           checkStaffName: hasCheckTimer ? (modalCheckStaffName || null) : null,
           checkProcess: hasCheckTimer ? (modalCheckProcess || 'チェック') : 'チェック',
           checkAlerted: false,
@@ -4224,6 +4211,7 @@ export default function SalonWorkScreen() {
         };
       });
       saveSeatsToStorage(updated);
+      syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
       return updated;
     });
     if (Platform.OS !== 'web') {
@@ -4268,6 +4256,7 @@ export default function SalonWorkScreen() {
           };
         });
         saveSeatsToStorage(updated);
+        syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
         return updated;
       });
       if (Platform.OS !== 'web') {
@@ -4299,6 +4288,7 @@ export default function SalonWorkScreen() {
         };
       });
       saveSeatsToStorage(updated);
+      syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
       return updated;
     });
 
@@ -4373,6 +4363,7 @@ export default function SalonWorkScreen() {
         };
       });
       saveSeatsToStorage(updated);
+      syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
       return updated;
     });
     setIsCheckStaffModalVisible(false);
@@ -4564,9 +4555,11 @@ export default function SalonWorkScreen() {
         isNoHelpNeeded: false,
         // ★ ユーザー指定: チェックも消える
         checkTargetSeconds: null,
+        checkTotalSeconds: null,
         checkEndTimestamp: null,
         checkPausedRemainingSeconds: null,
         checkStatus: null,
+        isCheckCompleted: false,
         checkInitialMinutes: null,
         checkStaffName: null,
         checkProcess: 'チェック',
@@ -4582,17 +4575,7 @@ export default function SalonWorkScreen() {
     });
     setSeats(updatedSeats);
     saveSeatsToStorage(updatedSeats);
-
-    // ★ 相手のApple Watchへ即時ブロードキャスト通知
-    const resetNotifText = `🔄 ${currentUser}が【${seat.seatLabel || '席'}】のタイマーをリセットしました`;
-    syncSeatsToWatch(updatedSeats, userName, staffMembers, {
-      immediate: true,
-      notification: {
-        text: resetNotifText,
-        color: '#FF9500',
-        sourceUser: currentUser,
-      },
-    });
+    syncSeatsToWatch(updatedSeats, userName, staffMembers, { immediate: true });
 
     if (mainTimeupAlertedRef.current) {
       mainTimeupAlertedRef.current[seatId] = false;
