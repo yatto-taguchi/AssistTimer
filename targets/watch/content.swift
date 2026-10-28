@@ -19,7 +19,7 @@ final class WatchRealtimeClock {
 
 // MARK: - データモデル (絶対終了時刻 targetEndTime 基準)
 struct SeatTimerItem: Identifiable, Equatable {
-    let id: String
+    var id: String
     var seatNumber: Int
     var seatLabel: String? = nil // ★ ユーザー登録表示名（例: "1番席 (個室)"）
     var creatorName: String
