@@ -2932,8 +2932,15 @@ struct ContentView: View {
                                         }
                                     }
                                     sessionManager.timers = timers
+                                    sessionManager.markLocalSeatMod(seatId: item.id)
+                                    WatchAlarmCoordinator.shared.update(
+                                        timers: timers,
+                                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                                        soundOn: sessionManager.alarmSoundEnabled,
+                                        currentUserName: currentUserName
+                                    )
                                     sessionManager.sendActionToPhone(action: "CLAIM_CHECK", seatId: item.id)
-                                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                                     showNotification(text: "📤 \(item.displayCheckProcess)担当に立候補しました", color: Color(hex: "#30D158"))
                                 }
                             )
@@ -3644,8 +3651,15 @@ struct ContentView: View {
                             timers[idx].isNoHelpNeeded = false
                         }
                         sessionManager.timers = timers
+                        sessionManager.markLocalSeatMod(seatId: item.id)
+                        WatchAlarmCoordinator.shared.update(
+                            timers: timers,
+                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                            soundOn: sessionManager.alarmSoundEnabled,
+                            currentUserName: currentUserName
+                        )
                         sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": process, "assistantStaffName": staff])
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         showNotification(
                             text: "📤 \(staff)さんに【\(process)】を指定しました",
                             color: Color(hex: "#0A84FF")
@@ -3661,8 +3675,15 @@ struct ContentView: View {
                             timers[idx].isNoHelpNeeded = false
                         }
                         sessionManager.timers = timers
+                        sessionManager.markLocalSeatMod(seatId: item.id)
+                        WatchAlarmCoordinator.shared.update(
+                            timers: timers,
+                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                            soundOn: sessionManager.alarmSoundEnabled,
+                            currentUserName: currentUserName
+                        )
                         sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": process])
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         showNotification(
                             text: "📢 【\(item.displaySeatName)】\(process)担当を全員に募集通知しました！",
                             color: Color(hex: "#FF9F0A")
@@ -3678,8 +3699,15 @@ struct ContentView: View {
                             timers[idx].isNoHelpNeeded = true
                         }
                         sessionManager.timers = timers
+                        sessionManager.markLocalSeatMod(seatId: item.id)
+                        WatchAlarmCoordinator.shared.update(
+                            timers: timers,
+                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                            soundOn: sessionManager.alarmSoundEnabled,
+                            currentUserName: currentUserName
+                        )
                         sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": "ヘルプなし", "assistantStaffName": "ヘルプなし"])
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         showNotification(
                             text: "👤 【\(item.displaySeatName)】ヘルプなし（一人施術）に設定しました",
                             color: Color(hex: "#8E8E93")
@@ -3695,8 +3723,15 @@ struct ContentView: View {
                             timers[idx].isNoHelpNeeded = false
                         }
                         sessionManager.timers = timers
+                        sessionManager.markLocalSeatMod(seatId: item.id)
+                        WatchAlarmCoordinator.shared.update(
+                            timers: timers,
+                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                            soundOn: sessionManager.alarmSoundEnabled,
+                            currentUserName: currentUserName
+                        )
                         sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         showNotification(
                             text: "👤 【\(item.displaySeatName)】ヘルプ指定を未定に戻しました",
                             color: Color(hex: "#8E8E93")
@@ -3710,8 +3745,15 @@ struct ContentView: View {
                             timers[idx].checkStaff = staff
                         }
                         sessionManager.timers = timers
+                        sessionManager.markLocalSeatMod(seatId: item.id)
+                        WatchAlarmCoordinator.shared.update(
+                            timers: timers,
+                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                            soundOn: sessionManager.alarmSoundEnabled,
+                            currentUserName: currentUserName
+                        )
                         sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": staff, "checkProcess": checkProcess, "isSubCheck": true])
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         showNotification(
                             text: "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
                             color: Color(hex: "#30D158")
@@ -3725,8 +3767,15 @@ struct ContentView: View {
                             timers[idx].checkStaff = "募集中"
                         }
                         sessionManager.timers = timers
+                        sessionManager.markLocalSeatMod(seatId: item.id)
+                        WatchAlarmCoordinator.shared.update(
+                            timers: timers,
+                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                            soundOn: sessionManager.alarmSoundEnabled,
+                            currentUserName: currentUserName
+                        )
                         sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": checkProcess, "checkProcess": checkProcess, "isSubCheck": true])
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         showNotification(
                             text: "📢 【\(item.displaySeatName)】\(checkProcess)担当を全員に募集通知しました！",
                             color: Color(hex: "#FF9F0A")
@@ -3740,8 +3789,15 @@ struct ContentView: View {
                             timers[idx].checkStaff = nil
                         }
                         sessionManager.timers = timers
+                        sessionManager.markLocalSeatMod(seatId: item.id)
+                        WatchAlarmCoordinator.shared.update(
+                            timers: timers,
+                            mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                            soundOn: sessionManager.alarmSoundEnabled,
+                            currentUserName: currentUserName
+                        )
                         sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": "", "checkProcess": "チェック", "isSubCheck": true])
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         showNotification(
                             text: "👤 チェック担当を未定に戻しました",
                             color: Color(hex: "#8E8E93")
@@ -3814,7 +3870,7 @@ struct ContentView: View {
                             soundOn: sessionManager.alarmSoundEnabled,
                             currentUserName: currentUserName
                         )
-                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                        WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                         let extraPayload: [String: Any] = [
                             "checkTotalSeconds": validSec,
                             "checkEndTimestamp": checkEnd.timeIntervalSince1970 * 1000.0,
@@ -3923,8 +3979,15 @@ struct ContentView: View {
                         timers[idx].checkStaff = staff
                     }
                     sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    WatchAlarmCoordinator.shared.update(
+                        timers: timers,
+                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                        soundOn: sessionManager.alarmSoundEnabled,
+                        currentUserName: currentUserName
+                    )
                     sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": staff, "checkProcess": checkProcess, "isSubCheck": true])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                     showNotification(
                         text: "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
                         color: Color(hex: "#30D158")
@@ -3938,8 +4001,15 @@ struct ContentView: View {
                         timers[idx].checkStaff = "募集中"
                     }
                     sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    WatchAlarmCoordinator.shared.update(
+                        timers: timers,
+                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                        soundOn: sessionManager.alarmSoundEnabled,
+                        currentUserName: currentUserName
+                    )
                     sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": checkProcess, "checkProcess": checkProcess, "isSubCheck": true])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                     showNotification(
                         text: "📢 【\(item.displaySeatName)】\(checkProcess)担当を全員に募集通知しました！",
                         color: Color(hex: "#FF9F0A")
@@ -3953,8 +4023,15 @@ struct ContentView: View {
                         timers[idx].checkStaff = nil
                     }
                     sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    WatchAlarmCoordinator.shared.update(
+                        timers: timers,
+                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                        soundOn: sessionManager.alarmSoundEnabled,
+                        currentUserName: currentUserName
+                    )
                     sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["checkStaffName": "", "checkProcess": "チェック", "isSubCheck": true])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                     showNotification(
                         text: "👤 チェック担当を未定に戻しました",
                         color: Color(hex: "#8E8E93")
@@ -4121,8 +4198,15 @@ struct ContentView: View {
                         timers[idx].isNoHelpNeeded = false
                     }
                     sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    WatchAlarmCoordinator.shared.update(
+                        timers: timers,
+                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                        soundOn: sessionManager.alarmSoundEnabled,
+                        currentUserName: currentUserName
+                    )
                     sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": process, "assistantStaffName": staff])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                     showNotification(
                         text: "📤 \(staff)さんに【\(process)】を通知しました",
                         color: Color(hex: "#0A84FF")
@@ -4144,8 +4228,15 @@ struct ContentView: View {
                         }
                     }
                     sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    WatchAlarmCoordinator.shared.update(
+                        timers: timers,
+                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                        soundOn: sessionManager.alarmSoundEnabled,
+                        currentUserName: currentUserName
+                    )
                     sessionManager.sendActionToPhone(action: "RECRUIT_HELP", seatId: item.id, extra: ["helpProcess": process])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                     // 募集するの場合は全員に通知する！
                     showNotification(
                         text: "📢 【\(item.displaySeatName)】\(process)担当を全員に募集通知しました！",
@@ -4162,8 +4253,15 @@ struct ContentView: View {
                         timers[idx].isNoHelpNeeded = true
                     }
                     sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    WatchAlarmCoordinator.shared.update(
+                        timers: timers,
+                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                        soundOn: sessionManager.alarmSoundEnabled,
+                        currentUserName: currentUserName
+                    )
                     sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: item.id, extra: ["helpProcess": "ヘルプなし", "assistantStaffName": "ヘルプなし"])
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                     showNotification(
                         text: "👤 【\(item.displaySeatName)】ヘルプなし（一人施術）に設定しました",
                         color: Color(hex: "#8E8E93")
@@ -4182,8 +4280,15 @@ struct ContentView: View {
                         }
                     }
                     sessionManager.timers = timers
+                    sessionManager.markLocalSeatMod(seatId: item.id)
+                    WatchAlarmCoordinator.shared.update(
+                        timers: timers,
+                        mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                        soundOn: sessionManager.alarmSoundEnabled,
+                        currentUserName: currentUserName
+                    )
                     sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: item.id)
-                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    WidgetSync.save(timers: timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                     showNotification(
                         text: "👤 【\(item.displaySeatName)】ヘルプ指定を未定に戻しました",
                         color: Color(hex: "#8E8E93")

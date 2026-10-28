@@ -1159,7 +1159,7 @@ export default function SalonWorkScreen() {
   const getSeatCloudSignature = (seat) => {
     if (!seat) return '';
     const label = (seat.seatLabel || seat.name || '').replace(/\s*[\(（]サンプル[\)）]/g, '').trim();
-    return `${label}_${seat.status}_${seat.targetSeconds || seat.targetTime}_${seat.targetEndTimestamp}_${seat.pausedRemainingSeconds}_${seat.assistantStaffName}_${seat.helpProcess}_${seat.actionStatus}_${seat.isRecruiting}_${seat.isNoHelpNeeded}_${seat.checkEndTimestamp}_${seat.checkStatus}_${seat.checkStaffName}_${seat.comment}_${seat.isShampooing}`;
+    return `${label}_${seat.status}_${seat.targetSeconds || seat.targetTime}_${seat.targetEndTimestamp}_${seat.pausedRemainingSeconds}_${seat.assistantStaffName}_${seat.helpProcess}_${seat.actionStatus}_${seat.isRecruiting}_${seat.isNoHelpNeeded}_${seat.checkEndTimestamp}_${seat.checkStatus}_${seat.checkProcess}_${seat.checkStaffName}_${seat.comment}_${seat.isShampooing}`;
   };
 
   const syncChangedSeatsToCloud = async (newSeats) => {
@@ -1808,12 +1808,14 @@ export default function SalonWorkScreen() {
             stopAlarm('salon', `${seatId}-check`);
             const prevHist = s.history || [];
             const chkStaff = watchUser || s.checkStaffName || 'スタッフ';
+            const preservedCheckSec = s.checkTargetSeconds || s.checkTotalSeconds || 60;
             return {
               ...s,
               isCheckCompleted: true,
               checkStatus: 'completed',
               checkEndTimestamp: null,
-              checkTargetSeconds: null,
+              checkTargetSeconds: preservedCheckSec,
+              checkTotalSeconds: preservedCheckSec,
               checkStaffName: chkStaff,
               history: [
                 ...prevHist,
@@ -1925,12 +1927,14 @@ export default function SalonWorkScreen() {
               }
               const prevHist = s.history || [];
               const chkStaff = watchUser || s.checkStaffName || 'スタッフ';
+              const preservedCheckSec = s.checkTargetSeconds || s.checkTotalSeconds || 60;
               return {
                 ...s,
                 isCheckCompleted: true,
                 checkStatus: 'completed',
                 checkEndTimestamp: null,
-                checkTargetSeconds: null,
+                checkTargetSeconds: preservedCheckSec,
+                checkTotalSeconds: preservedCheckSec,
                 checkStaffName: chkStaff,
                 history: [
                   ...prevHist,
@@ -2093,29 +2097,8 @@ export default function SalonWorkScreen() {
 
       // ★ 何も変わらなければ元の配列を返す（不要な保存・Watch への同期を起こさない）
       if (!hasChanged) return prevSeats;
+      // ★ saveSeatsToStorage 内で syncChangedSeatsToCloud(updated) が呼ばれ、Supabase クラウドへ差分同期される（二重UPSERT防止）
       saveSeatsToStorage(updated);
-
-      // ★ Watchからの操作（タイマー開始・延長・停止・ヘルプ指定）を Supabase クラウドへ直行送信！
-      const targetSalonId = cloudSalonIdRef.current || (currentSalonRef.current?.id && currentSalonRef.current.id !== 'workspace-free' ? currentSalonRef.current.id : null);
-      const changedSeat = matchedIdx >= 0 ? updated[matchedIdx] : updated.find((s) => s.id === seatId);
-      if (targetSalonId && changedSeat) {
-        const sig = getSeatCloudSignature(changedSeat);
-        lastSyncedSeatsStateRef.current[changedSeat.id] = sig;
-        upsertCloudTimer(targetSalonId, changedSeat)
-          .then((savedCloudSeat) => {
-            if (savedCloudSeat?.id) {
-              lastSyncedSeatsStateRef.current[savedCloudSeat.id] = sig;
-              if (changedSeat.id !== savedCloudSeat.id) {
-                setSeats((curr) =>
-                  curr.map((item) =>
-                    item.id === changedSeat.id ? { ...item, id: savedCloudSeat.id, cloudTimerId: savedCloudSeat.id } : item
-                  )
-                );
-              }
-            }
-          })
-          .catch((e) => console.warn('[WatchAction] direct upsertCloudTimer failed:', e));
-      }
 
       // ★ 誰かが止めた・変更したアクションを関係者のApple Watchへ即時ブロードキャスト通知
       let watchNotif = null;
@@ -3871,12 +3854,14 @@ export default function SalonWorkScreen() {
         text: chkText,
         type: 'check',
       };
+      const preservedCheckSec = s.checkTargetSeconds || s.checkTotalSeconds || 60;
       return {
         ...s,
         isCheckCompleted: true,
         checkStatus: 'completed',
         checkEndTimestamp: null,
-        checkTargetSeconds: null,
+        checkTargetSeconds: preservedCheckSec,
+        checkTotalSeconds: preservedCheckSec,
         history: [...prevHistory, historyItem],
       };
     });

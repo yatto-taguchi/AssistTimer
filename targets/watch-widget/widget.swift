@@ -53,12 +53,15 @@ struct ComplicationSeat {
         
         // 作成者（左側）: 自分が作成したなら「自分」、他人ならその名前
         let isCreatorMe: Bool = {
+            if creatorRaw == "自分" || creatorRaw == "あなた" {
+                return true
+            }
             if !me.isEmpty && !creatorRaw.isEmpty {
                 return creatorRaw.caseInsensitiveCompare(me) == .orderedSame
             }
-            return related || creatorRaw.isEmpty
+            return creatorRaw.isEmpty
         }()
-        let creatorDisplay = isCreatorMe ? "自分" : (creatorRaw.isEmpty ? "スタイリスト" : creatorRaw)
+        let creatorDisplay = isCreatorMe ? "自分" : creatorRaw
         
         // 最終担当（右側 / シャンプー・コーミング等）
         let shampooRaw = (shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -72,6 +75,9 @@ struct ComplicationSeat {
         } else if !shampooRaw.isEmpty {
             // 最終担当決定済み
             let isTargetMe: Bool = {
+                if shampooRaw == "自分" || shampooRaw == "あなた" {
+                    return true
+                }
                 if !me.isEmpty {
                     return shampooRaw.caseInsensitiveCompare(me) == .orderedSame
                 }
@@ -572,7 +578,7 @@ struct ComplicationView: View {
                     return "\(proc) 未定"
                 } else if rawCheckStaff == "募集中" {
                     return "\(proc) 募集中"
-                } else if !me.isEmpty && rawCheckStaff.caseInsensitiveCompare(me) == .orderedSame {
+                } else if rawCheckStaff == "自分" || rawCheckStaff == "あなた" || (!me.isEmpty && rawCheckStaff.caseInsensitiveCompare(me) == .orderedSame) {
                     return "\(proc) 自分"
                 } else {
                     return "\(proc) \(rawCheckStaff)"

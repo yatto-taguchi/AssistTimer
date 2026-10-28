@@ -1745,10 +1745,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             scheduledNotificationEventKeys.insert(e.key)
         }
 
-        // ★ 2. 不要になった古い通知ID（予約待ち・およびすでにWatch画面に表示済みの通知）を非同期で掃除
-        if targets.isEmpty {
-            center.removeAllDeliveredNotifications()
-        }
+        // ★ 2. 不要になった古い通知ID（予約待ち・およびすでにWatch画面に表示済みのアラーム通知のみ）を非同期で掃除
+        // ※ 相手からの操作通知（"assisttimer.peer.*"）を巻き込んで消さないよう、prefix（"assisttimer.alarm."）一致のみ削除する
         let activeKeyPrefixes = targets
             .filter { !(session != nil && sessionStarted && isSameTarget(key1: sessionKey, key2: $0.key)) }
             .map { "\(prefix)\($0.key)." }
