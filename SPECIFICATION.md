@@ -3008,3 +3008,36 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
        - チェックタイマー設定済み時は「チェック残り時間ボタン（タップで `.subCheckActionBranch`）」と「`チェック担当を指名・募集` ボタン（タップでチェック内容・担当者/全員募集を指定）」を上下に配置。
        - チェックタイマー未設定時も **`[ ＋ チェックタイマー・担当を追加 ]`** ボタンを表示し、後からでもその場でチェック分数・内容・担当者を設定して `.standard` 画面へ戻ることができる。
     4. **最下段**: **`[ 完了（一覧へ戻る） ]`** ボタンを配置し、ヘルプ指定完了後にワンタップで一覧へ戻ることができる。
+
+
+---
+
+## 42. Supabase クラウド連携、サロン招待コード参加・メンバー管理、およびサロン客席タイマーリアルタイム双方向同期仕様 (Build 87)
+
+#### 1. Supabase クラウド基盤設計と構成 (`src/utils/supabase.js`, Supabase Database)
+- **背景・目的**:
+  - サロン内の複数のスタッフ（スタイリスト・アシスタント等）が各自の端末（iPhone / Apple Watch）から同一サロンの客席タイマーをリアルタイムに共有・操作・確認できるクラウド同期基盤を構築。
+- **テーブル構成**:
+  - `salons`: サロン基本情報（`id` [UUID], `name`, `invite_code` [6桁英数字], `owner_user_id`, `created_at`, `updated_at`）
+  - `salon_members`: 所属スタッフ（`id` [UUID], `salon_id`, `user_id`, `display_name`, `role` ['owner'|'member'], `joined_at`, `last_active_at`）
+  - `salon_timers`: 客席タイマーのリアルタイム状態（`id` [UUID], `salon_id`, `seat_id`, `seat_name`, `is_running`, `total_seconds`, `target_end_timestamp`, `paused_remaining_seconds`, `is_check_timer_active`, `check_total_seconds`, `check_target_end_timestamp`, `check_process`, `help_assigned_to`, `help_target_process`, `updated_at`）
+- **Supabase Realtime**:
+  - `supabase_realtime` publication に `salon_members` と `salon_timers` を追加し、WebSocket 経由での変更即時ブロードキャスト受信を有効化。
+- **端末一意識別子 (`userId`)**:
+  - `AsyncStorage`（`@salon_my_user_id`）に端末固有の UUID を自動生成・永続化し、煩わしいログイン・パスワード入力不要（キーレス）で全スタッフを識別。
+
+#### 2. サロン招待コード参加とメンバー管理 (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)
+- **確定仕様**:
+  - **招待コード（6桁英数字）での参加**: サロン作成時に重複のない6桁の招待コード（例: `ABC123`）を自動発行。別端末の「サロン参加」ボタンから招待コードを入力するだけで瞬時にサロンを特定し、メンバーとして参加登録。
+  - **リアルタイムメンバー同期**: `subscribeSalonMembers` による監視で、新規メンバーの参加やニックネーム変更を即座に全員の画面へ反映。
+  - **メンバー一覧UIの拡充**: 「👑 オーナー」「あなた」「スタイリスト / アシスタント」バッジを明瞭に表示し、誰が参加しているか一目で把握可能。
+
+#### 3. 客席タイマーのリアルタイム双方向同期アーキテクチャ (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)
+- **確定仕様**:
+  - **ハイブリッド同期モデル（通信量最小化＆ゼロ遅延）**:
+    - 毎秒のカウントダウンは各端末のローカル時計（`Date.now()` と `targetEndTimestamp` の差分）で自律的に計算。
+    - クラウドへはタイマー開始・延長・一時停止・停止・席名変更・ヘルプ担当指定・チェックタイマー等の「状態変更時」のみ送信し、Supabase の通信量を最小化しつつネットワーク遅延ゼロの滑らかな表示を実現。
+  - **エコー・無限ループ防止ガード**:
+    - クラウドから受信したタイマー更新をローカル状態へ適用する際、`isRemoteSyncRef` ガードを立てることで、受信したデータを再度クラウドへ逆送信する無限ループやエコーバックを完全防止。
+  - **Apple Watch 連携の透過的同期**:
+    - Apple Watch からの操作も iPhone の `saveSeatsToStorage` を経由するため、Watch 上で行われた客席タイマーの開始・延長・停止・ヘルプ指定も自動的に Supabase を通じてサロン内全員の端末へ瞬時に伝播。
