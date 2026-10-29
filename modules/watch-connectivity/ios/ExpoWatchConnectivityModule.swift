@@ -109,7 +109,9 @@ public class ExpoWatchConnectivityModule: Module {
 
       guard session.activationState == .activated else {
         // まだアクティベート中の場合は保留キューに保管し、アクティベート完了時に自動送信
+        self.eventLock.lock()
         self.pendingApplicationContext = cleanContext
+        self.eventLock.unlock()
         session.activate()
         promise.resolve(true)
         return
@@ -122,7 +124,9 @@ public class ExpoWatchConnectivityModule: Module {
 
       do {
         try session.updateApplicationContext(cleanContext)
+        self.eventLock.lock()
         self.pendingApplicationContext = nil
+        self.eventLock.unlock()
         promise.resolve(true)
       } catch {
         print("[ExpoWatchConnectivity] updateApplicationContext warning: \(error.localizedDescription)")
@@ -174,7 +178,9 @@ public class ExpoWatchConnectivityModule: Module {
       let cleanUserInfo = self.sanitizeDictionary(userInfo)
 
       guard session.activationState == .activated else {
+        self.eventLock.lock()
         self.pendingUserInfo = cleanUserInfo
+        self.eventLock.unlock()
         session.activate()
         promise.resolve(true)
         return
@@ -201,7 +207,9 @@ public class ExpoWatchConnectivityModule: Module {
       } else {
         transfer = session.transferUserInfo(cleanUserInfo)
       }
+      self.eventLock.lock()
       self.pendingUserInfo = nil
+      self.eventLock.unlock()
       promise.resolve(transfer.isTransferring)
     }
   }
@@ -240,10 +248,13 @@ public class ExpoWatchConnectivityModule: Module {
 
   fileprivate func flushPendingApplicationContext(session: WCSession) {
     guard session.isPaired else { return }
-    guard let pending = self.pendingApplicationContext else { return }
+    self.eventLock.lock()
+    let pending = self.pendingApplicationContext
+    self.pendingApplicationContext = nil
+    self.eventLock.unlock()
+    guard let pending = pending else { return }
     do {
       try session.updateApplicationContext(pending)
-      self.pendingApplicationContext = nil
     } catch {
       print("[ExpoWatchConnectivity] flushPendingApplicationContext failed: \(error.localizedDescription)")
     }
@@ -251,9 +262,16 @@ public class ExpoWatchConnectivityModule: Module {
 
   fileprivate func flushPendingUserInfo(session: WCSession) {
     guard session.isPaired, session.isWatchAppInstalled else { return }
-    guard let pending = self.pendingUserInfo else { return }
-    session.transferUserInfo(pending)
+    self.eventLock.lock()
+    let pending = self.pendingUserInfo
     self.pendingUserInfo = nil
+    self.eventLock.unlock()
+    guard let pending = pending else { return }
+    if session.isComplicationEnabled && session.remainingComplicationUserInfoTransfers > 0 {
+      session.transferCurrentComplicationUserInfo(pending)
+    } else {
+      session.transferUserInfo(pending)
+    }
   }
 
   fileprivate func dispatchEvent(_ name: String, _ body: [String: Any]) {
@@ -289,6 +307,13 @@ public class ExpoWatchConnectivityModule: Module {
     }
     let s = WCSession.default
     let delegateOk = (sessionDelegate != nil) && (s.delegate === sessionDelegate)
+    self.eventLock.lock()
+    let actErr = lastActivationError
+    let rxCount = nativeReceivedCount
+    let rxAt = lastNativeReceivedAt
+    let rxKind = lastNativeReceivedKind
+    let rxAction = lastNativeReceivedAction
+    self.eventLock.unlock()
     return [
       "supported": true,
       "activationState": activationStateText(s.activationState),
@@ -296,11 +321,11 @@ public class ExpoWatchConnectivityModule: Module {
       "isWatchAppInstalled": s.isWatchAppInstalled,
       "isReachable": s.isReachable,
       "delegateOk": delegateOk,
-      "activationError": lastActivationError,
-      "nativeReceivedCount": nativeReceivedCount,
-      "lastNativeReceivedAt": lastNativeReceivedAt,
-      "lastNativeReceivedKind": lastNativeReceivedKind,
-      "lastNativeReceivedAction": lastNativeReceivedAction
+      "activationError": actErr,
+      "nativeReceivedCount": rxCount,
+      "lastNativeReceivedAt": rxAt,
+      "lastNativeReceivedKind": rxKind,
+      "lastNativeReceivedAction": rxAction
     ]
   }
 
@@ -308,12 +333,22 @@ public class ExpoWatchConnectivityModule: Module {
     sendEvent("onStatusChanged", buildStatus())
   }
 
+  fileprivate func setLastActivationError(_ errorText: String) {
+    self.eventLock.lock()
+    self.lastActivationError = errorText
+    self.eventLock.unlock()
+  }
+
   // ★ JSへ渡す前にネイティブ層で受信を記録（JSに届いているかの切り分け用）
   fileprivate func recordReceived(kind: String, body: [String: Any]) {
+    let actionStr = (body["action"] as? String) ?? (body["type"] as? String) ?? "?"
+    let nowMs = Date().timeIntervalSince1970 * 1000.0
+    self.eventLock.lock()
     nativeReceivedCount += 1
-    lastNativeReceivedAt = Date().timeIntervalSince1970 * 1000.0
+    lastNativeReceivedAt = nowMs
     lastNativeReceivedKind = kind
-    lastNativeReceivedAction = (body["action"] as? String) ?? (body["type"] as? String) ?? "?"
+    lastNativeReceivedAction = actionStr
+    self.eventLock.unlock()
   }
 }
 
@@ -329,7 +364,7 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
   func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
     let errorText = error?.localizedDescription ?? ""
     DispatchQueue.main.async {
-      self.module?.lastActivationError = errorText
+      self.module?.setLastActivationError(errorText)
       if activationState == .activated {
         self.module?.flushPendingApplicationContext(session: session)
         self.module?.flushPendingUserInfo(session: session)

@@ -271,12 +271,12 @@ export default function HomeScreen({ navigation }) {
   }, [homeQuickStats?.todaySessions]);
 
   // バイブレーション制御ヘルパー（強度およびタイミング個別設定対応）
-  // ※ Watch側の「携帯の音 OFF（isWatchMuted）」は音声・アラーム音のみをミュートし、バイブレーションは設定に従い常に作動させる
+  // ※ タイム終了時（type === 'finish'）のバイブレーションは仕様（Section 40.1）により常時ON（スマホのアラーム音OFF時でも本体振動で作動）
   const triggerVibration = (type) => {
-    if (!isVibrationEnabled) return;
+    if (type !== 'finish' && !isVibrationEnabled) return;
     try {
       if (type === 'finish') {
-        if (!isVibFinishEnabled) return;
+        if (isVibFinishEnabled === false) return;
         if (vibrationTimeoutRef.current) {
           clearTimeout(vibrationTimeoutRef.current);
           vibrationTimeoutRef.current = null;
@@ -1280,11 +1280,14 @@ export default function HomeScreen({ navigation }) {
     setWatchMutedState(false);
     // タイマーが10秒以上進行した状態での直接リセットは「途中終了（中断）」として自動カウント
     if (!fromSave) {
-      const elapsedSeconds = isCountUp 
-        ? targetTime + remainingTime 
-        : targetTime - remainingTime;
+      const curIsCountUp = isCountUpRef.current ?? isCountUp;
+      const curTarget = targetTimeRef.current || targetTime || 0;
+      const curRem = remainingTimeRef.current ?? remainingTime ?? 0;
+      const elapsedSeconds = curIsCountUp 
+        ? curTarget + curRem 
+        : curTarget - curRem;
       if (elapsedSeconds >= 10) {
-        recordInterruption(selectedCategory || null);
+        recordInterruption(selectedCategoryRef.current || selectedCategory || null);
       }
     }
 
@@ -1628,12 +1631,13 @@ export default function HomeScreen({ navigation }) {
         }
       }
     } else if (cleanAction === 'toggle') {
+      const isFromPhone = payload?.fromPhone === true;
       if (isCountUpRef.current || (isRunningRef.current && remainingTimeRef.current <= 0)) {
         if (resetTimerRef.current) {
           resetTimerRef.current(true);
         }
       } else if (toggleTimerRef.current) {
-        toggleTimerRef.current(true);
+        toggleTimerRef.current(!isFromPhone);
       }
     } else if (cleanAction === 'reset') {
       const incomingStopEnd = Number(payload?.targetEndTimestamp || payload?.extra?.targetEndTimestamp || payload?.expectedEnd || payload?.extra?.expectedEnd || 0);
@@ -1849,6 +1853,14 @@ export default function HomeScreen({ navigation }) {
           updateCachedMainTimerState(updated);
           syncMainTimerToWatch(updated, { immediate: true });
         }
+      }
+    } else if (cleanAction === 'update_sound') {
+      const rawSound = payload?.playSoundOnPhone ?? payload?.extra?.playSoundOnPhone ?? payload?.alarmSoundEnabled ?? payload?.extra?.alarmSoundEnabled;
+      const playPhoneSound = rawSound === true || rawSound === 1 || rawSound === 'true';
+      setWatchMutedState(!playPhoneSound);
+      if (!playPhoneSound) {
+        stopAllAlarms('main');
+        if (soundRef.current) soundRef.current.stopAsync().catch(() => {});
       }
     }
   }, [setWatchMutedState]);
@@ -2399,6 +2411,10 @@ export default function HomeScreen({ navigation }) {
       targetEndTimeRef.current = null;
     }
     overStartTimeRef.current = null;
+    lastAutoFinishedAtRef.current = 0;
+    lastAutoFinishedEndTimestampRef.current = 0;
+    lastResetTargetEndRef.current = 0;
+    lastMainTimerResetAtRef.current = 0;
     triggeredVoicesRef.current.clear();
     triggeredOverVoicesRef.current.clear();
     isFirstCheerTriggeredRef.current = false;
@@ -2416,6 +2432,11 @@ export default function HomeScreen({ navigation }) {
         isPaused: false,
         isCountUp: false,
         isCountUpEnabled: !!isCountUpEnabledRef.current,
+        explicitStop: false,
+        isExplicitReset: false,
+        isAutoFinished: false,
+        lastResetTargetEndTimestamp: 0,
+        lastResetAt: 0,
         genre: selectedCategoryRef.current || selectedCategory || '',
         isPreCountingDown: !!isPreCountingDownRef.current,
         preCountdownSeconds: preCountdownTimeRef.current || 0,
@@ -2617,6 +2638,8 @@ export default function HomeScreen({ navigation }) {
         remainingTime: snapTarget,
         targetTime: snapTarget,
         targetEndTimestamp: 0,
+        lastResetTargetEndTimestamp: lastResetTargetEndRef.current || 0,
+        lastResetAt: lastMainTimerResetAtRef.current || 0,
         isRunning: false,
         isPaused: false,
         isCountUp: false,
@@ -2697,6 +2720,8 @@ export default function HomeScreen({ navigation }) {
         remainingTime: snapTarget,
         targetTime: snapTarget,
         targetEndTimestamp: 0,
+        lastResetTargetEndTimestamp: lastResetTargetEndRef.current || 0,
+        lastResetAt: lastMainTimerResetAtRef.current || 0,
         isRunning: false,
         isPaused: false,
         isCountUp: false,
@@ -3025,6 +3050,14 @@ export default function HomeScreen({ navigation }) {
 
   const handleToggleAlarm = () => {
     Vibration.vibrate(30);
+    if (isAlarmSoundEnabled) {
+      stopAllAlarms('main');
+      if (soundRef.current) {
+        soundRef.current.stopAsync().catch(() => {});
+      } else if (sound) {
+        sound.stopAsync().catch(() => {});
+      }
+    }
     toggleAlarmSoundEnabled();
   };
 

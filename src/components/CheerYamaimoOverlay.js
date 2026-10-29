@@ -163,7 +163,7 @@ const CheerYamaimoOverlay = forwardRef(({
       }
 
       await Audio.setAudioModeAsync({
-        playsInSilentModeIOS: true,
+        playsInSilentModeIOS: !!playsInSilentMode,
         staysActiveInBackground: true,
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: false,

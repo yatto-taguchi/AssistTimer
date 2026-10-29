@@ -241,22 +241,35 @@ export const mapSeatToCloudTimer = (seat, salonId, userId) => {
   const seatLabel = rawLabel.replace(/\s*[\(（]サンプル[\)）]/g, '').trim() || '1番席';
   const targetSeconds = Math.round(Number(seat.targetSeconds || seat.targetTime || 0));
   const rawCheckSec = Math.round(Number(seat.checkTargetSeconds || seat.checkTotalSeconds || 0));
-  const hasRunningCheck = seat.checkStatus === 'running' && Number(seat.checkEndTimestamp) > 0;
+  const checkPausedRem = Math.round(Number(seat.checkPausedRemainingSeconds || 0));
+  const hasRunningCheck =
+    (seat.checkStatus === 'running' || seat.checkStatus === 'timeup') &&
+    (Number(seat.checkEndTimestamp) > 0 || checkPausedRem > 0);
   const isCheckDone = !hasRunningCheck && (seat.checkStatus === 'completed' || !!seat.isCheckCompleted);
   const checkTotalSeconds = isCheckDone
     ? (rawCheckSec > 0 ? rawCheckSec : Math.max(60, Math.round(Number(seat.checkInitialMinutes || 1) * 60)))
-    : (seat.checkStatus === 'stopped' && !seat.checkEndTimestamp ? 0 : rawCheckSec);
+    : (seat.checkStatus === 'stopped' && !seat.checkEndTimestamp && checkPausedRem <= 0 ? 0 : rawCheckSec);
   const targetEndTs = Math.round(Number(seat.targetEndTimestamp || 0));
   const pausedRemSec = Math.round(Number(seat.pausedRemainingSeconds || 0));
-  const checkEndTs = (!isCheckDone && seat.checkEndTimestamp) ? Math.round(Number(seat.checkEndTimestamp)) : null;
+  const checkEndTs = !isCheckDone
+    ? (seat.checkEndTimestamp
+        ? Math.round(Number(seat.checkEndTimestamp))
+        : (checkPausedRem > 0 ? Date.now() + checkPausedRem * 1000 : null))
+    : null;
 
-  const isShampooing = !!seat.isShampooing || seat.actionStatus === 'shampoo' || seat.helpProcess === 'シャンプー';
+  const isShampooing =
+    !!seat.isShampooing || (seat.status !== 'running' && seat.actionStatus === 'shampoo');
+  const actionLabel = seat.actionStatus ? (ACTION_ID_TO_LABEL[seat.actionStatus] || seat.actionStatus) : '';
   const resolvedHelpProcess =
-    seat.helpProcess ||
-    (seat.actionStatus ? (ACTION_ID_TO_LABEL[seat.actionStatus] || seat.actionStatus) : (isShampooing ? 'シャンプー' : null));
+    actionLabel || seat.helpProcess || (isShampooing ? 'シャンプー' : null);
   const resolvedAssistant = seat.isRecruiting
     ? '募集中'
     : (seat.isNoHelpNeeded ? 'ヘルプなし' : (seat.assistantStaffName || null));
+
+  const resolvedSortOrder =
+    typeof seat.sortOrder === 'number' && seat.sortOrder > 0
+      ? Math.round(seat.sortOrder)
+      : (Number(seat.seatNumber) > 0 ? Math.round(Number(seat.seatNumber)) : 0);
 
   return {
     salon_id: salonId,
@@ -270,7 +283,7 @@ export const mapSeatToCloudTimer = (seat, salonId, userId) => {
     target_end_timestamp: targetEndTs,
     paused_remaining_seconds: pausedRemSec,
     comment: seat.comment || null,
-    sort_order: typeof seat.sortOrder === 'number' ? Math.round(seat.sortOrder) : 0,
+    sort_order: resolvedSortOrder,
     created_by: seat.createdBy || userId,
     check_target_end_timestamp: checkEndTs,
     check_total_seconds: checkTotalSeconds > 0 ? checkTotalSeconds : null,
@@ -283,7 +296,7 @@ export const mapSeatToCloudTimer = (seat, salonId, userId) => {
 /**
  * クラウドsalon_timersのレコードをローカルSeatItem形式にマッピング
  */
-export const mapCloudTimerToSeat = (cloudTimer, index = 0) => {
+export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
   const rawName = cloudTimer.seat_label || '1番席';
   const name = String(rawName).replace(/\s*[\(（]サンプル[\)）]/g, '').trim() || '1番席';
   const targetSeconds = Math.round(Number(cloudTimer.target_seconds || 0));
@@ -292,21 +305,28 @@ export const mapCloudTimerToSeat = (cloudTimer, index = 0) => {
   const status = cloudTimer.status || 'idle';
   const targetEndTs = Math.round(Number(cloudTimer.target_end_timestamp || 0));
   const pausedRemSec = Math.round(Number(cloudTimer.paused_remaining_seconds || 0));
-  const hasActiveCheck = status === 'running' && checkSec > 0 && checkEndTs && checkEndTs > 0;
+  const hasActiveCheck = checkSec > 0 && checkEndTs && checkEndTs > 0;
   const isCheckCompleted = !hasActiveCheck && checkSec > 0;
   const numMatch = String(name).match(/\d+/);
-  const seatNumber = numMatch ? parseInt(numMatch[0], 10) : (index + 1);
+  const sortOrderNum = Number(cloudTimer.sort_order);
+  const seatNumber = numMatch
+    ? parseInt(numMatch[0], 10)
+    : (sortOrderNum > 0
+        ? Math.round(sortOrderNum)
+        : (typeof index === 'number' ? index + 1 : 0));
 
   const rawAssist = cloudTimer.assistant_staff_name || '';
   const isRecruiting = rawAssist === '募集中';
   const isNoHelpNeeded = rawAssist === 'ヘルプなし' || rawAssist === 'none';
   const assistantStaffName = isRecruiting ? '' : rawAssist;
   const helpProcess = cloudTimer.help_process || '';
-  const isShampooing = !!cloudTimer.is_shampooing || helpProcess === 'シャンプー' || helpProcess === 'shampoo';
+  const isShampooing = !!cloudTimer.is_shampooing;
   const actionStatus = isShampooing ? 'shampoo' : (LABEL_TO_ACTION_ID[helpProcess] || null);
   const isReset = (status === 'paused' || status === 'idle') && pausedRemSec <= 0 && targetEndTs <= 0;
   const nowMs = Date.now();
   const isOver = status === 'running' && targetEndTs > 0 && targetEndTs <= nowMs;
+  const checkPausedRemainingSeconds =
+    status === 'paused' && hasActiveCheck ? Math.max(0, Math.round((checkEndTs - nowMs) / 1000)) : null;
 
   return {
     id: cloudTimer.id,
@@ -335,13 +355,14 @@ export const mapCloudTimerToSeat = (cloudTimer, index = 0) => {
     sortOrder: cloudTimer.sort_order || 0,
     createdBy: cloudTimer.created_by,
     checkEndTimestamp: checkEndTs,
+    checkPausedRemainingSeconds: checkPausedRemainingSeconds,
     checkTargetSeconds: checkSec > 0 ? checkSec : null,
     checkTotalSeconds: checkSec > 0 ? checkSec : null,
     checkInitialMinutes: checkSec > 0 ? Math.max(1, Math.round(checkSec / 60)) : null,
     checkProcess: cloudTimer.check_process || 'チェック',
     checkStaffName: cloudTimer.check_staff_name || '',
     checkStaff: cloudTimer.check_staff_name || '',
-    checkStatus: hasActiveCheck ? 'running' : (isCheckCompleted ? 'completed' : 'stopped'),
+    checkStatus: hasActiveCheck ? (status === 'running' && checkEndTs <= nowMs ? 'timeup' : 'running') : (isCheckCompleted ? 'completed' : 'stopped'),
     isCheckCompleted: isCheckCompleted,
     updatedAt: cloudTimer.updated_at ? new Date(cloudTimer.updated_at).getTime() : nowMs,
   };
@@ -364,7 +385,32 @@ export const fetchSalonTimers = async (salonId) => {
       console.warn('fetchSalonTimers error:', error);
       return [];
     }
-    return (data || []).map(mapCloudTimerToSeat);
+    const mapped = (data || []).map((row, idx) => mapCloudTimerToSeat(row, idx));
+    const usedNums = new Set();
+    let maxUsed = 0;
+    mapped.forEach((seat) => {
+      if (/\d+/.test(String(seat.seatLabel || ''))) {
+        const n = Number(seat.seatNumber);
+        if (n > 0 && !usedNums.has(n)) {
+          usedNums.add(n);
+          if (n > maxUsed) maxUsed = n;
+        }
+      }
+    });
+    return mapped.map((seat) => {
+      if (/\d+/.test(String(seat.seatLabel || ''))) {
+        return seat;
+      }
+      const n = Number(seat.seatNumber);
+      if (n > 0 && !usedNums.has(n)) {
+        usedNums.add(n);
+        if (n > maxUsed) maxUsed = n;
+        return seat;
+      }
+      maxUsed += 1;
+      usedNums.add(maxUsed);
+      return { ...seat, seatNumber: maxUsed };
+    });
   } catch (e) {
     console.warn('fetchSalonTimers failed:', e);
     return [];
@@ -378,7 +424,7 @@ const _recentLocalPayloadSigs = new Map();
 
 const getCloudPayloadSignature = (p) => {
   if (!p) return '';
-  return `${p.seat_label || ''}|${p.status || ''}|${Number(p.target_seconds || 0)}|${Number(p.target_end_timestamp || 0)}|${Number(p.paused_remaining_seconds || 0)}|${p.assistant_staff_name || ''}|${p.help_process || ''}|${Number(p.check_target_end_timestamp || 0)}|${Number(p.check_total_seconds || 0)}|${p.check_process || ''}|${p.check_staff_name || ''}`;
+  return `${p.seat_label || ''}|${p.color_staff_name || ''}|${p.status || ''}|${Number(p.target_seconds || 0)}|${Number(p.target_end_timestamp || 0)}|${Number(p.paused_remaining_seconds || 0)}|${p.assistant_staff_name || ''}|${p.help_process || ''}|${p.is_shampooing ? 1 : 0}|${p.comment || ''}|${Number(p.check_target_end_timestamp || 0)}|${Number(p.check_total_seconds || 0)}|${p.check_process || ''}|${p.check_staff_name || ''}`;
 };
 
 const recordLocalCloudPayload = (p) => {

@@ -596,17 +596,40 @@ struct ComplicationView: View {
             Spacer(minLength: 2)
             
             // 右側: チェック用のめっちゃ細いインジケーター（オレンジ / 1分前で赤）
-            ProgressView(
-                timerInterval: checkStart...checkEnd,
-                countsDown: true
-            )
-            .progressViewStyle(.linear)
-            .tint(checkBarColor)
-            .labelsHidden()
-            .scaleEffect(y: 0.35)
-            .frame(width: 36, height: 3)
-            .clipped()
+            if isCheckOver {
+                ProgressView(
+                    timerInterval: checkEnd...checkEnd.addingTimeInterval(180),
+                    countsDown: false
+                )
+                .progressViewStyle(.linear)
+                .tint(checkBarColor)
+                .labelsHidden()
+                .scaleEffect(y: 0.35)
+                .frame(width: 36, height: 3)
+                .clipped()
+            } else {
+                ProgressView(
+                    timerInterval: checkStart...checkEnd,
+                    countsDown: true
+                )
+                .progressViewStyle(.linear)
+                .tint(checkBarColor)
+                .labelsHidden()
+                .scaleEffect(y: 0.35)
+                .frame(width: 36, height: 3)
+                .clipped()
+            }
         }
+    }
+
+    private func compactSeatLabel(for seat: ComplicationSeat) -> String {
+        if seat.isMainTimer { return "メイン" }
+        let trimmed = seat.seatLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "\(seat.seatNumber)番" }
+        if trimmed.hasSuffix("番席") {
+            return String(trimmed.dropLast(1))
+        }
+        return trimmed
     }
 
     private var circular: some View {
@@ -614,7 +637,7 @@ struct ComplicationView: View {
             AccessoryWidgetBackground()
             VStack(spacing: 0) {
                 if let seat = activeSeat {
-                    Text(seat.isMainTimer ? "メイン" : "\(seat.seatNumber)番")
+                    Text(compactSeatLabel(for: seat))
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(seat.isMainTimer ? Color(red: 0.19, green: 0.82, blue: 0.35) : nil)
                         .widgetAccentable(!seat.isMainTimer)
@@ -641,7 +664,7 @@ struct ComplicationView: View {
     private var inline: some View {
         Group {
             if let seat = activeSeat {
-                Text("\(seat.isMainTimer ? "メインタイマー" : "\(seat.seatNumber)番席") \(isPreCountingDown ? "準備" : (isOver ? "超過" : "残り")) ") + timerText(for: seat)
+                Text("\(seat.isMainTimer ? "メインタイマー" : seat.seatLabel) \(isPreCountingDown ? "準備" : (isOver ? "超過" : "残り")) ") + timerText(for: seat)
             } else {
                 Text("AssistTimer 00:00")
             }
@@ -655,7 +678,7 @@ struct ComplicationView: View {
             .widgetAccentable()
             .widgetLabel {
                 if let seat = activeSeat {
-                    Text("\(seat.isMainTimer ? "メイン" : "\(seat.seatNumber)番") ") + timerText(for: seat)
+                    Text("\(compactSeatLabel(for: seat)) ") + timerText(for: seat)
                 } else {
                     Text("00:00")
                 }

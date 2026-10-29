@@ -3194,3 +3194,205 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
     - `WatchAlarmCoordinator` に `acknowledgeSeatTimer(seatId:checkOnly:skipRefresh:)` を新設し、客席タイマーの停止・ヘルプ開始・チェック完了・時間延長時は、その席（全体またはチェックのみ）のアラーム・通知・該当セッションのみをピンポイントで消火する。
     - `acknowledgeRinging` で `mergedTargets.isEmpty` 時に `sessionKey` をフォールバック採用する条件を「`explicitTarget == nil` かつ（`sessionStarted == true` または予定時刻到達済み）」に限定し、未来の予約中スマートアラームを誤って消火しないよう保護する。
     - `restartRemainingTimerAfterCheck` でもチェック鳴動除去直後に `if ringing.isEmpty { stopForegroundHaptics() }` を実行し、フォアグラウンドの振動・アラーム音を即座に停止する。
+
+---
+
+## 46. チェックタイマー停止・工程開始ボタンのタッチ後無反応ラグ（数秒〜数十秒遅延）の根本原因解明および完全解消仕様 (2026-10-29 / Build 94+)
+
+- **記録日・対象バージョン**: `2026-10-29` / App Version `1.0.6` (Build `94` 以降)
+- **対象ファイル**: `targets/watch/content.swift`, `targets/watch/alarm.swift`
+- **背景・発生していた症状**:
+  - Build 93 で `WidgetSync.save()` の非同期化や `deferSeatSheetCloseAction` を導入した後も、Apple Watch でチェックタイマー等の「タイマーを止める」「チェックに入る（〇〇に入る）」ボタンを押した際、**押した瞬間にハプティック振動（`.click`）は鳴るものの画面が閉じず、数秒〜数十秒後にようやく反応する**現象が残存していた。
+- **判明した5つの根本原因（履歴検証による特定）**:
+  1. **`0.15秒` フォールバックが watchOS シート閉鎖アニメーション（約 `0.35秒`）の真っ最中に発火し、閉鎖トランザクションを破壊していた (`targets/watch/content.swift`)**:
+     - Build 93 の `deferSeatSheetCloseAction` / `deferMainTimerSheetCloseAction` は `0.15秒` 後にフォールバックで `executePendingSeatSheetAction()` を実行していた。
+     - watchOS のモーダルシート閉鎖アニメーションは約 `0.30〜0.35秒` かかるため、`onDismiss` が呼ばれる前の **閉鎖アニメーション途中（`0.15秒` 時点）に必ずフォールバックが先行発火** し、親の `self.timers[idx]`（`checkTimerSeconds = 0` 等）を更新していた。しかもこのフォールバックは `timeActionTargetId = nil` をクリアしていなかったため、閉鎖途中のシートが強制再評価されて SwiftUI のプレゼンテーション制御がスタックしていた。
+  2. **シート閉鎖アニメーション中の `0.5秒` クロック（`WatchRealtimeClock`）が `liveItem` を上書きし、押したボタンの View 階層を閉鎖途中で消滅させていた (`targets/watch/content.swift`)**:
+     - `TimeActionSheet` の `subCheckStopAndHelpButtons` は `if let checkSec = liveItem.checkTimerSeconds, checkSec > 0, let checkEnd = liveItem.checkEndTime` を表示条件としている。
+     - ボタン押下後に `0.5秒` クロックが鳴ると、シート内の `.onReceive(WatchRealtimeClock.shared.publisher)` が `self.liveItem = latest`（すでに `checkTimerSeconds = 0` に更新された親データ）を代入してしまい、**シートが閉じ切る前にボタン自身の View ツリーが消滅** して watchOS のシート閉鎖完了通知（`onDismiss`）がロスト・フリーズしていた。
+  3. **チェック用スマートアラーム破棄後の遅延 XPC コールバック（`didInvalidateWith`）が、新設された本体タイマーの `sessionKey` を誤参照してシートを即座に再表示させていた (`targets/watch/alarm.swift`)**:
+     - `restartRemainingTimerAfterCheck` でチェック用 `WKExtendedRuntimeSession`（`s1`）を `invalidate()` し、`0.25秒` 後に `invalidatingSessions.removeAll()` でクリアして残りの本体タイマー用セッション（`s2`）を新規作成していた。
+     - しかし watchOS デーモン（`extendedruntimed`）から `s1` の `didInvalidateWith` XPC コールバックが `0.25秒` 以降に届くと、`wasInvalidating` が `false` になり、かつ `endedKey` が現在の `self.sessionKey`（`s2` の `<seatId>-main@...`）を参照してシステムアラーム終了分岐へ突入し、`pendingOpenedAlarmEvent` にイベントをセットして **閉じたばかりの `TimeActionSheet` を再び強制オープン** させていた。
+  4. **未開始セッションの破棄による 0ms 同期 `refresh()` → `UNUserNotificationCenter` 56件再登録の無限 XPC ストーム (`targets/watch/alarm.swift`)**:
+     - 画面遷移中や前セッション破棄直後に新セッションの `start(at:)` が OS に拒絶されて `didInvalidateWith` が呼ばれた際、0ms で同期的に `self.refresh()` → `notificationSignature = "__FORCE__"` → `UNUserNotificationCenter` へ最大56件の通知再投入 → 再び `start(at:)` を繰り返すメインスレッド XPC ストームが発生し、数十秒間の UI フリーズを引き起こしていた。
+  5. **モーダルシート表示中の背面 `ContentView` の毎 `0.5秒` 全体再描画と `item.id` 不一致 (`targets/watch/content.swift`)**:
+     - モーダルシートが前面を覆っている間も、背面 `ContentView` が `0.5秒` ごとに `self.now = tick` と全7個の `.sheet` クロージャを再評価していた。
+     - また、シートをローカル席ID（`"seat-1"`）で開いている間にクラウドUUIDが到着すると、コールバック内の `self.timers[idx]` は更新されるが `acknowledgeSeatTimer(seatId: item.id)` 等に古い `item.id` が渡り、現在の `timers[idx].id` と不一致になっていた。
+- **確定仕様（再発防止の不変条件）**:
+  1. **閉鎖中フラグ `isClosingSheet` と `closeSheetAfter` によるシート内状態の完全凍結 (`targets/watch/content.swift`)**:
+     - `TimeActionSheet` および `MainTimerActionSheet` に `@State private var isClosingSheet = false` を設け、シートを閉じるすべてのボタン操作は `closeSheetAfter { ... }` を経由させる。
+     - `isClosingSheet == true` の間は `.onReceive(WatchRealtimeClock.shared.publisher)` による `now` / `liveItem` / `displayItem` の更新を一切スキップし、シートが完全に閉じ切るまでボタン階層の View ツリーを100%保持する。
+  2. **`onDismiss` 完了待ち＋`0.42秒` 強制バインディング解除フォールバック (`targets/watch/content.swift`)**:
+     - `deferSeatSheetCloseAction` / `deferMainTimerSheetCloseAction` は閉鎖アニメーション中（`0.15秒`）に親ステートを書き換えず、原則として watchOS のシート閉鎖アニメーションが完了した `onDismiss` で `executePendingSeatSheetAction()` / `executePendingMainTimerSheetAction()` を実行する。
+     - 万が一 watchOS 側で `dismiss()` がドロップされた場合に備え、アニメーション完了後の `0.42秒` 後に発火する `closeFallbackWorkItem` / `mainCloseFallbackWorkItem` がペンディングアクションを実行すると同時に、親側のすべてのシートバインディング（`timeActionTargetId = nil`, `showingMainTimerActionSheet = false` 等）を確実に強制解除する。
+     - また、シート閉鎖時およびアラームイベント開封時に `suppressOvertimeSheetUntil = Date().addingTimeInterval(1.5)` を設定し、`scenePhase == .active` 時の `presentOvertimeActionSheetIfNeeded()` が閉じたばかりのシートを再表示するのを防止する。
+  3. **モーダルシート表示中の背面 `ContentView` クロック休止と `actualSeatId` 統一 (`targets/watch/content.swift`)**:
+     - `isAnyModalSheetPresented && alarm.ringing.isEmpty` の間は、背面 `ContentView` の `0.5秒` クロック更新（`self.now = tick` および `timers` 再代入）をスキップし、前面シートのアニメーションとタッチ応答に CPU/メインスレッドを100%割り当てる。
+     - 全シートコールバック内で `let actualSeatId = self.timers[idx].id` を取得し、`acknowledgeSeatTimer`・`restartRemainingTimerAfterCheck`・`applyLocalCheckComplete` 等すべてに最新の `actualSeatId` を渡す。
+     - `syncSeatTimersState` 実行時は `skipNextTimersOnChangeSync = true` により `.onChange(of: timers)` との二重 `alarm.update` / 二重 `WidgetSync.save` を防止する。
+  4. **セッション個体別キー管理 `sessionKeysBySession`・意図的破棄記録 `intentionallyInvalidatedSessions`・未開始セッション再試行クールダウン (`targets/watch/alarm.swift`)**:
+     - `intentionallyInvalidatedSessions` により、0.25秒経過後であってもアプリ側が意図的に `invalidate()` したセッションの遅延 `didInvalidateWith` を100%識別する。
+     - `sessionKeysBySession[s] = key` により各 `WKExtendedRuntimeSession` インスタンス固有のイベントキーを保持し、古いセッションの `didInvalidateWith` が新しく予約された別セッションの `self.sessionKey` を誤参照することを根絶する。
+     - `didInvalidateWith` のシステムアラーム終了処理（`pendingOpenedAlarmEvent` 等）は `wasStarted == true && !wasInvalidating` の場合のみ実行する。
+     - 未開始（`!wasStarted && !wasInvalidating`）の予約セッションが OS に破棄された場合は、`nextSmartAlarmScheduleAllowedAt = Date().addingTimeInterval(1.2)` のクールダウンを設けて `1.25秒` 後に再試行し、同期 `refresh()` ループと通知再登録ストームを完全に遮断する。
+     - `acknowledgeRinging` における重複した `removePendingNotificationRequests` / `removeDeliveredNotifications` 呼び出し（`removeNotifications(forEventKey:)` と完全に重複していた248件×ターゲット数のIPC呼び出し）を撤廃する。
+
+### 46.2 仕様書横断コード監査（全8項目）による不変条件（イミュータブル仕様）の完全統一 (2026-10-29)
+
+過去の仕様書履歴（第35節・第36節・第37節・第38節・第39節・第41節・第44節・第45節）と全ソースコードを突き合わせた横断監査を実施し、他箇所の修正時に先祖返り・不整合を起こしていた以下8項目をすべて解消・統一した。
+
+1. **アラーム鳴動オーバーレイ（`alarmOverlay` / `activeRingingAction`）と通常シートの停止・工程開始ロジック完全統一 (`targets/watch/content.swift`)**:
+   - **課題**: アラーム鳴動オーバーレイおよび上部停止ボタンでは、古い `timers.firstIndex(where: { $0.id == targetSeatId })` 検索のままでクラウドUUID到着時に空振りするリスクがあり、また全体タイマー停止・工程開始時に `helpProcess` / `shampooStaff` / `isRecruiting` / `isNoHelpNeeded` / `clearCheck()` / `isCollapsed = true` のクリアおよび `skipNextTimersOnChangeSync = true` が漏れていた。さらに撤廃済みの `isRingingMainTimer` 分岐が残存していた。
+   - **修正**: `findSeatIndex(seatId: targetSeatId, title: activeTarget.title)` によるID＋席番号フォールバック検索に統一し、全体タイマーの「タイマーを止める」「〇〇に入る」押下時は `TimeActionSheet` と同一の全項目クリア＋スリムバー格納（`isCollapsed = true`）＋`skipNextTimersOnChangeSync = true` を適用。不要な `isRingingMainTimer` 分岐を完全撤去。
+2. **`ShampooActionSheet`（「工程操作・変更」）における「シャンプーに入る」「コーミングを開始」のステータス誤設定修正 (`targets/watch/content.swift`)**:
+   - **課題**: `shampooActionSheetView` の `onStartShampoo` と `onStartCombing` が、工程を開始するのではなく `.normal`（「完了」）と `"COMPLETE_SHAMPOO"` を送信してしまっていた。
+   - **修正**: `onStartShampoo` は `.shampoo`（`"START_SHAMPOO"`）、`onStartCombing` は `.combing`（`"UPDATE_STATUS"`, `extra: ["actionStatus": "combing"]`）を正しくセットし、`findSeatIndex(for: item)` と `skipNextTimersOnChangeSync = true` を通じて即座に反映するよう修正。併せて `cardsScrollView.onClaimCheck` も同様に統一。
+3. **システムアラーム「開く」復帰時（`restoreSeatTimerForOpenedAlarm` / `handleOpenedAlarmEvent` / `resolveSheetItem`）の双方向ID解決 (`targets/watch/content.swift`)**:
+   - **課題**: `restoreSeatTimerForOpenedAlarm` が `id == item.id` のみで検索しており、予約後にクラウドUUIDへ切り替わった席を復元できないケースがあった。また `resolveSheetItem` が逆方向（UUID → ローカルID）や `sessionManager.timers` フォールバックに対応していなかった。
+   - **修正**: `restoreSeatTimerForOpenedAlarm` で `id` または `seatNumber` で検索し、`item.id` と `"seat-\(item.seatNumber)"` 両方のローカル停止記録を解除した上で `isRunning = true`・`isCollapsed = false` に復元するよう修正。`findSeatIndex(seatId:title:)` を新設し、`resolveSheetItem` と `handleOpenedAlarmEvent` でも双方向ID解決＋`sessionManager.timers` フォールバックを適用。
+4. **稼働中（非超過）の共有タイマー操作シートの「＜ 戻る」ワンタップ閉鎖と標準画面上部「＜ 戻る」配置 (`targets/watch/content.swift`)**:
+   - **課題**: 一覧画面（`cardsScrollView`）から稼働中（非超過）の共有タイマーをタップして直接 `.timerActionBranch` を開いた際、左上の「＜ 戻る」を押すと `if initialTimerBranchMode && isOvertime` の条件のせいで一覧へ戻らず `.standard` 画面へ遷移し、戻るのに2タップ必要になっていた。また `.standard` 画面の最上部に「＜ 戻る」がなかった。
+   - **修正**: `timerActionBranchScrollView` の「＜ 戻る」を `if initialTimerBranchMode { dismiss() } else { subMode = .standard }` に修正し、一覧から直接開いた場合は1タップで即座に閉じ、サムネイルマップから `.standard` 経由で進んだ場合は `.standard` に戻るよう統一。さらに `standardTopTimerSection` のヘッダー左上にも「＜ 戻る」（`dismiss()`）を配置。
+5. **チェックタイマー操作画面（`subCheckActionBranchScrollView`）表示中に他端末でチェック完了された際のフォールバック表示 (`targets/watch/content.swift`)**:
+   - **課題**: チェック操作画面を開いている最中にペア端末でチェック完了されると、`isCheckOvertime` も `currentCheckDisplaySeconds` も `false`/`nil` となり、タイム表示欄が空白になっていた。
+   - **修正**: `else` 分岐を追加し、`00:00 (完了)` をグレー表示してレイアウト崩れを防止。
+6. **スタッフ名変更時（`onReceive(sessionManager.$currentUserName)`）のアラーム対象・文字盤即時再評価 (`targets/watch/content.swift`)**:
+   - **課題**: 初回起動時（`currentUserName.isEmpty`）のみ `sessionManager.$currentUserName` を反映するガードになっていたため、サロン参加モーダル等で後からスタッフ名を変更した際に `WatchAlarmCoordinator` の関係者判定（第44.7.8節）が旧スタッフ名のままになっていた。
+   - **修正**: `currentUserName` が新しい非空文字列に変わるたびに更新し、即座に `alarm.update(...)` と `WidgetSync.save(..., forceReload: true)` を実行するよう修正。
+7. **`MainTimerCard` / `MainTimerActionSheet` の未使用ヘルプ指定デッドコード完全撤去 (`targets/watch/content.swift`)**:
+   - **課題**: 第37.7節で撤廃済みのメインタイマー終了後メニュー・ヘルプ指定の未使用コード（`handleUpdateMainTimerHelpMenu`、`handleEnterMainTimerHelp`、`MainTimerCard.mainHelpMenuSection`、`MainTimerActionSheet.selectHelpProcess` 等）が残存していた。
+   - **修正**: これらのデッドコードを完全撤去し、メインタイマーを純粋な個人用タイマー構造に整理。
+8. **iPhone 側クラウド同期マージ時の端末固有設定（音ON/OFF・履歴・折りたたみ状態）保持と `RESET_ZERO` デッドコード整理 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: `initCloudSalon` の `fetchSalonTimers` マージ時に、稼働中保護分岐以外の席で `return ct` をそのまま返していたため、端末固有の `alarmSoundEnabled` / `watchAlarmSoundEnabled` / `history` / `collapsedAtEnd` が初期値で上書きされていた。また `subscribeSalonTimers` で `watchAlarmSoundEnabled` の保持が漏れており、`handleWatchAction` の `case 'RESET_ZERO'` に到達不能な重複 `return` が残っていた。
+   - **修正**: `fetchSalonTimers` マージ時および `subscribeSalonTimers` 受信時に `alarmSoundEnabled`・`watchAlarmSoundEnabled`・`history`・`collapsedAtEnd` を確実に引き継ぐよう修正し、`case 'RESET_ZERO'` の到達不能コードを除去。
+
+### 46.3 第2回仕様書＆全コード横断精査（全9項目）によるクラウド・Watch・iPhone・文字盤の完全整合化 (2026-10-29)
+
+第46.2節に続き、Watch通知バックグラウンド処理・iPhone側Watchアクション受信・Supabaseクラウドマッピング・文字盤コンプリケーション・メインタイマー振動制御の再精査を実施し、以下9項目をすべて解消・統一した。
+
+1. **Watch側バックグラウンド通知「アラーム停止」時の双方向ID解決・スリムバー格納統一 (`targets/watch/content.swift`)**:
+   - **課題**: `applyLocalStop` および `applyLocalCheckComplete` が `timers.firstIndex(where: { $0.id == seatId })` の完全一致のみで検索していたため、通知予約時のローカルID（`"seat-1"`）とクラウド同期後のUUIDが異なると停止やチェック完了後の残り全体タイマー再予約（`restartRemainingTimerAfterCheck`）が空振りしていた。また `applyLocalStop` で `isCollapsed = true` / `setCollapseOverride` が設定されていなかった。
+   - **修正**: `findTimerIndex(forSeatId:)` ヘルパーにより `canonicalSeatId` および席番号（`seatNumber`）で確実に該当席を特定し、`actualId` と `seatId` の双方に対してローカル停止・チェック完了保護・スリムバー折りたたみ（`isCollapsed = true`）を即座に記録・反映するよう統一。
+2. **Watch側 `alarmOverlay` における客席タイマー停止時のメインタイマー巻き添えリセット防止 (`targets/watch/content.swift`)**:
+   - **課題**: `alarmOverlay` の「タイマーを止める」ボタンで `hadMain` 判定に `(self.mainTimer ?? sessionManager.mainTimer)?.isOvertime == true` が含まれていたため、メインタイマーを超過カウントアップさせたまま別の客席タイマーのアラームを止めると、鳴動対象ではないメインタイマーまで勝手に `00:00` にリセットされていた。
+   - **修正**: `alarm.ringing.contains(where: { $0.seatId == "main-timer" })` のみで判定するよう厳格化し、客席タイマーのアラーム停止とメインタイマーを完全分離。あわせて `alarm.stop()` 直後に `self.timers = sessionManager.timers` を即時同期。
+3. **Watch側 `TimeActionSheet` の停止・工程開始時の即時スリムバー格納・ステータス初期化・再入力時アラーム消火 (`targets/watch/content.swift`)**:
+   - **課題**: `timeActionSheetView` の `onStop` / `onEnterHelp` / `onCompleteCheck` で `isCollapsed = true` および `setCollapseOverride(seatId:collapsed:true)`（`onStop` では `status = .normal` も）が設定されておらず、シート閉鎖直後にカードが開いたまま残り、1〜2秒後のiPhone同期で遅れて折りたたまれる表示ジャンプが起きていた。また `onReinputTime` で超過中の旧アラーム消火（`acknowledgeSeatTimer`）が漏れていた。
+   - **修正**: `onStop` / `onEnterHelp` / `onCompleteCheck` のすべてで即時 `status = .normal`・`isCollapsed = true`・`setCollapseOverride(..., collapsed: true)` を適用し、`onReinputTime` では `acknowledgeSeatTimer` と `clearLocalStop`（`watchStartedSeatTimes` 記録込み）を即時実行するよう統一。
+4. **iPhone側 `handleWatchAction` におけるクラウドUUID席のAlarmKitアラーム確実停止＆`ENTER_HELP` 時のチェックタイマー解除・履歴記録 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: `STOP_ALARM` / `STOP_TIMER` / `COMPLETE_CHECK` 等で `matchedIdx` 解決前の生の `seatId` のみで `stopAlarm` を呼んでいたため、iPhone側の席IDがクラウドUUIDの場合にAlarmKitアラームが止まらなかった。また `ENTER_HELP` でチェックタイマーのクリア・`stopAlarm`・履歴記録が漏れていた。
+   - **修正**: `matchedIdx` 解決後の `s.id` に対しても確実に `stopAlarm('salon', `${s.id}-main`)` / `stopAlarm('salon', `${s.id}-check`)` を呼び出し、`ENTER_HELP` でもチェックタイマー完全解除・アラートフラグリセット・履歴記録を行うよう統一。
+5. **iPhone側での超過・タイムアップ後の時間延長時におけるアラート発火フラグおよび `checkStatus: 'running'` の完全復帰 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: チェックタイマーが `0:00` 到達後（`checkStatus === 'timeup'`）にWatchから時間延長（`ADJUST_TIME` with `isSubCheck: true`）しても `checkStatus` が `'timeup'` のまま残り、再タイムアップ時に通知が鳴らなかった。本タイマーも超過後に延長（`ADJUST_TIME` / `handleExtend5Min` / `handleConfirmQuickTimeAdjust`）した際に `mainTimeupAlertedRef`・`oneMinuteHelpAlertRef`・`escalatedAlertRef` がリセットされず、再到達時に通知が鳴らなかった。
+   - **修正**: チェックタイマー延長時は `checkStatus: 'running'`・`isCheckCompleted: false`・`checkAlertedRef` リセットを行い、本タイマー延長時も未来時刻へ復帰した際は全アラート発火済みフラグと `isOver: false`・`timeUpTimestamp: null` をリセットして再到達時に100%通知・アラームが鳴動するよう修正。
+6. **iPhone側＆クラウド同期における `helpProcess` / `actionStatus` / `isShampooing` の整合化と「募集中」解除 (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)**:
+   - **課題**: `mapSeatToCloudTimer` と `mapCloudTimerToSeat` で、終了後予定メニューが `helpProcess === 'シャンプー'` であるだけでタイマー稼働中（`status === 'running'`）でも `is_shampooing: true` と判定されていた。また iPhone側の `handleAssignAssistant` / `handleSelectActionStatus` で `helpProcess` の同期更新と `isRecruiting: false` 解除が漏れていた。
+   - **修正**: 稼働中は `isShampooing: false` を維持し、iPhone側で工程やヘルプ担当を変更した際は `helpProcess`・`actionStatus`・`isRecruiting: false` を一括同期するよう修正。
+7. **クラウド同期のStale Closure解消・一時停止時のチェック完了誤判定防止・差分シグネチャ拡充・`workspace-free` ガード (`src/screens/SalonWorkScreen.js`, `src/utils/salonCloudService.js`)**:
+   - **課題**: `initCloudSalon` 内の `subscribeSalonMembers` がマウント時の古い `seats`・`userName` を参照してWatchを上書きしていた。また `mapCloudTimerToSeat` で一時停止中（`status === 'paused'`）の席のチェックタイマーが `isCheckCompleted = true` と誤判定されていた。さらにクラウド差分シグネチャに `color_staff_name`・`comment`・`is_shampooing` が含まれておらず、`handleSaveUserName` で `'workspace-free'` ガードと `checkStaffName` 更新が漏れていた。
+   - **修正**: `subscribeSalonMembers` で `_cachedCurrentSeats` と `userNameRef.current` を参照するよう修正し、一時停止中のチェック残り秒数保持・差分シグネチャ全項目網羅・`handleSaveUserName` の `'workspace-free'` ガードおよび `checkStaffName` 更新を実装。
+8. **Watchからの `ADD_SEAT` 重複防止・`0:00` リセット席のクイック再開時の設定分数更新・メインタイマー席移管時の残留状態クリア (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: `ADD_SEAT` 受信時に同じ席番号の待機席が存在すると無視または重複カード生成が起きていた。また `0:00` リセット席をクイック調整（`handleConfirmQuickTimeAdjust`）で再開した際に `targetSeconds: 0` のまま「設定0分」と表示され、`handleAssignMainTimerToSeat` でも前回のチェックやヘルプ状態が残留していた。
+   - **修正**: `ADD_SEAT` で既存の同一ID/同一席番号があればその席のUUID・席名を維持して稼働更新し、`handleConfirmQuickTimeAdjust` で `targetSeconds` / `initialMinutes` を正しく更新、`handleAssignMainTimerToSeat` で残留フィールドをすべて初期化するよう修正。
+9. **文字盤コンプリケーション全ファミリーでのカスタム席名対応＆メインタイマー消音時のiPhone本体バイブレーション確実作動 (`targets/watch-widget/widget.swift`, `src/screens/HomeScreen.js`)**:
+   - **課題**: `widget.swift` の `circular`・`inline`・`corner` で `seat.seatLabel` ではなく `"\(seat.seatNumber)番"` がハードコードされていた。また `HomeScreen.js` の `triggerVibration('finish')` が `if (!isVibrationEnabled) return;`（初期値 `false`）でブロックされ、スマホ消音時（Section 40.1）に本体バイブレーションが作動していなかった。
+   - **修正**: 全コンプリケーションでカスタム席名（`seat.seatLabel` / `compactSeatLabel`）を表示し、チェック超過時のプログレスバーもカウントアップ表示に対応。`HomeScreen.js` では `type === 'finish'` 時に `isVibrationEnabled` に阻まれず本体バイブレーションが作動するよう修正し、`applyTimeInSeconds` でもリセット保護タイムスタンプをクリアするよう統一。
+
+### 46.4 第3回全ファイル深層監査（全9項目）による実行時例外・音設定即時同期・履歴写真保存・ネイティブスレッド安全性の完全修正 (2026-10-29)
+
+第46.3節に続き、全画面・ストレージ・ネイティブモジュールにわたる第3回深層監査を実施し、以下9項目をすべて解消した。
+
+1. **メインタイマー時間変更時（`applyTimeInSeconds`）の未定義Ref参照（`lastResetAtRef`）による `ReferenceError` 例外の修正 (`src/screens/HomeScreen.js`)**:
+   - **課題**: 宣言されているRef名は `lastMainTimerResetAtRef` であるにもかかわらず、`applyTimeInSeconds` 内で `lastResetAtRef.current = 0;` と記述されていたため、時間変更時に実行時例外が発生し、モーダル閉鎖やWatch同期が中断されていた。
+   - **修正**: `lastMainTimerResetAtRef.current = 0;` および `lastAutoFinishedEndTimestampRef.current = 0;` を正しく参照するよう修正し、全画面の `*Ref.current` 参照に未定義変数がないことを静的検証で確認。
+2. **iPhoneメインタイマーの「タイマーを止める（保存モーダル起動）」押下時の `lastResetAt` / `lastResetTargetEndTimestamp` 付与と `syncMainTimerToWatch` 停止フラグ有効期限の整合化 (`src/screens/HomeScreen.js`, `src/screens/SalonWorkScreen.js`)**:
+   - **課題**: `handleOpenSaveModal` / `handleOpenSaveInTimeModal` の `stoppedState` に `lastResetTargetEndTimestamp` と `lastResetAt` が欠落しており、かつ `syncMainTimerToWatch` の `resetAgeMs` フォールバックが `0`（`< 5000`）になっていたため、停止フラグが永続化したりWatch主導のメインタイマーが止まらない不整合があった。
+   - **修正**: `stoppedState` に両タイムスタンプを付与し、`syncMainTimerToWatch` の `resetAgeMs` フォールバックを `Infinity` に統一。
+3. **Watch側 `MainTimerActionSheet` の「ウォッチの音」「スマホの音」トグルの即時反映およびiPhone双方向同期 (`targets/watch/content.swift`, `src/screens/HomeScreen.js`)**:
+   - **課題**: `MainTimerActionSheet` で「スマホの音 ON/OFF」を切り替えても `UserDefaults` に保存されるのみで、稼働中の `mainTimer` やiPhone側（`isWatchMuted` / AlarmKit）へ即時同期されていなかった。またメインタイマー開始・時間変更時に既存 `mainTimer` の音設定が `UserDefaults` から再取得されていなかった。
+   - **修正**: トグル操作時に `displayItem` および `WatchSessionManager.shared.mainTimer` を即時更新し、`MAIN_TIMER_UPDATE_SOUND` アクションでiPhone側へ即時同期（OFF時は鳴動中の音・AlarmKitも即座に停止）。メインタイマー開始・時間設定時にも最新の `UserDefaults` 音設定を反映。
+4. **Watch側 `ShampooActionSheet` におけるローカル変更保護（`markLocalSeatMod`）網羅および中間チェック完了時の全体ヘルプ保持 (`targets/watch/content.swift`)**:
+   - **課題**: `onFinishCombing`・`onStartCheck`・`onFinishCheck`・`onClearStaff` で `markLocalSeatMod` が呼ばれておらず、また `onStartCheck` / `onFinishCheck` で中間チェックを完了した際に本タイマーの `helpProcess`（「シャンプー」等）や `isRecruiting` まで消去されていた。
+   - **修正**: 全コールバックで `markLocalSeatMod`（ローカルID・クラウドUUID双方）を呼び出し、チェック完了時は `helpProcess == "チェック"` の場合を除き全体ヘルプ工程・募集状態を保持するよう修正。
+5. **Watch側 `processReceivedData` における一時停止席への誤った `markLocalStop` 防止と、`localStops` 発動時のヘルプ初期化・`collapseOverrides` のID引き継ぎ (`targets/watch/content.swift`)**:
+   - **課題**: カウントダウン途中の一時停止（`pausedRemainingSeconds > 0`）でも `markLocalStop` が呼ばれて残り時間が `00:00` に潰されていたほか、`localStops` 発動時にヘルプ・ステータスの初期化が漏れ、`collapseOverrides` がクラウドUUID到着前のローカルID（`prevKey`）を引き継いでいなかった。
+   - **修正**: `parsed[i].isZero` のときのみ `markLocalStop` を記録し、`localStops` 発動時はヘルプ・ステータス・折りたたみを完全初期化、`collapseOverrides` でも `prevKey` を引き継ぐよう修正。
+6. **iPhoneサロン画面のタイム設定モーダル（`handleStartSeatTimer`）・施術終了（`handleFinishSeat`）・リセット・新規席追加の状態整合化 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: `handleStartSeatTimer` で前回の停止・超過フラグ（`isReset`, `collapsedAtEnd`, `isOver`, `timeUpTimestamp`, `escalationLevel`）のクリアや `additional` / `edit` 時の `isShampooing: false` / `pausedRemainingSeconds: null`・`modalComment` 反映が漏れていた。また `handleFinishSeat` / `handleExecuteResetSeatTimer` で `stopAlarm` やフリータイマーの `deleteCloudTimer` が呼ばれず、`handleAddNewSeatMaster` で `seatNumber` が採番されていなかった。
+   - **修正**: 全経路でフラグ初期化・`stopAlarm`・クラウド削除・`maxSeatNum + 1` による `seatNumber` 採番を完備。
+7. **サロンメンバーのカスタム呼び名（`customNickname`）保持およびメンバー名変更時の客席担当者名自動連動 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: `normalizeStaffMembers` がクラウド同期のたびにローカルの `customNickname` をクラウドの `display_name` で上書きしていたほか、`handleSaveMemberCustomNickname` や `subscribeSalonMembers` でメンバー名が変わった際に客席の `colorStaffName` / `assistantStaffName` / `checkStaffName` が旧名のまま残っていた。
+   - **修正**: `normalizeStaffMembers` で既存メンバーの `customNickname` を保持し、名前変更時は客席の担当者名も一括更新してクラウド・Watchへ即時同期するよう修正。あわせて `isStaffNameMe` で `m.user_id` と `m.userId` の双方を判定。
+8. **「記録・統計」画面（`RecordsScreen.js`）における複数写真変更時の保存・表示不整合の修正 (`src/screens/RecordsScreen.js`, `src/utils/recordStorage.js`)**:
+   - **課題**: `handleChangePhoto` で最大4枚の写真を選択しても `updateRecordPhoto` に1枚目しか渡しておらず、かつ `recordStorage.js` 側で `photoUris` 配列を更新していなかったため、モーダルを閉じると変更前の古い `photoUris[0]` に戻ってしまっていた。
+   - **修正**: `updateRecordPhoto` がURI配列を受け取って `photoUri` と `photoUris` の双方を永続化するよう修正。
+9. **WatchConnectivityコンテキスト保護・ネイティブスレッド安全性・超過鳴動中ミュート即時消火・設定画面プレビュー多重再生防止 (`modules/watch-connectivity/`, `src/utils/alarmScheduler.js`, `src/screens/HomeScreen.js`, `src/screens/SettingsScreen.js`, `src/components/CheerYamaimoOverlay.js`)**:
+   - **課題**: 初回 `syncMainTimerToWatch` 時の `_contextSeats` 引き継ぎ、`ExpoWatchConnectivityModule.swift` の共有プロパティへのロック保護、超過鳴動中にアラーム設定をOFFにした際の `AlarmKit.cancel` / `soundRef` 即時停止、設定画面のプレビュー連打時の `Audio.Sound` 重複再生、および `playsInSilentMode` 設定の反映漏れ。
+   - **修正**: `_contextSeats` と `lastSyncedMainTimer` による `applicationContext` 完全保護、`eventLock` によるネイティブスレッド保護、ミュート時の即時消火、`previewSoundRef` による確実なアンロード、および `playsInSilentModeIOS: !!playsInSilentMode` の統一を実装。
+
+### 46.5 第4回全コード横断監査（全9項目）による非数値席名の衝突防止・サロン切り替え分離・遅延Watch停止の誤消火防止・`isNoHelpNeeded` 整合化 (2026-10-29)
+
+第46.4節に続き、さらに全コードを横断した第4回深層監査を実施し、以下9項目をすべて解消した。
+
+1. **数字を含まない席名（「個室」「VIP席」「シャンプー台」「フリー枠」等）のクラウド同期・Watch同期における席番号衝突・上書き防止 (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)**:
+   - **課題**: `mapCloudTimerToSeat` で席名に数字がない場合に `index + 1`（Realtime購読や単体保存では常に `1`）へフォールバックしていたため、ローカルマージ処理の `seatNumber` 一致判定で「1番席」と「個室」が同一席と誤認されて上書きされていた。また `formatSeatsPayload` でも数字なし席が `index + 1` となり、Apple Watch側の席キー（`seat-\(seatNumber)`）が既存の番号席と衝突していた。
+   - **修正**: `mapSeatToCloudTimer` で `seatNumber` を `sort_order` に保存し、`mapCloudTimerToSeat` / `fetchSalonTimers` および `formatSeatsPayload` に2パス重複回避ロジック（数字入り席名の番号を優先予約したうえで数字なし席に衝突しない一意の `seatNumber` を割り当て）を導入。さらに `initCloudSalon` / `subscribeSalonTimers` のマージ判定で、異なるクラウドUUIDを持つ席同士は絶対に統合せず、`seatNumber` フォールバックも双方の席名に同じ数字が含まれる場合のみに限定。
+2. **タイム設定モーダル内の席名変更保存（`handleSaveSeatLabel`）における `oldSeatLabel` 引数受け渡しと即時同期の修正 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: `upsertCloudTimer` の第3引数に `{ oldSeatLabel }` を渡していたため2引数仕様の `upsertCloudTimer(salonId, seat)` で参照されず、ローカルの `name` プロパティ更新も漏れていた。
+   - **修正**: 第2引数の席オブジェクト内に `oldSeatLabel` と `name: trimmed` を含めて渡し、`syncSeatsToWatch` も `{ immediate: true }` で即時同期するよう統一。
+3. **「ヘルプなし（`isNoHelpNeeded`）」設定席に対する後続Watch操作およびiPhone「追加タイム・時間変更」でのフラグ更新・解除の完全網羅 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: 一度 `isNoHelpNeeded: true` になった席に対し、Watchから `START_TIMER`・`ASSIGN_HELP`・`RECRUIT_HELP`・`CLEAR_STAFF` を行ったり、iPhoneで `additional` / `edit` モードから更新した際に `isNoHelpNeeded` が適切に更新・解除されず、クラウド同期やアラート判定で「ヘルプなし」扱いが残り続けていた。
+   - **修正**: Watchの `ASSIGN_HELP`（「ヘルプなし」選択時は `true`、スタッフ指名時は `false`）・`RECRUIT_HELP`・`START_TIMER`・`CLEAR_STAFF`、およびiPhoneの `handleStartSeatTimer`（`additional` / `edit`）・`formatSeatsPayload`・`performDirectConfirm`・`handlePressConfirmButton` の全箇所で `isNoHelpNeeded` を一貫して更新・参照するよう統一。
+4. **Apple Watchから遅延到着した停止系アクションによる新規稼働タイマーのAlarmKit誤消火防止 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: `STOP_ALARM`・`FINISH_MEASURE`・`RESET_ZERO`・`STOP_TIMER` の受信時、`isStaleStop(s)` や未来終了時刻ガードで古い停止通知と判定される前に `stopAlarm('salon', ...)` を呼んでいたため、再スタート済みの新しいタイマーのAlarmKit予約を誤ってキャンセルしていた。
+   - **修正**: `setSeats` 前の無条件 `stopAlarm` を撤廃し、`matchedIdx` 特定および `isStaleStop(s)` / 未来終了時刻ガード（本タイマー・中間チェック双方の `+15秒` 判定）を通過した正当な停止対象に対してのみ `stopAlarm` を実行するよう修正（削除済み席の孤立アラームのみ安全に消火）。
+5. **iPhone「タイマーを止める / 状態変更して停止」モーダル（`handleStopTimerWithNotification`）のAlarmKit消火・中間チェック保持/解除・超過後アクション移行時の担当者保持 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: モーダルからの停止時に `stopAlarm` が呼ばれず、途中一時停止時の `checkPausedRemainingSeconds` 保存や `0:00` 停止時のチェック状態クリアも漏れていた。さらに `0:00` 超過後に「シャンプーへ移行して停止」等のアクションを選んでも `assistantStaffName` と `helpProcess` が空に上書きされていた。
+   - **修正**: 即時 `stopAlarm` 呼び出し、途中停止時の `checkPausedRemainingSeconds` 保存、`0:00` 停止時のチェックタイマー完全クリアおよびアラートRef初期化を追加し、アクション指定停止時（`determinedActionId` あり）はヘルプ担当者名と `helpProcess` を保持するよう修正。
+6. **「＋ 席追加」モーダル起動時の初期席名採番における既存席番号との重複防止 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: 途中の席を削除している場合などに `seats.length + 1` が既存の席番号と重複していた。
+   - **修正**: 既存席の最大席番号＋1を算出する `getNextSuggestedSeatNumber()` を導入し、ヘッダー・下部ボタン・モーダル内クイックチップのすべてで重複しない次の席番号を初期提示するよう統一。
+7. **メインタイマーのサロン席・フリー枠への割り当て時（`handleAssignMainTimerToSeat` / `handleAssignMainTimerWithoutSeat`）の必須プロパティ完備とWatch即時同期 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: フリー枠追加時に `seatNumber`・`initialMinutes`・中間チェック初期値・`history` 等が未設定で、Watchへの即時同期やアラートRef初期化も漏れていた。
+   - **修正**: 重複しない `seatNumber` や全初期フィールド・初期履歴を完備し、アラートRef初期化および `syncSeatsToWatch(..., { immediate: true })` を確実に実行するよう修正。
+8. **サロン切り替え・削除・コード参加時（`handleSelectSalon` / `handleDeleteSalon` / `handleJoinByCode`）の旧サロン状態・AlarmKit予約完全分離 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: 参加先サロンのクラウドタイマーが `0` 件のときに旧サロンの席が画面に残って誤同期されたり、サロン切り替え時に `lastSyncedSeatsStateRef` や旧サロンのAlarmKit予約がクリアされていなかった。
+   - **修正**: サロン切り替え・削除・参加時に `resetSalonRuntimeStateForSwitch()` でクラウド同期キャッシュ・アラートRef・`stopAllAlarms('salon')` を一括リセットし、参加先が `0` 件の場合も確実に空配列（オーナー初期席または `[]`）へ置換して旧サロンUUID席の混入を完全遮断。
+9. **サロン画面の「👤 自分担当のみ」フィルター・確認ボタン等でのカスタム呼び名判定統一およびメインタイマーウィジェット操作時のiPhone消音解除 (`src/screens/SalonWorkScreen.js`, `src/screens/HomeScreen.js`)**:
+   - **課題**: 「自分担当のみ」フィルターや確認ボタン等が単純な文字列 `.includes()` で判定されており、カスタム呼び名・`'自分'`・メンバーIDを考慮した `isMainStaffOfSeat` / `isStaffNameMe` が使われていなかった。またサロン画面のメインタイマーウィジェットで「スタート / 一時停止」を押した際に `fromPhone: true` が渡らず、Watch操作後の消音状態（`watchMuted`）が解除されていなかった。
+   - **修正**: 全箇所を `isMainStaffOfSeat` / `isStaffNameMe` に統一し、サロン画面メインタイマーウィジェットの `toggle` / `reset` に `{ fromPhone: true }` を付与して `HomeScreen.js` の `toggleTimer(!isFromPhone)` で確実に消音解除されるよう修正。
+
+### 46.6 第5回タイマー鳴動後画面遷移・順番・仕様書整合性監査（全8項目） (2026-10-29)
+
+タイマーが `00:00` に到達して鳴動した後の画面遷移順・操作導線・iPhone/Watch双方向の仕様書整合性を全経路にわたり精査し、以下8項目をすべて解消した。
+
+1. **Apple Watchローカル通知バナー（本体タップ＝「開く」 vs 「アラーム停止」ボタン）の挙動分離とスマートアラーム「開く」との完全統一 (`targets/watch/alarm.swift`)**:
+   - **課題**: `userNotificationCenter(_:didReceive:)` が `response.actionIdentifier` を区別せず一律に `stop(sendToPhone: true, completeCheckIfNeeded: true)` を実行していたため、通知本体をタップ（「開く」: `UNNotificationDefaultActionIdentifier`）しただけでもタイマーが `00:00` に完全リセットされ、第41.2節・第41.6節で規定された「超過カウントアップ（`+00:xx`）を維持したまま『⏹️ タイマーを止める』が最上段にある操作画面へ自動遷移する」導線に入れなかった。
+   - **修正**: `response.actionIdentifier == "STOP_ACTION"`（明示的な「アラーム停止」ボタン）のみバックグラウンドで完全停止・iPhone同期（`stop(sendToPhone: true, completeCheckIfNeeded: true)`）を実行し、通知本体タップ（「開く」）時は `stop(sendToPhone: false, completeCheckIfNeeded: false)` で振動・音・通知のみ消火して超過カウントアップを維持したうえ、`pendingOpenedAlarmEvent` にセットして即座に操作画面（`.timerActionBranch` / `.subCheckActionBranch`）を自動で開くよう修正。
+2. **中間チェック鳴動中に「超過カウント続行（画面を見る）」またはモジュラー文字盤をタップした際のチェック超過カウントアップ保持 (`targets/watch/content.swift`)**:
+   - **課題**: `alarmOverlay` の `[ 超過カウント続行（画面を見る） ]` および `handleOpenURL` が `alarm.stop(sendToPhone: false)`（デフォルト `completeCheckIfNeeded: true`）を呼んでいたため、中間チェックタイマー鳴動中に画面確認へ移行すると `applyLocalCheckComplete` が走って中間チェックが完了消去され、`検超過 +00:xx` カウントアップが失われていた。
+   - **修正**: 両箇所とも `alarm.stop(sendToPhone: false, completeCheckIfNeeded: false)` に変更し、アラーム振動・音のみ消火（`acknowledged` 記録により第2段階の本タイマー用スマートアラーム自動予約は維持）しつつ `検超過 +00:xx` 表示とチェック状態をそのまま維持するよう修正。
+3. **Apple Watchの赤いアラーム画面（`alarmOverlay`）における中間チェック未指定時の二重停止ボタン解消と停止フィードバック統一 (`targets/watch/content.swift`)**:
+   - **課題**: 第40.4節および `subCheckStopAndHelpButtons` では、中間チェックで工程（コーミング等）・チェック担当とも未設定の場合に `[ ⏹️ タイマーを止める ]` のみを目立つ赤ボタンで単一表示する仕様であるのに対し、`alarmOverlay` の `activeRingingAction` が無条件に緑の `[ チェックに入る ]` と赤の `[ タイマーを止める ]` を並べて二重表示していた。またチェック単独アラーム停止時の `WidgetSync` 即時更新と完了バナー表示が漏れていた。
+   - **修正**: 中間チェックで明示工程（`!= "チェック"`）・チェック担当とも未設定時は `activeRingingAction` を `nil` にして大きな赤い `[ タイマーを止める ]` 単一表示に統一し、停止時に `WidgetSync.save(..., forceReload: true)` と `✅ 【席名】〇〇完了（タイマー続行）` バナーを即時表示するよう修正。
+4. **Apple Watchカード一覧（`cardsScrollView`）タップ時の画面遷移順を客席マップ（`SeatThumbnailMapSheet`）および第41.2節・第41.6節と完全統一 (`targets/watch/content.swift`)**:
+   - **課題**: カード一覧の `SeatTimerCard` タップ時に `item.isCheckOvertime` を判定せず、また非超過の稼働中席でも常に `.timerActionBranch`（2番目の停止分岐画面）を開いていたため、中間チェック超過中（`検超過 +00:xx`）にタップすると本タイマーごと止めてしまう画面が開いたり、通常稼働中に1番目の標準画面（`.standard`: タイマー＋ヘルプ指定＋チェック担当）が開かなかった。
+   - **修正**: 客席マップと完全統一し、`item.isCheckOvertime && !item.isOvertime` 時は `.subCheckActionBranch`（チェックのみ停止する画面）、`item.isOvertime` 時は `.timerActionBranch`（本タイマー停止画面）、通常稼働中・停止中は `.standard`（1番目の標準画面）を開くよう修正。
+5. **`TimeActionSheet` 表示中にサブ画面（工程選択・スタッフ選択等）を開いたまま `00:00` を跨いだ際の自動画面遷移フラグ保護 (`targets/watch/content.swift`)**:
+   - **課題**: `TimeActionSheet` の1秒タイマー購読で `subMode` が `.selectHelpProcess` 等のサブピッカー中であっても `hasAutoMovedToMainOvertimeBranch` / `hasAutoMovedToCheckOvertimeBranch` を `true` に消費していたため、ピッカーから `.standard` に戻った後に超過停止画面への自動遷移が起きなくなっていた。
+   - **修正**: `subMode == .standard || subMode == .subCheckActionBranch`（チェック時は `subMode == .standard`）で実際に画面遷移を実行したときのみフラグを `true` にするよう修正。
+6. **複数タイマー同時超過時および文字盤コンプリケーションタップ時（`presentOvertimeActionSheetIfNeeded`）の優先画面選択 (`targets/watch/content.swift`)**:
+   - **課題**: `presentOvertimeActionSheetIfNeeded` が常に `mainTimer` → `timers` 配列先頭順の固定優先度だったため、特定席のコンプリケーション（`assisttimer://seat?id=...`）をタップした際や、古い超過タイマー放置中に別の席が新しくタイムアップした際に対象外の停止画面が開いていた。
+   - **修正**: URL指定対象（`preferredSeatId`）が超過中なら最優先で開き、指定がない場合は最も新しくタイムアップした（`expiredAt` が最新の）超過タイマーの停止画面を最優先で開くよう改善。
+7. **iPhoneサロン画面のアラーム音OFF時バイブレーション常時作動（第40.1節準拠）および中間チェック工程（コーミング／1液2液／担当を呼ぶ）のアラート・停止モーダル・履歴完全連動 (`src/screens/SalonWorkScreen.js`)**:
+   - **課題**: 第40.1節で「スマホのアラーム音 OFF（デフォルト）でもバイブレーションは常に作動」と規定されているにもかかわらず、サロン画面のタイムアップ・チェック・再通知の `Vibration.vibrate` が `if (s.alarmSoundEnabled)` の内側にあったためデフォルトOFF時に無振動になっていた。また中間チェック到達アラート・`isCheckStopModalVisible`・完了履歴が `s.checkProcess` を参照せず `'チェック'` 固定文言になっていた。
+   - **修正**: バイブレーション判定（`phoneAlarmAllowedRef.current || !!s.alarmSoundEnabled`）とサウンド再生判定（`!!s.alarmSoundEnabled`）を分離して音OFF時も確実にバイブレーションを作動させ、中間チェックのアラート・停止モーダル（第40.4節準拠の大きな赤色 `[ ⏹️ タイマーを止める ]` 完備）・履歴すべてに `checkProcess` を連動。
+8. **クラウドUUID同期による席ID切り替わり（`seat-1` → `<UUID>`）後のWatchアラームイベント解決・同一ターゲット判定・通知一括消去の耐障害性強化 (`targets/watch/alarm.swift`)**:
+   - **課題**: ローカルID（`seat-1`）で予約されたスマートアラームやローカル通知が発火するまでにクラウドUUIDへ席IDが更新されると、`eventFromKey`・`didInvalidateWith`・`isSameTarget`・`removeNotifications` がID文字列完全一致のみで照合して席を見失い、画面自動遷移や残りリピート通知消去が漏れるケースがあった。
+   - **修正**: `findMatchingSeat(for:title:)` ヘルパーを導入し、`isSameTarget` および `removeNotifications(forEventKey:)` でも `seat-<番号>` とクラウドUUIDの双方を同一席として横断照合・一括消去するよう強化。
+
+
+
+
+
+

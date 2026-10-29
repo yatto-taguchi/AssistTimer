@@ -120,6 +120,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private var sessionPresentedSystemAlert = false
     private var wasBackgroundWhenSystemAlertShown = false
     private var invalidatingSessions: Set<WKExtendedRuntimeSession> = []
+    private var intentionallyInvalidatedSessions: Set<WKExtendedRuntimeSession> = []
+    private var sessionKeysBySession: [WKExtendedRuntimeSession: String] = [:]
+    private var nextSmartAlarmScheduleAllowedAt: Date = .distantPast
     // ★ watchOSペナルティ防止用: notifyUser を呼び出し済みのセッション、呼び出し開始時刻、およびバックグラウンド起動で引き継いだセッションを記録
     private var notifiedSessions: Set<WKExtendedRuntimeSession> = []
     private var sessionNotifyStartTimes: [WKExtendedRuntimeSession: Date] = [:]
@@ -619,6 +622,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             }
         }
         for adopted in Array(backgroundAdoptedSessions) {
+            intentionallyInvalidatedSessions.insert(adopted)
+            sessionKeysBySession.removeValue(forKey: adopted)
             if adopted.state != .invalid {
                 adopted.invalidate()
             }
@@ -705,12 +710,17 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             let isAlreadyAcked = (self.sessionKey != nil && self.isAcknowledged(self.sessionKey!))
             let hasDueUnackedEvent = self.events.contains { !self.isAcknowledged($0.key) && $0.date <= now.addingTimeInterval(15) }
             if isAlreadyAcked || !hasDueUnackedEvent {
+                self.intentionallyInvalidatedSessions.insert(extendedRuntimeSession)
+                self.sessionKeysBySession.removeValue(forKey: extendedRuntimeSession)
                 if extendedRuntimeSession.state != .invalid {
                     extendedRuntimeSession.invalidate()
                 }
                 self.clearSession()
                 self.updateStatusText()
                 return
+            }
+            if let k = self.sessionKey {
+                self.sessionKeysBySession[extendedRuntimeSession] = k
             }
             self.backgroundAdoptedSessions.insert(extendedRuntimeSession)
             self.session = extendedRuntimeSession
@@ -770,14 +780,34 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
 
     // ★ 2つのイベントキーが実質的に同一ターゲット（同一席・同一種別、かつ通信丸め誤差の2秒以内）か判定
     //   （※15秒にすると、停止直後に短いテストタイマー等を再スタートした際に「停止済み」と誤認して鳴らなくなるため2秒に厳密化）
+    //   クラウドUUID到着前後で「seat-<番号>」と「<UUID>」にキーが切り替わった同一席も一致とみなす。
     private func isSameTarget(key1: String?, key2: String?) -> Bool {
         guard let k1 = key1, let k2 = key2 else { return false }
         if k1 == k2 { return true }
         let parts1 = k1.components(separatedBy: "@")
         let parts2 = k2.components(separatedBy: "@")
-        guard parts1.count == 2, parts2.count == 2, parts1[0] == parts2[0] else { return false }
-        if let epoch1 = Int(parts1[1]), let epoch2 = Int(parts2[1]), abs(epoch1 - epoch2) <= 2 {
-            return true
+        guard parts1.count == 2, parts2.count == 2,
+              let epoch1 = Int(parts1[1]), let epoch2 = Int(parts2[1]),
+              abs(epoch1 - epoch2) <= 2 else {
+            return false
+        }
+        if parts1[0] == parts2[0] { return true }
+        let isCheck1 = parts1[0].hasSuffix("-check")
+        let isCheck2 = parts2[0].hasSuffix("-check")
+        let isMain1 = parts1[0].hasSuffix("-main")
+        let isMain2 = parts2[0].hasSuffix("-main")
+        guard (isCheck1 && isCheck2) || (isMain1 && isMain2) else { return false }
+        let suffixLen = isCheck1 ? 6 : 5
+        let sid1 = String(parts1[0].dropLast(suffixLen))
+        let sid2 = String(parts2[0].dropLast(suffixLen))
+        guard sid1 != "main-timer" && sid2 != "main-timer" else { return sid1 == sid2 }
+        if sid1.hasPrefix("seat-"), let num = Int(sid1.dropFirst(5)), num > 0 {
+            let matches = WatchSessionManager.shared.timers.filter { $0.seatNumber == num }
+            if matches.count == 1 && matches[0].id == sid2 { return true }
+        }
+        if sid2.hasPrefix("seat-"), let num = Int(sid2.dropFirst(5)), num > 0 {
+            let matches = WatchSessionManager.shared.timers.filter { $0.seatNumber == num }
+            if matches.count == 1 && matches[0].id == sid1 { return true }
         }
         return false
     }
@@ -892,6 +922,28 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         updateStatusText()
     }
 
+    private func findMatchingSeat(for seatId: String, title: String = "") -> SeatTimerItem? {
+        let timers = WatchSessionManager.shared.timers
+        if let exact = timers.first(where: { $0.id == seatId }) {
+            return exact
+        }
+        if let byTag = timers.first(where: { "seat-\($0.seatNumber)" == seatId || String($0.seatNumber) == seatId }) {
+            return byTag
+        }
+        if seatId.hasPrefix("seat-"),
+           let num = Int(seatId.dropFirst(5)),
+           num > 0 && num < 1000,
+           let byNum = timers.first(where: { $0.seatNumber == num }) {
+            return byNum
+        }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedTitle.isEmpty,
+           let byTitle = timers.first(where: { !$0.displaySeatName.isEmpty && trimmedTitle.hasPrefix($0.displaySeatName) }) {
+            return byTitle
+        }
+        return nil
+    }
+
     private func eventFromKey(_ key: String) -> WatchAlarmEvent? {
         if let existing = events.first(where: { isSameTarget(key1: $0.key, key2: key) }) {
             return existing
@@ -907,16 +959,24 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         let seatId = String(key[..<range.lowerBound])
         let epStr = String(key[range.upperBound...])
         let ts = Double(epStr) ?? Date().timeIntervalSince1970
+        let matchedSeat = (seatId == "main-timer") ? nil : findMatchingSeat(for: seatId)
         let wSound: Bool = {
             if seatId == "main-timer" {
                 return WatchSessionManager.shared.mainTimer?.watchAlarmSoundEnabled ?? ((UserDefaults.standard.object(forKey: "assisttimer.mainTimerWatchSound.v2") as? Bool) ?? false)
             }
-            if let seat = WatchSessionManager.shared.timers.first(where: { $0.id == seatId }) {
+            if let seat = matchedSeat {
                 return seat.watchAlarmSoundEnabled
             }
             return self.soundOn
         }()
-        return WatchAlarmEvent(key: key, seatId: seatId, date: Date(timeIntervalSince1970: ts), title: "", watchSoundOn: wSound)
+        let fallbackTitle: String = {
+            if seatId == "main-timer" { return "⏱️ メインタイマー 終了" }
+            if let seat = matchedSeat {
+                return sep == "-check@" ? "🔍 \(seat.displaySeatName) チェック時間" : "\(seat.displaySeatName) タイム終了"
+            }
+            return ""
+        }()
+        return WatchAlarmEvent(key: key, seatId: matchedSeat?.id ?? seatId, date: Date(timeIntervalSince1970: ts), title: fallbackTitle, watchSoundOn: wSound)
     }
 
     /// 指定されたイベントキー（および同一席・同一種別の±15秒ウィンドウを含む全キー）に紐づくローカル通知を即座に全削除する
@@ -924,19 +984,32 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         var targetKeys: Set<String> = [key]
         let isCheckTarget = key.contains("-check@")
         let kindTag = isCheckTarget ? "-check@" : "-main@"
-        var prefixHeader: String? = nil
+        var candidateSeatIds: Set<String> = []
+        if let range = key.range(of: kindTag, options: .backwards) {
+            candidateSeatIds.insert(String(key[..<range.lowerBound]))
+        }
+        var prefixHeaders: [String] = []
         if let ev = eventFromKey(key) {
-            let prefixTag = "\(ev.seatId)\(kindTag)"
-            prefixHeader = "\(notificationPrefix)\(prefixTag)"
-            for e in events where e.key.hasPrefix(prefixTag) { targetKeys.insert(e.key) }
-            for r in ringing where r.key.hasPrefix(prefixTag) { targetKeys.insert(r.key) }
-            for k in armed.keys where k.hasPrefix(prefixTag) { targetKeys.insert(k) }
-            for k in scheduledNotificationEventKeys where k.hasPrefix(prefixTag) { targetKeys.insert(k) }
-            // ★ 通信同期による1〜数秒の時刻ズレやアプリ再起動後でも、残りリピート通知（4秒・8秒・13秒後など）が
-            //   1件も取りこぼされず同期的に即座に消えるよう、前後15秒分のキーも一括生成して消去する
+            candidateSeatIds.insert(ev.seatId)
+            if ev.seatId != "main-timer", let matched = findMatchingSeat(for: ev.seatId, title: ev.title) {
+                candidateSeatIds.insert(matched.id)
+                if matched.seatNumber > 0 {
+                    candidateSeatIds.insert("seat-\(matched.seatNumber)")
+                }
+            }
+            let prefixTags = candidateSeatIds.map { "\($0)\(kindTag)" }
+            prefixHeaders = prefixTags.map { "\(notificationPrefix)\($0)" }
             let baseEpoch = Int(ev.date.timeIntervalSince1970)
-            for ep in (baseEpoch - 15)...(baseEpoch + 15) {
-                targetKeys.insert("\(prefixTag)\(ep)")
+            for prefixTag in prefixTags {
+                for e in events where e.key.hasPrefix(prefixTag) { targetKeys.insert(e.key) }
+                for r in ringing where r.key.hasPrefix(prefixTag) { targetKeys.insert(r.key) }
+                for k in armed.keys where k.hasPrefix(prefixTag) { targetKeys.insert(k) }
+                for k in scheduledNotificationEventKeys where k.hasPrefix(prefixTag) { targetKeys.insert(k) }
+                // ★ 通信同期による1〜数秒の時刻ズレやアプリ再起動後でも、残りリピート通知（4秒・8秒・13秒後など）が
+                //   1件も取りこぼされず同期的に即座に消えるよう、前後15秒分のキーも一括生成して消去する
+                for ep in (baseEpoch - 15)...(baseEpoch + 15) {
+                    targetKeys.insert("\(prefixTag)\(ep)")
+                }
             }
         }
         for k in targetKeys {
@@ -948,16 +1021,16 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             center.removePendingNotificationRequests(withIdentifiers: ids)
             center.removeDeliveredNotifications(withIdentifiers: ids)
         }
-        if let pHeader = prefixHeader {
+        if !prefixHeaders.isEmpty {
             center.getPendingNotificationRequests { requests in
-                let matched = requests.map(\.identifier).filter { $0.hasPrefix(pHeader) }
+                let matched = requests.map(\.identifier).filter { id in prefixHeaders.contains { id.hasPrefix($0) } }
                 if !matched.isEmpty {
                     center.removePendingNotificationRequests(withIdentifiers: matched)
                     center.removeDeliveredNotifications(withIdentifiers: matched)
                 }
             }
             center.getDeliveredNotifications { delivered in
-                let matched = delivered.map { $0.request.identifier }.filter { $0.hasPrefix(pHeader) }
+                let matched = delivered.map { $0.request.identifier }.filter { id in prefixHeaders.contains { id.hasPrefix($0) } }
                 if !matched.isEmpty {
                     center.removeDeliveredNotifications(withIdentifiers: matched)
                 }
@@ -1046,10 +1119,6 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             restoredOverlayEvents = restoredOverlayEvents.filter { !isSameTarget(key1: $0.key, key2: e.key) }
         }
         persist()
-        let ids = allAckKeys.flatMap { k in repeatOffsets.indices.map { "\(notificationPrefix)\(k).\($0)" } }
-        let center = UNUserNotificationCenter.current()
-        center.removePendingNotificationRequests(withIdentifiers: ids)
-        center.removeDeliveredNotifications(withIdentifiers: ids)
         ringing = []
 
         // ★ 放置タイム終了のアラーム（-main@）と途中チェック時間のアラーム（-check@）を分離して処理:
@@ -1187,11 +1256,16 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     ///    破棄時に notifyUser（＝2枚目のシステムアラーム画面表示）を呼んだり非同期遅延を入れたりすると、
     ///    1枚目の通知で「アラーム停止」を押した直後に2枚目のアラームが鳴り出す原因になるため、即座に同期破棄する。
     private func safeInvalidateSession(_ s: WKExtendedRuntimeSession, wasStarted: Bool = false, associatedKey: String? = nil) {
+        intentionallyInvalidatedSessions.insert(s)
+        if let key = associatedKey {
+            sessionKeysBySession[s] = key
+        }
         notifiedSessions.remove(s)
         sessionNotifyStartTimes.removeValue(forKey: s)
         backgroundAdoptedSessions.remove(s)
         guard s.state != .invalid else {
             invalidatingSessions.remove(s)
+            sessionKeysBySession.removeValue(forKey: s)
             return
         }
         invalidatingSessions.insert(s)
@@ -1480,6 +1554,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
 
         guard let t = target, startDate.timeIntervalSince(now) < 36 * 3600 else { return }
+        guard now >= nextSmartAlarmScheduleAllowedAt else { return }
         // ★ watchOS の仕様上、WKExtendedRuntimeSession.start(at:) は .active または .inactive（canScheduleSmartAlarm == true）、
         //   または直前のスマートアラーム終了直後の引き継ぎウィンドウ（allowBackgroundHandoffScheduleUntil）で試行する。
         //   もしOS側に拒否されて .invalid になった場合は即座にクリアし、次回アクティブ化時に再予約する。
@@ -1492,17 +1567,19 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         s.delegate = self
         s.start(at: safeStartDate)
         if s.state == .invalid {
+            intentionallyInvalidatedSessions.insert(s)
+            nextSmartAlarmScheduleAllowedAt = now.addingTimeInterval(1.2)
             clearSession()
+            scheduleRetryAfterInvalidation(delay: 1.25)
             return
         }
         session = s
+        sessionKeysBySession[s] = t.key
         sessionScheduledAt = now
         setSessionKey(t.key)
         sessionStarted = false
         sessionPresentedSystemAlert = false
         wasBackgroundWhenSystemAlertShown = false
-        // スマートアラームが予約されたら通知署名も更新し、初期通知との重複を防ぐ
-        notificationSignature = "__FORCE__"
     }
 
     // 止めるまで強い振動を繰り返す（アプリ非表示時はシステムのアラーム画面になる）
@@ -1549,6 +1626,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 if session === extendedRuntimeSession {
                     invalidateCurrentSession()
                 } else if extendedRuntimeSession.state != .invalid {
+                    intentionallyInvalidatedSessions.insert(extendedRuntimeSession)
                     extendedRuntimeSession.invalidate()
                 }
                 updateStatusText()
@@ -1565,6 +1643,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         if let ev = matchedEvent {
             armed[ev.key] = ev.date.timeIntervalSince1970
             forceRingingKeys.insert(ev.key)
+            sessionKeysBySession[extendedRuntimeSession] = ev.key
             setSessionKey(ev.key)
             persist()
             // ★ 2枚目（スマートアラーム）が起動した瞬間に、同一イベントの1枚目（ローカル通知）を全消去して二重表示を防ぐ！
@@ -1572,6 +1651,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             startNotifyUser(extendedRuntimeSession)
             refresh()
         } else if let latest = currentRinging(now).last {
+            sessionKeysBySession[extendedRuntimeSession] = latest.key
             setSessionKey(latest.key)
             removeNotifications(forEventKey: latest.key)
             startNotifyUser(extendedRuntimeSession)
@@ -1582,6 +1662,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             if session === extendedRuntimeSession {
                 invalidateCurrentSession()
             } else if extendedRuntimeSession.state != .invalid {
+                intentionallyInvalidatedSessions.insert(extendedRuntimeSession)
                 extendedRuntimeSession.invalidate()
             }
             updateStatusText()
@@ -1595,8 +1676,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 //   かつ今まさに鳴るべき未消火イベントがある場合は破棄せず正規セッションとして引き継いで確実に振動させる！
                 let now = Date()
                 let hasDueUnacked = self.events.contains { !self.isAcknowledged($0.key) && $0.date <= now.addingTimeInterval(15) }
-                if !self.invalidatingSessions.contains(extendedRuntimeSession) && hasDueUnacked {
+                if !self.invalidatingSessions.contains(extendedRuntimeSession) && !self.intentionallyInvalidatedSessions.contains(extendedRuntimeSession) && hasDueUnacked {
                     if let old = self.session, old !== extendedRuntimeSession, old.state != .invalid {
+                        self.intentionallyInvalidatedSessions.insert(old)
                         self.invalidatingSessions.insert(old)
                         old.invalidate()
                     }
@@ -1620,17 +1702,21 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                                 didInvalidateWith reason: WKExtendedRuntimeSessionInvalidationReason,
                                 error: Error?) {
         DispatchQueue.main.async {
-            let wasInvalidating = self.invalidatingSessions.remove(extendedRuntimeSession) != nil
+            let wasIntentionallyInvalidated = self.intentionallyInvalidatedSessions.remove(extendedRuntimeSession) != nil
+            let wasInvalidating = (self.invalidatingSessions.remove(extendedRuntimeSession) != nil) || wasIntentionallyInvalidated
             let wasBackgroundAdopted = self.backgroundAdoptedSessions.remove(extendedRuntimeSession) != nil
             let wasNotified = self.notifiedSessions.remove(extendedRuntimeSession) != nil
             self.sessionNotifyStartTimes.removeValue(forKey: extendedRuntimeSession)
             let isCurrent = (extendedRuntimeSession === self.session)
+            let sessionSpecificKey = self.sessionKeysBySession.removeValue(forKey: extendedRuntimeSession)
             guard wasInvalidating || isCurrent || wasBackgroundAdopted || wasNotified else { return }
 
             let wasStarted = (self.sessionStarted && isCurrent) || wasBackgroundAdopted || wasNotified
-            let wasSystemAlert = self.sessionPresentedSystemAlert || wasBackgroundAdopted || (WKApplication.shared().applicationState != .active)
-            let wasBgWhenShown = self.wasBackgroundWhenSystemAlertShown || wasBackgroundAdopted
-            let endedKey = self.sessionKey ?? UserDefaults.standard.string(forKey: self.sessionKeyStoreKey)
+            let wasSystemAlert = (self.sessionPresentedSystemAlert && isCurrent) || wasBackgroundAdopted || (wasStarted && WKApplication.shared().applicationState != .active)
+            let wasBgWhenShown = (self.wasBackgroundWhenSystemAlertShown && isCurrent) || wasBackgroundAdopted
+            // ★ セッション固有キーを優先参照し、古いチェック用セッションの遅延 didInvalidateWith が
+            //   新しく予約された本体タイマーの self.sessionKey を誤って参照して TimeActionSheet を再表示させるバグを防止！
+            let endedKey = sessionSpecificKey ?? (isCurrent ? (self.sessionKey ?? UserDefaults.standard.string(forKey: self.sessionKeyStoreKey)) : nil)
             if isCurrent {
                 self.clearSession()
             }
@@ -1645,7 +1731,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             //   2. 右側の「終了」を押した場合（またはデジタルクラウン等で閉じた場合）:
             //      アラームの振動・音・通知のみを消火し、超過カウントアップ（+00:xx）は継続させる！
             //      その後、超過タイムをタップした時に「タイマーを止める」ボタンが表示され、明示的に止めると 00:00 に戻る。
-            if !wasInvalidating && reason != .sessionInProgress && (wasStarted || (endedKey != nil && reason == .none)) {
+            //   ※ 必ず wasStarted == true（実際に鳴動開始していたセッション）かつ意図的破棄ではない場合のみシステムアラーム終了として扱う。
+            if !wasInvalidating && reason != .sessionInProgress && wasStarted {
                 self.allowBackgroundHandoffScheduleUntil = Date().addingTimeInterval(2.5)
                 self.suppressSmartAlarmUntil = Date().addingTimeInterval(3.0)
                 self.pendingSystemDismissPhoneSyncWorkItem?.cancel()
@@ -1692,7 +1779,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 if wasBgWhenShown, let ev = matchedEv {
                     let isCheck = ev.key.contains("-check@")
                     let preMain = WatchSessionManager.shared.mainTimer
-                    let preSeat = WatchSessionManager.shared.timers.first(where: { $0.id == ev.seatId })
+                    let preSeat = self.findMatchingSeat(for: ev.seatId, title: ev.title)
                     self.lastSystemDismissedSnapshot = SystemDismissedSnapshot(
                         event: ev,
                         dismissedAt: now,
@@ -1713,11 +1800,19 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 self.scheduleRetryAfterInvalidation(delay: 0.25)
                 return
             }
-            // ★ 前セッション破棄完了の瞬間に、残っている次の予定（チェック後の本タイマーなど）を即座に再スケジュール！
+            // ★ 未開始の予約セッションが watchOS によって即座に破棄された場合（画面遷移中や前セッション破棄直後の XPC 拒否など）は、
+            //   0ms で同期 refresh() → start(at:) → didInvalidateWith の無限 XPC ＆ UNUserNotificationCenter 再登録ストームになるのを防ぐため、
+            //   1.2秒のクールダウンを置いてから再試行する。
+            if !wasStarted && !wasInvalidating {
+                self.nextSmartAlarmScheduleAllowedAt = Date().addingTimeInterval(1.2)
+                self.scheduleRetryAfterInvalidation(delay: 1.25)
+                return
+            }
+            // ★ 意図的に前セッションを破棄完了した瞬間に、残っている次の予定（チェック後の本タイマーなど）を再スケジュール
             if reason != .sessionInProgress {
                 self.refresh()
             }
-            self.scheduleRetryAfterInvalidation(delay: reason == .sessionInProgress ? 0.35 : 0.2)
+            self.scheduleRetryAfterInvalidation(delay: reason == .sessionInProgress ? 0.35 : 0.25)
         }
     }
 
@@ -1904,9 +1999,10 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     }
 
     // ★ 通知タップ（「開く」）または「アラーム停止」ボタン（STOP_ACTION）押下時:
-    //   「アラーム停止」ボタンを押した時も、通知カード本体をタップした時も、どちらも1回の操作で
-    //   対象タイマー（客席・チェック・メインタイマー）を即座に停止・リセット（00:00）し、
-    //   スマートアラーム（2枚目）も後続リピート通知もすべて完全消去してiPhoneへも停止を同期する（二度手間防止）。
+    //   1. 「アラーム停止」ボタン（STOP_ACTION）を押した時: バックグラウンドのまま対象タイマーを即座に停止・リセット（チェック時はチェック完了）し、iPhoneへも停止を同期する。
+    //   2. 通知カード本体をタップ（「開く」: UNNotificationDefaultActionIdentifier）してアプリを開いた時:
+    //      スマートアラーム左側の「開く」と完全統一し、アラーム振動・音・通知のみを消火して超過カウントアップ（+00:xx）は維持したまま、
+    //      即座に「⏹️ タイマーを止める」が最上段にある操作画面（.timerActionBranch / .subCheckActionBranch）を自動で開く！
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
@@ -1915,6 +2011,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             completionHandler()
             return
         }
+        let isExplicitStopAction = (response.actionIdentifier == "STOP_ACTION")
         let block = {
             self.allowBackgroundHandoffScheduleUntil = Date().addingTimeInterval(2.5)
             self.suppressSmartAlarmUntil = Date().addingTimeInterval(5.0)
@@ -1927,7 +2024,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             var targetEventKey: String? = nil
             var explicitTargetEvent: WatchAlarmEvent? = nil
             // 通知ID（"assisttimer.alarm.<eventKey>.<index>"）から対象イベントキーを特定し、
-            // コールドスタート時やイベント時刻更新後でも確実に通知削除・停止処理（explicitTarget）へ通す
+            // コールドスタート時やイベント時刻更新後でも確実に通知削除・対象解決へ通す
             if reqId.hasPrefix(self.notificationPrefix) {
                 let stripped = String(reqId.dropFirst(self.notificationPrefix.count))
                 if let dotIdx = stripped.lastIndex(of: ".") {
@@ -1938,13 +2035,24 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     self.forceRingingKeys.insert(eventKey)
                 }
             }
-            self.stop(sendToPhone: true, completeCheckIfNeeded: true, explicitTarget: explicitTargetEvent)
+            if isExplicitStopAction {
+                self.stop(sendToPhone: true, completeCheckIfNeeded: true, explicitTarget: explicitTargetEvent)
+            } else {
+                self.stop(sendToPhone: false, completeCheckIfNeeded: false, explicitTarget: explicitTargetEvent)
+            }
             if let eventKey = targetEventKey {
                 let ts = explicitTargetEvent?.date.timeIntervalSince1970 ?? Date().timeIntervalSince1970
                 self.acknowledged[eventKey] = ts
                 self.removeForceRinging(matching: eventKey)
                 self.removeNotifications(forEventKey: eventKey)
                 self.persist()
+            }
+            if !isExplicitStopAction {
+                if let ev = explicitTargetEvent ?? targetEventKey.flatMap({ self.eventFromKey($0) }) {
+                    self.pendingOpenedAlarmEvent = ev
+                }
+                completionHandler()
+                return
             }
             // ★ バックグラウンドの通知アクション（STOP_ACTION: options: []）で呼ばれた際、
             //   WCSession の iPhone 送信および 0.25秒後のチェック後本タイマー再予約が完遂する前に

@@ -138,12 +138,13 @@ export default function RecordsScreen() {
 
     const pickerResult = await ImagePicker.launchImageLibraryAsync({
       allowsMultipleSelection: true,
+      selectionLimit: 4,
       quality: 0.8,
     });
 
     if (!pickerResult.canceled) {
       const newUris = pickerResult.assets.map(a => a.uri).slice(0, 4);
-      const updated = await updateRecordPhoto(recordId, newUris[0]);
+      const updated = await updateRecordPhoto(recordId, newUris);
       setRecords(updated);
       
       // 開いているモーダルの更新

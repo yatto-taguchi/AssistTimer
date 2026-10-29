@@ -193,7 +193,7 @@ export default function SettingsScreen({ route }) {
             }
 
             await Audio.setAudioModeAsync({
-              playsInSilentModeIOS: true,
+              playsInSilentModeIOS: !!playsInSilentMode,
               staysActiveInBackground: true,
               shouldDuckAndroid: true,
               playThroughEarpieceAndroid: false,
@@ -384,26 +384,39 @@ export default function SettingsScreen({ route }) {
     { key: 'o_15min', label: '15分超過', phrase: '「15分超過」', isEnabled: isOverVoice15MinEnabled, toggle: toggleOverVoice15Min },
   ];
 
+  const previewSoundRef = useRef(null);
+
   useEffect(() => {
-    return previewSound ? () => previewSound.unloadAsync() : undefined;
-  }, [previewSound]);
+    return () => {
+      if (previewSoundRef.current) {
+        previewSoundRef.current.unloadAsync().catch(() => {});
+        previewSoundRef.current = null;
+      }
+    };
+  }, []);
 
   const handleSelectSound = async (type) => {
     toggleAlarmSoundType(type);
     try {
+      if (previewSoundRef.current) {
+        await previewSoundRef.current.unloadAsync().catch(() => {});
+        previewSoundRef.current = null;
+      }
       if (previewSound) {
-        await previewSound.unloadAsync();
+        await previewSound.unloadAsync().catch(() => {});
+        setPreviewSound(null);
       }
       if (type === 'none') {
         return; // 無音の場合はプレビュー再生なし
       }
       await Audio.setAudioModeAsync({
-        playsInSilentModeIOS: playsInSilentMode,
+        playsInSilentModeIOS: !!playsInSilentMode,
         staysActiveInBackground: true,
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: false,
       });
       const { sound: newSound } = await Audio.Sound.createAsync(ALARM_SOUNDS[type]);
+      previewSoundRef.current = newSound;
       setPreviewSound(newSound);
       await newSound.playAsync();
     } catch (e) {
@@ -413,17 +426,23 @@ export default function SettingsScreen({ route }) {
 
   const handlePlayVoice = async (key) => {
     try {
+      if (previewSoundRef.current) {
+        await previewSoundRef.current.unloadAsync().catch(() => {});
+        previewSoundRef.current = null;
+      }
       if (previewSound) {
-        await previewSound.unloadAsync();
+        await previewSound.unloadAsync().catch(() => {});
+        setPreviewSound(null);
       }
       setPlayingVoiceKey(key);
       await Audio.setAudioModeAsync({
-        playsInSilentModeIOS: playsInSilentMode,
+        playsInSilentModeIOS: !!playsInSilentMode,
         staysActiveInBackground: true,
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: false,
       });
       const { sound: newSound } = await Audio.Sound.createAsync(VOICE_SAMPLES[key]);
+      previewSoundRef.current = newSound;
       setPreviewSound(newSound);
       newSound.setOnPlaybackStatusUpdate((status) => {
         if (status.didJustFinish) {
@@ -1921,11 +1940,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 8,
     elevation: 4,
-  },
-  ecoCloseButtonText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: 'bold',
   },
   ecoCloseButtonText: {
     color: '#FFFFFF',

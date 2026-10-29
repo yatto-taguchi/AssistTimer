@@ -131,13 +131,17 @@ export const getRecords = async () => {
   }
 };
 
-// 特定の記録の写真（や他項目）を更新する
-export const updateRecordPhoto = async (recordId, newPhotoUri) => {
+// 特定の記録の写真（や他項目）を更新する（単一URIまたは複数URI配列の両方に対応）
+export const updateRecordPhoto = async (recordId, newPhotoInput) => {
     try {
+        const newUris = Array.isArray(newPhotoInput)
+            ? newPhotoInput.filter(Boolean).slice(0, 4)
+            : (newPhotoInput ? [newPhotoInput] : []);
+        const primaryUri = newUris[0] || null;
         const records = await getRecords();
         const updatedRecords = records.map(record => {
             if (record.id === recordId) {
-                return { ...record, photoUri: newPhotoUri };
+                return { ...record, photoUri: primaryUri, photoUris: newUris };
             }
             return record;
         });

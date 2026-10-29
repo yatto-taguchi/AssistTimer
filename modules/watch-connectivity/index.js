@@ -31,8 +31,9 @@ const safeAddListener = (eventName, callback) => {
   return { remove: () => {} };
 };
 
-// ★ applicationContext 永続保存用の最新客席スナップショット（メインタイマー単独同期時のコンテキスト上書き消失防止）
+// ★ applicationContext 永続保存用の最新客席・メインタイマースナップショット（単独同期時のコンテキスト上書き消失防止）
 let lastSyncedSeats = null;
+let lastSyncedMainTimer = null;
 
 // ★ 診断用ストア（画面の通信状態表示で使用）
 const diagnostics = {
@@ -528,9 +529,21 @@ export const WatchConnectivity = {
     if (!NativeModule || Platform.OS !== 'ios') return null;
     if (data && Array.isArray(data.seats)) {
       lastSyncedSeats = data.seats;
+    } else if (data && Array.isArray(data._contextSeats) && !Array.isArray(lastSyncedSeats)) {
+      lastSyncedSeats = data._contextSeats;
     }
-    const seatCount = data && Array.isArray(data.seats)
-      ? data.seats.length
+    if (data && data.mainTimer && typeof data.mainTimer === 'object') {
+      lastSyncedMainTimer = data.mainTimer;
+    }
+    const cleanWireData = data && typeof data === 'object' && '_contextSeats' in data
+      ? (() => {
+          const copy = { ...data };
+          delete copy._contextSeats;
+          return copy;
+        })()
+      : data;
+    const seatCount = cleanWireData && Array.isArray(cleanWireData.seats)
+      ? cleanWireData.seats.length
       : (Array.isArray(lastSyncedSeats) ? lastSyncedSeats.length : diagnostics.lastSendSeatCount);
     let messageResult = '';
     let contextResult = '';
@@ -546,7 +559,7 @@ export const WatchConnectivity = {
         try {
           // ★ リアルタイム送信（sendMessage）は渡された data をそのまま送る
           //   （メインタイマー同期時は seats を含めないことで Watch 側の稼働中客席タイマーを絶対保護）
-          await NativeModule.sendMessage(data);
+          await NativeModule.sendMessage(cleanWireData);
           messageResult = '即時OK';
         } catch (sendErr) {
           messageResult = `失敗: ${errorText(sendErr)}`;
@@ -558,11 +571,11 @@ export const WatchConnectivity = {
       // ★ Watchがバックグラウンド（文字盤表示中・消灯中）で即時通信（sendMessage）できなかった場合、
       //   updateApplicationContext だけでは Watch アプリがバックグラウンド起床せず文字盤モジュールが更新されないため、
       //   transferUserInfo（コンプリケーション優先転送）も併用してバックグラウンドの Watch Extension を確実に起こす
-      const isSyncPayload = data?.type === 'SYNC_MAIN_TIMER' || data?.type === 'SYNC_SEATS' || !!data?.notification;
+      const isSyncPayload = cleanWireData?.type === 'SYNC_MAIN_TIMER' || cleanWireData?.type === 'SYNC_SEATS' || !!cleanWireData?.notification;
       const needUserInfoFallback = isSyncPayload && (!reachable || messageResult.startsWith('失敗'));
       if (needUserInfoFallback && typeof NativeModule.transferUserInfo === 'function') {
         try {
-          await NativeModule.transferUserInfo(data);
+          await NativeModule.transferUserInfo(cleanWireData);
         } catch (uErr) {
           console.warn('[WatchConnectivity] transferUserInfo fallback error:', uErr);
         }
@@ -572,13 +585,16 @@ export const WatchConnectivity = {
         // ★ 永続保存される applicationContext には一時通知（notification）を含めない
         //   また、WCSession.updateApplicationContext は辞書全体を置換するため、
         //   メインタイマー単独同期（data.seats 未指定）時も前回保存済みの lastSyncedSeats を引き継いで客席消失を防ぐ
-        const contextPayload = data && typeof data === 'object' ? { ...data } : data;
+        const contextPayload = cleanWireData && typeof cleanWireData === 'object' ? { ...cleanWireData } : cleanWireData;
         if (contextPayload && typeof contextPayload === 'object') {
           if ('notification' in contextPayload) {
             delete contextPayload.notification;
           }
           if (!Array.isArray(contextPayload.seats) && Array.isArray(lastSyncedSeats)) {
             contextPayload.seats = lastSyncedSeats;
+          }
+          if (!contextPayload.mainTimer && lastSyncedMainTimer) {
+            contextPayload.mainTimer = lastSyncedMainTimer;
           }
         }
         const ok = await NativeModule.updateApplicationContext(contextPayload);

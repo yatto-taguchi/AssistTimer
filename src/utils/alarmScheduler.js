@@ -102,6 +102,12 @@ const applyAlarms = async (source, desired, options) => {
     dirty = true;
     if (d.timestamp <= Date.now() + 500) {
       // すでに時刻を過ぎている予定は予約しない（記録だけ残し、繰り返し予約を防ぐ）
+      // ただし超過鳴動中に音がOFFへ切り替えられた場合は鳴動中のアラームを即座に消火する
+      if (prev && prev.soundOn && !soundOn) {
+        AlarmKit.cancel(key);
+        current.set(key, { timestamp: d.timestamp, title: d.title, soundOn, result: 'cancelled' });
+        continue;
+      }
       // ※同じ時刻の予約がすでに鳴っている場合は、その結果（ok）を維持する
       const keepOk = prev && prev.result === 'ok' && Math.abs(prev.timestamp - d.timestamp) <= 1000;
       current.set(key, { timestamp: d.timestamp, title: d.title, soundOn, result: keepOk ? 'ok' : 'past' });
