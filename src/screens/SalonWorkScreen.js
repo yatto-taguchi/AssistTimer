@@ -26,6 +26,7 @@ import { setAlarms, stopAlarm, stopAllAlarms, subscribeUserStoppedAlarms } from 
 import {
   getOrCreateUserId,
   syncOrCreateSalonInCloud,
+  updateSalonInviteCode,
   joinSalonByInviteCode,
   fetchSalonMembers,
   subscribeSalonMembers,
@@ -253,6 +254,9 @@ export const getMemberDisplayName = (m) => {
 let _cachedStaffMembers = [];
 let _cachedCurrentSeats = [];
 let _cachedUserName = 'スタイリスト';
+let _cachedMyUserId = null;
+let _cachedIsSalonOwner = true;
+let _cachedActiveSalonId = 'workspace-free';
 let _cachedMainTimerState = null;
 let _syncDebounceTimer = null;
 let _pendingWatchPayload = null;
@@ -266,6 +270,157 @@ export const updateCachedMainTimerState = (state) => {
 const isCloudUUID = (val) =>
   typeof val === 'string' &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
+
+// ★ 自他判定・サロンオーナー権限判定の共通純粋関数（スマホ画面・Watchペイロード双方で使用）
+export const checkIsStaffNameMe = (
+  name,
+  currentUserName = _cachedUserName,
+  currentMyUserId = _cachedMyUserId,
+  currentStaffMembers = _cachedStaffMembers
+) => {
+  const n = (name || '').trim();
+  if (!n || n === 'ヘルプなし' || n === 'none' || n === '未定' || n === '募集中') return false;
+  if (n === '自分' || n === 'あなた') return true;
+  const me = (currentUserName || 'スタイリスト').trim();
+  if (me && n === me) return true;
+  if (Array.isArray(currentStaffMembers)) {
+    const myMember = currentStaffMembers.find(
+      (m) =>
+        m &&
+        (m.isMe ||
+          (currentMyUserId &&
+            (m.userId === currentMyUserId || m.user_id === currentMyUserId || m.id === currentMyUserId)))
+    );
+    if (myMember) {
+      if (myMember.originalNickname && n === myMember.originalNickname.trim()) return true;
+      if (myMember.customNickname && n === myMember.customNickname.trim()) return true;
+      if (myMember.name && n === myMember.name.trim()) return true;
+    }
+  }
+  return false;
+};
+
+export const checkIsMainStaffOfSeat = (
+  seat,
+  currentUserName = _cachedUserName,
+  currentMyUserId = _cachedMyUserId,
+  currentStaffMembers = _cachedStaffMembers
+) => {
+  if (!seat) return false;
+  // createdBy と自分の userId が両方ある場合は UUID 照合を最優先（同名の初期表示名「スタイリスト」同士でも他人の席を誤って「自分」にしない）
+  if (seat.createdBy && currentMyUserId) {
+    return seat.createdBy === currentMyUserId;
+  }
+  const creator = (seat.colorStaffName || '').trim();
+  if (!creator) return false;
+  return checkIsStaffNameMe(creator, currentUserName, currentMyUserId, currentStaffMembers);
+};
+
+export const checkIsSalonOwner = (salon, uid = _cachedMyUserId) => {
+  if (!salon) return true;
+  if (salon.id === 'workspace-free' || salon.id === 'workspace-pro-demo') return true;
+  if (salon.ownerUserId && uid) {
+    return salon.ownerUserId === uid;
+  }
+  if (salon.role) {
+    return salon.role === 'owner';
+  }
+  return true;
+};
+
+// ★ サロンID別の席データ保存キー＆オフライン削除待ちキュー（アップデート・再起動・サロン切替時の席消失を完全防止）
+const SALON_SEATS_MIGRATED_KEY = '@salon_seats_migrated_v2';
+export const getSalonSeatsStorageKey = (salonId) => `@salon_saved_seats_${salonId || 'workspace-free'}`;
+export const getPendingDeletedSeatsKey = (salonId) => `@salon_pending_deleted_seats_${salonId || 'workspace-free'}`;
+
+export const persistSeatsForSalonId = async (salonId, seatsList, isOwner = true) => {
+  const resolvedId = salonId || 'workspace-free';
+  const safeList = Array.isArray(seatsList) ? seatsList : [];
+  await AsyncStorage.setItem(getSalonSeatsStorageKey(resolvedId), JSON.stringify(safeList));
+  // オーナーサロンの有効席データは旧キーにもミラー保持（ゲストの空配列や他サロンの席で上書き汚染しない）
+  if (isOwner && safeList.length > 0) {
+    await AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(safeList));
+  }
+};
+
+export const readSeatsForSalonFromStorage = async (
+  salon,
+  activeUserName = 'スタイリスト',
+  activeUserId = null,
+  savedCurrentSalonId = null
+) => {
+  const salonId = salon?.id || 'workspace-free';
+  const isOwner = checkIsSalonOwner(salon, activeUserId);
+  const perSalonKey = getSalonSeatsStorageKey(salonId);
+
+  try {
+    const perSalonJson = await AsyncStorage.getItem(perSalonKey);
+    if (perSalonJson !== null) {
+      const parsed = JSON.parse(perSalonJson);
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to parse per-salon saved seats:', e);
+  }
+
+  // サロン別キーが未作成の場合: 旧バージョン @salon_saved_seats からの安全な初回マイグレーション
+  try {
+    const legacyJson = await AsyncStorage.getItem('@salon_saved_seats');
+    if (legacyJson) {
+      const legacyParsed = JSON.parse(legacyJson);
+      if (Array.isArray(legacyParsed) && legacyParsed.length > 0) {
+        if (isOwner) {
+          const migratedTarget = await AsyncStorage.getItem(SALON_SEATS_MIGRATED_KEY);
+          if (!migratedTarget || migratedTarget === salonId) {
+            await AsyncStorage.setItem(perSalonKey, JSON.stringify(legacyParsed));
+            await AsyncStorage.setItem(SALON_SEATS_MIGRATED_KEY, salonId);
+            return legacyParsed;
+          }
+        } else if (
+          savedCurrentSalonId === salonId &&
+          legacyParsed.some((s) => isCloudUUID(s?.cloudTimerId || s?.id))
+        ) {
+          // ゲスト参加中でアップデート直後の場合、クラウドUUID席キャッシュのみ安全に引き継ぐ（サンプル席は除外）
+          const cloudCachedOnly = legacyParsed.filter((s) => isCloudUUID(s?.cloudTimerId || s?.id));
+          await AsyncStorage.setItem(perSalonKey, JSON.stringify(cloudCachedOnly));
+          return cloudCachedOnly;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to migrate legacy @salon_saved_seats:', e);
+  }
+
+  // ゲスト（参加者）は初期サンプル「1番席」を絶対に生成せず空配列でクラウド同期を待つ
+  if (!isOwner) {
+    return [];
+  }
+  return getDefaultInitialSeats(activeUserName);
+};
+
+export const readPendingDeletedSeats = async (salonId) => {
+  try {
+    const raw = await AsyncStorage.getItem(getPendingDeletedSeatsKey(salonId));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+export const writePendingDeletedSeats = async (salonId, list) => {
+  try {
+    const key = getPendingDeletedSeatsKey(salonId);
+    if (!Array.isArray(list) || list.length === 0) {
+      await AsyncStorage.removeItem(key);
+    } else {
+      await AsyncStorage.setItem(key, JSON.stringify(list));
+    }
+  } catch {}
+};
 
 export const formatSeatsPayload = (seatsList) => {
   if (!Array.isArray(seatsList) || seatsList.length === 0) return [];
@@ -340,6 +495,7 @@ export const formatSeatsPayload = (seatsList) => {
         watchAlarmSoundEnabled: !!s.watchAlarmSoundEnabled,
         alarmSoundEnabled: !!s.alarmSoundEnabled,
         isCollapsed: isCollapsedSeat,
+        isCreatorMe: checkIsMainStaffOfSeat(s, _cachedUserName, _cachedMyUserId, _cachedStaffMembers),
       };
     })
     .filter(Boolean);
@@ -351,47 +507,59 @@ export const ensureSalonSeatsCached = async () => {
     return _cachedCurrentSeats;
   }
   try {
+    const activeUserId = await getOrCreateUserId();
+    _cachedMyUserId = activeUserId;
+
     const savedName = (await AsyncStorage.getItem('@assist_timer_user_name')) || (await AsyncStorage.getItem('@salon_user_name'));
     const activeUserName = (savedName && savedName.trim()) ? savedName.trim() : 'スタイリスト';
     _cachedUserName = activeUserName;
 
-    const savedSeatsJson = await AsyncStorage.getItem('@salon_saved_seats');
-    let loadedSeats = getDefaultInitialSeats(activeUserName);
-    if (savedSeatsJson) {
-      try {
-        const parsed = JSON.parse(savedSeatsJson);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          loadedSeats = parsed;
+    let activeSalon = null;
+    const savedCurrentSalonId = await AsyncStorage.getItem('@salon_current_salon_id');
+    try {
+      const savedSalonsJson = await AsyncStorage.getItem('@salon_saved_salons');
+      if (savedSalonsJson) {
+        const parsedSalons = JSON.parse(savedSalonsJson);
+        if (Array.isArray(parsedSalons) && parsedSalons.length > 0) {
+          activeSalon = parsedSalons.find((s) => s.id === savedCurrentSalonId) || parsedSalons[0];
         }
-      } catch (e) {
-        console.warn('Failed to parse saved seats in ensureSalonSeatsCached', e);
       }
-    }
-
-    // ★ 安全サニタイズ: 起動時点ですでに終了時刻を過ぎている稼働中タイマーは停止状態に正規化し、iPhone/Watchでの起動直後の振動暴発を防止
-    const { seats: sanitizedSeats, didSanitize } = sanitizeLoadedSeats(loadedSeats);
-    loadedSeats = sanitizedSeats;
-    if (didSanitize) {
-      AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(loadedSeats)).catch(() => {});
-    }
-
-    _cachedCurrentSeats = loadedSeats;
+    } catch {}
+    const isOwner = checkIsSalonOwner(activeSalon, activeUserId);
+    _cachedIsSalonOwner = isOwner;
+    _cachedActiveSalonId = activeSalon?.id || 'workspace-free';
 
     const savedMembersJson = await AsyncStorage.getItem('@salon_staff_members');
     if (savedMembersJson) {
       try {
         const parsed = JSON.parse(savedMembersJson);
         if (Array.isArray(parsed)) {
-          _cachedStaffMembers = normalizeStaffMembers(parsed);
+          _cachedStaffMembers = normalizeStaffMembers(parsed, activeUserId);
         }
       } catch (e) {
         console.warn('Failed to parse saved staff members in ensureSalonSeatsCached', e);
       }
     }
+
+    let loadedSeats = await readSeatsForSalonFromStorage(
+      activeSalon,
+      activeUserName,
+      activeUserId,
+      savedCurrentSalonId
+    );
+
+    // ★ 安全サニタイズ: 起動時点ですでに終了時刻を過ぎている稼働中タイマーは停止状態に正規化し、iPhone/Watchでの起動直後の振動暴発を防止
+    const { seats: sanitizedSeats, didSanitize } = sanitizeLoadedSeats(loadedSeats);
+    loadedSeats = sanitizedSeats;
+    if (didSanitize) {
+      persistSeatsForSalonId(_cachedActiveSalonId, loadedSeats, isOwner).catch(() => {});
+    }
+
+    _cachedCurrentSeats = loadedSeats;
     return loadedSeats;
   } catch (e) {
     console.warn('[SalonWorkScreen] ensureSalonSeatsCached failed:', e);
-    const defaultSeats = getDefaultInitialSeats(_cachedUserName || 'スタイリスト');
+    const defaultSeats = _cachedIsSalonOwner ? getDefaultInitialSeats(_cachedUserName || 'スタイリスト') : [];
     _cachedCurrentSeats = defaultSeats;
     return defaultSeats;
   }
@@ -475,6 +643,7 @@ export const syncMainTimerToWatch = async (mainState = null, options = {}) => {
       type: 'SYNC_MAIN_TIMER',
       userName: (_cachedUserName || 'スタイリスト').trim(),
       members: flatMembers,
+      isSalonOwner: _cachedIsSalonOwner,
       watchAlarmSound: _watchAlarmSound,
       timestamp: Date.now(),
       mainTimer: mainTimerPayload,
@@ -607,6 +776,7 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
       type: 'SYNC_SEATS',
       userName: (currentName || 'スタイリスト').trim(),
       members: flatMembers,
+      isSalonOwner: _cachedIsSalonOwner,
       watchAlarmSound: _watchAlarmSound,
       timestamp: Date.now(),
       mainTimer: mainTimerPayload,
@@ -780,12 +950,13 @@ export default function SalonWorkScreen() {
       return 'ヘルプ未定 (あと1分) ▾';
     }
 
-    // スタッフが決まっている場合
+    // スタッフが決まっている場合（自分が担当の場合は2文字の「自分」に統一）
     if (staff && staff !== '') {
+      const dispStaff = formatStaffForDisplay(staff);
       if (actionLabel && actionLabel !== 'チェック') {
-        return `${actionLabel} ${staff} ▾`;
+        return `${actionLabel} ${dispStaff} ▾`;
       }
-      return `${staff} ▾`;
+      return `${dispStaff} ▾`;
     }
 
     // スタッフが未定で、工程だけ指定されている場合（シャンプー、コーミング等。※チェックの場合は全体ヘルプと紛らわしいためヘルプ未定）
@@ -893,11 +1064,35 @@ export default function SalonWorkScreen() {
   const watchLinkedRef = useRef(false);
   watchLinkedRef.current = watchLinked;
 
+  // ★ 現在のサロンで自分が招待元（オーナー）かどうか（席の追加・削除・リネーム・招待コード変更はオーナーのみ可能）
+  const isSalonOwner = useMemo(() => checkIsSalonOwner(currentSalon, myUserId), [currentSalon, myUserId]);
+  const isSalonOwnerRef = useRef(isSalonOwner);
+  isSalonOwnerRef.current = isSalonOwner;
+  _cachedIsSalonOwner = isSalonOwner;
+  _cachedMyUserId = myUserId;
+  _cachedActiveSalonId = currentSalon?.id || 'workspace-free';
+
+  const seatsRef = useRef(seats);
+  seatsRef.current = seats;
+  const pendingDeletedSeatsRef = useRef([]);
+  const reconcileInFlightRef = useRef(false);
+  const reconcileCloudTimersRef = useRef(null);
+
   // ★ スマホ画面の開閉状態（フォアグラウンド 'active' か、ロック中・バックグラウンド・別アプリか）を常時追跡
+  //   バックグラウンドから 'active' に復帰した際、クラウドの最新席一覧を自動再同期してリアルタイム取りこぼしを防ぐ
   const appStateRef = useRef(AppState.currentState || 'active');
   useEffect(() => {
     const sub = AppState.addEventListener('change', (nextAppState) => {
+      const prevAppState = appStateRef.current;
       appStateRef.current = nextAppState || 'active';
+      if (
+        prevAppState &&
+        prevAppState !== 'active' &&
+        nextAppState === 'active' &&
+        typeof reconcileCloudTimersRef.current === 'function'
+      ) {
+        reconcileCloudTimersRef.current();
+      }
     });
     return () => {
       if (sub?.remove) sub.remove();
@@ -944,37 +1139,35 @@ export default function SalonWorkScreen() {
   };
 
   // ★ 席の関係者判定ヘルパー（自分以外の無関係な席のタイマー通知・アラームが来ないようにフィルタリング）
-  const isStaffNameMe = (name, currentUserName = userNameRef.current, currentMyUserId = myUserIdRef.current, currentStaffMembers = staffMembersRef.current) => {
-    const n = (name || '').trim();
-    if (!n) return false;
-    const me = (currentUserName || 'スタイリスト').trim();
-    if (n === me || n === '自分') return true;
-    if (Array.isArray(currentStaffMembers)) {
-      const myMember = currentStaffMembers.find(
-        (m) => m && (m.isMe || (currentMyUserId && (m.userId === currentMyUserId || m.user_id === currentMyUserId || m.id === currentMyUserId)))
-      );
-      if (myMember) {
-        if (myMember.originalNickname && n === myMember.originalNickname.trim()) return true;
-        if (myMember.customNickname && n === myMember.customNickname.trim()) return true;
-        if (myMember.name && n === myMember.name.trim()) return true;
-      }
+  const isStaffNameMe = (
+    name,
+    currentUserName = userNameRef.current,
+    currentMyUserId = myUserIdRef.current,
+    currentStaffMembers = staffMembersRef.current
+  ) => checkIsStaffNameMe(name, currentUserName, currentMyUserId, currentStaffMembers);
+
+  const isMainStaffOfSeat = (
+    seat,
+    currentUserName = userNameRef.current,
+    currentMyUserId = myUserIdRef.current,
+    currentStaffMembers = staffMembersRef.current
+  ) => checkIsMainStaffOfSeat(seat, currentUserName, currentMyUserId, currentStaffMembers);
+
+  // ★ UI表示用: 該当スタッフ・作成者が自分自身なら「自分」（2文字のみ）に統一表示（内部データ・通信値は本人の名前のまま保持）
+  const formatStaffForDisplay = (name, fallback = '') => {
+    const trimmed = (name || '').trim();
+    if (!trimmed) return fallback;
+    if (trimmed === 'ヘルプなし' || trimmed === 'none' || trimmed === '未定' || trimmed === '募集中') {
+      return trimmed;
     }
-    return false;
+    return isStaffNameMe(trimmed) ? '自分' : trimmed;
   };
 
-  const isMainStaffOfSeat = (seat, currentUserName = userNameRef.current, currentMyUserId = myUserIdRef.current, currentStaffMembers = staffMembersRef.current) => {
-    if (!seat) return false;
-    const creator = (seat.colorStaffName || '').trim();
-    if (isStaffNameMe(creator, currentUserName, currentMyUserId, currentStaffMembers)) {
-      if (creator === 'スタイリスト' && seat.createdBy && currentMyUserId && seat.createdBy !== currentMyUserId) {
-        return false;
-      }
-      return true;
-    }
-    if ((!creator || creator === 'スタッフ') && seat.createdBy && currentMyUserId && seat.createdBy === currentMyUserId) {
-      return true;
-    }
-    return false;
+  const formatCreatorForDisplay = (seat, fallback = '') => {
+    if (!seat) return fallback;
+    if (isMainStaffOfSeat(seat)) return '自分';
+    const raw = (seat.colorStaffName || '').trim();
+    return raw || fallback;
   };
 
   // 全体タイマーの関係者か（主担当・全体ヘルプ担当・または「ヘルプなし」以外で全体ヘルプが未定/募集中のため自分がヘルプに入る可能性がある場合）
@@ -1252,38 +1445,108 @@ export default function SalonWorkScreen() {
     return `${label}_${seat.colorStaffName || ''}_${seat.status}_${seat.targetSeconds || seat.targetTime}_${seat.targetEndTimestamp}_${seat.pausedRemainingSeconds}_${seat.assistantStaffName}_${seat.helpProcess}_${seat.actionStatus}_${seat.isRecruiting}_${seat.isNoHelpNeeded}_${seat.checkEndTimestamp}_${seat.checkPausedRemainingSeconds}_${seat.checkTotalSeconds || seat.checkTargetSeconds}_${seat.checkStatus}_${seat.checkProcess}_${seat.checkStaffName}_${seat.comment}_${seat.isShampooing}`;
   };
 
+  const getActiveStorageSalonId = () =>
+    cloudSalonIdRef.current || currentSalonRef.current?.id || 'workspace-free';
+
+  const enqueuePendingDeletedSeat = async (salonId, seatItem) => {
+    if (!seatItem) return;
+    const resolvedSalonId = salonId || getActiveStorageSalonId();
+    const entry = {
+      id: seatItem.id || null,
+      cloudTimerId: seatItem.cloudTimerId || (isCloudUUID(seatItem.id) ? seatItem.id : null),
+      seatLabel: (seatItem.seatLabel || seatItem.name || '').trim() || null,
+      deletedAt: Date.now(),
+    };
+    const nextList = [
+      ...pendingDeletedSeatsRef.current.filter(
+        (x) =>
+          !(
+            (entry.cloudTimerId && x.cloudTimerId === entry.cloudTimerId) ||
+            (entry.id && x.id === entry.id) ||
+            (!entry.cloudTimerId && entry.seatLabel && x.seatLabel === entry.seatLabel)
+          )
+      ),
+      entry,
+    ];
+    pendingDeletedSeatsRef.current = nextList;
+    await writePendingDeletedSeats(resolvedSalonId, nextList);
+  };
+
+  const removePendingDeletedSeat = async (salonId, seatIdOrCloudId, seatLabel = null) => {
+    const resolvedSalonId = salonId || getActiveStorageSalonId();
+    const nextList = pendingDeletedSeatsRef.current.filter((x) => {
+      if (seatIdOrCloudId && (x.id === seatIdOrCloudId || x.cloudTimerId === seatIdOrCloudId)) return false;
+      if (!isCloudUUID(seatIdOrCloudId) && seatLabel && x.seatLabel === seatLabel) return false;
+      return true;
+    });
+    pendingDeletedSeatsRef.current = nextList;
+    await writePendingDeletedSeats(resolvedSalonId, nextList);
+  };
+
+  const isSeatInPendingDeleted = (seatObj, list = pendingDeletedSeatsRef.current) => {
+    if (!seatObj || !Array.isArray(list) || list.length === 0) return false;
+    const targetUuid = seatObj.cloudTimerId || (isCloudUUID(seatObj.id) ? seatObj.id : null);
+    const targetLabel = (seatObj.seatLabel || seatObj.name || '').trim();
+    return list.some((x) => {
+      if (targetUuid && (x.cloudTimerId === targetUuid || x.id === targetUuid)) return true;
+      if (!x.cloudTimerId && targetLabel && x.seatLabel === targetLabel) return true;
+      return false;
+    });
+  };
+
   const syncChangedSeatsToCloud = async (newSeats) => {
     if (isRemoteSyncRef.current) return;
-    const targetSalonId = cloudSalonIdRef.current || (currentSalonRef.current?.id && currentSalonRef.current.id !== 'workspace-free' ? currentSalonRef.current.id : null);
+    const targetSalonId =
+      cloudSalonIdRef.current ||
+      (currentSalonRef.current?.id &&
+      currentSalonRef.current.id !== 'workspace-free' &&
+      currentSalonRef.current.id !== 'workspace-pro-demo'
+        ? currentSalonRef.current.id
+        : null);
     if (!targetSalonId) return;
 
     for (const seat of newSeats) {
       if (!seat || !seat.id) continue;
+      // ゲスト端末からはクラウドにまだ存在しない非UUID新規席のINSERTを行わない（オーナーの席マスターのみを基準とする）
+      if (!isSalonOwnerRef.current && !isCloudUUID(seat.cloudTimerId || seat.id)) continue;
       const sig = getSeatCloudSignature(seat);
-      if (lastSyncedSeatsStateRef.current[seat.id] !== sig) {
+      if (lastSyncedSeatsStateRef.current[seat.id] !== sig || seat.dirtySync) {
         lastSyncedSeatsStateRef.current[seat.id] = sig;
         upsertCloudTimer(targetSalonId, seat)
           .then((savedCloudSeat) => {
             if (savedCloudSeat?.id) {
               lastSyncedSeatsStateRef.current[savedCloudSeat.id] = sig;
-              if (seat.id !== savedCloudSeat.id) {
-                setSeats((curr) =>
-                  curr.map((item) =>
-                    item.id === seat.id ? { ...item, id: savedCloudSeat.id, cloudTimerId: savedCloudSeat.id } : item
-                  )
-                );
+              if (seat.id !== savedCloudSeat.id || seat.dirtySync) {
+                setSeats((curr) => {
+                  const next = curr.map((item) =>
+                    item.id === seat.id
+                      ? { ...item, id: savedCloudSeat.id, cloudTimerId: savedCloudSeat.id, dirtySync: false }
+                      : item
+                  );
+                  persistSeatsForSalonId(targetSalonId, next, isSalonOwnerRef.current).catch(() => {});
+                  return next;
+                });
               }
+            } else if (lastSyncedSeatsStateRef.current[seat.id] === sig) {
+              // オフライン等で送信失敗した場合はシグネチャを戻し、次回再送を保証
+              delete lastSyncedSeatsStateRef.current[seat.id];
             }
           })
-          .catch((e) => console.warn('upsertCloudTimer error:', e));
+          .catch((e) => {
+            if (lastSyncedSeatsStateRef.current[seat.id] === sig) {
+              delete lastSyncedSeatsStateRef.current[seat.id];
+            }
+            console.warn('upsertCloudTimer error:', e);
+          });
       }
     }
   };
 
-  // ストレージ保存ヘルパー
+  // ストレージ保存ヘルパー（サロンID別キーへ保存し、サロン間の席上書き・消失を防止）
   const saveSeatsToStorage = async (newSeats) => {
     try {
-      await AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(newSeats));
+      const storageSalonId = getActiveStorageSalonId();
+      await persistSeatsForSalonId(storageSalonId, newSeats, isSalonOwnerRef.current);
       // ★ Apple Watchへ即時同期 (登録メンバーも含めて送信)
       syncSeatsToWatch(newSeats, userName, staffMembers);
       // ★ クラウド（Supabase）へ差分同期！
@@ -1628,6 +1891,8 @@ export default function SalonWorkScreen() {
         seatLabel: `${seatNum}番席`,
         status: 'running',
         colorStaffName: watchUser || userName || 'スタイリスト',
+        createdBy: myUserIdRef.current || myUserId || null,
+        dirtySync: true,
         targetSeconds: totalSec,
         initialMinutes: Math.max(1, Math.round(totalSec / 60)),
         targetEndTimestamp: targetEnd,
@@ -1700,6 +1965,11 @@ export default function SalonWorkScreen() {
               : s
           );
         } else {
+          // 参加者（ゲスト）側では新規席の追加をブロック（招待元の席マスターのみ使用）
+          if (!isSalonOwnerRef.current) {
+            syncSeatsToWatch(prevSeats, userName, staffMembers, { immediate: true });
+            return prevSeats;
+          }
           updated = [...prevSeats, newSeatObj];
         }
         saveSeatsToStorage(updated);
@@ -1782,9 +2052,9 @@ export default function SalonWorkScreen() {
           });
         }
       }
-      // ★ 万が一該当席が存在しない状態で START_TIMER が来た場合は、その番号の席を自動生成して開始（空振り防止）
+      // ★ 万が一該当席が存在しない状態で START_TIMER が来た場合は、オーナー時のみその番号の席を自動生成して開始（ゲストによる勝手な席増加を防止）
       let baseSeats = prevSeats;
-      if (matchedIdx < 0 && action === 'START_TIMER') {
+      if (matchedIdx < 0 && action === 'START_TIMER' && isSalonOwnerRef.current) {
         const numMatch = String(extra?.seatNumber || message?.seatNumber || seatId || '').match(/\d+/);
         const newNum = numMatch ? parseInt(numMatch[0], 10) : prevSeats.length + 1;
         const autoSeat = {
@@ -1793,6 +2063,8 @@ export default function SalonWorkScreen() {
           seatLabel: extra?.seatLabel || `${newNum}番席`,
           status: 'idle',
           colorStaffName: watchUser || userName || 'スタイリスト',
+          createdBy: myUserIdRef.current || myUserId || null,
+          dirtySync: true,
           targetSeconds: 0,
           targetEndTimestamp: 0,
           pausedRemainingSeconds: 0,
@@ -2228,6 +2500,8 @@ export default function SalonWorkScreen() {
               targetEndTimestamp: targetEnd,
               pausedRemainingSeconds: null,
               colorStaffName: watchUser || s.colorStaffName,
+              createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+              dirtySync: true,
               assistantStaffName: '',
               helpProcess: '',
               actionStatus: null,
@@ -2438,10 +2712,12 @@ export default function SalonWorkScreen() {
   useEffect(() => {
     if (!isDataLoaded) return;
     _watchAlarmSound = !!isWatchAlarmSoundEnabled;
+    _cachedIsSalonOwner = isSalonOwner;
+    _cachedMyUserId = myUserId;
     if (Platform.OS === 'ios') {
       syncSeatsToWatch(seats, userName, staffMembers);
     }
-  }, [isDataLoaded, seats, userName, staffMembers, isWatchAlarmSoundEnabled]);
+  }, [isDataLoaded, seats, userName, staffMembers, isWatchAlarmSoundEnabled, isSalonOwner, myUserId]);
 
   // ★ サロン席の終了時刻を iPhone 純正アラーム（AlarmKit）に予約
   // 共有タイマーはデフォルトでスマホから音が鳴らないようにし、入力画面で「アラーム音 ON」にした席（alarmSoundEnabled === true）かつ自分が関係者の席のみ予約する。
@@ -2468,38 +2744,291 @@ export default function SalonWorkScreen() {
     setAlarms('salon', desired, { soundOn: true, stopPassedOnRemove: true });
   }, [seats, isDataLoaded, userName, myUserId, staffMembers]);
 
+  // ★ クラウド客席タイマーとの完全整合同期（初回接続時 ＆ バックグラウンドからの 'active' 復帰時の双方で実行）
+  //   - オーナー（招待元）: ローカル追加・編集席と削除待ちキューを絶対保護し、「1番席」への勝手なリセットを一切行わない
+  //   - ゲスト（参加者）  : 招待元のクラウド席一覧を唯一のマスターとして完全同期する
+  const reconcileCloudTimers = async (explicitSalonId = null, explicitOwnerUserId = null) => {
+    const targetSalonId =
+      explicitSalonId ||
+      cloudSalonIdRef.current ||
+      (isCloudUUID(currentSalonRef.current?.id) ? currentSalonRef.current.id : null);
+    if (!targetSalonId || !myUserIdRef.current) return;
+    if (reconcileInFlightRef.current) return;
+    reconcileInFlightRef.current = true;
+
+    try {
+      const resolvedOwnerId = explicitOwnerUserId || currentSalonRef.current?.ownerUserId || null;
+      const isOwnerOfSalon = resolvedOwnerId
+        ? resolvedOwnerId === myUserIdRef.current
+        : checkIsSalonOwner(currentSalonRef.current, myUserIdRef.current);
+
+      // 1. オーナーの場合: オフライン中に削除された席の削除待ちキューを先にクラウドへ反映
+      if (isOwnerOfSalon && pendingDeletedSeatsRef.current.length > 0) {
+        const snapshotQueue = [...pendingDeletedSeatsRef.current];
+        for (const delItem of snapshotQueue) {
+          const ok = await deleteCloudTimer(
+            targetSalonId,
+            delItem.cloudTimerId || delItem.id,
+            delItem.seatLabel
+          );
+          if (ok) {
+            await removePendingDeletedSeat(targetSalonId, delItem.cloudTimerId || delItem.id, delItem.seatLabel);
+          }
+        }
+      }
+
+      // 2. クラウドの最新席一覧を取得（通信エラー時は null が返るため、ローカル席を消さずに保護して終了）
+      const cloudTimers = await fetchSalonTimers(targetSalonId, { returnNullOnError: true });
+      if (cloudTimers === null) {
+        return;
+      }
+
+      const wasSwitchedSalon = didSwitchSalonRef.current;
+      didSwitchSalonRef.current = false;
+
+      // 3. ゲスト（参加者）の場合: 招待元のクラウド席を唯一のマスターとして100%追従同期（ローカルサンプル席は一切混入させない）
+      if (!isOwnerOfSalon) {
+        isRemoteSyncRef.current = true;
+        setSeats((prevLocalSeats) => {
+          const syncedGuestSeats = cloudTimers.map((ct) => {
+            const prevMatch = Array.isArray(prevLocalSeats)
+              ? prevLocalSeats.find((ls) => ls && (ls.id === ct.id || ls.cloudTimerId === ct.id))
+              : null;
+            const item = prevMatch
+              ? {
+                  ...ct,
+                  alarmSoundEnabled: prevMatch.alarmSoundEnabled ?? ct.alarmSoundEnabled,
+                  watchAlarmSoundEnabled: prevMatch.watchAlarmSoundEnabled ?? ct.watchAlarmSoundEnabled,
+                  history:
+                    Array.isArray(prevMatch.history) && prevMatch.history.length > 0
+                      ? prevMatch.history
+                      : ct.history,
+                  collapsedAtEnd: ct.status === 'running' ? null : (prevMatch.collapsedAtEnd ?? ct.collapsedAtEnd),
+                }
+              : ct;
+            lastSyncedSeatsStateRef.current[item.id] = getSeatCloudSignature(item);
+            return item;
+          });
+          persistSeatsForSalonId(targetSalonId, syncedGuestSeats, false).catch(() => {});
+          syncSeatsToWatch(
+            syncedGuestSeats,
+            userNameRef.current || userName,
+            staffMembersRef.current || staffMembers,
+            { immediate: true, forceEmpty: syncedGuestSeats.length === 0 }
+          );
+          return syncedGuestSeats;
+        });
+        setTimeout(() => {
+          isRemoteSyncRef.current = false;
+        }, 300);
+        return;
+      }
+
+      // 4. オーナー（招待元）の場合: 削除待ちキュー内の席を除外した上で、ローカル未同期の追加/編集席を完全保護マージ
+      const activeCloudTimers = cloudTimers.filter((ct) => !isSeatInPendingDeleted(ct));
+
+      if (activeCloudTimers.length > 0) {
+        isRemoteSyncRef.current = true;
+        const seatsToPushBack = [];
+        setSeats((prevLocalSeats) => {
+          const nowMs = Date.now();
+          const safePrev = Array.isArray(prevLocalSeats)
+            ? prevLocalSeats.filter((ls) => !isSeatInPendingDeleted(ls))
+            : [];
+          const matchedLocalIds = new Set();
+
+          const merged = activeCloudTimers.map((ct) => {
+            const ctCleanLabel = String(ct.seatLabel || ct.name || '').replace(/席$/, '').trim();
+            const localMatch = safePrev.find((ls) => {
+              if (!ls || matchedLocalIds.has(ls.id)) return false;
+              if (ls.id === ct.id || ls.cloudTimerId === ct.id) return true;
+              const lsUuid = isCloudUUID(ls.cloudTimerId) ? ls.cloudTimerId : (isCloudUUID(ls.id) ? ls.id : null);
+              if (lsUuid && isCloudUUID(ct.id) && lsUuid !== ct.id) return false;
+              const lsCleanLabel = String(ls.seatLabel || ls.name || '').replace(/席$/, '').trim();
+              if (ctCleanLabel && lsCleanLabel === ctCleanLabel) return true;
+              const lsDigits = lsCleanLabel.match(/\d+/);
+              const ctDigits = ctCleanLabel.match(/\d+/);
+              if (lsDigits && ctDigits && parseInt(lsDigits[0], 10) === parseInt(ctDigits[0], 10)) return true;
+              return false;
+            });
+
+            if (localMatch) {
+              matchedLocalIds.add(localMatch.id);
+              const isLocalRunningAhead =
+                localMatch.status === 'running' &&
+                Number(localMatch.targetEndTimestamp) > nowMs &&
+                ct.status !== 'running';
+              // ローカルで稼働中またはオフライン未同期編集（リネーム・変更等 dirtySync）がある場合はローカル状態を優先保護してクラウドへ送信
+              if (isLocalRunningAhead || localMatch.dirtySync) {
+                const preserved = {
+                  ...ct,
+                  ...localMatch,
+                  id: ct.id,
+                  cloudTimerId: ct.id,
+                  seatNumber: localMatch.seatNumber || ct.seatNumber,
+                  seatLabel: localMatch.dirtySync
+                    ? (localMatch.seatLabel || ct.seatLabel)
+                    : (ct.seatLabel || localMatch.seatLabel),
+                  name: localMatch.dirtySync
+                    ? (localMatch.name || localMatch.seatLabel || ct.seatLabel)
+                    : (ct.seatLabel || localMatch.seatLabel),
+                  dirtySync: false,
+                };
+                seatsToPushBack.push(preserved);
+                lastSyncedSeatsStateRef.current[preserved.id] = getSeatCloudSignature(preserved);
+                return preserved;
+              }
+
+              const mergedItem = {
+                ...ct,
+                alarmSoundEnabled: localMatch.alarmSoundEnabled ?? ct.alarmSoundEnabled,
+                watchAlarmSoundEnabled: localMatch.watchAlarmSoundEnabled ?? ct.watchAlarmSoundEnabled,
+                history:
+                  Array.isArray(localMatch.history) && localMatch.history.length > 0
+                    ? localMatch.history
+                    : ct.history,
+                collapsedAtEnd: ct.status === 'running' ? null : (localMatch.collapsedAtEnd ?? ct.collapsedAtEnd),
+              };
+              lastSyncedSeatsStateRef.current[mergedItem.id] = getSeatCloudSignature(mergedItem);
+              return mergedItem;
+            }
+
+            lastSyncedSeatsStateRef.current[ct.id] = getSeatCloudSignature(ct);
+            return ct;
+          });
+
+          // オフライン中や通信前にオーナーが追加したローカル未同期席（非UUID席または dirtySync 席）を絶対に消さず保持＆クラウドへ追加
+          if (!wasSwitchedSalon) {
+            safePrev.forEach((ls) => {
+              if (!ls || matchedLocalIds.has(ls.id)) return;
+              const hasCloudId = isCloudUUID(ls.cloudTimerId || ls.id);
+              if (!hasCloudId || ls.dirtySync) {
+                merged.push(ls);
+                seatsToPushBack.push(ls);
+              }
+            });
+          }
+
+          persistSeatsForSalonId(targetSalonId, merged, true).catch(() => {});
+          syncSeatsToWatch(merged, userNameRef.current || userName, staffMembersRef.current || staffMembers);
+          return merged;
+        });
+
+        if (seatsToPushBack.length > 0) {
+          for (const seatToSync of seatsToPushBack) {
+            upsertCloudTimer(targetSalonId, seatToSync)
+              .then((saved) => {
+                if (saved?.id) {
+                  lastSyncedSeatsStateRef.current[saved.id] = getSeatCloudSignature(saved);
+                  if (seatToSync.id !== saved.id || seatToSync.dirtySync) {
+                    setSeats((curr) => {
+                      const next = curr.map((item) =>
+                        item.id === seatToSync.id
+                          ? { ...item, id: saved.id, cloudTimerId: saved.id, dirtySync: false }
+                          : item
+                      );
+                      persistSeatsForSalonId(targetSalonId, next, true).catch(() => {});
+                      return next;
+                    });
+                  }
+                }
+              })
+              .catch(() => {});
+          }
+        }
+        setTimeout(() => {
+          isRemoteSyncRef.current = false;
+        }, 300);
+      } else {
+        // クラウドが0席の初回登録時: 「1番席」への強制リセットは行わず、オーナー現在の全ローカル席をそのままクラウドへ登録する
+        const currentOwnerSeats = (Array.isArray(seatsRef.current) ? seatsRef.current : []).filter(
+          (ls) => ls && !isSeatInPendingDeleted(ls)
+        );
+        for (const s of currentOwnerSeats) {
+          upsertCloudTimer(targetSalonId, s)
+            .then((savedCloudSeat) => {
+              if (savedCloudSeat?.id) {
+                lastSyncedSeatsStateRef.current[savedCloudSeat.id] = getSeatCloudSignature(savedCloudSeat);
+                setSeats((curr) => {
+                  const next = curr.map((item) =>
+                    item.id === s.id
+                      ? { ...item, id: savedCloudSeat.id, cloudTimerId: savedCloudSeat.id, dirtySync: false }
+                      : item
+                  );
+                  persistSeatsForSalonId(targetSalonId, next, true).catch(() => {});
+                  return next;
+                });
+              }
+            })
+            .catch(() => {});
+        }
+      }
+    } finally {
+      reconcileInFlightRef.current = false;
+    }
+  };
+  reconcileCloudTimersRef.current = reconcileCloudTimers;
+
   // ★ サロンのクラウド登録＆メンバーリアルタイム同期 (Supabase Realtime)
   useEffect(() => {
-    if (!isDataLoaded || !currentSalon?.inviteCode || !myUserId) return;
+    if (!isDataLoaded || (!currentSalon?.inviteCode && !isCloudUUID(currentSalon?.id)) || !myUserId) return;
+    if (currentSalon?.id === 'workspace-pro-demo') return;
 
     let isMounted = true;
     let unsubscribeMembers = null;
 
     const initCloudSalon = async () => {
       try {
-        // 1. サロンをSupabaseクラウドへ確保・登録（未登録時は新規作成＆オーナー登録）
+        const localIsOwner = checkIsSalonOwner(currentSalon, myUserId);
+        // 1. サロンをSupabaseクラウドへ確保・取得（ゲスト参加サロンでは allowCreate: false で勝手な空サロン新規作成を禁止）
         const cloudSalon = await syncOrCreateSalonInCloud({
+          salonId: isCloudUUID(currentSalon.id) ? currentSalon.id : null,
           salonName: currentSalon.name,
           inviteCode: currentSalon.inviteCode,
           isPro: currentSalon.isPro,
           userName: userName,
+          allowCreate: localIsOwner,
         });
 
         if (!cloudSalon || !isMounted) return;
         cloudSalonIdRef.current = cloudSalon.id;
+        const resolvedIsOwner = cloudSalon.owner_user_id === myUserId;
+        const resolvedRole = resolvedIsOwner ? 'owner' : 'assistant';
 
-        // クラウド側UUIDへIDを同期
-        if (currentSalon.id !== cloudSalon.id) {
-          const updatedSalon = { ...currentSalon, id: cloudSalon.id };
+        // クラウド側UUID・最新招待コード・オーナーIDをローカルサロン情報へ同期（workspace-free昇格時は席データも引き継ぐ）
+        if (
+          currentSalon.id !== cloudSalon.id ||
+          currentSalon.ownerUserId !== cloudSalon.owner_user_id ||
+          (cloudSalon.invite_code && currentSalon.inviteCode !== cloudSalon.invite_code) ||
+          currentSalon.role !== resolvedRole
+        ) {
+          const prevSalonId = currentSalon.id;
+          if (prevSalonId && prevSalonId !== cloudSalon.id) {
+            await persistSeatsForSalonId(cloudSalon.id, seatsRef.current, resolvedIsOwner);
+            if (resolvedIsOwner) {
+              await AsyncStorage.setItem(SALON_SEATS_MIGRATED_KEY, cloudSalon.id).catch(() => {});
+            }
+            const prevPending = await readPendingDeletedSeats(prevSalonId);
+            if (prevPending.length > 0) {
+              pendingDeletedSeatsRef.current = prevPending;
+              await writePendingDeletedSeats(cloudSalon.id, prevPending);
+              await writePendingDeletedSeats(prevSalonId, []);
+            }
+          }
+          const updatedSalon = {
+            ...currentSalon,
+            id: cloudSalon.id,
+            inviteCode: cloudSalon.invite_code || currentSalon.inviteCode,
+            ownerUserId: cloudSalon.owner_user_id,
+            role: resolvedRole,
+          };
           setCurrentSalon(updatedSalon);
           currentSalonRef.current = updatedSalon;
-          setSavedSalons((prev) =>
-            prev.map((s) => (s.id === currentSalon.id ? updatedSalon : s))
-          );
-          saveSalonsToStorage(
-            savedSalons.map((s) => (s.id === currentSalon.id ? updatedSalon : s)),
-            cloudSalon.id
-          );
+          setSavedSalons((prev) => {
+            const next = prev.map((s) => (s.id === prevSalonId || s.id === cloudSalon.id ? updatedSalon : s));
+            saveSalonsToStorage(next, cloudSalon.id);
+            return next;
+          });
         }
 
         // 2. クラウド上のメンバー一覧を取得して反映
@@ -2508,7 +3037,7 @@ export default function SalonWorkScreen() {
           const normalized = normalizeStaffMembers(cloudMembers, myUserId, staffMembersRef.current);
           setStaffMembers(normalized);
           AsyncStorage.setItem('@salon_staff_members', JSON.stringify(normalized)).catch(() => {});
-          syncSeatsToWatch(_cachedCurrentSeats || seats, userNameRef.current || userName, normalized);
+          syncSeatsToWatch(_cachedCurrentSeats || seatsRef.current, userNameRef.current || userName, normalized);
         }
 
         // 3. Supabase Realtimeでメンバー変更（参加・更新）をリアルタイム監視
@@ -2554,7 +3083,7 @@ export default function SalonWorkScreen() {
                 return s;
               });
               if (seatRenamed) {
-                AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(nextSeats)).catch(() => {});
+                persistSeatsForSalonId(cloudSalon.id, nextSeats, resolvedIsOwner).catch(() => {});
                 syncSeatsToWatch(nextSeats, userNameRef.current || userName, normalized, { immediate: true });
                 return nextSeats;
               }
@@ -2562,116 +3091,13 @@ export default function SalonWorkScreen() {
               return prevSeats;
             });
           } else {
-            syncSeatsToWatch(_cachedCurrentSeats || seats, userNameRef.current || userName, normalized, { immediate: true });
+            syncSeatsToWatch(_cachedCurrentSeats || seatsRef.current, userNameRef.current || userName, normalized, { immediate: true });
           }
         });
 
-        // 4. クラウド上の客席タイマーを取得して反映（ローカルで稼働中のタイマーがクラウドの00:00で消されるのを保護）
-        const cloudTimers = await fetchSalonTimers(cloudSalon.id);
-        const wasSwitchedSalon = didSwitchSalonRef.current;
-        didSwitchSalonRef.current = false;
-        if (isMounted && Array.isArray(cloudTimers) && cloudTimers.length > 0) {
-          isRemoteSyncRef.current = true;
-          const seatsToPushBack = [];
-          setSeats((prevLocalSeats) => {
-            const nowMs = Date.now();
-            const merged = cloudTimers.map((ct) => {
-              const ctCleanLabel = String(ct.seatLabel || ct.name || '').replace(/席$/, '').trim();
-              const localMatch = (!wasSwitchedSalon && Array.isArray(prevLocalSeats))
-                ? prevLocalSeats.find((ls) => {
-                    if (!ls) return false;
-                    if (ls.id === ct.id || ls.cloudTimerId === ct.id) return true;
-                    const lsUuid = isCloudUUID(ls.cloudTimerId) ? ls.cloudTimerId : (isCloudUUID(ls.id) ? ls.id : null);
-                    if (lsUuid && isCloudUUID(ct.id) && lsUuid !== ct.id) return false;
-                    const lsCleanLabel = String(ls.seatLabel || ls.name || '').replace(/席$/, '').trim();
-                    if (ctCleanLabel && lsCleanLabel === ctCleanLabel) return true;
-                    const lsDigits = lsCleanLabel.match(/\d+/);
-                    const ctDigits = ctCleanLabel.match(/\d+/);
-                    if (lsDigits && ctDigits && parseInt(lsDigits[0], 10) === parseInt(ctDigits[0], 10)) return true;
-                    return false;
-                  })
-                : null;
-              // ローカル（またはWatch開始直後）で現在カウントダウン稼働中なのにクラウド側が停止中(00:00)の場合はローカルの稼働状態を優先保持しクラウドへ逆同期
-              if (
-                localMatch &&
-                localMatch.status === 'running' &&
-                Number(localMatch.targetEndTimestamp) > nowMs &&
-                ct.status !== 'running'
-              ) {
-                const preserved = {
-                  ...localMatch,
-                  id: ct.id,
-                  cloudTimerId: ct.id,
-                  seatNumber: ct.seatNumber || localMatch.seatNumber,
-                  seatLabel: ct.seatLabel || localMatch.seatLabel,
-                  name: ct.seatLabel || localMatch.seatLabel,
-                };
-                seatsToPushBack.push(preserved);
-                return preserved;
-              }
-              if (localMatch) {
-                const mergedItem = {
-                  ...ct,
-                  alarmSoundEnabled: localMatch.alarmSoundEnabled ?? ct.alarmSoundEnabled,
-                  watchAlarmSoundEnabled: localMatch.watchAlarmSoundEnabled ?? ct.watchAlarmSoundEnabled,
-                  history: Array.isArray(localMatch.history) && localMatch.history.length > 0 ? localMatch.history : ct.history,
-                  collapsedAtEnd: ct.status === 'running' ? null : (localMatch.collapsedAtEnd ?? ct.collapsedAtEnd),
-                };
-                lastSyncedSeatsStateRef.current[mergedItem.id] = getSeatCloudSignature(mergedItem);
-                return mergedItem;
-              }
-              lastSyncedSeatsStateRef.current[ct.id] = getSeatCloudSignature(ct);
-              return ct;
-            });
-            AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(merged)).catch(() => {});
-            syncSeatsToWatch(merged, userName, staffMembers);
-            return merged;
-          });
-          if (seatsToPushBack.length > 0) {
-            for (const activeSeat of seatsToPushBack) {
-              lastSyncedSeatsStateRef.current[activeSeat.id] = getSeatCloudSignature(activeSeat);
-              upsertCloudTimer(cloudSalon.id, activeSeat).catch(() => {});
-            }
-          }
-          setTimeout(() => {
-            isRemoteSyncRef.current = false;
-          }, 300);
-        } else if (isMounted && cloudSalon.owner_user_id === myUserId) {
-          // クラウドがまだ空の場合はオーナーの初期席をクラウドへ初期登録（別サロンから切り替えた直後で旧UUID席のみの場合は初期席にリセット）
-          const hasOnlyForeignCloudSeats =
-            wasSwitchedSalon ||
-            (seats.length > 0 && seats.every((s) => isCloudUUID(s?.cloudTimerId || s?.id)));
-          const seedSeats = hasOnlyForeignCloudSeats
-            ? getDefaultInitialSeats(userNameRef.current || userName || 'スタイリスト')
-            : seats;
-          if (hasOnlyForeignCloudSeats) {
-            setSeats(seedSeats);
-            AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(seedSeats)).catch(() => {});
-            syncSeatsToWatch(seedSeats, userNameRef.current || userName, staffMembers, { immediate: true });
-          }
-          for (const s of seedSeats) {
-            upsertCloudTimer(cloudSalon.id, s)
-              .then((savedCloudSeat) => {
-                if (isMounted && savedCloudSeat?.id) {
-                  lastSyncedSeatsStateRef.current[savedCloudSeat.id] = getSeatCloudSignature(savedCloudSeat);
-                  setSeats((curr) =>
-                    curr.map((item) =>
-                      item.id === s.id ? { ...item, id: savedCloudSeat.id, cloudTimerId: savedCloudSeat.id } : item
-                    )
-                  );
-                }
-              })
-              .catch(() => {});
-          }
-        } else if (isMounted && Array.isArray(cloudTimers) && cloudTimers.length === 0) {
-          // 参加先サロンのクラウド席が0件の場合、切り替え前のサロンの席が残らないようクリア
-          isRemoteSyncRef.current = true;
-          setSeats([]);
-          AsyncStorage.setItem('@salon_saved_seats', JSON.stringify([])).catch(() => {});
-          syncSeatsToWatch([], userNameRef.current || userName, staffMembers, { immediate: true, forceEmpty: true });
-          setTimeout(() => {
-            isRemoteSyncRef.current = false;
-          }, 300);
+        // 4. クラウド上の客席タイマーを取得・マージ同期
+        if (isMounted) {
+          await reconcileCloudTimers(cloudSalon.id, cloudSalon.owner_user_id);
         }
 
         // 5. Supabase Realtimeで客席タイマーの変更（開始・延長・停止・ヘルプ指定）をリアルタイム監視！
@@ -3014,7 +3440,7 @@ export default function SalonWorkScreen() {
                   : Number(newSeat.seatNumber);
                 const addedSeat = { ...newSeat, seatNumber: nextSeatNum };
                 updated = [...prev, addedSeat];
-                if (!isOwnRecentSync && addedSeat.status === 'running') {
+                if (!isSelfEcho && addedSeat.status === 'running') {
                   const label = (addedSeat.seatLabel || addedSeat.name || `${nextSeatNum}番席`).trim();
                   const canAlertNew =
                     shouldAlertMainTimerForUser(addedSeat, activeUser, activeUserId, activeMembers) ||
@@ -3029,7 +3455,7 @@ export default function SalonWorkScreen() {
                   }
                 }
               }
-              AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(updated)).catch(() => {});
+              persistSeatsForSalonId(cloudSalon.id, updated, resolvedIsOwner).catch(() => {});
               if (peerNotification) {
                 const enrichedNotif = {
                   ...peerNotification,
@@ -3078,8 +3504,8 @@ export default function SalonWorkScreen() {
               isRemoteSyncRef.current = false;
             }, 300);
           } else if (eventType === 'DELETE') {
-            const delId = oldSeat?.id;
-            const delLabel = oldSeat?.seatLabel || oldSeat?.name;
+            const delId = oldSeat?.id || oldSeat?.cloudTimerId || null;
+            const delLabel = oldSeat?.seatLabel || oldSeat?.name || null;
             if (delId || delLabel) {
               isRemoteSyncRef.current = true;
               if (delId) {
@@ -3087,9 +3513,21 @@ export default function SalonWorkScreen() {
                 stopAlarm('salon', `${delId}-check`);
               }
               setSeats((prev) => {
-                const updated = prev.filter((s) => s.id !== delId && s.seatLabel !== delLabel && s.name !== delLabel);
-                AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(updated)).catch(() => {});
-                syncSeatsToWatch(updated, userNameRef.current, staffMembersRef.current);
+                const updated = prev.filter((s) => {
+                  if (!s) return false;
+                  if (delId && (s.id === delId || s.cloudTimerId === delId)) return false;
+                  if (delLabel && !isCloudUUID(s.cloudTimerId || s.id)) {
+                    if (s.seatLabel === delLabel || s.name === delLabel) return false;
+                  } else if (!delId && delLabel && (s.seatLabel === delLabel || s.name === delLabel)) {
+                    return false;
+                  }
+                  return true;
+                });
+                persistSeatsForSalonId(cloudSalon.id, updated, resolvedIsOwner).catch(() => {});
+                syncSeatsToWatch(updated, userNameRef.current, staffMembersRef.current, {
+                  immediate: true,
+                  forceEmpty: updated.length === 0,
+                });
                 return updated;
               });
               setTimeout(() => {
@@ -3164,20 +3602,28 @@ export default function SalonWorkScreen() {
 
       const savedCurrentSalonId = await AsyncStorage.getItem('@salon_current_salon_id');
       const foundSalon = loadedSalons.find((s) => s.id === savedCurrentSalonId) || loadedSalons[0];
+      const foundIsOwner = checkIsSalonOwner(foundSalon, activeUserId);
+      _cachedMyUserId = activeUserId;
+      _cachedIsSalonOwner = foundIsOwner;
+      _cachedActiveSalonId = foundSalon?.id || 'workspace-free';
+      cloudSalonIdRef.current =
+        foundSalon?.id && foundSalon.id !== 'workspace-free' && foundSalon.id !== 'workspace-pro-demo'
+          ? foundSalon.id
+          : null;
       setCurrentSalon(foundSalon);
 
-      // 2. 席データの読み込み・初期化（デフォルトはメインタイマと1番席サンプルのみ。余計な席は排除し本人が追加）
-      const savedSeatsJson = await AsyncStorage.getItem('@salon_saved_seats');
-      let loadedSeats = getDefaultInitialSeats(activeUserName);
-      if (savedSeatsJson) {
-        try {
-          const parsed = JSON.parse(savedSeatsJson);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            loadedSeats = parsed;
-          }
-        } catch (e) {
-          console.warn('Failed to parse saved seats', e);
-        }
+      // オフライン削除待ちキューを復元
+      pendingDeletedSeatsRef.current = await readPendingDeletedSeats(foundSalon?.id);
+
+      // 2. 席データの読み込み・初期化（オーナーはサロン別保存席または初期1番席、ゲストはサンプル席を作らずクラウド同期）
+      let loadedSeats = await readSeatsForSalonFromStorage(
+        foundSalon,
+        activeUserName,
+        activeUserId,
+        savedCurrentSalonId
+      );
+      if (foundIsOwner && pendingDeletedSeatsRef.current.length > 0) {
+        loadedSeats = loadedSeats.filter((s) => !isSeatInPendingDeleted(s));
       }
       // ★ アプリ起動時（TestFlight更新後・再起動時）に過去終了済みのタイマーをサニタイズし、起動直後のバイブ暴発を根絶
       const { seats: sanitizedSeats, didSanitize } = sanitizeLoadedSeats(loadedSeats);
@@ -3214,7 +3660,7 @@ export default function SalonWorkScreen() {
         }
       });
       if (didSanitize) {
-        AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(loadedSeats)).catch(() => {});
+        persistSeatsForSalonId(foundSalon?.id, loadedSeats, foundIsOwner).catch(() => {});
       }
       setSeats(loadedSeats);
 
@@ -3225,7 +3671,7 @@ export default function SalonWorkScreen() {
         try {
           const parsed = JSON.parse(savedMembersJson);
           if (Array.isArray(parsed)) {
-            loadedMembers = normalizeStaffMembers(parsed);
+            loadedMembers = normalizeStaffMembers(parsed, activeUserId);
           }
         } catch (e) {
           console.warn('Failed to parse saved staff members', e);
@@ -3421,7 +3867,7 @@ export default function SalonWorkScreen() {
 
     try {
       await AsyncStorage.setItem('@salon_staff_members', JSON.stringify(updated));
-      await AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(updatedSeats));
+      await persistSeatsForSalonId(getActiveStorageSalonId(), updatedSeats, isSalonOwnerRef.current);
       syncChangedSeatsToCloud(updatedSeats);
       // Apple Watchへ即時同期
       syncSeatsToWatch(updatedSeats, userName, updated, { immediate: true });
@@ -3466,18 +3912,34 @@ export default function SalonWorkScreen() {
     );
   };
 
-  // サロン・グループ切り替え
-  const handleSelectSalon = (salon) => {
+  // サロン・グループ切り替え（切り替え先サロンの専用ストレージから席を復元し、別サロンの席混入・消失を防止）
+  const handleSelectSalon = async (salon) => {
     if (!salon) return;
+    setIsSwitcherModalVisible(false);
     if (salon.id !== currentSalon?.id) {
       resetSalonRuntimeStateForSwitch();
       didSwitchSalonRef.current = true;
       cloudSalonIdRef.current =
         salon.id && salon.id !== 'workspace-free' && salon.id !== 'workspace-pro-demo' ? salon.id : null;
+      const targetIsOwner = checkIsSalonOwner(salon, myUserIdRef.current || myUserId);
+      _cachedIsSalonOwner = targetIsOwner;
+      _cachedActiveSalonId = salon.id || 'workspace-free';
+      pendingDeletedSeatsRef.current = await readPendingDeletedSeats(salon.id);
+      const switchedSeats = await readSeatsForSalonFromStorage(
+        salon,
+        userNameRef.current || userName,
+        myUserIdRef.current || myUserId,
+        salon.id
+      );
+      setSeats(switchedSeats);
+      syncSeatsToWatch(switchedSeats, userNameRef.current || userName, staffMembersRef.current || staffMembers, {
+        immediate: true,
+        forceEmpty: switchedSeats.length === 0,
+      });
     }
     setCurrentSalon(salon);
+    currentSalonRef.current = salon;
     AsyncStorage.setItem('@salon_current_salon_id', salon.id).catch((e) => console.warn(e));
-    setIsSwitcherModalVisible(false);
   };
 
   // 招待コードの共有・コピー（OS標準の共有シート / LINE・メッセージ等）
@@ -3509,8 +3971,13 @@ export default function SalonWorkScreen() {
     }
   };
 
-  // 招待コードの直接変更・保存
-  const handleSaveCustomInviteCode = () => {
+  // 招待コードの直接変更・保存（オーナー専用：既存クラウドサロンの invite_code を更新して全席・全メンバーを引き継ぐ）
+  const handleSaveCustomInviteCode = async () => {
+    if (!editingSalonForCode) return;
+    if (!checkIsSalonOwner(editingSalonForCode, myUserIdRef.current || myUserId)) {
+      Alert.alert('権限エラー', '招待コードの変更はサロン作成者（オーナー）のみ行えます。');
+      return;
+    }
     const clean = sanitizeInviteCode(inputNewInviteCode);
     if (!clean) {
       Alert.alert('入力エラー', '招待コードを入力してください');
@@ -3520,17 +3987,35 @@ export default function SalonWorkScreen() {
       Alert.alert('入力エラー', '招待コードは4〜15文字で入力してください');
       return;
     }
-    if (!editingSalonForCode) return;
 
     const targetId = editingSalonForCode.id;
-    const updated = savedSalons.map((s) => (s.id === targetId ? { ...s, inviteCode: clean } : s));
+    let finalCode = clean;
+    if (isCloudUUID(targetId)) {
+      try {
+        const updatedCloudSalon = await updateSalonInviteCode({
+          salonId: targetId,
+          newInviteCode: clean,
+        });
+        if (updatedCloudSalon?.invite_code) {
+          finalCode = updatedCloudSalon.invite_code;
+        }
+      } catch (err) {
+        Alert.alert('招待コード更新エラー', err.message || 'クラウド上の招待コード更新に失敗しました');
+        return;
+      }
+    }
+
+    const updated = savedSalons.map((s) => (s.id === targetId ? { ...s, inviteCode: finalCode } : s));
     setSavedSalons(updated);
+    setEditingSalonForCode((prev) => (prev ? { ...prev, inviteCode: finalCode } : prev));
     if (currentSalon?.id === targetId) {
-      setCurrentSalon({ ...currentSalon, inviteCode: clean });
+      const nextCurrent = { ...currentSalon, inviteCode: finalCode };
+      setCurrentSalon(nextCurrent);
+      currentSalonRef.current = nextCurrent;
     }
     saveSalonsToStorage(updated, currentSalon?.id);
     setSwitcherSubView('list');
-    Alert.alert('招待コードを更新しました', `招待コード: ${clean}\n\nパートナーにこのコードを共有してご参加ください。`);
+    Alert.alert('招待コードを更新しました', `招待コード: ${finalCode}\n\n既存の客席とメンバーを維持したまま更新しました。パートナーにこのコードを共有してご参加ください。`);
   };
 
   // ランダムコード再生成
@@ -3572,19 +4057,26 @@ export default function SalonWorkScreen() {
       AsyncStorage.setItem('@assist_timer_user_name', staffName).catch(() => {});
 
       const uid = myUserId || (await getOrCreateUserId());
+      const isJoinedSalonOwner = salon.owner_user_id === uid;
       const newSalonItem = {
         id: salon.id,
         name: salon.name || (inputSalonName || '').trim() || `サロン (${code})`,
         type: 'salon',
         inviteCode: salon.invite_code,
+        ownerUserId: salon.owner_user_id,
         isPro: !!salon.is_pro,
-        role: salon.owner_user_id === uid ? 'owner' : 'assistant',
+        role: isJoinedSalonOwner ? 'owner' : 'assistant',
         description: `${members.length}名参加中 (クラウド同期中)`,
       };
+
+      _cachedIsSalonOwner = isJoinedSalonOwner;
+      _cachedActiveSalonId = newSalonItem.id;
+      pendingDeletedSeatsRef.current = await readPendingDeletedSeats(newSalonItem.id);
 
       const updatedSalons = [newSalonItem, ...savedSalons.filter((s) => s.id !== salon.id && s.inviteCode !== salon.invite_code)];
       setSavedSalons(updatedSalons);
       setCurrentSalon(newSalonItem);
+      currentSalonRef.current = newSalonItem;
       saveSalonsToStorage(updatedSalons, newSalonItem.id);
 
       // クラウドのメンバー一覧を即時反映
@@ -3599,22 +4091,21 @@ export default function SalonWorkScreen() {
       // クラウドサロンIDを即時保持
       cloudSalonIdRef.current = salon.id;
 
-      // 親サロンの客席タイマーを即時取得して自分のローカル席を100%上書き置換（0件の場合も旧サロン席を残さない）
-      const cloudTimers = await fetchSalonTimers(salon.id);
+      // 親サロンの客席タイマーを即時取得して自分のローカル席を100%上書き置換（0件の場合も旧サロン席やサンプル席を残さない）
+      const cloudTimers = await fetchSalonTimers(salon.id, { returnNullOnError: true });
       isRemoteSyncRef.current = true;
-      if (Array.isArray(cloudTimers)) {
-        cloudTimers.forEach((ct) => {
-          if (ct?.id) {
-            lastSyncedSeatsStateRef.current[ct.id] = getSeatCloudSignature(ct);
-          }
-        });
-        setSeats(cloudTimers);
-        AsyncStorage.setItem('@salon_saved_seats', JSON.stringify(cloudTimers)).catch(() => {});
-        syncSeatsToWatch(cloudTimers, staffName, normalizedMembers, {
-          immediate: true,
-          forceEmpty: cloudTimers.length === 0,
-        });
-      }
+      const initialJoinedSeats = Array.isArray(cloudTimers) ? cloudTimers : [];
+      initialJoinedSeats.forEach((ct) => {
+        if (ct?.id) {
+          lastSyncedSeatsStateRef.current[ct.id] = getSeatCloudSignature(ct);
+        }
+      });
+      setSeats(initialJoinedSeats);
+      persistSeatsForSalonId(salon.id, initialJoinedSeats, isJoinedSalonOwner).catch(() => {});
+      syncSeatsToWatch(initialJoinedSeats, staffName, normalizedMembers, {
+        immediate: true,
+        forceEmpty: initialJoinedSeats.length === 0,
+      });
       setTimeout(() => {
         isRemoteSyncRef.current = false;
       }, 500);
@@ -3725,7 +4216,7 @@ export default function SalonWorkScreen() {
         {
           text: '削除する',
           style: 'destructive',
-          onPress: () => {
+          onPress: async () => {
             const updated = savedSalons.filter((s) => s.id !== salonToDelete.id);
             setSavedSalons(updated);
             let nextSalon = currentSalon;
@@ -3733,11 +4224,29 @@ export default function SalonWorkScreen() {
               resetSalonRuntimeStateForSwitch();
               didSwitchSalonRef.current = true;
               nextSalon = updated[0] || createDefaultFreeSalon();
+              const nextIsOwner = checkIsSalonOwner(nextSalon, myUserIdRef.current || myUserId);
+              _cachedIsSalonOwner = nextIsOwner;
+              _cachedActiveSalonId = nextSalon.id || 'workspace-free';
               cloudSalonIdRef.current =
                 nextSalon.id && nextSalon.id !== 'workspace-free' && nextSalon.id !== 'workspace-pro-demo'
                   ? nextSalon.id
                   : null;
+              pendingDeletedSeatsRef.current = await readPendingDeletedSeats(nextSalon.id);
+              const restoredSeats = await readSeatsForSalonFromStorage(
+                nextSalon,
+                userNameRef.current || userName,
+                myUserIdRef.current || myUserId,
+                nextSalon.id
+              );
+              setSeats(restoredSeats);
+              syncSeatsToWatch(
+                restoredSeats,
+                userNameRef.current || userName,
+                staffMembersRef.current || staffMembers,
+                { immediate: true, forceEmpty: restoredSeats.length === 0 }
+              );
               setCurrentSalon(nextSalon);
+              currentSalonRef.current = nextSalon;
               AsyncStorage.setItem('@salon_current_salon_id', nextSalon.id).catch((e) => console.warn(e));
             }
             saveSalonsToStorage(updated, nextSalon.id);
@@ -3747,8 +4256,12 @@ export default function SalonWorkScreen() {
     );
   };
 
-  // ★ ユーザー指定: タイム設定モーダルでの席名変更の保存
+  // ★ ユーザー指定: タイム設定モーダルでの席名変更の保存（オーナーのみ）
   const handleSaveSeatLabel = () => {
+    if (!isSalonOwnerRef.current) {
+      setIsEditingSeatLabel(false);
+      return;
+    }
     const trimmed = (modalSeatLabel || '').trim() || '席';
     setModalSeatLabel(trimmed);
     setIsEditingSeatLabel(false);
@@ -3757,7 +4270,7 @@ export default function SalonWorkScreen() {
       const oldLabel = (oldSeat?.seatLabel || oldSeat?.name || '').trim();
       setSeats((prev) => {
         const updated = prev.map((s) =>
-          s.id === targetSeatId ? { ...s, seatLabel: trimmed, name: trimmed } : s
+          s.id === targetSeatId ? { ...s, seatLabel: trimmed, name: trimmed, dirtySync: true } : s
         );
         saveSeatsToStorage(updated);
         syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
@@ -3765,7 +4278,9 @@ export default function SalonWorkScreen() {
       });
       const targetSalonId =
         cloudSalonIdRef.current ||
-        (currentSalon?.id && currentSalon.id !== 'workspace-free' ? currentSalon.id : null);
+        (currentSalon?.id && currentSalon.id !== 'workspace-free' && currentSalon.id !== 'workspace-pro-demo'
+          ? currentSalon.id
+          : null);
       if (targetSalonId && oldSeat && oldLabel && oldLabel !== trimmed) {
         upsertCloudTimer(targetSalonId, {
           ...oldSeat,
@@ -3777,18 +4292,18 @@ export default function SalonWorkScreen() {
     }
   };
 
-  // ★ 席名ダイレクト変更モーダルを開く（カードヘッダー・スリムバーからいつでも開ける）
+  // ★ 席名ダイレクト変更モーダルを開く（オーナーのみ）
   const handleOpenSeatRenameModal = (seat) => {
-    if (!seat) return;
+    if (!seat || !isSalonOwnerRef.current) return;
     setRenameTargetSeat(seat);
     const cleanLabel = (seat.seatLabel || '').replace(/^[🪑⌚️⏱️]\s*/, '').trim();
     setRenameSeatLabelInput(cleanLabel);
     setIsRenameSeatModalVisible(true);
   };
 
-  // ★ 席名変更の確定保存（ローカル保存・Watch同期・Supabaseリアルタイム同期）
+  // ★ 席名変更の確定保存（オーナーのみ：ローカル保存・Watch同期・Supabaseリアルタイム同期）
   const handleSaveSeatRename = async () => {
-    if (!renameTargetSeat) {
+    if (!renameTargetSeat || !isSalonOwnerRef.current) {
       setIsRenameSeatModalVisible(false);
       return;
     }
@@ -3805,7 +4320,7 @@ export default function SalonWorkScreen() {
     let renamedSeatObj = null;
     const updatedSeats = seats.map((s) => {
       if (s.id === targetId) {
-        renamedSeatObj = { ...s, seatLabel: finalLabel, name: finalLabel };
+        renamedSeatObj = { ...s, seatLabel: finalLabel, name: finalLabel, dirtySync: true };
         return renamedSeatObj;
       }
       return s;
@@ -3815,7 +4330,13 @@ export default function SalonWorkScreen() {
     saveSeatsToStorage(updatedSeats);
     syncSeatsToWatch(updatedSeats, userName, staffMembers, { immediate: true });
 
-    const targetSalonId = cloudSalonIdRef.current || (currentSalonRef.current?.id && currentSalonRef.current.id !== 'workspace-free' ? currentSalonRef.current.id : null);
+    const targetSalonId =
+      cloudSalonIdRef.current ||
+      (currentSalonRef.current?.id &&
+      currentSalonRef.current.id !== 'workspace-free' &&
+      currentSalonRef.current.id !== 'workspace-pro-demo'
+        ? currentSalonRef.current.id
+        : null);
     if (targetSalonId && renamedSeatObj) {
       upsertCloudTimer(targetSalonId, { ...renamedSeatObj, oldSeatLabel: oldLabel }).catch((e) =>
         console.warn('Supabase update seat_label failed:', e)
@@ -4256,7 +4777,7 @@ export default function SalonWorkScreen() {
     } else {
       Alert.alert(
         '🤝 代理確認の完了・関係者共有',
-        message + '\n\n（メイン担当・ヘルプ担当・あなたの3名にリアルタイム共有されました）',
+        message + '\n\n（メイン担当・ヘルプ担当・自分の3名にリアルタイム共有されました）',
         [{ text: 'OK' }]
       );
     }
@@ -4593,6 +5114,8 @@ export default function SalonWorkScreen() {
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
             colorStaffName: userName || 'スタイリスト',
+            createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+            dirtySync: true,
             // ★ 新しく測る時は前の施術のヘルプを勝手に引き継がない
             assistantStaffName: (modalAssistantStaff || '').trim() || '',
             actionStatus: null,
@@ -4649,6 +5172,8 @@ export default function SalonWorkScreen() {
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
             colorStaffName: userName || s.colorStaffName || 'スタイリスト',
+            createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+            dirtySync: true,
             assistantStaffName: resolvedAssist,
             isNoHelpNeeded: resolvedIsNoHelp,
             isShampooing: false,
@@ -4701,6 +5226,8 @@ export default function SalonWorkScreen() {
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
             colorStaffName: userName || s.colorStaffName || 'スタイリスト',
+            createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+            dirtySync: true,
             assistantStaffName: resolvedAssist,
             isNoHelpNeeded: resolvedIsNoHelp,
             isShampooing: false,
@@ -4745,6 +5272,8 @@ export default function SalonWorkScreen() {
           seatLabel: modalSeatLabel.trim() || s.seatLabel,
           status: 'running',
           colorStaffName: userName || 'スタイリスト',
+          createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+          dirtySync: true,
           // ★ 新規開始時はモーダルの指定がなければ空文字
           assistantStaffName: (modalAssistantStaff || '').trim() || '',
           actionStatus: null,
@@ -4982,14 +5511,14 @@ export default function SalonWorkScreen() {
       // メイン担当本人が指定した場合 -> メイン ＋ 指定されたヘルプ の2名に通知
       Alert.alert(
         '🤝 ヘルプ指名通知',
-        `「${seat.seatLabel}」の${actionBadgeLabel}ヘルプ担当に【${newHelp}】さんを指名しました。\n\n【お互いへの通知完了】\n・🎨 ${mainStaff}（あなた・メイン担当）\n・🤝 ${newHelp}（指定されたヘルプ）\n\n両者の端末およびApple Watchに通知が届きました。`,
+        `「${seat.seatLabel}」の${actionBadgeLabel}ヘルプ担当に【${newHelp}】さんを指名しました。\n\n【お互いへの通知完了】\n・🎨 自分（メイン担当）\n・🤝 ${newHelp}（指定されたヘルプ）\n\n両者の端末およびApple Watchに通知が届きました。`,
         [{ text: 'OK' }]
       );
     } else {
       // 本人が立候補した場合
       Alert.alert(
         '🤝 ヘルプ参戦通知',
-        `「${seat.seatLabel}」の${actionBadgeLabel}ヘルプ担当に【${newHelp}】（あなた）が入りました。\n\n【お互いへの通知完了】\n・🎨 ${mainStaff || 'メイン担当'}\n・🤝 ${newHelp}（あなた・ヘルプ担当）\n\n両者の端末およびApple Watchに通知が届きました。`,
+        `「${seat.seatLabel}」の${actionBadgeLabel}ヘルプ担当に【自分】が入りました。\n\n【お互いへの通知完了】\n・🎨 ${mainStaff || 'メイン担当'}\n・🤝 自分（ヘルプ担当）\n\n両者の端末およびApple Watchに通知が届きました。`,
         [{ text: 'OK' }]
       );
     }
@@ -5571,10 +6100,10 @@ export default function SalonWorkScreen() {
     }
   };
 
-  // 施術終了（固定席なら待機中スリムバーに戻し、フリータイマーならボードから削除）
+  // 施術終了（固定席なら待機中スリムバーに戻し、フリータイマーかつオーナーならボードから削除）
   const handleFinishSeat = (seatId) => {
     const targetSeat = seats.find((s) => s.id === seatId);
-    const isFree = targetSeat?.isFreeTimer;
+    const isFree = !!(targetSeat?.isFreeTimer && isSalonOwnerRef.current);
 
     Alert.alert(
       '施術終了の確認',
@@ -5586,11 +6115,13 @@ export default function SalonWorkScreen() {
         {
           text: isFree ? '終了して削除' : '終了して空席に戻す',
           style: isFree ? 'destructive' : 'default',
-          onPress: () => {
+          onPress: async () => {
             stopAlarm('salon', `${seatId}-main`);
             stopAlarm('salon', `${seatId}-check`);
             WatchConnectivity.notifyLocalStopOrReset(seatId, targetSeat?.targetEndTimestamp || 0);
             if (isFree) {
+              const storageSalonId = getActiveStorageSalonId();
+              await enqueuePendingDeletedSeat(storageSalonId, targetSeat);
               setSeats((prev) => {
                 const updated = prev.filter((s) => s.id !== seatId);
                 saveSeatsToStorage(updated);
@@ -5599,9 +6130,14 @@ export default function SalonWorkScreen() {
               });
               const targetSalonId =
                 cloudSalonIdRef.current ||
-                (currentSalon?.id && currentSalon.id !== 'workspace-free' ? currentSalon.id : null);
+                (currentSalon?.id && currentSalon.id !== 'workspace-free' && currentSalon.id !== 'workspace-pro-demo'
+                  ? currentSalon.id
+                  : null);
               if (targetSalonId) {
-                deleteCloudTimer(targetSalonId, seatId, targetSeat?.seatLabel).catch(() => {});
+                const ok = await deleteCloudTimer(targetSalonId, targetSeat?.cloudTimerId || seatId, targetSeat?.seatLabel);
+                if (ok) {
+                  await removePendingDeletedSeat(targetSalonId, targetSeat?.cloudTimerId || seatId, targetSeat?.seatLabel);
+                }
               }
             } else {
               setSeats((prev) => {
@@ -5616,6 +6152,8 @@ export default function SalonWorkScreen() {
                     timeUpTimestamp: null,
                     escalationLevel: 0,
                     colorStaffName: '',
+                    createdBy: null,
+                    dirtySync: true,
                     assistantStaffName: null,
                     actionStatus: null,
                     helpProcess: null,
@@ -5651,8 +6189,10 @@ export default function SalonWorkScreen() {
     );
   };
 
-  // 待機席の削除（席マスターから削除）
+  // 待機席の削除（オーナー専用：席マスターから削除＆オフライン削除キュー記録）
   const handleDeleteSeat = (seatId, seatLabel) => {
+    if (!isSalonOwnerRef.current) return;
+    const targetSeatObj = seats.find((s) => s.id === seatId) || { id: seatId, seatLabel };
     Alert.alert(
       '席の削除確認',
       `「${seatLabel}」をサロンボードから削除しますか？`,
@@ -5661,7 +6201,12 @@ export default function SalonWorkScreen() {
         {
           text: '削除する',
           style: 'destructive',
-          onPress: () => {
+          onPress: async () => {
+            if (!isSalonOwnerRef.current) return;
+            stopAlarm('salon', `${seatId}-main`);
+            stopAlarm('salon', `${seatId}-check`);
+            const storageSalonId = getActiveStorageSalonId();
+            await enqueuePendingDeletedSeat(storageSalonId, targetSeatObj);
             setSeats((prev) => {
               const updated = prev.filter((s) => s.id !== seatId);
               saveSeatsToStorage(updated);
@@ -5670,9 +6215,15 @@ export default function SalonWorkScreen() {
             });
             const targetSalonId =
               cloudSalonIdRef.current ||
-              (currentSalon?.id && currentSalon.id !== 'workspace-free' ? currentSalon.id : null);
+              (currentSalon?.id && currentSalon.id !== 'workspace-free' && currentSalon.id !== 'workspace-pro-demo'
+                ? currentSalon.id
+                : null);
             if (targetSalonId) {
-              deleteCloudTimer(targetSalonId, seatId, seatLabel).catch(() => {});
+              const delKey = targetSeatObj.cloudTimerId || seatId;
+              const ok = await deleteCloudTimer(targetSalonId, delKey, seatLabel);
+              if (ok) {
+                await removePendingDeletedSeat(targetSalonId, delKey, seatLabel);
+              }
             }
           },
         },
@@ -5687,8 +6238,12 @@ export default function SalonWorkScreen() {
       return Math.max(maxN, n);
     }, 0) + 1;
 
-  // 新規固定席の追加（席マスターを増やす）
+  // 新規固定席の追加（オーナー専用：席マスターを増やす）
   const handleAddNewSeatMaster = () => {
+    if (!isSalonOwnerRef.current) {
+      setIsAddSeatModalVisible(false);
+      return;
+    }
     const nextSuggestedNum = getNextSuggestedSeatNumber(seats);
     const trimmedInput = newSeatName.trim();
     const inputNumMatch = trimmedInput.match(/\d+/);
@@ -5701,6 +6256,8 @@ export default function SalonWorkScreen() {
       name: label,
       status: 'idle',
       colorStaffName: '',
+      createdBy: myUserIdRef.current || myUserId || null,
+      dirtySync: true,
       assistantStaffName: null,
       actionStatus: null,
       helpProcess: null,
@@ -5740,6 +6297,8 @@ export default function SalonWorkScreen() {
           ...s,
           status: 'running',
           colorStaffName: userName || 'スタイリスト',
+          createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+          dirtySync: true,
           assistantStaffName: '',
           actionStatus: null,
           helpProcess: '',
@@ -5780,8 +6339,12 @@ export default function SalonWorkScreen() {
     Alert.alert('割り当て完了', `メインタイマーを「${seats.find((s) => s.id === seatId)?.seatLabel}」にセットしました！`);
   };
 
-  // メインタイマーを席に割り当てずにセット（席指定なし・フリータイマーとしてサロンボードに追加）
+  // メインタイマーを席に割り当てずにセット（オーナー専用：席指定なし・フリータイマーとしてサロンボードに追加）
   const handleAssignMainTimerWithoutSeat = () => {
+    if (!isSalonOwnerRef.current) {
+      setIsAssignMainTimerModalVisible(false);
+      return;
+    }
     const target = mainTimerState?.targetTime || 180;
     const remaining = (!mainTimerState?.isCountUp && mainTimerState?.remainingTime > 0)
       ? mainTimerState.remainingTime
@@ -5801,6 +6364,8 @@ export default function SalonWorkScreen() {
       isFreeTimer: true, // 席マスター外のフリータイマーフラグ
       status: 'running',
       colorStaffName: userName || 'スタイリスト',
+      createdBy: myUserIdRef.current || myUserId || null,
+      dirtySync: true,
       assistantStaffName: '',
       actionStatus: null,
       helpProcess: '',
@@ -5994,24 +6559,26 @@ export default function SalonWorkScreen() {
             </Text>
           </TouchableOpacity>
 
-          {/* 席追加（席マスターを増やす）ボタン */}
-          <TouchableOpacity
-            style={[
-              styles.addSeatHeaderButton,
-              {
-                backgroundColor: theme.accentLight,
-                borderColor: theme.accentBorder,
-                paddingHorizontal: 7,
-              },
-            ]}
-            onPress={() => {
-              setNewSeatName(`${getNextSuggestedSeatNumber()}番席`);
-              setIsAddSeatModalVisible(true);
-            }}
-          >
-            <Ionicons name="add" size={15} color={theme.accent} />
-            <Text style={[styles.addSeatHeaderText, { color: theme.accent, fontSize: 11 }]}>席追加</Text>
-          </TouchableOpacity>
+          {/* 席追加（席マスターを増やす）ボタン（招待元オーナーのみ表示） */}
+          {isSalonOwner ? (
+            <TouchableOpacity
+              style={[
+                styles.addSeatHeaderButton,
+                {
+                  backgroundColor: theme.accentLight,
+                  borderColor: theme.accentBorder,
+                  paddingHorizontal: 7,
+                },
+              ]}
+              onPress={() => {
+                setNewSeatName(`${getNextSuggestedSeatNumber()}番席`);
+                setIsAddSeatModalVisible(true);
+              }}
+            >
+              <Ionicons name="add" size={15} color={theme.accent} />
+              <Text style={[styles.addSeatHeaderText, { color: theme.accent, fontSize: 11 }]}>席追加</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
       </View>
 
@@ -6190,23 +6757,31 @@ export default function SalonWorkScreen() {
                   },
                 ]}
                 onPress={() => handleOpenSetTimerModal(item)}
-                onLongPress={() => handleDeleteSeat(item.id, item.seatLabel)}
+                onLongPress={isSalonOwner ? () => handleDeleteSeat(item.id, item.seatLabel) : undefined}
                 activeOpacity={0.7}
               >
                 <View style={styles.idleRowLeft}>
-                  <TouchableOpacity
-                    style={[styles.idleSeatBadge, { backgroundColor: theme.inputBg, flexDirection: 'row', alignItems: 'center' }]}
-                    onPress={(e) => {
-                      e.stopPropagation();
-                      handleOpenSeatRenameModal(item);
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.idleSeatBadgeText, { color: theme.textPrimary }]}>
-                      ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
-                    </Text>
-                    <Ionicons name="pencil" size={11} color={theme.accent} style={{ marginLeft: 4 }} />
-                  </TouchableOpacity>
+                  {isSalonOwner ? (
+                    <TouchableOpacity
+                      style={[styles.idleSeatBadge, { backgroundColor: theme.inputBg, flexDirection: 'row', alignItems: 'center' }]}
+                      onPress={(e) => {
+                        e.stopPropagation();
+                        handleOpenSeatRenameModal(item);
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.idleSeatBadgeText, { color: theme.textPrimary }]}>
+                        ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
+                      </Text>
+                      <Ionicons name="pencil" size={11} color={theme.accent} style={{ marginLeft: 4 }} />
+                    </TouchableOpacity>
+                  ) : (
+                    <View style={[styles.idleSeatBadge, { backgroundColor: theme.inputBg, flexDirection: 'row', alignItems: 'center' }]}>
+                      <Text style={[styles.idleSeatBadgeText, { color: theme.textPrimary }]}>
+                        ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
+                      </Text>
+                    </View>
+                  )}
                   <Text style={[styles.idleStatusText, { color: theme.textTertiary }]}>
                     空席・待機中
                   </Text>
@@ -6268,19 +6843,27 @@ export default function SalonWorkScreen() {
               >
                 {/* 左側: 席ラベル ＆ 停止時タイム（最後に入れられたタイム） */}
                 <View style={styles.pausedRowLeft}>
-                  <TouchableOpacity
-                    style={[styles.pausedSeatBadge, { backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7', flexDirection: 'row', alignItems: 'center' }]}
-                    onPress={(e) => {
-                      e.stopPropagation();
-                      handleOpenSeatRenameModal(item);
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.pausedSeatBadgeText, { color: theme.textPrimary }]}>
-                      ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
-                    </Text>
-                    <Ionicons name="pencil" size={11} color={theme.accent} style={{ marginLeft: 4 }} />
-                  </TouchableOpacity>
+                  {isSalonOwner ? (
+                    <TouchableOpacity
+                      style={[styles.pausedSeatBadge, { backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7', flexDirection: 'row', alignItems: 'center' }]}
+                      onPress={(e) => {
+                        e.stopPropagation();
+                        handleOpenSeatRenameModal(item);
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.pausedSeatBadgeText, { color: theme.textPrimary }]}>
+                        ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
+                      </Text>
+                      <Ionicons name="pencil" size={11} color={theme.accent} style={{ marginLeft: 4 }} />
+                    </TouchableOpacity>
+                  ) : (
+                    <View style={[styles.pausedSeatBadge, { backgroundColor: isEcoMode ? '#2C2C2E' : '#F2F2F7', flexDirection: 'row', alignItems: 'center' }]}>
+                      <Text style={[styles.pausedSeatBadgeText, { color: theme.textPrimary }]}>
+                        ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
+                      </Text>
+                    </View>
+                  )}
                   <View style={styles.pausedTimeContainer}>
                     <Text style={[styles.pausedTimeText, { color: theme.warning }]}>
                       ⏸️ {timeString}
@@ -6355,13 +6938,13 @@ export default function SalonWorkScreen() {
                         : item.assistantStaffName === 'ヘルプなし'
                         ? 'ヘルプなし'
                         : item.assistantStaffName
-                        ? item.assistantStaffName
+                        ? formatStaffForDisplay(item.assistantStaffName)
                         : '未定'}
                     </Text>
                   </TouchableOpacity>
 
                   <Text style={[styles.pausedStaffText, { color: theme.textSecondary }]} numberOfLines={1}>
-                    📝 {item.colorStaffName || '未'}
+                    📝 {item.colorStaffName ? formatCreatorForDisplay(item, '未') : '未'}
                   </Text>
 
                   <Ionicons name="chevron-down" size={18} color={theme.textTertiary} style={{ marginLeft: 4 }} />
@@ -6423,16 +7006,19 @@ export default function SalonWorkScreen() {
                 <View style={styles.cardHeaderLeft}>
                   <TouchableOpacity
                     style={[styles.seatLabelContainer, item.isFreeTimer && { backgroundColor: theme.accentLight }, { flexDirection: 'row', alignItems: 'center' }]}
-                    onPress={() => handleOpenSeatRenameModal(item)}
-                    activeOpacity={0.7}
+                    onPress={isSalonOwner ? () => handleOpenSeatRenameModal(item) : undefined}
+                    disabled={!isSalonOwner}
+                    activeOpacity={isSalonOwner ? 0.7 : 1}
                   >
                     <Text style={[styles.seatLabelText, { color: item.isFreeTimer ? theme.accent : theme.textPrimary }]}>
                       ⌚️ {item.seatLabel.replace(/^[🪑⌚️⏱️]\s*/, '')}
                     </Text>
-                    <Ionicons name="pencil" size={11} color={theme.accent} style={{ marginLeft: 4 }} />
+                    {isSalonOwner ? (
+                      <Ionicons name="pencil" size={11} color={theme.accent} style={{ marginLeft: 4 }} />
+                    ) : null}
                   </TouchableOpacity>
 
-                  {/* ★ ユーザー指定: 1番席の右の所にタイマー作成者の名前を表示（絵文字は📝） */}
+                  {/* ★ ユーザー指定: 1番席の右の所にタイマー作成者の名前を表示（自分が作成者なら「📝 自分」） */}
                   {item.colorStaffName ? (
                     <View
                       style={[
@@ -6444,7 +7030,7 @@ export default function SalonWorkScreen() {
                       ]}
                     >
                       <Text style={[styles.headerCreatorText, { color: theme.textSecondary }]}>
-                        📝 {item.colorStaffName}
+                        📝 {formatCreatorForDisplay(item)}
                       </Text>
                     </View>
                   ) : null}
@@ -6487,7 +7073,7 @@ export default function SalonWorkScreen() {
                         ? item.isReset || remainingSec === 0
                           ? '🔄 リセット済 (0:00)'
                           : item.stoppedBy
-                          ? `⏸️ 停止中 (🛑 ${item.stoppedBy})`
+                          ? `⏸️ 停止中 (🛑 ${formatStaffForDisplay(item.stoppedBy)})`
                           : '⏸️ 一時停止中'
                         : isOver
                         ? '🚨 全体タイム超過'
@@ -6748,8 +7334,8 @@ export default function SalonWorkScreen() {
                           ]}
                         >
                           {isCompleted
-                            ? (item.checkStaffName ? `${item.checkStaffName}済 ▾` : 'チェック済 ▾')
-                            : (item.checkStaffName ? `チェック: ${item.checkStaffName} ▾` : 'チェック未定 ▾')}
+                            ? (item.checkStaffName ? `${formatStaffForDisplay(item.checkStaffName)}済 ▾` : 'チェック済 ▾')
+                            : (item.checkStaffName ? `チェック: ${formatStaffForDisplay(item.checkStaffName)} ▾` : 'チェック未定 ▾')}
                         </Text>
                       </TouchableOpacity>
                     </View>
@@ -6776,7 +7362,7 @@ export default function SalonWorkScreen() {
                         </Text>
                       ) : item.assistantStaffName ? (
                         <Text style={[styles.safetyRoleText, { color: item.assistantStaffConfirmed ? theme.success : theme.danger }]}>
-                          ヘルプ（{item.assistantStaffName}）: {item.assistantStaffConfirmed ? '✓済' : '✕未'}
+                          ヘルプ（{formatStaffForDisplay(item.assistantStaffName)}）: {item.assistantStaffConfirmed ? '✓済' : '✕未'}
                         </Text>
                       ) : (
                         <Text style={[styles.safetyRoleText, { color: theme.warning }]}>
@@ -6974,19 +7560,41 @@ export default function SalonWorkScreen() {
           );
         })}
 
-        {/* 席マスター追加ボタン（一番下） */}
-        <TouchableOpacity
-          style={[styles.bottomAddSeatBar, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}
-          onPress={() => {
-            setNewSeatName(`${getNextSuggestedSeatNumber()}番席`);
-            setIsAddSeatModalVisible(true);
-          }}
-        >
-          <Ionicons name="add-circle-outline" size={18} color={theme.accent} style={{ marginRight: 6 }} />
-          <Text style={[styles.bottomAddSeatText, { color: theme.accent }]}>
-            新しい席番号を追加する
-          </Text>
-        </TouchableOpacity>
+        {/* 席マスター追加ボタン（一番下：招待元オーナーのみ表示。ゲストで0席時は同期案内を表示） */}
+        {isSalonOwner ? (
+          <TouchableOpacity
+            style={[styles.bottomAddSeatBar, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}
+            onPress={() => {
+              setNewSeatName(`${getNextSuggestedSeatNumber()}番席`);
+              setIsAddSeatModalVisible(true);
+            }}
+          >
+            <Ionicons name="add-circle-outline" size={18} color={theme.accent} style={{ marginRight: 6 }} />
+            <Text style={[styles.bottomAddSeatText, { color: theme.accent }]}>
+              新しい席番号を追加する
+            </Text>
+          </TouchableOpacity>
+        ) : seats.length === 0 ? (
+          <View
+            style={[
+              styles.bottomAddSeatBar,
+              {
+                backgroundColor: theme.cardBg,
+                borderColor: theme.cardBorder,
+                flexDirection: 'column',
+                paddingVertical: 18,
+              },
+            ]}
+          >
+            <Ionicons name="sync-outline" size={20} color={theme.textSecondary} style={{ marginBottom: 6 }} />
+            <Text style={{ fontSize: 13, fontWeight: '700', color: theme.textPrimary, marginBottom: 3 }}>
+              招待元の客席データを同期中
+            </Text>
+            <Text style={{ fontSize: 11.5, color: theme.textSecondary, textAlign: 'center' }}>
+              サロン作成者（招待元）側で登録された席が自動的に表示されます
+            </Text>
+          </View>
+        ) : null}
       </ScrollView>
 
       {/* ======================================================== */}
@@ -7402,63 +8010,85 @@ export default function SalonWorkScreen() {
                   </Text>
                 </TouchableOpacity>
 
-                {/* コードの直接変更・再生成セクション */}
-                <View
-                  style={{
-                    marginTop: 12,
-                    paddingTop: 12,
-                    borderTopWidth: 1,
-                    borderTopColor: theme.cardBorder,
-                  }}
-                >
-                  <Text style={[styles.inputLabel, { color: theme.textSecondary, marginBottom: 6 }]}>
-                    コードの変更・再発行（任意）
-                  </Text>
-                  <View style={styles.codeModalInputRow}>
-                    <TextInput
-                      style={[
-                        styles.codeModalTextInput,
-                        {
-                          backgroundColor: theme.inputBg,
-                          color: theme.accent,
-                          borderColor: theme.cardBorder,
-                        },
-                      ]}
-                      placeholder="例: 738-921"
-                      placeholderTextColor={theme.textTertiary}
-                      value={inputNewInviteCode}
-                      onChangeText={setInputNewInviteCode}
-                      autoCapitalize="characters"
-                      maxLength={15}
-                    />
-                    <TouchableOpacity
-                      style={[styles.codeRandomBtn, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder }]}
-                      onPress={handleRegenerateRandomCode}
-                      activeOpacity={0.7}
-                    >
-                      <Ionicons name="shuffle" size={16} color={theme.accent} style={{ marginRight: 4 }} />
-                      <Text style={[styles.codeRandomBtnText, { color: theme.accent }]}>再生成</Text>
-                    </TouchableOpacity>
-                  </View>
+                {/* コードの直接変更・再生成セクション（招待元オーナーのみ編集可） */}
+                {checkIsSalonOwner(editingSalonForCode, myUserId) ? (
+                  <View
+                    style={{
+                      marginTop: 12,
+                      paddingTop: 12,
+                      borderTopWidth: 1,
+                      borderTopColor: theme.cardBorder,
+                    }}
+                  >
+                    <Text style={[styles.inputLabel, { color: theme.textSecondary, marginBottom: 6 }]}>
+                      コードの変更・再発行（任意）
+                    </Text>
+                    <View style={styles.codeModalInputRow}>
+                      <TextInput
+                        style={[
+                          styles.codeModalTextInput,
+                          {
+                            backgroundColor: theme.inputBg,
+                            color: theme.accent,
+                            borderColor: theme.cardBorder,
+                          },
+                        ]}
+                        placeholder="例: 738-921"
+                        placeholderTextColor={theme.textTertiary}
+                        value={inputNewInviteCode}
+                        onChangeText={setInputNewInviteCode}
+                        autoCapitalize="characters"
+                        maxLength={15}
+                      />
+                      <TouchableOpacity
+                        style={[styles.codeRandomBtn, { backgroundColor: theme.accentLight, borderColor: theme.accentBorder }]}
+                        onPress={handleRegenerateRandomCode}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons name="shuffle" size={16} color={theme.accent} style={{ marginRight: 4 }} />
+                        <Text style={[styles.codeRandomBtnText, { color: theme.accent }]}>再生成</Text>
+                      </TouchableOpacity>
+                    </View>
 
-                  <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
+                    <View style={{ flexDirection: 'row', gap: 10, marginTop: 4 }}>
+                      <TouchableOpacity
+                        style={[styles.submitButton, { flex: 1, backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderWidth: 1 }]}
+                        onPress={() => setSwitcherSubView('list')}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={[styles.submitButtonText, { color: theme.textSecondary }]}>戻る</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[styles.submitButton, { flex: 2, backgroundColor: theme.accent }]}
+                        onPress={handleSaveCustomInviteCode}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={styles.submitButtonText}>保存する</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ) : (
+                  <View
+                    style={{
+                      marginTop: 12,
+                      paddingTop: 12,
+                      borderTopWidth: 1,
+                      borderTopColor: theme.cardBorder,
+                    }}
+                  >
+                    <Text style={{ fontSize: 11.5, color: theme.textTertiary, textAlign: 'center', marginBottom: 10 }}>
+                      ※招待コードの変更・再発行はサロン作成者（招待元）のみ行えます
+                    </Text>
                     <TouchableOpacity
-                      style={[styles.submitButton, { flex: 1, backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderWidth: 1 }]}
+                      style={[styles.submitButton, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder, borderWidth: 1 }]}
                       onPress={() => setSwitcherSubView('list')}
                       activeOpacity={0.7}
                     >
                       <Text style={[styles.submitButtonText, { color: theme.textSecondary }]}>戻る</Text>
                     </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={[styles.submitButton, { flex: 2, backgroundColor: theme.accent }]}
-                      onPress={handleSaveCustomInviteCode}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={styles.submitButtonText}>保存する</Text>
-                    </TouchableOpacity>
                   </View>
-                </View>
+                )}
               </ScrollView>
             )}
           </View>
@@ -7640,24 +8270,40 @@ export default function SalonWorkScreen() {
                 </View>
               ) : (
                 <View style={styles.modalHeaderLeftGroup}>
-                  {/* ★ ユーザー指定: タイム設定画面で「2番席」等の名前を変更できるようにする */}
-                  <TouchableOpacity
-                    style={[
-                      styles.modalSeatLabelPill,
-                      {
-                        backgroundColor: isEcoMode ? '#1E293B' : '#EFF6FF',
-                        borderColor: theme.accent,
-                      },
-                    ]}
-                    onPress={() => setIsEditingSeatLabel(true)}
-                    activeOpacity={0.7}
-                  >
-                    <Ionicons name="pencil" size={13} color={theme.accent} style={{ marginRight: 4 }} />
-                    <Text style={[styles.modalSeatLabelPillText, { color: theme.accent }]} numberOfLines={1}>
-                      {modalSeatLabel || '席名'}
-                    </Text>
-                    <Text style={[styles.modalSeatLabelEditHint, { color: theme.accent }]}>編集</Text>
-                  </TouchableOpacity>
+                  {/* ★ ユーザー指定: タイム設定画面で「2番席」等の名前を変更できるようにする（オーナーのみ編集可） */}
+                  {isSalonOwner ? (
+                    <TouchableOpacity
+                      style={[
+                        styles.modalSeatLabelPill,
+                        {
+                          backgroundColor: isEcoMode ? '#1E293B' : '#EFF6FF',
+                          borderColor: theme.accent,
+                        },
+                      ]}
+                      onPress={() => setIsEditingSeatLabel(true)}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="pencil" size={13} color={theme.accent} style={{ marginRight: 4 }} />
+                      <Text style={[styles.modalSeatLabelPillText, { color: theme.accent }]} numberOfLines={1}>
+                        {modalSeatLabel || '席名'}
+                      </Text>
+                      <Text style={[styles.modalSeatLabelEditHint, { color: theme.accent }]}>編集</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <View
+                      style={[
+                        styles.modalSeatLabelPill,
+                        {
+                          backgroundColor: isEcoMode ? '#1E293B' : '#EFF6FF',
+                          borderColor: theme.accent,
+                        },
+                      ]}
+                    >
+                      <Text style={[styles.modalSeatLabelPillText, { color: theme.accent }]} numberOfLines={1}>
+                        {modalSeatLabel || '席名'}
+                      </Text>
+                    </View>
+                  )}
 
                   <Text style={[styles.modalTitleSuffix, { color: theme.textPrimary }]}>
                     {timerSetupMode === 'additional'
@@ -7969,7 +8615,7 @@ export default function SalonWorkScreen() {
                                 color: isSelected ? '#FFFFFF' : theme.textPrimary,
                               }}
                             >
-                              {staff}
+                              {formatStaffForDisplay(staff)}
                             </Text>
                           </TouchableOpacity>
                         );
@@ -8266,37 +8912,45 @@ export default function SalonWorkScreen() {
               現在のメインタイマー（{formatSec((!mainTimerState?.isCountUp && mainTimerState?.remainingTime > 0) ? mainTimerState.remainingTime : (mainTimerState?.targetTime || 180))}）をセットしてサロンボードで稼働開始します。
             </Text>
 
-            {/* ★ ユーザー指定: 席に割り当てずにセットするボタン */}
-            <TouchableOpacity
-              style={[
-                styles.assignWithoutSeatCard,
-                { backgroundColor: theme.accentLight, borderColor: theme.accentBorder },
-              ]}
-              onPress={handleAssignMainTimerWithoutSeat}
-              activeOpacity={0.7}
-            >
-              <View style={styles.assignWithoutSeatLeft}>
-                <Ionicons name="timer" size={22} color={theme.accent} style={{ marginRight: 10 }} />
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.assignWithoutSeatTitle, { color: theme.accent }]}>
-                    席を指定しない (フリー)
-                  </Text>
-                  <Text style={[styles.assignWithoutSeatDesc, { color: theme.textSecondary }]}>
-                    固定席を使わず、そのままボードに追加
-                  </Text>
-                </View>
-              </View>
-              <View style={[styles.assignSeatBtn, { backgroundColor: theme.accent }]}>
-                <Text style={styles.assignSeatBtnText}>割り当てずにセット</Text>
-              </View>
-            </TouchableOpacity>
+            {/* ★ ユーザー指定: 席に割り当てずにセットするボタン（席追加にあたるためオーナーのみ表示） */}
+            {isSalonOwner ? (
+              <>
+                <TouchableOpacity
+                  style={[
+                    styles.assignWithoutSeatCard,
+                    { backgroundColor: theme.accentLight, borderColor: theme.accentBorder },
+                  ]}
+                  onPress={handleAssignMainTimerWithoutSeat}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.assignWithoutSeatLeft}>
+                    <Ionicons name="timer" size={22} color={theme.accent} style={{ marginRight: 10 }} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.assignWithoutSeatTitle, { color: theme.accent }]}>
+                        席を指定しない (フリー)
+                      </Text>
+                      <Text style={[styles.assignWithoutSeatDesc, { color: theme.textSecondary }]}>
+                        固定席を使わず、そのままボードに追加
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={[styles.assignSeatBtn, { backgroundColor: theme.accent }]}>
+                    <Text style={styles.assignSeatBtnText}>割り当てずにセット</Text>
+                  </View>
+                </TouchableOpacity>
 
-            {idleSeats.length > 0 ? (
-              <View style={styles.assignDividerRow}>
-                <View style={[styles.assignDividerLine, { backgroundColor: theme.cardBorder }]} />
-                <Text style={[styles.assignDividerText, { color: theme.textTertiary }]}>または空席に割り当てる</Text>
-                <View style={[styles.assignDividerLine, { backgroundColor: theme.cardBorder }]} />
-              </View>
+                {idleSeats.length > 0 ? (
+                  <View style={styles.assignDividerRow}>
+                    <View style={[styles.assignDividerLine, { backgroundColor: theme.cardBorder }]} />
+                    <Text style={[styles.assignDividerText, { color: theme.textTertiary }]}>または空席に割り当てる</Text>
+                    <View style={[styles.assignDividerLine, { backgroundColor: theme.cardBorder }]} />
+                  </View>
+                ) : null}
+              </>
+            ) : idleSeats.length === 0 ? (
+              <Text style={{ fontSize: 12.5, color: theme.textTertiary, textAlign: 'center', paddingVertical: 14 }}>
+                現在割り当て可能な空席がありません
+              </Text>
             ) : null}
 
             <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 260 }}>
@@ -9117,11 +9771,13 @@ export default function SalonWorkScreen() {
                         {[
                           { label: '指定なし', value: '' },
                           { label: '📢 全員に募集', value: '募集中' },
-                          { label: `🙋 自分 (${userName || 'スタイリスト'})`, value: userName || 'スタイリスト' },
-                          ...staffMembers.map((m) => {
-                            const name = getMemberDisplayName(m);
-                            return { label: `👤 ${name}`, value: name };
-                          }),
+                          { label: '🙋 自分', value: userName || 'スタイリスト' },
+                          ...staffMembers
+                            .filter((m) => !m?.isMe && !isStaffNameMe(getMemberDisplayName(m)))
+                            .map((m) => {
+                              const name = getMemberDisplayName(m);
+                              return { label: `👤 ${name}`, value: name };
+                            }),
                         ].map((opt) => {
                           const isSel = (lateCheckStaffName || '') === opt.value;
                           return (
@@ -9241,7 +9897,9 @@ export default function SalonWorkScreen() {
                     <Ionicons name="notifications-outline" size={18} color="#059669" style={{ marginRight: 8 }} />
                     <View style={{ flex: 1 }}>
                       <Text style={{ fontSize: 12, fontWeight: '700', color: '#059669' }}>
-                        タイマー設定者（📝 {checkStopTargetSeat?.colorStaffName || '担当'} さん）へ通知
+                        {isMainStaffOfSeat(checkStopTargetSeat)
+                          ? 'タイマー設定者: 📝 自分'
+                          : `タイマー設定者（📝 ${formatCreatorForDisplay(checkStopTargetSeat, '担当')} さん）へ通知`}
                       </Text>
                       <Text style={{ fontSize: 11, color: theme.textSecondary, marginTop: 2 }}>
                         停止すると、設定者の端末およびApple Watchに{modalChkProc}完了の通知がリアルタイム送信されます。
@@ -9600,7 +10258,7 @@ export default function SalonWorkScreen() {
                   🤝 ヘルプ担当の指定・変更
                 </Text>
                 <Text style={[styles.helpAssignSubtitle, { color: theme.textSecondary }]}>
-                  {helpAssignTargetSeat?.seatLabel} （作成者: 📝 {helpAssignTargetSeat?.colorStaffName || '未設定'}）
+                  {helpAssignTargetSeat?.seatLabel} （作成者: 📝 {helpAssignTargetSeat?.colorStaffName ? formatCreatorForDisplay(helpAssignTargetSeat, '未設定') : '未設定'}）
                 </Text>
               </View>
               <TouchableOpacity onPress={() => setIsHelpAssignModalVisible(false)}>
@@ -9765,10 +10423,10 @@ export default function SalonWorkScreen() {
                     <Ionicons name="hand-right" size={20} color={theme.accent} style={{ marginRight: 10 }} />
                     <View style={{ flex: 1 }}>
                       <Text style={[styles.selfTakeBtnTitle, { color: theme.accent }]}>
-                        私が【{getActionStatusInfo(selectedHelpAction)?.label}】に入ります（立候補）
+                        自分が【{getActionStatusInfo(selectedHelpAction)?.label}】に入ります（立候補）
                       </Text>
                       <Text style={[styles.selfTakeBtnSub, { color: theme.textSecondary }]}>
-                        ログイン中: {userName || '自分'}
+                        担当表示: 自分
                       </Text>
                     </View>
                     <Ionicons name="chevron-forward" size={16} color={theme.accent} />
@@ -9825,7 +10483,7 @@ export default function SalonWorkScreen() {
                                 { color: isCurrent ? '#FFFFFF' : theme.textPrimary, fontWeight: isCurrent ? '700' : '600' },
                               ]}
                             >
-                              🤝 {staff} {isCurrent ? '（現在）' : ''}
+                              🤝 {formatStaffForDisplay(staff)} {isCurrent ? '（現在）' : ''}
                             </Text>
                           </TouchableOpacity>
                         );
@@ -9897,7 +10555,7 @@ export default function SalonWorkScreen() {
               <View style={[styles.notificationNoteBox, { backgroundColor: isEcoMode ? 'rgba(0,0,0,0.3)' : '#F8F9FA', marginTop: 12 }]}>
                 <Ionicons name="information-circle-outline" size={15} color={theme.accent} style={{ marginRight: 6 }} />
                 <Text style={[styles.notificationNoteText, { color: theme.textSecondary }]}>
-                  指定すると、メイン担当・指名されたヘルプ・指定したあなた（第3者）の【関係者3名全員】にリアルタイム通知が届きます。
+                  指定すると、メイン担当・指名されたヘルプ・指定した自分（第3者）の【関係者3名全員】にリアルタイム通知が届きます。
                 </Text>
               </View>
             </ScrollView>
@@ -9952,13 +10610,13 @@ export default function SalonWorkScreen() {
                 style={[
                   styles.selfTakeBtn,
                   {
-                    backgroundColor: checkStaffTargetSeat?.checkStaffName === (userName || '自分')
+                    backgroundColor: isStaffNameMe(checkStaffTargetSeat?.checkStaffName)
                       ? (isEcoMode ? 'rgba(16, 185, 129, 0.2)' : '#D1FAE5')
                       : (isEcoMode ? '#252528' : '#ECFDF5'),
-                    borderColor: checkStaffTargetSeat?.checkStaffName === (userName || '自分')
+                    borderColor: isStaffNameMe(checkStaffTargetSeat?.checkStaffName)
                       ? '#10B981'
                       : '#A7F3D0',
-                    borderWidth: checkStaffTargetSeat?.checkStaffName === (userName || '自分') ? 2 : 1,
+                    borderWidth: isStaffNameMe(checkStaffTargetSeat?.checkStaffName) ? 2 : 1,
                     marginBottom: 10,
                   },
                 ]}
@@ -9968,13 +10626,13 @@ export default function SalonWorkScreen() {
                 <Ionicons name="search" size={20} color="#059669" style={{ marginRight: 10 }} />
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.selfTakeBtnTitle, { color: '#059669' }]}>
-                    私（{userName || '自分'}）がチェックに入ります
+                    自分がチェックに入ります
                   </Text>
                   <Text style={[styles.selfTakeBtnSub, { color: theme.textSecondary }]}>
-                    ワンタップでチェック担当として立候補
+                    ワンタップでチェック担当として立候補（表示: 自分）
                   </Text>
                 </View>
-                {checkStaffTargetSeat?.checkStaffName === (userName || '自分') && (
+                {isStaffNameMe(checkStaffTargetSeat?.checkStaffName) && (
                   <Ionicons name="checkmark-circle" size={20} color="#10B981" />
                 )}
               </TouchableOpacity>
@@ -10015,7 +10673,7 @@ export default function SalonWorkScreen() {
                             },
                           ]}
                         >
-                          🔍 {staff} {isCurrent ? '（現在）' : ''}
+                          🔍 {formatStaffForDisplay(staff)} {isCurrent ? '（現在）' : ''}
                         </Text>
                       </TouchableOpacity>
                     );
@@ -10339,7 +10997,7 @@ export default function SalonWorkScreen() {
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                   <Text style={{ fontSize: 13, marginRight: 6 }}>📝</Text>
                   <Text style={[styles.proxyStaffName, { color: theme.textPrimary }]}>
-                    {confirmProxyTargetSeat?.colorStaffName || '未設定'}
+                    {confirmProxyTargetSeat?.colorStaffName ? formatCreatorForDisplay(confirmProxyTargetSeat, '未設定') : '未設定'}
                     <Text style={{ fontSize: 11, color: theme.textTertiary }}>（タイマー作成）</Text>
                   </Text>
                 </View>
@@ -10362,7 +11020,7 @@ export default function SalonWorkScreen() {
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                   <Text style={{ fontSize: 13, marginRight: 6 }}>🤝</Text>
                   <Text style={[styles.proxyStaffName, { color: theme.textPrimary }]}>
-                    {confirmProxyTargetSeat?.assistantStaffName || '未定'}
+                    {formatStaffForDisplay(confirmProxyTargetSeat?.assistantStaffName, '未定')}
                     <Text style={{ fontSize: 11, color: theme.textTertiary }}>（ヘルプ）</Text>
                   </Text>
                 </View>
@@ -10397,7 +11055,7 @@ export default function SalonWorkScreen() {
 
             <Text style={[styles.proxyExplanationText, { color: theme.textSecondary }]}>
               タイマー作成者は自分でタイムを入れているため確認不要です。{'\n'}
-              ヘルプ担当者（{confirmProxyTargetSeat?.assistantStaffName || 'ヘルプ担当'}）の代わりに代理確認を行いますか？
+              ヘルプ担当者（{formatStaffForDisplay(confirmProxyTargetSeat?.assistantStaffName, 'ヘルプ担当')}）の代わりに代理確認を行いますか？
             </Text>
 
             {/* 選択肢ボタン群 */}
@@ -10411,7 +11069,7 @@ export default function SalonWorkScreen() {
                 <Text style={{ fontSize: 18, marginRight: 10 }}>🤝</Text>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.proxyConfirmOptionTitle, { color: theme.textPrimary }]}>
-                    ヘルプ（{confirmProxyTargetSeat?.assistantStaffName || 'ヘルプ担当'}）の代わりに確認
+                    ヘルプ（{formatStaffForDisplay(confirmProxyTargetSeat?.assistantStaffName, 'ヘルプ担当')}）の代わりに確認
                   </Text>
                   <Text style={[styles.proxyConfirmOptionSub, { color: theme.textTertiary }]}>
                     ヘルプ担当者の確認を代行します（関係者に通知記録）
@@ -10785,7 +11443,7 @@ export default function SalonWorkScreen() {
                               </Text>
                               {member.isMe ? (
                                 <View style={{ backgroundColor: theme.accent, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 4 }}>
-                                  <Text style={{ color: '#fff', fontSize: 9, fontWeight: 'bold' }}>あなた</Text>
+                                  <Text style={{ color: '#fff', fontSize: 9, fontWeight: 'bold' }}>自分</Text>
                                 </View>
                               ) : null}
                               {member.role === 'owner' ? (

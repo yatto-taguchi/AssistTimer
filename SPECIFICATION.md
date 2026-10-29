@@ -3426,9 +3426,30 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
    - タイマー停止を伴わないステータス変更（停止中席や稼働中席でのコーミング・シャンプー・チェック・呼び出しの開始・変更・完了）も検知して関係者にリアルタイム通知。
    - `handleStopTimerWithNotification`（タイムアップ前・タイムアップ後双方）、`handleSelectActionStatus`、および Apple Watch からの `ENTER_HELP` / `START_SHAMPOO` / `FINISH_SHAMPOO` / `UPDATE_STATUS` ハンドラにおいて、入った施術工程（`actionStatus`, `helpProcess`, `isShampooing`）と担当者名（`assistantStaffName`）が消去されずクラウドへ確実に同期されるよう統一。
 
+---
 
+## 48. GitHub Issue #3 & Issue #4 改修仕様（自ユーザー表示の「自分」完全統一 ＆ 招待元オーナー基準の席マスター管理・席消失防止・完全同期） (2026-10-30)
 
+### 48.1 Issue #3：自ユーザー表示を「自分」（2文字のみ）へ統一（Apple Watch・文字盤・iPhone共通）
 
+1. **UI表示上の自ユーザー表記を2文字の「自分」に完全統一 (`targets/watch/content.swift`, `targets/watch/widget_sync.swift`, `targets/watch-widget/widget.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - ヘルプ担当・チェック担当・作成者（メイン担当）が自分自身である場合、`スタイリスト(あなた)` や生のスタッフ名ではなく、すべて **`自分`**（2文字のみ）に統一表示。
+   - **Apple Watch (`content.swift`) / 文字盤コンプリケーション (`widget.swift`)**: `SeatTimerItem.displayStaffName(_:currentUserName:)` および `SeatTimerItem.displayCreatorName(currentUserName:)` を導入し、カード（`シャンプー: 自分` / `チェック: 自分` / `担当: 自分`）、操作シート、客席サムネイルマップ（`主:自分`）、スタッフ選択候補バッジ、文字盤ウィジェット（`自分→...` / `...→自分`）の全箇所で `自分` に統一。画面内の `(あなた)` / `あなた` 表記を廃止。
+   - **iPhone (`SalonWorkScreen.js`)**: `formatStaffForDisplay(name)` および `formatCreatorForDisplay(seat)` を導入し、展開カード（`📝 自分` / `シャンプー 自分 ▾` / `チェック: 自分 ▾` / `自分済 ▾`）、停止中スリムバー、超過時安全確認欄、ヘルプ担当指定モーダル、チェック担当指定モーダル、代理確認モーダル、共有メンバー管理一覧の自ユーザー識別バッジ（`自分`）まで一貫して `自分` に統一。
+2. **内部保存データ・クラウド同期値の保持とUUIDベースの厳密な自他判定 (`src/screens/SalonWorkScreen.js`, `targets/watch/widget_sync.swift`, `targets/watch/content.swift`)**:
+   - Supabase `salon_timers`（`created_by`, `created_by_name`, `assistant_staff_name`, `check_staff_name` 等）および Watch⇔iPhone 通信ペイロードには従来通り本人の表示名（例: `田中` や `スタイリスト`）とユーザーUUIDをそのまま保持し、相手スタッフの端末からは本人の名前が正しく表示される仕様を維持。
+   - `checkIsMainStaffOfSeat(seat, myDisplayName, myMemberAliases, currentMyUserId)` において `seat.createdBy` と `myUserId`（UUID）の厳密一致判定を最優先し、Watch通信ペイロードおよび `WidgetSync` にも `isCreatorMe: Bool` を明示送出することで、複数スタッフが初期名 `スタイリスト` のまま利用しているサロンでも他人の席が誤って `自分` と表示されない安全設計を確立。
 
+### 48.2 Issue #4：アップデート・再起動時の席消失防止 ＆ 招待元マスター基準での完全同期・席増減権限の招待元統一
 
-
+1. **席管理権限（追加・削除・席名変更・フリー枠追加・招待コード変更）を招待元オーナーのみに統一 (`src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`)**:
+   - `checkIsSalonOwner(salonObj, currentMyUserId)` / `isCurrentSalonOwner` により現在選択中サロンのオーナー権限を厳密判定し、Watch側にも `WatchSessionManager.isSalonOwner` をリアルタイム同期・永続化。
+   - **参加者（ゲスト）側のUI制限**: ヘッダー「＋ 席追加」ボタン、最下部「新しい席番号を追加する」ボタン（席0件時は「招待元が席を追加するとここに自動表示されます」案内を表示）、待機/停止スリムバーおよび展開カードの席名変更（鉛筆アイコン）・長押し席削除、タイム設定モーダル内の席名編集、メインタイマー割当モーダルの「席を指定せず追加（フリー枠）」、招待コード変更フォーム、および Apple Watch 最下部の「新しい席を追加」ボタンをすべて招待元オーナー限定で表示（ゲスト側では非表示/ロック）。
+   - **ハンドラ・Watch受信ガード**: `handleConfirmAddSeat` / `handleDeleteSeat` / `handleOpenRenameSeat` / `handleConfirmRenameSeat` / `handleSaveSeatLabel` / `handleAssignMainTimerWithoutSeat` / `handleSaveCustomInviteCode`、および Watch からの `ADD_SEAT`（新規席追加）・未知席に対する `START_TIMER` 自動席生成をゲスト側でブロック。通常のタイマー操作（開始・停止・延長・リセット・ヘルプ/チェック担当設定）は従来通り全メンバーが操作可能。
+2. **招待元（オーナー）の席データの絶対保護（「1番席」への勝手なリセット根絶） (`src/screens/SalonWorkScreen.js`, `src/utils/salonCloudService.js`)**:
+   - **サロンID別ローカルストレージ分離と初回マイグレーション**: 単一キー `@salon_saved_seats` の全サロン共有上書きを廃止し、`@salon_saved_seats_${salonId}` へ分離。アップデート初回起動時に既存オーナーの複数席が消えないよう、サロン別キー未作成かつオーナーサロンの場合は旧 `@salon_saved_seats` から1回のみ安全に引き継ぐマイグレーション（`@salon_seats_migrated_v2`）を実装。`workspace-free` からクラウドUUIDへの初回昇格時も席ストレージ・削除待ちキュー・`savedSalons` を漏れなく引き継ぐ。
+   - **誤判定リセットの完全撤廃と未同期変更・削除待ちキュー保護**: クラウドUUID席を他サロン席と誤認して `1番席` に初期化していた `hasOnlyForeignCloudSeats` リセット処理を完全撤廃。オフライン中や通信瞬断中に追加・リネーム・変更した席には `dirtySync: true` を付与し、削除失敗席は `@salon_pending_deleted_seats_${salonId}` キューに記録。クラウド再接続（`reconcileCloudTimers`）時にクラウド側の古いデータでローカル追加席が消されたり削除済み席がゾンビ復活する現象を防止し、さらに `upsertCloudTimer` 失敗時は `lastSyncedSeatsStateRef` シグネチャを破棄して次回確実に再送するよう強化。
+   - **招待コード変更時の既存サロン引き継ぎ**: `updateSalonInviteCode(salonId, newInviteCode)` を新設し、オーナーが招待コードを変更した際に新規サロンを作らず既存 `salons` レコードの `invite_code` を直接更新して既存の全客席（`salon_timers`）と参加メンバーを維持。`syncOrCreateSalonInCloud` でも既知の `salonId`（UUID）による検索を最優先し、ゲスト側では `allowCreate: false` を徹底してコード変更後の勝手な空サロン新規作成を根絶。
+3. **参加者（ゲスト）側の招待元マスター完全追従同期 (`src/screens/SalonWorkScreen.js`, `src/utils/salonCloudService.js`)**:
+   - ゲストサロンではローカル初期サンプル席（`getDefaultInitialSeats` の `1番席`）を一切生成・混入させず、招待元のクラウド `salon_timers` を唯一のマスターとして表示（`fetchSalonTimers(salonId, { returnNullOnError: true })` により通信エラー時は `null` で判別して直前キャッシュを維持し、正当な0席時は `[]` を反映）。
+   - 初回参加時・起動時・Supabase Realtime（`INSERT` の `!isSelfEcho` 修正、および `DELETE` で `payload.old` に `seat_label` が含まれない場合のデフォルト `'1番席'` 誤補完・巻き添え削除防止を含む）に加え、**`AppState` がバックグラウンド/非アクティブから `'active'`（フォアグラウンド）に復帰した際**にも `reconcileCloudTimers` を即時実行し、iPhone と Apple Watch 双方の席一覧を招待元マスターと完全一致させる。

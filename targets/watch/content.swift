@@ -23,6 +23,7 @@ struct SeatTimerItem: Identifiable, Equatable {
     var seatNumber: Int
     var seatLabel: String? = nil // ★ ユーザー登録表示名（例: "1番席 (個室)"）
     var creatorName: String
+    var isCreatorMeExplicit: Bool? = nil // ★ iPhone側でcreatedByユーザーID照合済みの自ユーザー作成判定
     var totalSeconds: Int // 全体初期設定秒数 (例: 900秒 = 15分)
     var targetEndTime: Date // 終了目標時刻（画面消灯・スリープでもずれない絶対時刻）
     var isRunning: Bool
@@ -97,6 +98,7 @@ struct SeatTimerItem: Identifiable, Equatable {
         seatNumber: Int = 0,
         seatLabel: String? = nil,
         creatorName: String = "スタイリスト",
+        isCreatorMeExplicit: Bool? = nil,
         totalSeconds: Int = 600,
         targetEndTime: Date = Date().addingTimeInterval(600),
         isRunning: Bool = false,
@@ -128,6 +130,7 @@ struct SeatTimerItem: Identifiable, Equatable {
         self.seatNumber = seatNumber
         self.seatLabel = seatLabel
         self.creatorName = creatorName
+        self.isCreatorMeExplicit = isCreatorMeExplicit
         self.totalSeconds = totalSeconds
         self.targetEndTime = targetEndTime
         self.isRunning = isRunning
@@ -207,42 +210,79 @@ struct SeatTimerItem: Identifiable, Equatable {
         return !isRunning && !isPreCountingDown && remainingSeconds <= 0
     }
     
+    // ★ ヘルプ担当・チェック担当等のスタッフ名が「自分自身」かどうか判定
+    static func isStaffMe(_ staff: String?, currentUserName: String) -> Bool {
+        guard let raw = staff?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return false }
+        if raw == "自分" || raw == "あなた" { return true }
+        let lower = raw.lowercased()
+        if raw == "ヘルプなし" || lower == "none" || raw == "未定" || raw == "募集中" { return false }
+        let cleanUser = currentUserName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanUser.isEmpty && raw.caseInsensitiveCompare(cleanUser) == .orderedSame {
+            return true
+        }
+        return false
+    }
+
+    // ★ スタッフ名の画面表示用フォーマット（自分自身の場合は名前を省いて「自分」に統一）
+    static func displayStaffName(_ staff: String, currentUserName: String) -> String {
+        let trimmed = staff.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return staff }
+        if isStaffMe(trimmed, currentUserName: currentUserName) {
+            return "自分"
+        }
+        return trimmed
+    }
+
+    // ★ この席のタイマー作成者（主担当）が「自分自身」かどうか判定（iPhone側のユーザーID照合フラグを最優先）
+    func isCreatorMe(currentUserName: String) -> Bool {
+        if let explicit = isCreatorMeExplicit {
+            return explicit
+        }
+        return SeatTimerItem.isStaffMe(creatorName, currentUserName: currentUserName)
+    }
+
+    // ★ 作成者（主担当）の画面表示用フォーマット（自分自身なら「自分」、他人ならそのスタッフ名）
+    func displayCreatorName(currentUserName: String, emptyFallback: String = "主担当") -> String {
+        if isCreatorMe(currentUserName: currentUserName) {
+            return "自分"
+        }
+        let trimmed = creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? emptyFallback : trimmed
+    }
+
     // 自分に関係している席か判定（作成者 or シャンプー・コーミング等ヘルプ担当 or サブタイマー・チェック担当 or 全員募集中）
     func isRelated(to userName: String) -> Bool {
-        let cleanUser = userName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cleanUser.isEmpty || cleanUser == "スタイリスト" || cleanUser == "スタッフ" { return true }
-        
-        let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cName.isEmpty || cName == "スタイリスト" || cName == "スタッフ" || cName == "自分" || cName == "あなた" { return true }
-        
-        let sStaff = (shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let chkStaff = (checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        
-        return cName == cleanUser ||
-               (!sStaff.isEmpty && (sStaff == cleanUser || sStaff == "自分" || sStaff == "あなた")) ||
-               (!chkStaff.isEmpty && (chkStaff == cleanUser || chkStaff == "自分" || chkStaff == "あなた")) ||
-               isRecruiting
+        if isCreatorMe(currentUserName: userName) { return true }
+        if SeatTimerItem.isStaffMe(shampooStaff, currentUserName: userName) { return true }
+        if SeatTimerItem.isStaffMe(checkStaff, currentUserName: userName) { return true }
+        if isRecruiting { return true }
+        if isCreatorMeExplicit == nil {
+            let cleanUser = userName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if cleanUser.isEmpty || cName.isEmpty { return true }
+        }
+        return false
     }
 
     // ★ 全体タイマー（放置タイム終了）のアラーム・通知対象か判定（関係者のみ：主担当・全体ヘルプ担当・またはヘルプ未定で自分が入る可能性がある場合）
     func shouldAlertMainTimer(for userName: String) -> Bool {
         if isMainTimer { return true }
-        let cleanUser = userName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cleanUser.isEmpty || cleanUser == "スタイリスト" || cleanUser == "スタッフ" { return true }
-
-        let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cName.isEmpty || cName == "スタイリスト" || cName == "スタッフ" || cName == "自分" || cName == "あなた" || cName == cleanUser {
-            return true
+        if isCreatorMe(currentUserName: userName) { return true }
+        if isCreatorMeExplicit == nil {
+            let cleanUser = userName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if cleanUser.isEmpty || cName.isEmpty { return true }
         }
 
-        let sStaff = (shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if isNoHelpNeeded || sStaff == "ヘルプなし" || sStaff == "none" {
+        let sStaff = (shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let sLower = sStaff.lowercased()
+        if isNoHelpNeeded || sStaff == "ヘルプなし" || sLower == "none" {
             // ヘルプなし（主担当の一人施術）の場合は主担当のみ
             return false
         }
         if !sStaff.isEmpty && sStaff != "募集中" && sStaff != "未定" {
             // 全体ヘルプ担当が決まっている場合は、その担当者本人のみ（またはチェック担当が未定でない限り無関係な人には鳴らさない）
-            return sStaff == cleanUser || sStaff == "自分" || sStaff == "あなた"
+            return SeatTimerItem.isStaffMe(sStaff, currentUserName: userName)
         }
         // まだ全体ヘルプ担当が未定または募集中の場合は、自分がヘルプに入る可能性があるため通知対象
         return true
@@ -250,18 +290,17 @@ struct SeatTimerItem: Identifiable, Equatable {
 
     // ★ 中間チェックタイマーのアラーム・通知対象か判定（関係者のみ：主担当・チェック担当・またはチェック未定で自分が入る可能性がある場合）
     func shouldAlertCheckTimer(for userName: String) -> Bool {
-        let cleanUser = userName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cleanUser.isEmpty || cleanUser == "スタイリスト" || cleanUser == "スタッフ" { return true }
-
-        let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cName.isEmpty || cName == "スタイリスト" || cName == "スタッフ" || cName == "自分" || cName == "あなた" || cName == cleanUser {
-            return true
+        if isCreatorMe(currentUserName: userName) { return true }
+        if isCreatorMeExplicit == nil {
+            let cleanUser = userName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let cName = creatorName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if cleanUser.isEmpty || cName.isEmpty { return true }
         }
 
-        let chkStaff = (checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let chkStaff = (checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !chkStaff.isEmpty && chkStaff != "募集中" && chkStaff != "未定" {
             // チェック担当が決まっている場合は、主担当とチェック担当本人のみ
-            return chkStaff == cleanUser || chkStaff == "自分" || chkStaff == "あなた"
+            return SeatTimerItem.isStaffMe(chkStaff, currentUserName: userName)
         }
         // チェック担当が未定または募集中の場合は、自分がチェックに入る可能性があるため通知対象
         return true
@@ -302,6 +341,7 @@ extension SeatTimerItem {
         }
         
         self.creatorName = (dictionary["creatorName"] as? String) ?? (dictionary["colorStaffName"] as? String) ?? "スタイリスト"
+        self.isCreatorMeExplicit = (dictionary["isCreatorMe"] as? NSNumber)?.boolValue ?? (dictionary["isCreatorMe"] as? Bool)
         self.totalSeconds = (dictionary["totalSeconds"] as? NSNumber)?.intValue ?? (dictionary["totalSeconds"] as? Int) ?? (dictionary["targetSeconds"] as? Int) ?? 600
         
         // ★ isRunning の正確な判定 (Bool / NSNumber を最優先、なければ status 文字列)
@@ -465,6 +505,7 @@ extension SeatTimerItem {
             "alarmSoundEnabled": alarmSoundEnabled,
             "hasAlertedHelpUnassigned": hasAlertedHelpUnassigned
         ]
+        if let isCreatorMeExplicit = isCreatorMeExplicit { dict["isCreatorMe"] = isCreatorMeExplicit }
         if let seatLabel = seatLabel { dict["seatLabel"] = seatLabel }
         if let shampooStaff = shampooStaff { dict["shampooStaff"] = shampooStaff }
         if let checkTotalSeconds = checkTotalSeconds { dict["checkTotalSeconds"] = checkTotalSeconds }
@@ -553,6 +594,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     
     // ★ Watch 側アラーム音（未設定時はデフォルト false = OFF）
     @Published var alarmSoundEnabled: Bool = (UserDefaults.standard.object(forKey: "assisttimer.watchAlarmSound.v2") as? Bool) ?? false
+    // ★ 招待元（オーナー）サロンかどうか（参加者ゲストの場合は false となり、Watchからの新規席追加をロック）
+    private let savedIsSalonOwnerKey = "assisttimer.watch.isSalonOwner.v1"
+    @Published var isSalonOwner: Bool = (UserDefaults.standard.object(forKey: "assisttimer.watch.isSalonOwner.v1") as? Bool) ?? true {
+        didSet {
+            UserDefaults.standard.set(isSalonOwner, forKey: savedIsSalonOwnerKey)
+        }
+    }
     
     // ★ 有効化前に行われた操作の保留キュー（有効化完了時に自動送信。メインスレッドでのみ操作）
     private var pendingPayloads: [[String: Any]] = []
@@ -1094,6 +1142,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
         }
         
+        // ★ サロンオーナー権限フラグ同期（席の増減は招待元オーナーのみ許可）
+        if let ownerFlag = (data["isSalonOwner"] as? NSNumber)?.boolValue ?? (data["isSalonOwner"] as? Bool) {
+            if ownerFlag != self.isSalonOwner {
+                self.isSalonOwner = ownerFlag
+            }
+        }
+        
         // メインタイマー同期（Watch主導の予約時刻を保護しつつ、iPhoneからの最新状態と同期）
         var didUpdateMain = false
         if let rawMain = data["mainTimer"] as? [String: Any], var parsedMain = SeatTimerItem(dictionary: rawMain) {
@@ -1358,8 +1413,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
                 return nil
             }
-            // ★ 安全防御: すでに客席がある場合、空配列による全消滅・強制停止を鉄壁ブロック
-            let allowClear = (data["clearAllSeats"] as? Bool) == true
+            // ★ 安全防御: すでに客席がある場合、空配列による全消滅・強制停止を鉄壁ブロック（明示クリアまたはゲスト初期サンプル席のみ例外許可）
+            let isGuestInitialPlaceholder = (!self.isSalonOwner && self.timers.count == 1 && self.timers[0].id == "seat-1" && !self.timers[0].isRunning)
+            let allowClear = ((data["clearAllSeats"] as? NSNumber)?.boolValue ?? (data["clearAllSeats"] as? Bool) ?? false) || isGuestInitialPlaceholder
             if parsed.isEmpty && !self.timers.isEmpty && !allowClear {
                 // 稼働中・停止中問わず、空データによる客席全滅を完全ブロック
                 if didUpdateMain {
@@ -2729,7 +2785,7 @@ struct ContentView: View {
                 .foregroundColor(Color(hex: "#0A84FF"))
                 .padding(.top, 14)
             
-            Text("📱 iPhoneで席を追加してください")
+            Text(sessionManager.isSalonOwner ? "📱 iPhoneで席を追加してください" : "📱 招待元の席データを同期中")
                 .font(.system(size: 13, weight: .bold))
                 .foregroundColor(.white)
                 .lineLimit(1)
@@ -3385,33 +3441,35 @@ struct ContentView: View {
                         }
                     }
                     
-                    // ② 一番下に「新しい席を追加」ボタンを配置
-                    Button(action: {
-                        showingAddSeatSheet = true
-                        playHaptic(.click)
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "plus.circle.fill")
-                                .font(.system(size: 15, weight: .bold))
-                            Text("新しい席を追加")
-                                .font(.system(size: 13, weight: .bold))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.75)
+                    // ② 一番下に「新しい席を追加」ボタンを配置（席の増減は招待元オーナーのみ）
+                    if sessionManager.isSalonOwner {
+                        Button(action: {
+                            showingAddSeatSheet = true
+                            playHaptic(.click)
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "plus.circle.fill")
+                                    .font(.system(size: 15, weight: .bold))
+                                Text("新しい席を追加")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color(hex: "#0A84FF").opacity(0.18))
+                            .foregroundColor(Color(hex: "#0A84FF"))
+                            .cornerRadius(10)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke(Color(hex: "#0A84FF").opacity(0.4), lineWidth: 1)
+                            )
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(Color(hex: "#0A84FF").opacity(0.18))
-                        .foregroundColor(Color(hex: "#0A84FF"))
-                        .cornerRadius(10)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(Color(hex: "#0A84FF").opacity(0.4), lineWidth: 1)
-                        )
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 4)
+                        .padding(.top, 4)
+                        .id("add_seat_button")
                     }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 4)
-                    .padding(.top, 4)
-                    .id("add_seat_button")
                 }
                 .padding(.horizontal, 2)
                 .padding(.bottom, 20)
@@ -3760,9 +3818,9 @@ struct ContentView: View {
                     showingThumbnailMap = false
                 }
             },
-            onAddSeat: {
+            onAddSeat: sessionManager.isSalonOwner ? {
                 showingAddSeatSheet = true
-            }
+            } : nil
         )
     }
     
@@ -3837,10 +3895,13 @@ struct ContentView: View {
             suggestedSeatNumber: (timers.map { $0.seatNumber }.max() ?? 0) + 1,
             onAdd: { newSeat in
                 deferSeatSheetCloseAction {
-                    self.triggerScroll(to: newSeat.id)
-                    self.pendingOpenStandardSeatIdAfterAdd = newSeat.id
+                    guard self.sessionManager.isSalonOwner else { return }
+                    var createdSeat = newSeat
+                    createdSeat.isCreatorMeExplicit = true
+                    self.triggerScroll(to: createdSeat.id)
+                    self.pendingOpenStandardSeatIdAfterAdd = createdSeat.id
                     self.pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
-                    self.timers.append(newSeat)
+                    self.timers.append(createdSeat)
                     self.sessionManager.timers = self.timers
                     self.syncSeatTimersState(forceWidgetReload: true)
                     var extra: [String: Any] = [
@@ -4087,7 +4148,7 @@ struct ContentView: View {
                         self.syncSeatTimersState(forceWidgetReload: true)
                         self.sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: actualSeatId, extra: ["expectedEnd": expectedEndMs, "isCompleted": true, "helpProcess": process])
                         self.showNotification(
-                            text: "✅ 【\(item.displaySeatName)】\(self.currentUserName)さんが\(process)に入りました",
+                            text: "✅ 【\(item.displaySeatName)】自分が\(process)に入りました",
                             color: Color(hex: "#30D158")
                         )
                     }
@@ -4137,7 +4198,7 @@ struct ContentView: View {
                         self.syncSeatTimersState(forceWidgetReload: true)
                         self.sessionManager.sendActionToPhone(action: "ENTER_HELP", seatId: actualSeatId, extra: ["expectedEnd": expectedEndMs, "isCompleted": true, "helpProcess": "チェック", "completeSubCheck": true])
                         self.showNotification(
-                            text: "✅ 【\(item.displaySeatName)】\(self.currentUserName)さんがチェックに入りました",
+                            text: "✅ 【\(item.displaySeatName)】自分がチェックに入りました",
                             color: Color(hex: "#30D158")
                         )
                     }
@@ -4162,6 +4223,8 @@ struct ContentView: View {
                         WatchAlarmCoordinator.shared.acknowledgeSeatTimer(seatId: item.id, seatNumber: actualSeatNum, checkOnly: false, skipRefresh: true)
                     }
                     pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
+                    timers[idx].creatorName = currentUserName
+                    timers[idx].isCreatorMeExplicit = true
                     timers[idx].totalSeconds = sec
                     timers[idx].targetEndTime = mainEnd
                     timers[idx].pausedRemainingSeconds = sec
@@ -4231,8 +4294,9 @@ struct ContentView: View {
                     }
                     syncSeatTimersState(forceWidgetReload: true)
                     sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: actualSeatId, extra: ["helpProcess": process, "assistantStaffName": staff])
+                    let isSelfStaff = SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName)
                     showNotification(
-                        text: "📤 \(staff)さんに【\(process)】を指定しました",
+                        text: isSelfStaff ? "📤 自分を【\(process)】に設定しました" : "📤 \(staff)さんに【\(process)】を指定しました",
                         color: Color(hex: "#0A84FF")
                     )
                 }
@@ -4313,8 +4377,9 @@ struct ContentView: View {
                     }
                     syncSeatTimersState(forceWidgetReload: true)
                     sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: actualSeatId, extra: ["checkStaffName": staff, "checkProcess": checkProcess, "isSubCheck": true])
+                    let isSelfCheck = SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName)
                     showNotification(
-                        text: "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
+                        text: isSelfCheck ? "📤 自分を【\(checkProcess)】担当に設定しました" : "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
                         color: Color(hex: "#30D158")
                     )
                 }
@@ -4456,7 +4521,7 @@ struct ContentView: View {
                         ]
                         self.sessionManager.sendActionToPhone(action: "SET_CHECK_TIMER", seatId: actualSeatId, extra: extraPayload)
                         let mins = validSec / 60
-                        let staffText = resolvedStaff != nil ? " (\(resolvedStaff!))" : ""
+                        let staffText = resolvedStaff != nil ? " (\(SeatTimerItem.displayStaffName(resolvedStaff!, currentUserName: self.currentUserName)))" : ""
                         self.showNotification(
                             text: "🔍 \(item.displaySeatName): チェック\(mins)分を追加しました\(staffText)",
                             color: Color(hex: "#0A84FF")
@@ -4597,8 +4662,9 @@ struct ContentView: View {
                         }
                         self.syncSeatTimersState(forceWidgetReload: true)
                         self.sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: actualSeatId, extra: ["checkStaffName": staff, "checkProcess": checkProcess, "isSubCheck": true])
+                        let isSelfCheck = SeatTimerItem.isStaffMe(staff, currentUserName: self.currentUserName)
                         self.showNotification(
-                            text: "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
+                            text: isSelfCheck ? "📤 自分を【\(checkProcess)】担当に設定しました" : "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
                             color: Color(hex: "#30D158")
                         )
                     }
@@ -4653,6 +4719,7 @@ struct ContentView: View {
     private func shampooActionSheetView(item: SeatTimerItem) -> some View {
         ShampooActionSheet(
             item: item,
+            currentUserName: currentUserName,
             onStartShampoo: {
                 self.immediatelyAcknowledgeSeatAlarm(for: item, checkOnly: false, onlyIfRingingOrOvertime: true)
                 deferSeatSheetCloseAction {
@@ -4855,8 +4922,9 @@ struct ContentView: View {
                         self.sessionManager.timers = self.timers
                         self.syncSeatTimersState(forceWidgetReload: true)
                         self.sessionManager.sendActionToPhone(action: "CLEAR_STAFF", seatId: actualSeatId)
+                        let isOldSelf = SeatTimerItem.isStaffMe(oldStaff, currentUserName: self.currentUserName)
                         self.showNotification(
-                            text: "📤 \(oldStaff)さんに担当解除を通知しました",
+                            text: isOldSelf ? "📤 自分の担当を解除しました" : "📤 \(oldStaff)さんに担当解除を通知しました",
                             color: Color(hex: "#8E8E93")
                         )
                     }
@@ -4890,8 +4958,9 @@ struct ContentView: View {
                         }
                         self.syncSeatTimersState(forceWidgetReload: true)
                         self.sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: actualSeatId, extra: ["helpProcess": process, "assistantStaffName": staff])
+                        let isSelfStaff = SeatTimerItem.isStaffMe(staff, currentUserName: self.currentUserName)
                         self.showNotification(
-                            text: "📤 \(staff)さんに【\(process)】を通知しました",
+                            text: isSelfStaff ? "📤 自分を【\(process)】担当に設定しました" : "📤 \(staff)さんに【\(process)】を通知しました",
                             color: Color(hex: "#0A84FF")
                         )
                     }
@@ -5217,11 +5286,11 @@ struct MainTimerCard: View {
                 
                 Spacer(minLength: 2)
                 
-                // あなたバッジ
+                // 自分バッジ
                 HStack(spacing: 2) {
                     Image(systemName: "star.fill")
                         .font(.system(size: 7))
-                    Text("あなた")
+                    Text("自分")
                         .font(.system(size: 9.5, weight: .heavy))
                         .lineLimit(1)
                 }
@@ -5369,12 +5438,12 @@ struct SeatTimerCard: View {
     
     // 自分の関与タイプ
     var myRoleText: String? {
-        if item.shampooStaff == currentUserName {
-            return "⭐️ あなたシャンプー"
-        } else if item.checkStaff == currentUserName {
-            return "⭐️ あなたチェック"
-        } else if item.creatorName == currentUserName {
-            return "⭐️ あなた作成"
+        if SeatTimerItem.isStaffMe(item.shampooStaff, currentUserName: currentUserName) {
+            return "⭐️ 自分シャンプー"
+        } else if SeatTimerItem.isStaffMe(item.checkStaff, currentUserName: currentUserName) {
+            return "⭐️ 自分チェック"
+        } else if item.isCreatorMe(currentUserName: currentUserName) {
+            return "⭐️ 自分作成"
         }
         return nil
     }
@@ -5505,13 +5574,13 @@ struct SeatTimerCard: View {
     
     @ViewBuilder
     private var creatorRoleBadge: some View {
-        if item.creatorName == currentUserName {
-            // 自分が作成者の場合: 「⭐️ 担当: あなた」
+        if item.isCreatorMe(currentUserName: currentUserName) {
+            // 自分が作成者の場合: 「⭐️ 担当: 自分」
             HStack(spacing: 3) {
                 Image(systemName: "star.fill")
                     .font(.system(size: 8))
                     .foregroundColor(Color(hex: "#FFD60A"))
-                Text("担当: あなた")
+                Text("担当: 自分")
                     .font(.system(size: WatchLayout.font(11), weight: .heavy))
                     .foregroundColor(Color(hex: "#FFD60A"))
                     .lineLimit(1)
@@ -5522,10 +5591,10 @@ struct SeatTimerCard: View {
             .background(Color(hex: "#FFD60A").opacity(0.18))
             .cornerRadius(6)
             .fixedSize(horizontal: true, vertical: false)
-        } else if item.shampooStaff == currentUserName || item.checkStaff == currentUserName {
-            // 他人作成で自分がヘルプの場合: 「担当: 佐藤 ★あなた」
+        } else if SeatTimerItem.isStaffMe(item.shampooStaff, currentUserName: currentUserName) || SeatTimerItem.isStaffMe(item.checkStaff, currentUserName: currentUserName) {
+            // 他人作成で自分がヘルプの場合: 「担当: 佐藤 ★自分」
             HStack(spacing: 3) {
-                Text("担当: \(item.creatorName)")
+                Text("担当: \(item.displayCreatorName(currentUserName: currentUserName))")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(Color(hex: "#E5E5EA"))
                     .lineLimit(1)
@@ -5534,7 +5603,7 @@ struct SeatTimerCard: View {
                 HStack(spacing: 2) {
                     Image(systemName: "star.fill")
                         .font(.system(size: 7))
-                    Text("あなた")
+                    Text("自分")
                         .font(.system(size: 9, weight: .heavy))
                         .lineLimit(1)
                 }
@@ -5547,7 +5616,7 @@ struct SeatTimerCard: View {
             }
         } else {
             // 他人が担当の席: 「担当: ヤマモト」
-            Text("担当: \(item.creatorName)")
+            Text("担当: \(item.displayCreatorName(currentUserName: currentUserName))")
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(Color(hex: "#C7C7CC"))
                 .lineLimit(1)
@@ -5705,7 +5774,7 @@ struct SeatTimerCard: View {
     private func staffButtonBackground(staff: String) -> Color {
         if isShampooOrCombing {
             return Color(hex: "#0A84FF").opacity(0.3)
-        } else if staff == currentUserName {
+        } else if SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName) {
             return Color(hex: "#FFD60A").opacity(0.14)
         } else {
             return Color.white.opacity(0.08)
@@ -5715,7 +5784,7 @@ struct SeatTimerCard: View {
     private func staffButtonStroke(staff: String) -> Color {
         if isShampooOrCombing {
             return Color(hex: "#0A84FF").opacity(0.7)
-        } else if staff == currentUserName {
+        } else if SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName) {
             return Color(hex: "#FFD60A").opacity(0.4)
         } else {
             return Color.white.opacity(0.12)
@@ -5724,6 +5793,8 @@ struct SeatTimerCard: View {
 
     @ViewBuilder
     private func staffAssignedButton(staff: String) -> some View {
+        let isMe = SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName)
+        let displayStaff = SeatTimerItem.displayStaffName(staff, currentUserName: currentUserName)
         Button(action: onOpenSelectHelpStaff) {
             HStack(spacing: 4) {
                 Image(systemName: shampooStatusIcon)
@@ -5736,9 +5807,9 @@ struct SeatTimerCard: View {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                 
-                Text(staff)
+                Text(displayStaff)
                     .font(.system(size: 11, weight: .heavy))
-                    .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : .white)
+                    .foregroundColor(isMe ? Color(hex: "#FFD60A") : .white)
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
                 
@@ -5908,7 +5979,7 @@ struct SeatTimerCard: View {
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.72)
                             } else {
-                                let displayStaff = (cStaff == currentUserName) ? "\(cStaff)(あなた)" : cStaff
+                                let displayStaff = SeatTimerItem.displayStaffName(cStaff, currentUserName: currentUserName)
                                 Image(systemName: "person.fill.checkmark")
                                     .font(.system(size: 9.5, weight: .bold))
                                     .foregroundColor(Color(hex: "#30D158"))
@@ -5978,7 +6049,7 @@ struct SeatTimerCard: View {
                     .font(.system(size: 10, weight: .bold))
                     .lineLimit(1)
                 if let cStaff = item.checkStaff {
-                    Text("(\(cStaff))")
+                    Text("(\(SeatTimerItem.displayStaffName(cStaff, currentUserName: currentUserName)))")
                         .font(.system(size: 10))
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
@@ -8338,18 +8409,19 @@ struct TimeActionSheet: View {
                         WKInterfaceDevice.current().play(.click)
                         lateCheckStaff = currentUserName
                     }) {
+                        let isLateSelf = SeatTimerItem.isStaffMe(lateCheckStaff, currentUserName: currentUserName)
                         HStack(spacing: 4) {
                             Image(systemName: "hand.raised.fill")
                                 .font(.system(size: 10))
-                            Text("自分が担当 (\(currentUserName))")
+                            Text("自分が担当")
                                 .font(.system(size: 11, weight: .bold))
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.75)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
-                        .background(lateCheckStaff == currentUserName ? Color(hex: "#30D158") : Color.white.opacity(0.12))
-                        .foregroundColor(lateCheckStaff == currentUserName ? .black : .white)
+                        .background(isLateSelf ? Color(hex: "#30D158") : Color.white.opacity(0.12))
+                        .foregroundColor(isLateSelf ? .black : .white)
                         .cornerRadius(6)
                     }
                     .buttonStyle(.plain)
@@ -8621,7 +8693,7 @@ struct TimeActionSheet: View {
                         Image(systemName: "person.2.fill")
                             .font(.system(size: 13, weight: .bold))
                         if let cStaff = liveItem.checkStaff, !cStaff.isEmpty {
-                            Text("ヘルプ変更 (\(cStaff))")
+                            Text("ヘルプ変更 (\(SeatTimerItem.displayStaffName(cStaff, currentUserName: currentUserName)))")
                                 .font(.system(size: 13, weight: .heavy))
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.72)
@@ -8918,7 +8990,7 @@ struct TimeActionSheet: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.72)
                     } else {
-                        let displayStaff = (cStaff == currentUserName) ? "\(cStaff)(あなた)" : cStaff
+                        let displayStaff = SeatTimerItem.displayStaffName(cStaff, currentUserName: currentUserName)
                         Image(systemName: "person.fill.checkmark")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(Color(hex: "#30D158"))
@@ -9062,8 +9134,8 @@ struct TimeActionSheet: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
                 } else if let staff = liveItem.shampooStaff, !staff.isEmpty {
-                    let isMe = (staff == currentUserName)
-                    let displayStaff = isMe ? "\(staff)(あなた)" : staff
+                    let isMe = SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName)
+                    let displayStaff = SeatTimerItem.displayStaffName(staff, currentUserName: currentUserName)
                     let staffColor: Color = isMe ? Color(hex: "#FFD60A") : .white
                     Image(systemName: "person.fill.checkmark")
                         .font(.system(size: 10, weight: .bold))
@@ -9559,7 +9631,7 @@ struct TimeActionSheet: View {
     
     @ViewBuilder
     private func helpStaffCandidateRow(_ staff: String) -> some View {
-        let isMe = (staff == currentUserName)
+        let isMe = SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName)
         let isSelected = (liveItem.shampooStaff == staff && liveItem.helpProcess == selectedProcess)
         let bgColor: Color = isSelected ? Color(hex: "#30D158").opacity(0.2) : (isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12))
         let strokeColor: Color = isSelected ? Color(hex: "#30D158").opacity(0.6) : (isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1))
@@ -9580,7 +9652,7 @@ struct TimeActionSheet: View {
                 Image(systemName: isMe ? "star.fill" : "person.fill")
                     .font(.system(size: 11))
                     .foregroundColor(iconColor)
-                Text(isMe ? "\(staff)（あなた）" : staff)
+                Text(isMe ? "自分" : staff)
                     .font(.system(size: 12, weight: isMe ? .heavy : .bold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
@@ -9908,7 +9980,7 @@ struct TimeActionSheet: View {
     
     @ViewBuilder
     private func checkStaffCandidateRow(_ staff: String) -> some View {
-        let isMe = (staff == currentUserName)
+        let isMe = SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName)
         let isSelected = (liveItem.checkStaff == staff && liveItem.displayCheckProcess == selectedCheckProcess)
         let bgColor: Color = isSelected ? Color(hex: "#30D158").opacity(0.2) : (isMe ? Color(hex: "#FFD60A").opacity(0.18) : Color.white.opacity(0.12))
         let strokeColor: Color = isSelected ? Color(hex: "#30D158").opacity(0.6) : (isMe ? Color(hex: "#FFD60A").opacity(0.5) : Color.white.opacity(0.1))
@@ -9928,7 +10000,7 @@ struct TimeActionSheet: View {
                 Image(systemName: isMe ? "star.fill" : "person.fill")
                     .font(.system(size: 11))
                     .foregroundColor(iconColor)
-                Text(isMe ? "\(staff)（あなた）" : staff)
+                Text(isMe ? "自分" : staff)
                     .font(.system(size: 12, weight: isMe ? .heavy : .bold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
@@ -9973,7 +10045,7 @@ struct CheckActionSheet: View {
                     .minimumScaleFactor(0.72)
                 
                 if let staff = item.checkStaff {
-                    Text("担当: \(staff)")
+                    Text("担当: \(SeatTimerItem.displayStaffName(staff, currentUserName: currentUserName))")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(Color(hex: "#30D158"))
                         .lineLimit(1)
@@ -10233,7 +10305,7 @@ struct SelectCheckStaffSheet: View {
         }
         .buttonStyle(.plain)
         
-        // ② あなた（自分）が担当する（緑）
+        // ② 自分が担当する（緑）
         Button(action: {
             onAssignStaff(selectedCheckProcess, currentUserName)
             dismiss()
@@ -10280,7 +10352,7 @@ struct SelectCheckStaffSheet: View {
             .cornerRadius(8)
         } else {
             ForEach(staffCandidates, id: \.self) { staff in
-                let isMe = (staff == currentUserName)
+                let isMe = SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName)
                 let isSelected = (item.checkStaff == staff && item.displayCheckProcess == selectedCheckProcess)
                 
                 Button(action: {
@@ -10292,7 +10364,7 @@ struct SelectCheckStaffSheet: View {
                             .font(.system(size: 11))
                             .foregroundColor(isMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
                         
-                        Text(isMe ? "\(staff)（あなた）" : staff)
+                        Text(isMe ? "自分" : staff)
                             .font(.system(size: 12, weight: isMe ? .heavy : .bold))
                             .lineLimit(1)
                             .minimumScaleFactor(0.75)
@@ -10705,6 +10777,7 @@ struct AddSeatSheet: View {
                         id: UUID().uuidString,
                         seatNumber: seatNumber,
                         creatorName: currentUserName,
+                        isCreatorMeExplicit: true,
                         totalSeconds: totalSec,
                         targetEndTime: Date().addingTimeInterval(Double(totalSec)),
                         isRunning: true,
@@ -10746,6 +10819,7 @@ struct AddSeatSheet: View {
 struct ShampooActionSheet: View {
     @Environment(\.dismiss) var dismiss
     let item: SeatTimerItem
+    var currentUserName: String = ""
     let onStartShampoo: () -> Void
     let onFinishShampoo: () -> Void
     let onStartCombing: () -> Void
@@ -10766,7 +10840,7 @@ struct ShampooActionSheet: View {
                         .minimumScaleFactor(0.72)
                     
                     if let staff = item.shampooStaff {
-                        Text("現在の担当: \(staff)")
+                        Text("現在の担当: \(SeatTimerItem.displayStaffName(staff, currentUserName: currentUserName))")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color(hex: "#FFD60A"))
                             .lineLimit(1)
@@ -11216,12 +11290,12 @@ struct SelectHelpWorkflowSheet: View {
                 Image(systemName: "hand.raised.fill")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(Color(hex: "#30D158"))
-                Text("自分が担当する（\(currentUserName)）")
+                Text("自分が担当する")
                     .font(.system(size: 12, weight: .heavy))
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
                 Spacer(minLength: 4)
-                if item.shampooStaff == currentUserName && item.helpProcess == selectedProcess {
+                if SeatTimerItem.isStaffMe(item.shampooStaff, currentUserName: currentUserName) && item.helpProcess == selectedProcess {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 12))
                         .foregroundColor(Color(hex: "#30D158"))
@@ -11828,7 +11902,7 @@ struct ThumbnailSeatCard: View {
                 // 募集中
                 let orange = Color(hex: "#FF9F0A")
                 return (orange, orange.opacity(0.18), orange)
-            } else if item.shampooStaff == currentUserName || item.creatorName == currentUserName {
+            } else if SeatTimerItem.isStaffMe(item.shampooStaff, currentUserName: currentUserName) || item.isCreatorMe(currentUserName: currentUserName) {
                 // 自分関連
                 let gold = Color(hex: "#FFD60A")
                 return (gold, gold.opacity(0.15), Color(hex: "#64D2FF"))
@@ -11962,7 +12036,7 @@ struct ThumbnailSeatCard: View {
                         .monospacedDigit()
                         .lineLimit(1)
                         .fixedSize()
-                    Text(checkStaff == currentUserName ? "あなた" : checkStaff)
+                    Text(SeatTimerItem.displayStaffName(checkStaff, currentUserName: currentUserName))
                         .font(.system(size: 7, weight: .bold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.68)
@@ -11977,13 +12051,14 @@ struct ThumbnailSeatCard: View {
             // 下段: 【作成者（主担当）】＆【ヘルプ担当】の2人表示
             VStack(alignment: .leading, spacing: 1.5) {
                 // ① タイマー作成者（主担当スタイリスト）
+                let creatorIsMe = item.isCreatorMe(currentUserName: currentUserName)
                 HStack(spacing: 2) {
                     Image(systemName: "pencil")
                         .font(.system(size: 6.5, weight: .bold))
-                        .foregroundColor(item.creatorName == currentUserName ? Color(hex: "#FFD60A") : Color(hex: "#8E8E93"))
-                    Text("主:\(item.creatorName == currentUserName ? "あなた" : (item.creatorName.isEmpty ? "主担当" : item.creatorName))")
-                        .font(.system(size: 8, weight: item.creatorName == currentUserName ? .heavy : .bold))
-                        .foregroundColor(item.creatorName == currentUserName ? Color(hex: "#FFD60A") : Color(hex: "#E5E5EA"))
+                        .foregroundColor(creatorIsMe ? Color(hex: "#FFD60A") : Color(hex: "#8E8E93"))
+                    Text("主:\(item.displayCreatorName(currentUserName: currentUserName))")
+                        .font(.system(size: 8, weight: creatorIsMe ? .heavy : .bold))
+                        .foregroundColor(creatorIsMe ? Color(hex: "#FFD60A") : Color(hex: "#E5E5EA"))
                         .lineLimit(1)
                         .minimumScaleFactor(0.68)
                 }
@@ -12016,12 +12091,13 @@ struct ThumbnailSeatCard: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.68)
                     } else if let staff = item.shampooStaff, !staff.isEmpty {
+                        let staffIsMe = SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName)
                         Image(systemName: "hands.sparkles.fill")
                             .font(.system(size: 6.5))
-                            .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
-                        Text("\(procPrefix):\(staff == currentUserName ? "あなた" : staff)")
-                            .font(.system(size: 8, weight: staff == currentUserName ? .heavy : .bold))
-                            .foregroundColor(staff == currentUserName ? Color(hex: "#FFD60A") : Color(hex: "#64D2FF"))
+                            .foregroundColor(staffIsMe ? Color(hex: "#FFD60A") : Color(hex: "#0A84FF"))
+                        Text("\(procPrefix):\(SeatTimerItem.displayStaffName(staff, currentUserName: currentUserName))")
+                            .font(.system(size: 8, weight: staffIsMe ? .heavy : .bold))
+                            .foregroundColor(staffIsMe ? Color(hex: "#FFD60A") : Color(hex: "#64D2FF"))
                             .lineLimit(1)
                             .minimumScaleFactor(0.68)
                     } else if isRunning {

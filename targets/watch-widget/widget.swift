@@ -31,6 +31,7 @@ struct ComplicationSeat {
     let totalSeconds: Int
     let isCountUpEnabled: Bool
     let creatorName: String?
+    let isCreatorMeExplicit: Bool?
     let isNoHelpNeeded: Bool
     let currentUserName: String?
     
@@ -53,6 +54,9 @@ struct ComplicationSeat {
         
         // 作成者（左側）: 自分が作成したなら「自分」、他人ならその名前
         let isCreatorMe: Bool = {
+            if let explicit = isCreatorMeExplicit {
+                return explicit
+            }
             if creatorRaw == "自分" || creatorRaw == "あなた" {
                 return true
             }
@@ -61,7 +65,7 @@ struct ComplicationSeat {
             }
             return creatorRaw.isEmpty
         }()
-        let creatorDisplay = isCreatorMe ? "自分" : creatorRaw
+        let creatorDisplay = isCreatorMe ? "自分" : (creatorRaw.isEmpty ? "主担当" : creatorRaw)
         
         // 最終担当（右側 / シャンプー・コーミング等）
         let shampooRaw = (shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -140,6 +144,7 @@ enum ComplicationData {
             let isRecruiting = (d["isRecruiting"] as? NSNumber)?.boolValue ?? (d["isRecruiting"] as? Bool) ?? false
             let isCheckComp = (d["isCheckCompleted"] as? NSNumber)?.boolValue ?? (d["isCheckCompleted"] as? Bool) ?? false
             let creator = d["creatorName"] as? String
+            let isCreatorMeExplicit = (d["isCreatorMe"] as? NSNumber)?.boolValue ?? (d["isCreatorMe"] as? Bool)
             let isNoHelp = (d["isNoHelpNeeded"] as? NSNumber)?.boolValue ?? (d["isNoHelpNeeded"] as? Bool) ?? false
 
             let isCountUpEnabled = true
@@ -156,6 +161,7 @@ enum ComplicationData {
                 totalSeconds: (d["totalSeconds"] as? NSNumber)?.intValue ?? (d["totalSeconds"] as? Int) ?? 600,
                 isCountUpEnabled: isCountUpEnabled,
                 creatorName: creator,
+                isCreatorMeExplicit: isCreatorMeExplicit,
                 isNoHelpNeeded: isNoHelp,
                 currentUserName: currentUserName,
                 prepEndDate: prepEnd,
@@ -226,6 +232,7 @@ struct ComplicationProvider: TimelineProvider {
                 totalSeconds: 15 * 60,
                 isCountUpEnabled: true,
                 creatorName: "スタイリスト",
+                isCreatorMeExplicit: true,
                 isNoHelpNeeded: false,
                 currentUserName: "スタイリスト",
                 prepEndDate: nil,

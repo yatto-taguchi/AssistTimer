@@ -24,28 +24,62 @@ export const getOrCreateUserId = async () => {
   }
 };
 
+const isValidUUID = (val) =>
+  typeof val === 'string' &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
+
 /**
  * サロン・招待コードをSupabaseクラウドに登録（または既存を取得）
+ * - salonId(UUID)が既知の場合はまずIDで検索し、招待コード変更後の再起動でも同一サロンを確実に維持する
+ * - allowCreate === false（ゲスト参加サロン）の場合は、サロン未発見時に勝手な新規空サロン作成を行わない
  */
-export const syncOrCreateSalonInCloud = async ({ salonName, inviteCode, isPro, userName }) => {
-  if (!inviteCode) return null;
+export const syncOrCreateSalonInCloud = async ({
+  salonId = null,
+  salonName,
+  inviteCode,
+  isPro,
+  userName,
+  allowCreate = true,
+}) => {
+  const hasValidSalonId = isValidUUID(salonId);
+  if (!inviteCode && !hasValidSalonId) return null;
   const userId = await getOrCreateUserId();
-  const cleanCode = inviteCode.replace(/\s+/g, '').toUpperCase();
+  const cleanCode = inviteCode ? inviteCode.replace(/\s+/g, '').toUpperCase() : '';
 
   try {
-    const { data: existing, error: searchErr } = await supabase
-      .from('salons')
-      .select('*')
-      .eq('invite_code', cleanCode)
-      .maybeSingle();
+    let salonData = null;
 
-    if (searchErr) {
-      console.warn('Error searching salon by code:', searchErr);
+    if (hasValidSalonId) {
+      const { data: existingById, error: idErr } = await supabase
+        .from('salons')
+        .select('*')
+        .eq('id', salonId)
+        .maybeSingle();
+      if (idErr) {
+        console.warn('Error searching salon by id:', idErr);
+      }
+      if (existingById) {
+        salonData = existingById;
+      }
     }
 
-    let salonData = existing;
+    if (!salonData && cleanCode) {
+      const { data: existing, error: searchErr } = await supabase
+        .from('salons')
+        .select('*')
+        .eq('invite_code', cleanCode)
+        .maybeSingle();
+
+      if (searchErr) {
+        console.warn('Error searching salon by code:', searchErr);
+      }
+      salonData = existing;
+    }
 
     if (!salonData) {
+      if (allowCreate === false || !cleanCode) {
+        return null;
+      }
       const { data: created, error: insertErr } = await supabase
         .from('salons')
         .insert({
@@ -72,7 +106,7 @@ export const syncOrCreateSalonInCloud = async ({ salonName, inviteCode, isPro, u
 
     if (!salonData) return null;
 
-    const role = salonData.owner_user_id === userId ? 'owner' : 'stylist';
+    const role = salonData.owner_user_id === userId ? 'owner' : 'assistant';
     await supabase
       .from('salon_members')
       .upsert(
@@ -90,6 +124,43 @@ export const syncOrCreateSalonInCloud = async ({ salonName, inviteCode, isPro, u
     console.warn('syncOrCreateSalonInCloud failed:', e);
     return null;
   }
+};
+
+/**
+ * 既存サロンの招待コードを更新（オーナー専用：既存の席と参加メンバーを維持したままコードのみ変更）
+ */
+export const updateSalonInviteCode = async ({ salonId, newInviteCode }) => {
+  if (!isValidUUID(salonId) || !newInviteCode) return null;
+  const cleanCode = newInviteCode.replace(/\s+/g, '').toUpperCase();
+  if (!cleanCode) {
+    throw new Error('招待コードを入力してください');
+  }
+
+  const { data: conflict, error: conflictErr } = await supabase
+    .from('salons')
+    .select('id')
+    .eq('invite_code', cleanCode)
+    .neq('id', salonId)
+    .maybeSingle();
+
+  if (conflictErr) {
+    throw new Error(`招待コードの確認に失敗しました: ${conflictErr.message}`);
+  }
+  if (conflict) {
+    throw new Error('この招待コードは既に使用されています。別のコードを指定してください。');
+  }
+
+  const { data: updated, error: updateErr } = await supabase
+    .from('salons')
+    .update({ invite_code: cleanCode })
+    .eq('id', salonId)
+    .select()
+    .single();
+
+  if (updateErr) {
+    throw new Error(`招待コードの更新に失敗しました: ${updateErr.message}`);
+  }
+  return updated;
 };
 
 /**
@@ -371,7 +442,8 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
 /**
  * サロンに所属する全客席タイマーを取得
  */
-export const fetchSalonTimers = async (salonId) => {
+export const fetchSalonTimers = async (salonId, options = {}) => {
+  const { returnNullOnError = false } = options || {};
   if (!salonId) return [];
   try {
     const { data, error } = await supabase
@@ -383,7 +455,7 @@ export const fetchSalonTimers = async (salonId) => {
 
     if (error) {
       console.warn('fetchSalonTimers error:', error);
-      return [];
+      return returnNullOnError ? null : [];
     }
     const mapped = (data || []).map((row, idx) => mapCloudTimerToSeat(row, idx));
     const usedNums = new Set();
@@ -413,7 +485,7 @@ export const fetchSalonTimers = async (salonId) => {
     });
   } catch (e) {
     console.warn('fetchSalonTimers failed:', e);
-    return [];
+    return returnNullOnError ? null : [];
   }
 };
 
@@ -507,19 +579,39 @@ export const upsertCloudTimer = async (salonId, seat) => {
  * 客席タイマーの削除（席マスター削除時）
  */
 export const deleteCloudTimer = async (salonId, timerIdOrLabel, fallbackSeatLabel = null) => {
-  if (!salonId || (!timerIdOrLabel && !fallbackSeatLabel)) return;
+  if (!salonId || (!timerIdOrLabel && !fallbackSeatLabel)) return false;
   try {
-    const isUUID = timerIdOrLabel && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(timerIdOrLabel));
+    const isUUID = isValidUUID(String(timerIdOrLabel || ''));
     if (isUUID) {
-      await supabase.from('salon_timers').delete().eq('salon_id', salonId).eq('id', timerIdOrLabel);
+      const { error } = await supabase
+        .from('salon_timers')
+        .delete()
+        .eq('salon_id', salonId)
+        .eq('id', timerIdOrLabel);
+      if (error) {
+        console.warn('deleteCloudTimer by id error:', error);
+        return false;
+      }
+      return true;
     } else {
       const targetLabel = (fallbackSeatLabel || timerIdOrLabel || '').trim();
       if (targetLabel) {
-        await supabase.from('salon_timers').delete().eq('salon_id', salonId).eq('seat_label', targetLabel);
+        const { error } = await supabase
+          .from('salon_timers')
+          .delete()
+          .eq('salon_id', salonId)
+          .eq('seat_label', targetLabel);
+        if (error) {
+          console.warn('deleteCloudTimer by label error:', error);
+          return false;
+        }
+        return true;
       }
+      return false;
     }
   } catch (e) {
     console.warn('deleteCloudTimer failed:', e);
+    return false;
   }
 };
 
@@ -543,10 +635,24 @@ export const subscribeSalonTimers = (salonId, onTimerEvent) => {
         if (typeof onTimerEvent === 'function') {
           const { eventType, new: newRec, old: oldRec } = payload;
           const isSelfEcho = newRec ? isRecentLocalCloudPayload(newRec) : false;
+          const rawOldLabel = oldRec?.seat_label
+            ? String(oldRec.seat_label).replace(/\s*[\(（]サンプル[\)）]/g, '').trim()
+            : null;
+          const resolvedOldSeat =
+            eventType === 'DELETE'
+              ? (oldRec
+                  ? {
+                      id: oldRec.id || null,
+                      cloudTimerId: oldRec.id || null,
+                      seatLabel: rawOldLabel || null,
+                      name: rawOldLabel || null,
+                    }
+                  : null)
+              : (oldRec ? mapCloudTimerToSeat(oldRec) : null);
           onTimerEvent({
             eventType,
             newSeat: newRec ? mapCloudTimerToSeat(newRec) : null,
-            oldSeat: oldRec ? mapCloudTimerToSeat(oldRec) : null,
+            oldSeat: resolvedOldSeat,
             isSelfEcho,
             rawPayload: payload,
           });
