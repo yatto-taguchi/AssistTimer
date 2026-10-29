@@ -656,6 +656,31 @@ export const WatchConnectivity = {
       if (event && event.userInfo) callback(event.userInfo);
     });
   },
+
+  // ★ サロン共有時のOS標準ローカル通知（スマホ閉鎖・別アプリ使用中かつWatch未連動時用）
+  requestNotificationPermission: async () => {
+    if (!NativeModule || typeof NativeModule.requestNotificationPermission !== 'function') {
+      return false;
+    }
+    try {
+      return !!(await NativeModule.requestNotificationPermission());
+    } catch (e) {
+      console.warn('[WatchConnectivity] requestNotificationPermission failed:', e);
+      return false;
+    }
+  },
+
+  presentLocalNotification: async (title, body) => {
+    if (!NativeModule || typeof NativeModule.presentLocalNotification !== 'function') {
+      return false;
+    }
+    try {
+      return !!(await NativeModule.presentLocalNotification(String(title || 'サロン共有通知'), String(body || '')));
+    } catch (e) {
+      console.warn('[WatchConnectivity] presentLocalNotification failed:', e);
+      return false;
+    }
+  },
 };
 
 export default WatchConnectivity;

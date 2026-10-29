@@ -1,5 +1,5 @@
-import React, { createContext, useState, useEffect, useRef } from 'react';
-import { Animated, Platform } from 'react-native';
+import React, { createContext, useState, useEffect, useRef, useCallback } from 'react';
+import { Animated, Platform, Vibration } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ネイティブPurchasesモジュールの安全インポート
@@ -804,6 +804,60 @@ export const AppProvider = ({ children }) => {
     setMainTimerActionRequest({ action, payload, actionId, timestamp: Date.now() });
   };
 
+  // ★ サロン共有時の全タブ共通トースト通知（どのタブを表示中でも画面上部にトースト＋バイブレーションを表示）
+  const [globalPeerToast, setGlobalPeerToast] = useState(null);
+  const globalPeerToastTimerRef = useRef(null);
+  const lastPeerToastKeyRef = useRef({ key: '', at: 0 });
+
+  const hideGlobalPeerToast = useCallback(() => {
+    if (globalPeerToastTimerRef.current) {
+      clearTimeout(globalPeerToastTimerRef.current);
+      globalPeerToastTimerRef.current = null;
+    }
+    setGlobalPeerToast(null);
+  }, []);
+
+  const showGlobalPeerToast = useCallback((text, color = '#30D158', options = {}) => {
+    const trimmed = String(text || '').trim();
+    if (!trimmed) return;
+    const nowMs = Date.now();
+    const dedupeKey = options.id || trimmed;
+    if (
+      lastPeerToastKeyRef.current.key === dedupeKey &&
+      nowMs - lastPeerToastKeyRef.current.at < 1500
+    ) {
+      return;
+    }
+    lastPeerToastKeyRef.current = { key: dedupeKey, at: nowMs };
+
+    if (globalPeerToastTimerRef.current) {
+      clearTimeout(globalPeerToastTimerRef.current);
+    }
+    const duration = Number(options.duration) > 0 ? Number(options.duration) : 4800;
+    setGlobalPeerToast({
+      id: options.id || `toast_${nowMs}`,
+      text: trimmed,
+      color: color || '#30D158',
+      timestamp: nowMs,
+    });
+    globalPeerToastTimerRef.current = setTimeout(() => {
+      setGlobalPeerToast(null);
+      globalPeerToastTimerRef.current = null;
+    }, duration);
+
+    if (Platform.OS !== 'web' && options.vibrate !== false) {
+      Vibration.vibrate([0, 150, 80, 180]);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (globalPeerToastTimerRef.current) {
+        clearTimeout(globalPeerToastTimerRef.current);
+      }
+    };
+  }, []);
+
   return (
     <AppContext.Provider
       value={{
@@ -811,6 +865,9 @@ export const AppProvider = ({ children }) => {
         setMainTimerState,
         mainTimerActionRequest,
         requestMainTimerAction,
+        globalPeerToast,
+        showGlobalPeerToast,
+        hideGlobalPeerToast,
         isEcoMode,
         toggleEcoMode,
         isEcoClockEnabled,

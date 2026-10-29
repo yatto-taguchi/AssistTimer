@@ -17,7 +17,12 @@ enum WidgetSync {
     /// 終了時刻がこの秒数以上ずれたら「時間変更」とみなす（端末間の通信遅延による小さなずれは無視）
     private static let endChangeThreshold: Double = 2
 
-    private static let syncQueue = DispatchQueue(label: "com.assisttimer.watch.widgetsync", qos: .utility)
+    private static let queueKey = DispatchSpecificKey<Bool>()
+    private static let syncQueue: DispatchQueue = {
+        let q = DispatchQueue(label: "com.assisttimer.watch.widgetsync", qos: .userInitiated)
+        q.setSpecific(key: queueKey, value: true)
+        return q
+    }()
     private static var pendingWorkItem: DispatchWorkItem?
     private static var pendingForceReload: Bool = false
     private static var lastPayload: Data?
@@ -29,10 +34,32 @@ enum WidgetSync {
         let mainSnapshot = mainTimer
         let userSnapshot = userName
 
-        syncQueue.async {
-            if forceReload {
-                pendingForceReload = true
+        if forceReload {
+            // ★ タイマースタート・時間決定・停止・scenePhase遷移などの明示的操作（forceReload: true）時は、
+            //   直後にデジタルクラウンで文字盤へ戻ってアプリがサスペンドしても100%即座に文字盤へ反映されるよう、
+            //   0.06秒デバウンスおよび0.25秒スロットリングを一切挟まず同期的に保存＆タイムラインリロードを完了させる！
+            let executeImmediateSave = {
+                pendingWorkItem?.cancel()
+                pendingWorkItem = nil
+                pendingForceReload = false
+                trailingReloadWorkItem?.cancel()
+                trailingReloadWorkItem = nil
+                performSaveOnQueue(
+                    timers: timersSnapshot,
+                    mainTimer: mainSnapshot,
+                    userName: userSnapshot,
+                    forceReload: true
+                )
             }
+            if DispatchQueue.getSpecific(key: queueKey) == true {
+                executeImmediateSave()
+            } else {
+                syncQueue.sync(execute: executeImmediateSave)
+            }
+            return
+        }
+
+        syncQueue.async {
             pendingWorkItem?.cancel()
             let work = DispatchWorkItem {
                 let shouldForce = pendingForceReload
@@ -196,7 +223,14 @@ enum WidgetSync {
         lastPayload = data
 
         defaults.set(data, forKey: snapshotKey)
-        scheduleTimelineReloadOnQueue()
+        if forceReload {
+            trailingReloadWorkItem?.cancel()
+            trailingReloadWorkItem = nil
+            lastReloadAt = Date()
+            WidgetCenter.shared.reloadAllTimelines()
+        } else {
+            scheduleTimelineReloadOnQueue()
+        }
     }
 
     private static func scheduleTimelineReloadOnQueue() {

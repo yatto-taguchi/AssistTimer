@@ -3391,6 +3391,42 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
    - **課題**: ローカルID（`seat-1`）で予約されたスマートアラームやローカル通知が発火するまでにクラウドUUIDへ席IDが更新されると、`eventFromKey`・`didInvalidateWith`・`isSameTarget`・`removeNotifications` がID文字列完全一致のみで照合して席を見失い、画面自動遷移や残りリピート通知消去が漏れるケースがあった。
    - **修正**: `findMatchingSeat(for:title:)` ヘルパーを導入し、`isSameTarget` および `removeNotifications(forEventKey:)` でも `seat-<番号>` とクラウドUUIDの双方を同一席として横断照合・一括消去するよう強化。
 
+---
+
+## 47. GitHub Issue #2 & Issue #1 改修仕様（Apple Watch 0ms即時振動消火・文字盤0ms即時同期・サロン共有3パターン通知出し分け＆施術ステータス通知トリガー完全化） (2026-10-29)
+
+### 47.1 Issue #2：Apple Watch タイマー停止・モジュラー文字盤同期・共有タイマー「シャンプーに入る」押下時の振動停止の完全修正
+
+1. **メインタイマー「タイマーを止める」押下時の0ms即時完全消火とボタンロック防止 (`targets/watch/alarm.swift`, `targets/watch/content.swift`)**:
+   - `WatchAlarmCoordinator.acknowledgeMainTimer(skipRefresh:)` を強化し、押下0msの瞬間に `events` / `ringing` / `armed` / `scheduledNotificationEventKeys` / `forceRingingKeys` / `restoredOverlayEvents` / `pendingOpenedAlarmEvent` を即時消火して `stopForegroundHaptics()`（触覚＋スピーカー音）を停止。
+   - 現行 `session` のみならず `backgroundAdoptedSessions.union(notifiedSessions)` に保持された全 `WKExtendedRuntimeSession` を `safeInvalidateSession` で即時破棄し、`startNotifyUser` の `repeatHandler` クロージャでも破棄中・消火済みになった瞬間に `return 0` を返してシステム振動ループをXPC遅延なしで物理遮断。
+   - 現在時刻・終了予定時刻の前後30秒エポックID一括消去に加え、`"assisttimer.alarm.main-timer"` プレフィックスで保留・配信済み通知を全削除。
+   - `MainTimerActionSheet` の閉鎖フレームで `@State var accumulatedDelta = 0` を書き換えてボタン階層を消滅させていた競合を除去し、`closeSheetAfter` に0.5秒後の `isClosingSheet = false` 自動復帰フェイルセーフを導入。
+2. **メインタイマー開始・時間決定時のモジュラー文字盤コンプリケーションへの0ms即時カウントダウン反映 (`targets/watch/widget_sync.swift`, `targets/watch/content.swift`)**:
+   - `WidgetSync` に `DispatchSpecificKey` 付きシリアルキュー `syncQueue`（`.userInitiated`）を導入し、`forceReload: true` 時は0.06秒デバウンスおよび0.25秒スロットリングを完全バイパスして `syncQueue.sync` でApp Group `UserDefaults` への保存と `WidgetCenter.shared.reloadAllTimelines()` を0msで即時完了。
+   - `handleStartMainTimer` / `handlePauseMainTimer` / `handleResetMainTimer` / `handleSetMainTimerTime` / `handleAdjustMainTimer` に `deferParentStateSync` を導入し、シート上の決定・定番分数タップ0msの瞬間に `sessionManager.mainTimer` 更新・アラーム予約・`WidgetSync.save(..., forceReload: true)`・iPhone送信を即確定し、親 `ContentView` の `@State mainTimer` 同期のみシート閉鎖完了後（またはデジタルクラウンで文字盤へ戻った `scenePhase != .active` 遷移時）に実行する構造へ刷新。
+3. **共有タイマーのタイムアップ後に「シャンプーに入る」（およびコーミング・チェック等の全ヘルプ開始ボタン）を押した瞬間の0ms振動完全停止 (`targets/watch/alarm.swift`, `targets/watch/content.swift`)**:
+   - `resolveCandidateSeatIds(seatId:seatNumber:)` および `isSeatRingingOrDue(seatId:seatNumber:checkOnly:)` を新設し、ローカルID `"seat-N"` とクラウド同期後のUUID・同一席番号を横断統合。
+   - `acknowledgeSeatTimer` でフォアグラウンド振動・音・現行 `session`・`backgroundAdoptedSessions.union(notifiedSessions)`・前後30秒エポックID＋プレフィックス全検索リピート通知を0msで即時消去。
+   - `ContentView.immediatelyAcknowledgeSeatAlarm` により、シートの `dismiss()` アニメーション完了を待たずボタンをタップした0msの瞬間に振動をピタッと停止（客席カードの `00:00` 停止・自動折りたたみ仕様は維持）。
+
+### 47.2 Issue #1：サロン共有時の施術ステータス通知トリガー完全化 ＆ スマホ開閉状態 × Watch連動状態に応じた3パターン通知出し分け
+
+1. **端末・開閉状態に応じた3パターン通知出し分け (`src/screens/SalonWorkScreen.js`, `App.js`, `src/utils/AppContext.js`, `modules/watch-connectivity/*`, `targets/watch/content.swift`)**:
+   - **パターン① スマホを開いている時（フォアグラウンド `AppState === 'active'`）**:
+     - Watch連動あり／なし共通で、**スマホ側のみ**に「**全タブ共通トースト通知（`GlobalPeerToastOverlay`） ＋ バイブレーション**」を表示。
+     - 「サロン」タブだけでなく個人練習用「タイマー」「記録一覧」「設定」など全タブの最前面上部に表示され（他タブ表示中はタップでサロンタブへワンタップ遷移可能）、スマホを見ている間は Apple Watch 側は鳴らさない（`notification` オプションなしで客席データのみ最新同期）。
+   - **パターン② スマホを開いていない時（ロック中 / バックグラウンド / 別アプリ `AppState !== 'active'`） × Watch連動あり**:
+     - **Apple Watch 側**に通知（手首の触覚振動＋通知画面表示）を送出し、スマホ側のトーストおよびスマホOSバナー通知は出さない（重複防止）。
+     - Watch側の `WatchSessionManager.processReceivedData` の通知有効ウィンドウを `90_000ms`（`kind != "保存データ"` かつ通知ID `lastHandledPeerNotifId` デデュープ付き）に拡大し、iPhoneロック中の `transferUserInfo` 伝送ラグがあっても確実に鳴動。
+   - **パターン③ スマホを開いていない時（ロック中 / バックグラウンド / 別アプリ `AppState !== 'active'`） × Watch連動なし（スマホ単体）**:
+     - `ExpoWatchConnectivityModule.swift` に実装した `presentLocalNotification`（`UNUserNotificationCenter` `TimeSensitive` 即時ローカル通知 ＋ `PeerNotificationCenterDelegate` ＋ バックグラウンド遷移時の `beginBackgroundTask` 通信保護）により、スマホの **OS標準バナー通知（ロック画面／システム通知バナー＋標準通知音/振動）** として表示。
+2. **共有機能における施術ステータス移行・変更通知トリガーの完全化 (`src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`)**:
+   - `subscribeSalonTimers` において、タイマーが `running` → `paused` に停止した際、`newActionId`（💧シャンプー・🪮コーミング・🔍チェック・🔔呼び出し・💬その他）への移行を伴う場合は単なる `⏹ ◯番席のタイマーが停止されました` に丸めず、`💧 1番席のシャンプーに 〇〇 さんが入りました` / `🪮 1番席のコーミングに 〇〇 さんが入りました` / `🔔 1番席から呼び出しがあります` 等の具体的な施術工程通知を最優先で生成。
+   - タイマー停止を伴わないステータス変更（停止中席や稼働中席でのコーミング・シャンプー・チェック・呼び出しの開始・変更・完了）も検知して関係者にリアルタイム通知。
+   - `handleStopTimerWithNotification`（タイムアップ前・タイムアップ後双方）、`handleSelectActionStatus`、および Apple Watch からの `ENTER_HELP` / `START_SHAMPOO` / `FINISH_SHAMPOO` / `UPDATE_STATUS` ハンドラにおいて、入った施術工程（`actionStatus`, `helpProcess`, `isShampooing`）と担当者名（`assistantStaffName`）が消去されずクラウドへ確実に同期されるよう統一。
+
+
 
 
 

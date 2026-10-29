@@ -1,8 +1,13 @@
 import ExpoModulesCore
 import WatchConnectivity
+import UserNotifications
+import UIKit
 
 public class ExpoWatchConnectivityModule: Module {
   private var sessionDelegate: SessionDelegate?
+  private var notificationDelegate: PeerNotificationCenterDelegate?
+  private var bgTaskId: UIBackgroundTaskIdentifier = .invalid
+  private var bgObserverTokens: [NSObjectProtocol] = []
   private var pendingApplicationContext: [String: Any]?
   private var pendingUserInfo: [String: Any]?
 
@@ -41,6 +46,85 @@ public class ExpoWatchConnectivityModule: Module {
         let s = WCSession.default
         s.delegate = delegate
         s.activate()
+      }
+      DispatchQueue.main.async {
+        let center = UNUserNotificationCenter.current()
+        if !(center.delegate is PeerNotificationCenterDelegate) {
+          let notifDelegate = PeerNotificationCenterDelegate(previousDelegate: center.delegate)
+          self.notificationDelegate = notifDelegate
+          center.delegate = notifDelegate
+        }
+        self.setupBackgroundTaskObservers()
+      }
+    }
+
+    OnDestroy {
+      DispatchQueue.main.async {
+        for token in self.bgObserverTokens {
+          NotificationCenter.default.removeObserver(token)
+        }
+        self.bgObserverTokens.removeAll()
+        self.endRealtimeBackgroundTask()
+      }
+    }
+
+    AsyncFunction("requestNotificationPermission") { (promise: Promise) in
+      let center = UNUserNotificationCenter.current()
+      center.getNotificationSettings { settings in
+        if settings.authorizationStatus == .authorized ||
+           settings.authorizationStatus == .provisional ||
+           settings.authorizationStatus == .ephemeral {
+          promise.resolve(true)
+          return
+        }
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+          promise.resolve(granted)
+        }
+      }
+    }
+
+    AsyncFunction("presentLocalNotification") { (title: String, body: String, promise: Promise) in
+      let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmedBody.isEmpty else {
+        promise.resolve(false)
+        return
+      }
+      let resolvedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        ? "サロン共有通知"
+        : title.trimmingCharacters(in: .whitespacesAndNewlines)
+      let center = UNUserNotificationCenter.current()
+
+      let enqueueNotification = {
+        let content = UNMutableNotificationContent()
+        content.title = resolvedTitle
+        content.body = trimmedBody
+        content.sound = .default
+        if #available(iOS 15.0, *) {
+          content.interruptionLevel = .timeSensitive
+        }
+        content.threadIdentifier = "assisttimer.peer.shared"
+        let identifier = "assisttimer.peer.\(UUID().uuidString)"
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+        center.add(request) { error in
+          promise.resolve(error == nil)
+        }
+      }
+
+      center.getNotificationSettings { settings in
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+          enqueueNotification()
+        case .notDetermined:
+          center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+            if granted {
+              enqueueNotification()
+            } else {
+              promise.resolve(false)
+            }
+          }
+        default:
+          promise.resolve(false)
+        }
       }
     }
 
@@ -349,6 +433,89 @@ public class ExpoWatchConnectivityModule: Module {
     lastNativeReceivedKind = kind
     lastNativeReceivedAction = actionStr
     self.eventLock.unlock()
+  }
+
+  // ★ スマホ画面閉鎖・別アプリ切替直後も Supabase Realtime 受信および Watch/OSバナー通知送出を完了できるようバックグラウンド実行猶予を確保
+  fileprivate func setupBackgroundTaskObservers() {
+    guard bgObserverTokens.isEmpty else { return }
+    let enterBg = NotificationCenter.default.addObserver(
+      forName: UIApplication.didEnterBackgroundNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      self?.beginRealtimeBackgroundTask()
+    }
+    let enterFg = NotificationCenter.default.addObserver(
+      forName: UIApplication.willEnterForegroundNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      self?.endRealtimeBackgroundTask()
+    }
+    bgObserverTokens = [enterBg, enterFg]
+  }
+
+  private func beginRealtimeBackgroundTask() {
+    endRealtimeBackgroundTask()
+    bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerRealtimePeerSync") { [weak self] in
+      self?.endRealtimeBackgroundTask()
+    }
+  }
+
+  fileprivate func endRealtimeBackgroundTask() {
+    guard bgTaskId != .invalid else { return }
+    let taskToEnd = bgTaskId
+    bgTaskId = .invalid
+    UIApplication.shared.endBackgroundTask(taskToEnd)
+  }
+}
+
+// MARK: - OS標準バナー通知表示デリゲート（inactive / background 時の確実なバナー表示＆既存デリゲート委譲）
+private class PeerNotificationCenterDelegate: NSObject, UNUserNotificationCenterDelegate {
+  weak var previousDelegate: UNUserNotificationCenterDelegate?
+
+  init(previousDelegate: UNUserNotificationCenterDelegate?) {
+    self.previousDelegate = previousDelegate
+    super.init()
+  }
+
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    let reqId = notification.request.identifier
+    if reqId.hasPrefix("assisttimer.peer.") {
+      if #available(iOS 14.0, *) {
+        completionHandler([.banner, .list, .sound])
+      } else {
+        completionHandler([.alert, .sound])
+      }
+      return
+    }
+    if let prev = previousDelegate,
+       prev.responds(to: #selector(UNUserNotificationCenterDelegate.userNotificationCenter(_:willPresent:withCompletionHandler:))) {
+      prev.userNotificationCenter?(center, willPresent: notification, withCompletionHandler: completionHandler)
+      return
+    }
+    if #available(iOS 14.0, *) {
+      completionHandler([.banner, .list, .sound])
+    } else {
+      completionHandler([.alert, .sound])
+    }
+  }
+
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    didReceive response: UNNotificationResponse,
+    withCompletionHandler completionHandler: @escaping () -> Void
+  ) {
+    if let prev = previousDelegate,
+       prev.responds(to: #selector(UNUserNotificationCenterDelegate.userNotificationCenter(_:didReceive:withCompletionHandler:))) {
+      prev.userNotificationCenter?(center, didReceive: response, withCompletionHandler: completionHandler)
+      return
+    }
+    completionHandler()
   }
 }
 

@@ -1,7 +1,7 @@
-import React, { useContext } from 'react';
-import { Animated, View, StyleSheet } from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { NavigationContainer, DefaultTheme, DarkTheme } from '@react-navigation/native';
+import React, { useContext, useEffect, useRef } from 'react';
+import { Animated, View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { NavigationContainer, DefaultTheme, DarkTheme, createNavigationContainerRef } from '@react-navigation/native';
 import { createBottomTabNavigator, BottomTabBar } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 import { StatusBar } from 'expo-status-bar';
@@ -15,6 +15,7 @@ import SettingsScreen from './src/screens/SettingsScreen';
 import CustomBatteryIndicator from './src/components/CustomBatteryIndicator';
 
 const Tab = createBottomTabNavigator();
+const navigationRef = createNavigationContainerRef();
 
 function MainTabs() {
   const { 
@@ -136,6 +137,155 @@ function MainTabs() {
   );
 }
 
+function GlobalPeerToastOverlay() {
+  const { globalPeerToast, hideGlobalPeerToast, isEcoMode } = useContext(AppContext);
+  const insets = useSafeAreaInsets();
+  const translateY = useRef(new Animated.Value(-90)).current;
+  const opacity = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (globalPeerToast) {
+      translateY.setValue(-28);
+      opacity.setValue(0);
+      Animated.parallel([
+        Animated.spring(translateY, {
+          toValue: 0,
+          damping: 18,
+          stiffness: 220,
+          mass: 0.8,
+          useNativeDriver: true,
+        }),
+        Animated.timing(opacity, {
+          toValue: 1,
+          duration: 180,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [globalPeerToast?.id, globalPeerToast?.timestamp]);
+
+  if (!globalPeerToast) return null;
+
+  const accentColor = globalPeerToast.color || '#30D158';
+  const currentRouteName = navigationRef.isReady() ? navigationRef.getCurrentRoute()?.name : null;
+  const isOutsideSalonTab = currentRouteName && currentRouteName !== 'Salon';
+
+  const handlePressToast = () => {
+    if (navigationRef.isReady() && navigationRef.getCurrentRoute()?.name !== 'Salon') {
+      navigationRef.navigate('Salon');
+    }
+    hideGlobalPeerToast();
+  };
+
+  return (
+    <View
+      pointerEvents="box-none"
+      style={[
+        toastStyles.overlayContainer,
+        { top: Math.max((insets?.top || 0) + 8, 16) },
+      ]}
+    >
+      <Animated.View
+        style={[
+          toastStyles.toastCard,
+          {
+            backgroundColor: isEcoMode ? '#1C1C1E' : accentColor,
+            borderColor: isEcoMode ? accentColor : 'rgba(255,255,255,0.28)',
+            borderWidth: isEcoMode ? 1.5 : 1,
+            transform: [{ translateY }],
+            opacity,
+          },
+        ]}
+      >
+        <TouchableOpacity
+          activeOpacity={0.88}
+          onPress={handlePressToast}
+          style={toastStyles.toastMainTouch}
+        >
+          <View
+            style={[
+              toastStyles.accentDot,
+              { backgroundColor: isEcoMode ? accentColor : '#FFFFFF' },
+            ]}
+          />
+          <View style={toastStyles.textColumn}>
+            <Text style={toastStyles.toastTitle} numberOfLines={1}>
+              サロン共有通知{isOutsideSalonTab ? '（タップでサロンへ）' : ''}
+            </Text>
+            <Text style={toastStyles.toastBody} numberOfLines={2}>
+              {globalPeerToast.text}
+            </Text>
+          </View>
+        </TouchableOpacity>
+        <TouchableOpacity
+          activeOpacity={0.7}
+          onPress={hideGlobalPeerToast}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          style={toastStyles.closeButton}
+        >
+          <Ionicons name="close-circle" size={20} color="rgba(255,255,255,0.88)" />
+        </TouchableOpacity>
+      </Animated.View>
+    </View>
+  );
+}
+
+const toastStyles = StyleSheet.create({
+  overlayContainer: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    zIndex: 9999,
+    elevation: 9999,
+    alignItems: 'center',
+  },
+  toastCard: {
+    width: '100%',
+    maxWidth: 520,
+    borderRadius: 14,
+    paddingVertical: 11,
+    paddingLeft: 13,
+    paddingRight: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.32,
+    shadowRadius: 8,
+    elevation: 10,
+  },
+  toastMainTouch: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  accentDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 10,
+  },
+  textColumn: {
+    flex: 1,
+  },
+  toastTitle: {
+    color: 'rgba(255,255,255,0.85)',
+    fontSize: 10.5,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  toastBody: {
+    color: '#FFFFFF',
+    fontSize: 13.5,
+    fontWeight: '800',
+    lineHeight: 18,
+  },
+  closeButton: {
+    marginLeft: 8,
+    padding: 2,
+  },
+});
+
 function AppContent() {
   const { isEcoMode } = useContext(AppContext);
   const baseTheme = isEcoMode ? DarkTheme : DefaultTheme;
@@ -149,9 +299,12 @@ function AppContent() {
   };
 
   return (
-    <NavigationContainer theme={navTheme}>
-      <MainTabs />
-    </NavigationContainer>
+    <View style={{ flex: 1 }}>
+      <NavigationContainer ref={navigationRef} theme={navTheme}>
+        <MainTabs />
+      </NavigationContainer>
+      <GlobalPeerToastOverlay />
+    </View>
   );
 }
 
