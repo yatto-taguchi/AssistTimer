@@ -524,6 +524,19 @@ private class PeerNotificationCenterDelegate: NSObject, UNUserNotificationCenter
       }
       return
     }
+    if notification.request.trigger is UNPushNotificationTrigger {
+      let isForeground: Bool
+      if Thread.isMainThread {
+        isForeground = (UIApplication.shared.applicationState == .active)
+      } else {
+        isForeground = DispatchQueue.main.sync { UIApplication.shared.applicationState == .active }
+      }
+      if isForeground {
+        // アプリがフォアグラウンド（active）の時はRealtimeのアプリ内トースト＋Watch直接通知のみとし、OSリモートプッシュバナーの二重表示を抑止
+        completionHandler([])
+        return
+      }
+    }
     if let prev = previousDelegate,
        prev.responds(to: #selector(UNUserNotificationCenterDelegate.userNotificationCenter(_:willPresent:withCompletionHandler:))) {
       prev.userNotificationCenter?(center, willPresent: notification, withCompletionHandler: completionHandler)

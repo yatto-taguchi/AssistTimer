@@ -7,6 +7,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { StatusBar } from 'expo-status-bar';
 
 import { AppProvider, AppContext } from './src/utils/AppContext';
+import {
+  configurePushNotificationHandler,
+  subscribeNotificationTapNavigation,
+} from './src/utils/pushNotificationService';
 
 import HomeScreen from './src/screens/HomeScreen';
 import RecordsScreen from './src/screens/RecordsScreen';
@@ -288,6 +292,36 @@ const toastStyles = StyleSheet.create({
 
 function AppContent() {
   const { isEcoMode } = useContext(AppContext);
+
+  useEffect(() => {
+    configurePushNotificationHandler();
+    const navigateToSalonTab = () => {
+      if (navigationRef.isReady()) {
+        if (navigationRef.getCurrentRoute()?.name !== 'Salon') {
+          navigationRef.navigate('Salon');
+        }
+        return;
+      }
+      let attempts = 0;
+      const timer = setInterval(() => {
+        attempts += 1;
+        if (navigationRef.isReady()) {
+          clearInterval(timer);
+          if (navigationRef.getCurrentRoute()?.name !== 'Salon') {
+            navigationRef.navigate('Salon');
+          }
+        } else if (attempts >= 20) {
+          clearInterval(timer);
+        }
+      }, 150);
+    };
+
+    const unsubscribeTap = subscribeNotificationTapNavigation(navigateToSalonTab);
+    return () => {
+      unsubscribeTap();
+    };
+  }, []);
+
   const baseTheme = isEcoMode ? DarkTheme : DefaultTheme;
   const navTheme = {
     ...baseTheme,

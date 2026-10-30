@@ -903,15 +903,33 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     /// 「止める」ボタン（カスタムボタン側で別途アクション送信する場合は sendToPhone: false を指定可能）
     func stop(sendToPhone: Bool = true, completeCheckIfNeeded: Bool = true, explicitTarget: WatchAlarmEvent? = nil, skipRefresh: Bool = false) {
         suppressSmartAlarmUntil = Date().addingTimeInterval(3.0)
-        pendingSystemDismissPhoneSyncWorkItem?.cancel()
-        pendingSystemDismissPhoneSyncWorkItem = nil
-        lastSystemDismissedSnapshot = nil
+        if let exp = explicitTarget {
+            if let snap = lastSystemDismissedSnapshot,
+               isSameTarget(key1: snap.event.key, key2: exp.key) || (snap.event.seatId == exp.seatId && snap.event.key.contains("-check@") == exp.key.contains("-check@")) {
+                pendingSystemDismissPhoneSyncWorkItem?.cancel()
+                pendingSystemDismissPhoneSyncWorkItem = nil
+                lastSystemDismissedSnapshot = nil
+            }
+        } else {
+            pendingSystemDismissPhoneSyncWorkItem?.cancel()
+            pendingSystemDismissPhoneSyncWorkItem = nil
+            lastSystemDismissedSnapshot = nil
+        }
         acknowledgeRinging(sendToPhone: sendToPhone, completeCheckIfNeeded: completeCheckIfNeeded, explicitTarget: explicitTarget)
-        stopForegroundHaptics()
+        if ringing.isEmpty {
+            stopForegroundHaptics()
+        }
         // ★ すでに後続の全体タイマー等のために新しく予約成立（.scheduled）している未消火セッションは破棄せず保護し、
-        //   鳴動中・消火済みのセッションは遅延なく即座に破棄する
+        //   鳴動中・消火済みのセッションは遅延なく即座に破棄する（チェック単独消火時は大元 -main@ セッションを絶対保護）
         if session != nil {
             let shouldInvalidateSession: Bool = {
+                if let exp = explicitTarget, exp.key.contains("-check@") {
+                    guard let key = sessionKey else { return sessionStarted }
+                    if key.contains("-main@") && !isAcknowledged(key) {
+                        return false
+                    }
+                    return isAcknowledged(key) || isSameTarget(key1: key, key2: exp.key) || key.hasPrefix("\(exp.seatId)-check@")
+                }
                 if sessionStarted { return true }
                 guard let key = sessionKey else { return true }
                 if isAcknowledged(key) { return true }
@@ -923,7 +941,12 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             }
         }
         for adopted in Array(backgroundAdoptedSessions) {
-            safeInvalidateSession(adopted, wasStarted: true, associatedKey: sessionKeysBySession[adopted])
+            let assocKey = sessionKeysBySession[adopted]
+            if let exp = explicitTarget, exp.key.contains("-check@"),
+               let aKey = assocKey, aKey.contains("-main@") && !isAcknowledged(aKey) {
+                continue
+            }
+            safeInvalidateSession(adopted, wasStarted: true, associatedKey: assocKey)
         }
         notificationSignature = "__FORCE__"
         if !skipRefresh {
@@ -1473,32 +1496,53 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
 
     private func acknowledgeRinging(sendToPhone: Bool, completeCheckIfNeeded: Bool = true, explicitTarget: WatchAlarmEvent? = nil, deferPhoneSend: Bool = false) {
         let now = Date()
-        var mergedTargets = currentRinging(now)
-        if let exp = explicitTarget, !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: exp.key) }) {
+        var mergedTargets: [WatchAlarmEvent] = []
+        if let exp = explicitTarget {
+            // ★ 明示ターゲット指定時（チェックタイマー単独停止等）は他の鳴動イベント（大元 -main@ や別席・個人メインタイマー）を絶対に巻き込まない
+            let expIsCheck = exp.key.contains("-check@")
+            let matchesExp: (WatchAlarmEvent) -> Bool = { cand in
+                self.isSameTarget(key1: cand.key, key2: exp.key) ||
+                (cand.seatId == exp.seatId && cand.key.contains("-check@") == expIsCheck)
+            }
             mergedTargets.append(exp)
-        }
-        for r in ringing where !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: r.key) }) {
-            mergedTargets.append(r)
-        }
-        for (_, r) in restoredOverlayEvents where !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: r.key) }) {
-            mergedTargets.append(r)
-        }
-        for key in forceRingingKeys where !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: key) }) {
-            if let ev = eventFromKey(key) {
+            for c in currentRinging(now) where matchesExp(c) && !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: c.key) }) {
+                mergedTargets.append(c)
+            }
+            for r in ringing where matchesExp(r) && !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: r.key) }) {
+                mergedTargets.append(r)
+            }
+            for (_, r) in restoredOverlayEvents where matchesExp(r) && !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: r.key) }) {
+                mergedTargets.append(r)
+            }
+            for key in forceRingingKeys {
+                if let ev = eventFromKey(key), matchesExp(ev), !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: ev.key) }) {
+                    mergedTargets.append(ev)
+                }
+            }
+        } else {
+            mergedTargets = currentRinging(now)
+            for r in ringing where !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: r.key) }) {
+                mergedTargets.append(r)
+            }
+            for (_, r) in restoredOverlayEvents where !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: r.key) }) {
+                mergedTargets.append(r)
+            }
+            for key in forceRingingKeys where !mergedTargets.contains(where: { isSameTarget(key1: $0.key, key2: key) }) {
+                if let ev = eventFromKey(key) {
+                    mergedTargets.append(ev)
+                }
+            }
+            if mergedTargets.isEmpty,
+               let k = sessionKey ?? UserDefaults.standard.string(forKey: sessionKeyStoreKey),
+               let ev = eventFromKey(k),
+               (sessionStarted || ev.date <= now.addingTimeInterval(2.0)) {
                 mergedTargets.append(ev)
             }
         }
-        if mergedTargets.isEmpty,
-           explicitTarget == nil,
-           let k = sessionKey ?? UserDefaults.standard.string(forKey: sessionKeyStoreKey),
-           let ev = eventFromKey(k),
-           (sessionStarted || ev.date <= now.addingTimeInterval(2.0)) {
-            mergedTargets.append(ev)
-        }
         let targets = mergedTargets
         guard !targets.isEmpty else {
-            if !ringing.isEmpty { ringing = [] }
-            if sendToPhone, var m = WatchSessionManager.shared.mainTimer, (m.isOvertime || m.isPreCountingDown || m.isRunning) {
+            if explicitTarget == nil && !ringing.isEmpty { ringing = [] }
+            if explicitTarget == nil, sendToPhone, var m = WatchSessionManager.shared.mainTimer, (m.isOvertime || isMainTimerRingingOrDue) {
                 let stoppedEnd = m.targetEndTime.timeIntervalSince1970
                 m.isRunning = false
                 m.isPreCountingDown = false
@@ -1552,7 +1596,16 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             restoredOverlayEvents = restoredOverlayEvents.filter { !isSameTarget(key1: $0.key, key2: e.key) }
         }
         persist()
-        ringing = []
+        if explicitTarget != nil {
+            ringing.removeAll { r in
+                targets.contains(where: { t in
+                    isSameTarget(key1: t.key, key2: r.key) ||
+                    (t.seatId == r.seatId && t.key.contains("-check@") == r.key.contains("-check@"))
+                })
+            }
+        } else {
+            ringing = []
+        }
 
         // ★ 放置タイム終了のアラーム（-main@）と途中チェック時間のアラーム（-check@）を分離して処理:
         //   1. 本放置・メインタイマー（-main@）: ユーザーが明示的に「止める / タイム終了 / シャンプーに入る」等を選んだ時（sendToPhone == true）は00:00に戻す。

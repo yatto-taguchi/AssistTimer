@@ -41,6 +41,15 @@ import {
   deleteCloudTimer,
   subscribeSalonTimers,
 } from '../utils/salonCloudService';
+import {
+  configurePushNotificationHandler,
+  buildPeerEventSemanticKey,
+  hasHandledPeerNotification,
+  markPeerNotificationHandled,
+  registerAndSyncSalonPushToken,
+  removeSalonPushToken,
+  subscribeRemotePushEvents,
+} from '../utils/pushNotificationService';
 
 const playTimeUpSound = async () => {
   try {
@@ -77,6 +86,14 @@ export const getActionStatusInfo = (statusId, isShampooing) => {
   const actualId = statusId || (isShampooing ? 'shampoo' : null);
   if (!actualId) return null;
   return SALON_ACTION_STATUS_OPTIONS.find((opt) => opt.id === actualId || opt.label === actualId) || null;
+};
+
+// チェックタイマー（中間タイマー）専用工程リスト（シャンプーは完全除外：4種のみ）
+export const CHECK_PROCESS_OPTIONS = ['チェック', 'コーミング', '1液2液', '担当を呼ぶ'];
+
+export const sanitizeCheckProcess = (raw) => {
+  const trimmed = String(raw || '').trim();
+  return CHECK_PROCESS_OPTIONS.includes(trimmed) ? trimmed : 'チェック';
 };
 
 // ランダムな6桁（3桁-3桁）の安全な招待コード生成関数（入力例 000-000 や過去露出コードは完全除外）
@@ -717,7 +734,7 @@ export const formatSeatsPayload = (seatsList) => {
         : Math.max(0, Math.floor((targetEnd - Date.now()) / 1000));
 
       const isZero = !isRunning && pausedRem <= 0;
-      const isCollapsedSeat = !isRunning && (s.status === 'idle' || (!s.isReset && s.collapsedAtEnd != null));
+      const isCollapsedSeat = !isRunning && (s.status === 'idle' || isZero || s.collapsedAtEnd != null);
       const isNoHelp = !isZero && !isCollapsedSeat && (!!s.isNoHelpNeeded || s.assistantStaffName === 'ヘルプなし' || s.assistantStaffName === 'none');
       const actionInfo = getActionStatusInfo(s.actionStatus, s.isShampooing);
 
@@ -737,7 +754,7 @@ export const formatSeatsPayload = (seatsList) => {
         status: (isZero || isCollapsedSeat) ? 'normal' : (actionInfo ? actionInfo.id : 'normal'),
         checkTargetSeconds: s.checkTargetSeconds ? Number(s.checkTargetSeconds) : 0,
         checkEndTimestamp: isRunning && s.checkEndTimestamp ? Number(s.checkEndTimestamp) : 0,
-        checkProcess: s.checkProcess || 'チェック',
+        checkProcess: sanitizeCheckProcess(s.checkProcess),
         checkStaffName: s.checkStaffName || '',
         isCheckCompleted: s.checkStatus === 'completed',
         watchAlarmSoundEnabled: !!s.watchAlarmSoundEnabled,
@@ -872,8 +889,8 @@ export const adoptWatchActiveSeatsIntoCache = async (payload) => {
         nextSeats[idx] = {
           ...prevSeat,
           status: 'running',
-          colorStaffName: watchUser || prevSeat.colorStaffName || 'スタイリスト',
-          createdBy: _cachedMyUserId || prevSeat.createdBy || null,
+          colorStaffName: watchUser || 'スタイリスト',
+          createdBy: _cachedMyUserId || null,
           targetSeconds: targetSec,
           initialMinutes: Math.max(1, Math.round(targetSec / 60)),
           targetEndTimestamp: wsEnd,
@@ -1830,6 +1847,9 @@ export default function SalonWorkScreen() {
 
   const detachFromRemovedGuestSalon = async (removedSalonId, reasonMessage = null) => {
     const activeUid = myUserIdRef.current || myUserId;
+    if (removedSalonId && isCloudUUID(removedSalonId)) {
+      removeSalonPushToken({ salonId: removedSalonId, userId: activeUid, onlyCurrentDevice: false }).catch(() => {});
+    }
     const activeName = userNameRef.current || userName || 'スタイリスト';
     const prevList = Array.isArray(savedSalonsRef.current) ? savedSalonsRef.current : [];
     const remainingSalons = prevList.filter((s) => s && s.id !== removedSalonId);
@@ -1905,7 +1925,7 @@ export default function SalonWorkScreen() {
   const getSeatCloudSignature = (seat) => {
     if (!seat) return '';
     const label = (seat.seatLabel || seat.name || '').replace(/\s*[\(（]サンプル[\)）]/g, '').trim();
-    return `${label}_${seat.colorStaffName || ''}_${seat.status}_${seat.targetSeconds || seat.targetTime}_${seat.targetEndTimestamp}_${seat.pausedRemainingSeconds}_${seat.assistantStaffName}_${seat.helpProcess}_${seat.actionStatus}_${seat.isRecruiting}_${seat.isNoHelpNeeded}_${seat.checkEndTimestamp}_${seat.checkPausedRemainingSeconds}_${seat.checkTotalSeconds || seat.checkTargetSeconds}_${seat.checkStatus}_${seat.checkProcess}_${seat.checkStaffName}_${seat.comment}_${seat.isShampooing}`;
+    return `${label}_${seat.colorStaffName || ''}_${seat.createdBy || ''}_${seat.status}_${seat.targetSeconds || seat.targetTime}_${seat.targetEndTimestamp}_${seat.pausedRemainingSeconds}_${seat.assistantStaffName}_${seat.helpProcess}_${seat.actionStatus}_${seat.isRecruiting}_${seat.isNoHelpNeeded}_${seat.checkEndTimestamp}_${seat.checkPausedRemainingSeconds}_${seat.checkTotalSeconds || seat.checkTargetSeconds}_${seat.checkStatus}_${seat.checkProcess}_${seat.checkStaffName}_${seat.comment}_${seat.isShampooing}`;
   };
 
   const getActiveStorageSalonId = () =>
@@ -2036,10 +2056,13 @@ export default function SalonWorkScreen() {
     ...s,
     status: 'paused',
     pausedRemainingSeconds: 0,
+    targetSeconds: 0,
+    initialMinutes: 0,
     targetEndTimestamp: null,
     lastStoppedAt: Date.now(),
     lastStoppedTargetEndTimestamp: Number(s.targetEndTimestamp) || Number(s.lastStoppedTargetEndTimestamp) || 0,
     isOver: false,
+    isReset: true,
     timeUpTimestamp: null,
     escalationLevel: 0,
     mainStaffConfirmed: true,
@@ -2055,13 +2078,14 @@ export default function SalonWorkScreen() {
     checkTotalSeconds: null,
     checkEndTimestamp: null,
     checkPausedRemainingSeconds: null,
+    checkInitialMinutes: null,
     checkStaffName: '',
     checkProcess: 'チェック',
     checkStatus: 'stopped',
     isCheckCompleted: false,
     watchAlarmSoundEnabled: false,
     alarmSoundEnabled: false,
-    collapsedAtEnd: null,
+    collapsedAtEnd: Date.now(),
     history: [],
   });
 
@@ -2197,8 +2221,8 @@ export default function SalonWorkScreen() {
               nextSeats[idx] = {
                 ...prevSeat,
                 status: 'running',
-                colorStaffName: watchUser || userNameRef.current || userName || prevSeat.colorStaffName || 'スタイリスト',
-                createdBy: myUserIdRef.current || myUserId || prevSeat.createdBy || null,
+                colorStaffName: watchUser || userNameRef.current || userName || 'スタイリスト',
+                createdBy: myUserIdRef.current || myUserId || null,
                 targetSeconds: targetSec,
                 initialMinutes: Math.max(1, Math.round(targetSec / 60)),
                 targetEndTimestamp: wsEnd,
@@ -2637,14 +2661,50 @@ export default function SalonWorkScreen() {
 
         switch (action) {
           case 'START_SHAMPOO': {
+            stopAlarm('salon', `${s.id}-main`);
+            stopAlarm('salon', `${s.id}-check`);
+            if (String(s.id) !== String(seatId)) {
+              stopAlarm('salon', `${seatId}-main`);
+              stopAlarm('salon', `${seatId}-check`);
+            }
+            if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[s.id] = false;
+            if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
+            if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[s.id] = false;
+            if (escalatedAlertRef.current) escalatedAlertRef.current[s.id] = false;
+            const staff = watchUser || s.assistantStaffName || userName || 'スタッフ';
             return {
               ...s,
+              status: 'paused',
+              pausedRemainingSeconds: 0,
+              targetSeconds: 0,
+              initialMinutes: 0,
+              targetEndTimestamp: null,
+              lastStoppedAt: Date.now(),
+              lastStoppedTargetEndTimestamp: Number(s.targetEndTimestamp) || Number(s.lastStoppedTargetEndTimestamp) || 0,
+              isOver: false,
+              isReset: true,
+              timeUpTimestamp: null,
+              escalationLevel: 0,
+              mainStaffConfirmed: true,
+              assistantStaffConfirmed: true,
+              stoppedBy: staff,
+              collapsedAtEnd: Date.now(),
               isShampooing: true,
               actionStatus: 'shampoo',
               helpProcess: 'シャンプー',
-              assistantStaffName: watchUser || s.assistantStaffName,
+              assistantStaffName: staff,
               isRecruiting: false,
               isNoHelpNeeded: false,
+              checkTargetSeconds: null,
+              checkTotalSeconds: null,
+              checkEndTimestamp: null,
+              checkPausedRemainingSeconds: null,
+              checkInitialMinutes: null,
+              checkStaffName: '',
+              checkProcess: 'チェック',
+              checkStatus: 'stopped',
+              isCheckCompleted: false,
+              checkAlerted: false,
               history: [],
             };
           }
@@ -2690,38 +2750,39 @@ export default function SalonWorkScreen() {
                 ? s.assistantStaffName
                 : '';
             const staff = watchUser || existingAssist || userName || 'スタッフ';
-            const shouldMarkCheckCompleted = !!extra?.completeSubCheck || resolvedActionId === 'check';
-            const preservedCheckSec = shouldMarkCheckCompleted ? (s.checkTargetSeconds || s.checkTotalSeconds || null) : null;
             return {
               ...s,
               status: 'paused',
-              // Watch側の表示（0:00停止・カード折りたたみ）と一致させつつ、入った工程・担当者をクラウド共有相手に正確に伝える
+              // Watch側の表示（大元・チェック共に00:00リセット＆カード折りたたみ）と一致させつつ、入った工程・担当者をクラウド共有相手に正確に伝える
               pausedRemainingSeconds: 0,
+              targetSeconds: 0,
+              initialMinutes: 0,
               targetEndTimestamp: null,
               lastStoppedAt: Date.now(),
               lastStoppedTargetEndTimestamp: Number(s.targetEndTimestamp) || Number(s.lastStoppedTargetEndTimestamp) || 0,
               isOver: false,
+              isReset: true,
               timeUpTimestamp: null,
               escalationLevel: 0,
               mainStaffConfirmed: true,
               assistantStaffConfirmed: true,
               stoppedBy: staff,
-              collapsedAtEnd: s.targetEndTimestamp || Date.now(),
+              collapsedAtEnd: Date.now(),
               assistantStaffName: staff,
               isShampooing: resolvedActionId === 'shampoo',
               actionStatus: resolvedActionId,
               helpProcess: process,
               isRecruiting: false,
               isNoHelpNeeded: false,
-              checkTargetSeconds: preservedCheckSec,
-              checkTotalSeconds: preservedCheckSec,
+              checkTargetSeconds: null,
+              checkTotalSeconds: null,
               checkEndTimestamp: null,
               checkPausedRemainingSeconds: null,
               checkInitialMinutes: null,
-              checkStaffName: shouldMarkCheckCompleted ? staff : '',
-              checkProcess: s.checkProcess || 'チェック',
-              checkStatus: shouldMarkCheckCompleted && preservedCheckSec ? 'completed' : 'stopped',
-              isCheckCompleted: !!(shouldMarkCheckCompleted && preservedCheckSec),
+              checkStaffName: '',
+              checkProcess: 'チェック',
+              checkStatus: 'stopped',
+              isCheckCompleted: false,
               checkAlerted: false,
               history: [],
             };
@@ -2736,7 +2797,7 @@ export default function SalonWorkScreen() {
               return {
                 ...s,
                 checkStaffName: staff,
-                checkProcess: extra?.checkProcess || s.checkProcess || 'チェック',
+                checkProcess: sanitizeCheckProcess(extra?.checkProcess || s.checkProcess),
               };
             }
             const process = extra?.helpProcess ?? '';
@@ -2770,7 +2831,7 @@ export default function SalonWorkScreen() {
               return {
                 ...s,
                 checkStaffName: '募集中',
-                checkProcess: extra?.checkProcess || extra?.helpProcess || s.checkProcess || 'チェック',
+                checkProcess: sanitizeCheckProcess(extra?.checkProcess || extra?.helpProcess || s.checkProcess),
               };
             }
             const process = extra?.helpProcess || s.helpProcess || s.actionStatus || 'シャンプー';
@@ -2807,7 +2868,7 @@ export default function SalonWorkScreen() {
             }
             const prevHist = s.history || [];
             const chkStaff = watchUser || s.checkStaffName || 'スタッフ';
-            const chkProcLabel = (s.checkProcess || 'チェック').trim() || 'チェック';
+            const chkProcLabel = sanitizeCheckProcess(s.checkProcess);
             const preservedCheckSec = s.checkTargetSeconds || s.checkTotalSeconds || 60;
             return {
               ...s,
@@ -2817,6 +2878,7 @@ export default function SalonWorkScreen() {
               checkTargetSeconds: preservedCheckSec,
               checkTotalSeconds: preservedCheckSec,
               checkStaffName: chkStaff,
+              checkProcess: chkProcLabel,
               history: [
                 ...prevHist,
                 {
@@ -2858,7 +2920,7 @@ export default function SalonWorkScreen() {
             const checkEnd = (incomingCheckEnd > Date.now() && Math.abs(incomingCheckEnd - defaultCheckEnd) <= 15000)
               ? incomingCheckEnd
               : defaultCheckEnd;
-            const chkProcess = extra?.checkProcess || 'チェック';
+            const chkProcess = sanitizeCheckProcess(extra?.checkProcess);
             const chkStaff = extra?.checkStaffName !== undefined && extra?.checkStaffName !== null
               ? String(extra.checkStaffName)
               : '';
@@ -2902,7 +2964,7 @@ export default function SalonWorkScreen() {
             if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
             if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[s.id] = false;
             if (escalatedAlertRef.current) escalatedAlertRef.current[s.id] = false;
-            return { ...stopSeat(s, 'タイマーを止める'), collapsedAtEnd: s.targetEndTimestamp || Date.now() };
+            return { ...stopSeat(s, 'タイマーを止める'), collapsedAtEnd: Date.now() };
           }
           case 'STOP_TIMER': {
             stopAlarm('salon', `${s.id}-main`);
@@ -2915,7 +2977,7 @@ export default function SalonWorkScreen() {
             if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
             if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[s.id] = false;
             if (escalatedAlertRef.current) escalatedAlertRef.current[s.id] = false;
-            return { ...stopSeat(s, 'タイマーを止める'), collapsedAtEnd: s.targetEndTimestamp || Date.now() };
+            return { ...stopSeat(s, 'タイマーを止める'), collapsedAtEnd: Date.now() };
           }
           case 'FINISH_MEASURE': {
             // ★ 以前は未対応だったため、Watch で計測終了しても次の同期で「超過」に戻っていた
@@ -2930,7 +2992,7 @@ export default function SalonWorkScreen() {
             if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
             if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[s.id] = false;
             if (escalatedAlertRef.current) escalatedAlertRef.current[s.id] = false;
-            return { ...stopSeat(s, 'タイマーを止める'), collapsedAtEnd: s.targetEndTimestamp || Date.now() };
+            return { ...stopSeat(s, 'タイマーを止める'), collapsedAtEnd: Date.now() };
           }
           case 'STOP_ALARM': {
             // ★ チェック時間のアラーム停止ならチェックを完了にする（全体タイマーは終了前でも反映）
@@ -2952,7 +3014,7 @@ export default function SalonWorkScreen() {
               }
               const prevHist = s.history || [];
               const chkStaff = watchUser || s.checkStaffName || 'スタッフ';
-              const chkProcLabel = (s.checkProcess || 'チェック').trim() || 'チェック';
+              const chkProcLabel = sanitizeCheckProcess(s.checkProcess);
               const preservedCheckSec = s.checkTargetSeconds || s.checkTotalSeconds || 60;
               return {
                 ...s,
@@ -2962,6 +3024,7 @@ export default function SalonWorkScreen() {
                 checkTargetSeconds: preservedCheckSec,
                 checkTotalSeconds: preservedCheckSec,
                 checkStaffName: chkStaff,
+                checkProcess: chkProcLabel,
                 history: [
                   ...prevHist,
                   {
@@ -2996,7 +3059,7 @@ export default function SalonWorkScreen() {
             if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
             if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[s.id] = false;
             if (escalatedAlertRef.current) escalatedAlertRef.current[s.id] = false;
-            return { ...stopSeat(s, 'アラーム停止'), collapsedAtEnd: s.targetEndTimestamp || Date.now() };
+            return { ...stopSeat(s, 'アラーム停止'), collapsedAtEnd: Date.now() };
           }
           case 'START_TIMER': {
             const targetSec = Math.round(Number(extra?.targetSeconds) || 600);
@@ -3022,12 +3085,22 @@ export default function SalonWorkScreen() {
             const historyText = checkSec
               ? `Apple Watchからタイマー${wasActivelyPlacing ? '変更' : '開始'} (${Math.round(targetSec / 60)}分 / チェック${Math.round(checkSec / 60)}分)`
               : `Apple Watchからタイマー${wasActivelyPlacing ? '変更' : '開始'} (${Math.round(targetSec / 60)}分)`;
+            const watchOperatorName =
+              (watchUser && String(watchUser).trim()) || userNameRef.current || userName || 'スタイリスト';
+            const matchedWatchMember = Array.isArray(staffMembersRef.current)
+              ? staffMembersRef.current.find((m) => {
+                  if (!m || typeof m !== 'object') return false;
+                  const nick = String(m.customNickname || m.originalNickname || m.name || '').trim();
+                  return nick && nick === watchOperatorName && m.user_id && !String(m.user_id).startsWith('mem_');
+                })
+              : null;
+            const watchOperatorUserId = matchedWatchMember?.user_id || myUserIdRef.current || myUserId || null;
             const newHistoryItem = {
               id: `h-${Date.now()}`,
               time: getCurrentTimeFormatted(),
               text: historyText,
               type: 'timer',
-              staff: watchUser || userName || 'スタイリスト',
+              staff: watchOperatorName,
             };
 
             return {
@@ -3039,8 +3112,8 @@ export default function SalonWorkScreen() {
               lastStoppedAt: 0,
               lastStoppedTargetEndTimestamp: 0,
               pausedRemainingSeconds: null,
-              colorStaffName: watchUser || s.colorStaffName,
-              createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+              colorStaffName: watchOperatorName,
+              createdBy: watchOperatorUserId,
               dirtySync: true,
               assistantStaffName: '',
               helpProcess: '',
@@ -3055,7 +3128,7 @@ export default function SalonWorkScreen() {
               checkEndTimestamp: checkEnd,
               checkPausedRemainingSeconds: null,
               checkStaffName: checkSec ? (extra?.checkStaffName || '') : '',
-              checkProcess: checkSec ? (extra?.checkProcess || 'チェック') : 'チェック',
+              checkProcess: checkSec ? sanitizeCheckProcess(extra?.checkProcess) : 'チェック',
               checkStatus: checkSec ? 'running' : 'stopped',
               isCheckCompleted: false,
               checkAlerted: false,
@@ -3183,6 +3256,21 @@ export default function SalonWorkScreen() {
 
       // ★ 何も変わらなければ元の配列を返す（不要な保存・Watch への同期を起こさない）
       if (!hasChanged) return prevSeats;
+      const changedSeat = updated[matchedIdx];
+      if (
+        changedSeat?.id &&
+        (action === 'START_SHAMPOO' ||
+          action === 'ENTER_HELP' ||
+          action === 'RESET_ZERO' ||
+          action === 'STOP_TIMER' ||
+          action === 'FINISH_MEASURE' ||
+          action === 'START_TIMER' ||
+          (action === 'STOP_ALARM' && String(extra?.kind || message?.kind || '').toLowerCase() !== 'check'))
+      ) {
+        setExpandedPausedSeatIds((prevExp) =>
+          prevExp[changedSeat.id] ? { ...prevExp, [changedSeat.id]: false } : prevExp
+        );
+      }
       // ★ saveSeatsToStorage 内で syncChangedSeatsToCloud(updated) が呼ばれ、Supabase クラウドへ差分同期される（二重UPSERT防止）
       //   また、自分のWatchから来た操作に対して自分自身のWatchへ通知（watchNotif）を送り返すと二重通知になるため、データ同期のみ即時送信する
       saveSeatsToStorage(updated);
@@ -3670,6 +3758,8 @@ export default function SalonWorkScreen() {
           return;
         }
         cloudSalonIdRef.current = cloudSalon.id;
+        // ★ サロン接続・切替・起動時に Expo Push Token を Supabase へ登録（バックグラウンドPush通知配信用）
+        registerAndSyncSalonPushToken({ salonId: cloudSalon.id, userId: myUserId }).catch(() => {});
         const resolvedIsOwner = cloudSalon.owner_user_id === myUserId;
         const resolvedRole = resolvedIsOwner ? 'owner' : 'assistant';
 
@@ -3852,7 +3942,9 @@ export default function SalonWorkScreen() {
                 }
 
                 // ★ 共有相手の操作による差分を検知し、自分がその席の関係者（＋ヘルプに入る可能性がある場合）のみ通知を生成
-                if (!isSelfEcho) {
+                const effectiveIsSelfEcho =
+                  isSelfEcho || !!(newSeat?.updatedBy && activeUserId && newSeat.updatedBy === activeUserId);
+                if (!effectiveIsSelfEcho) {
                   const label = newSeat.seatLabel || newSeat.name || prevItem.seatLabel || '席';
                   const prevHadActiveCheck =
                     prevItem.status === 'running' &&
@@ -3908,6 +4000,16 @@ export default function SalonWorkScreen() {
                       ? newAssist
                       : '';
 
+                  const wasPausedActiveSeat =
+                    prevItem.status === 'paused' &&
+                    !prevItem.isReset &&
+                    (Number(prevItem.pausedRemainingSeconds || 0) > 0 || !!prevActionId || !!prevItem.isShampooing);
+                  const didResetOrFinishPaused =
+                    wasPausedActiveSeat &&
+                    (newSeat.isReset ||
+                      newSeat.status === 'idle' ||
+                      (Number(newSeat.pausedRemainingSeconds || 0) <= 0 && !newActionId && !newSeat.isShampooing));
+
                   // ① チェックタイマー完了・解除（主担当・ヘルプ担当・チェック担当・チェック未定時のみ通知）
                   if (prevHadActiveCheck && !newHasActiveCheck && newSeat.status === 'running') {
                     const isCheckStakeholder =
@@ -3918,6 +4020,7 @@ export default function SalonWorkScreen() {
                       const isCompleted = newSeat.isCheckCompleted || newSeat.checkStatus === 'completed';
                       const staffSuffix = newCheck && newCheck !== '未定' && newCheck !== '募集中' ? `（${newCheck}）` : '';
                       peerNotification = {
+                        eventType: 'check_done',
                         text: isCompleted
                           ? `✓ ${label}の${checkProcLabel}完了${staffSuffix}`
                           : `⏹ ${label}の${checkProcLabel}タイマーが解除されました`,
@@ -3926,8 +4029,8 @@ export default function SalonWorkScreen() {
                       };
                     }
                   }
-                  // ② 全体タイマー停止・施術工程移行・リセット（その席の関係者＋ヘルプ未定/募集中の可能性がある人のみ通知）
-                  else if (prevItem.status === 'running' && newSeat.status !== 'running') {
+                  // ② 全体タイマー停止・施術工程移行・リセット（稼働中・超過中・一時停止中からの停止/リセットで関係者へ即時通知）
+                  else if ((prevItem.status === 'running' && newSeat.status !== 'running') || didResetOrFinishPaused) {
                     const isStopStakeholder =
                       newActionId === 'call' ||
                       isAssignedStakeholder ||
@@ -3939,18 +4042,21 @@ export default function SalonWorkScreen() {
                         // タイマーを止めて「コーミング」「シャンプー」「チェック」「呼び出し」等の施術工程に入った場合、単なる停止ではなく工程移行を最優先で通知！
                         if (newActionId === 'call') {
                           peerNotification = {
+                            eventType: 'stop',
                             text: `🔔 ${label}から呼び出しがあります${validNewAssistActor ? `（${validNewAssistActor}）` : ''}`,
                             color: actionMeta.color,
                             sourceUser: '__remote__',
                           };
                         } else if (validNewAssistActor && !isStaffNameMe(validNewAssistActor, activeUser, activeUserId, activeMembers)) {
                           peerNotification = {
+                            eventType: 'stop',
                             text: `${actionMeta.emoji} ${label}の${actionMeta.label}に ${validNewAssistActor} さんが入りました`,
                             color: actionMeta.color,
                             sourceUser: '__remote__',
                           };
                         } else {
                           peerNotification = {
+                            eventType: 'stop',
                             text: `${actionMeta.emoji} ${label}が${actionMeta.label}に入りました${validNewAssistActor ? `（${validNewAssistActor}）` : ''}`,
                             color: actionMeta.color,
                             sourceUser: '__remote__',
@@ -3958,7 +4064,10 @@ export default function SalonWorkScreen() {
                         }
                       } else {
                         peerNotification = {
-                          text: `⏹ ${label}のタイマーが停止されました`,
+                          eventType: 'stop',
+                          text: didResetOrFinishPaused
+                            ? `⏹ ${label}のタイマーがリセットされました`
+                            : `⏹ ${label}のタイマーが停止されました`,
                           color: '#FF9500',
                           sourceUser: '__remote__',
                         };
@@ -3968,12 +4077,14 @@ export default function SalonWorkScreen() {
                   // ③ 全体ヘルプまたはチェックの「全員募集」開始（ヘルプに入る可能性がある全員へ通知）
                   else if (!prevItem.isRecruiting && newSeat.isRecruiting) {
                     peerNotification = {
+                      eventType: 'recruit',
                       text: `📢 ${label}が${helpProcLabel}担当を募集しています！`,
                       color: '#FF453A',
                       sourceUser: '__remote__',
                     };
                   } else if (prevCheck !== '募集中' && newCheck === '募集中') {
                     peerNotification = {
+                      eventType: 'recruit',
                       text: `📢 ${label}が${checkProcLabel}担当を募集しています！`,
                       color: '#FF9F0A',
                       sourceUser: '__remote__',
@@ -4037,12 +4148,14 @@ export default function SalonWorkScreen() {
                   else if (prevAssist !== newAssist && newAssist && newAssist !== 'ヘルプなし' && newAssist !== 'none' && !newSeat.isRecruiting) {
                     if (isStaffNameMe(newAssist, activeUser, activeUserId, activeMembers)) {
                       peerNotification = {
+                        eventType: 'assign_assist',
                         text: `🙋‍♂️ ${label}の${helpProcLabel}担当に指定されました`,
                         color: '#0A84FF',
                         sourceUser: '__remote__',
                       };
                     } else if (isMainStaffOfSeat(newSeat, activeUser, activeUserId, activeMembers) || isAssignedStakeholder) {
                       peerNotification = {
+                        eventType: 'assign_assist',
                         text: `🤝 ${label}の${helpProcLabel}に ${newAssist} さんが入りました`,
                         color: '#30D158',
                         sourceUser: '__remote__',
@@ -4051,12 +4164,14 @@ export default function SalonWorkScreen() {
                   } else if (prevCheck !== newCheck && newCheck && newCheck !== '未定' && newCheck !== '募集中') {
                     if (isStaffNameMe(newCheck, activeUser, activeUserId, activeMembers)) {
                       peerNotification = {
+                        eventType: 'assign_check',
                         text: `🔍 ${label}の${checkProcLabel}担当に指定されました`,
                         color: '#FF9F0A',
                         sourceUser: '__remote__',
                       };
                     } else if (isMainStaffOfSeat(newSeat, activeUser, activeUserId, activeMembers) || isAssignedStakeholder) {
                       peerNotification = {
+                        eventType: 'assign_check',
                         text: `🔍 ${label}の${checkProcLabel}に ${newCheck} さんが入りました`,
                         color: '#30D158',
                         sourceUser: '__remote__',
@@ -4117,33 +4232,47 @@ export default function SalonWorkScreen() {
                 }
 
                 const didStopRunningTimer = prevItem.status === 'running' && newSeat.status !== 'running';
+                const didResetPausedTimer =
+                  prevItem.status === 'paused' &&
+                  !prevItem.isReset &&
+                  (newSeat.isReset || newSeat.status === 'idle' || (Number(newSeat.pausedRemainingSeconds || 0) <= 0 && Number(prevItem.pausedRemainingSeconds || 0) > 0));
                 const didStopRunningCheck =
                   prevItem.status === 'running' &&
                   !prevItem.isCheckCompleted &&
                   Number(prevItem.checkEndTimestamp) > 0 &&
                   (newSeat.isCheckCompleted || newSeat.checkStatus === 'completed' || newSeat.checkStatus === 'stopped' || !newSeat.checkEndTimestamp);
-                if (didStopRunningTimer) {
+                if (didStopRunningTimer || didResetPausedTimer) {
                   WatchConnectivity.notifyLocalStopOrReset(newSeat.id || prevItem.id, prevItem.targetEndTimestamp || 0);
+                }
+                const targetCollapseSeatId = newSeat.id || prevItem.id;
+                if (targetCollapseSeatId && (didStopRunningTimer || didResetPausedTimer || newSeat.status === 'running')) {
+                  setExpandedPausedSeatIds((prevExp) =>
+                    prevExp[targetCollapseSeatId] ? { ...prevExp, [targetCollapseSeatId]: false } : prevExp
+                  );
                 }
 
                 const resolvedSeatNum =
                   Number(newSeat.seatNumber) > 0
                     ? Number(newSeat.seatNumber)
                     : (Number(prevItem.seatNumber) > 0 ? Number(prevItem.seatNumber) : idx + 1);
-                const nextRealtimeHistory = didStopRunningTimer
+                const nextRealtimeHistory = didStopRunningTimer || didResetPausedTimer
                   ? []
                   : reconcileRealtimeSeatHistory(prevItem, newSeat, getCurrentTimeFormatted());
                 updated = [...prev];
                 updated[idx] = {
                   ...prevItem,
                   ...newSeat,
+                  checkProcess: sanitizeCheckProcess(newSeat.checkProcess || prevItem.checkProcess),
                   seatNumber: resolvedSeatNum,
                   // 自分がスマホ・ウォッチで設定していた端末別アラーム音ON/OFF設定を保持
                   alarmSoundEnabled: prevItem.alarmSoundEnabled ?? newSeat.alarmSoundEnabled,
                   watchAlarmSoundEnabled: prevItem.watchAlarmSoundEnabled ?? newSeat.watchAlarmSoundEnabled,
-                  collapsedAtEnd: shouldClearCollapsed ? null : prevItem.collapsedAtEnd,
+                  collapsedAtEnd:
+                    didStopRunningTimer || didResetPausedTimer
+                      ? Date.now()
+                      : (shouldClearCollapsed ? null : prevItem.collapsedAtEnd),
                   history: nextRealtimeHistory,
-                  ...(didStopRunningTimer
+                  ...(didStopRunningTimer || didResetPausedTimer
                     ? {
                         lastStoppedAt: Date.now(),
                         lastStoppedTargetEndTimestamp: Number(prevItem.targetEndTimestamp) || Number(prevItem.lastStoppedTargetEndTimestamp) || 0,
@@ -4174,7 +4303,9 @@ export default function SalonWorkScreen() {
                     : [],
                 };
                 updated = [...prev, addedSeat];
-                if (!isSelfEcho && addedSeat.status === 'running') {
+                const effectiveIsSelfEchoForAdd =
+                  isSelfEcho || !!(addedSeat?.updatedBy && activeUserId && addedSeat.updatedBy === activeUserId);
+                if (!effectiveIsSelfEchoForAdd && addedSeat.status === 'running') {
                   const label = (addedSeat.seatLabel || addedSeat.name || `${nextSeatNum}番席`).trim();
                   const canAlertNew =
                     shouldAlertMainTimerForUser(addedSeat, activeUser, activeUserId, activeMembers) ||
@@ -4204,6 +4335,17 @@ export default function SalonWorkScreen() {
                   ...peerNotification,
                   id: peerNotification.id || `peer_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
                 };
+                const targetTimerKey = newSeat?.id || (idx >= 0 ? prev[idx]?.id : '') || newSeat?.seatLabel || '';
+                const semanticKey = buildPeerEventSemanticKey(
+                  targetTimerKey,
+                  peerNotification.eventType || 'status_change'
+                );
+                const alreadyDeliveredViaPush = hasHandledPeerNotification({
+                  notifId: enrichedNotif.id,
+                  semanticKey,
+                });
+                markPeerNotificationHandled({ notifId: enrichedNotif.id, semanticKey });
+
                 const currentAppState = appStateRef.current || AppState.currentState || 'active';
                 const isPhoneForeground = currentAppState === 'active';
                 const isWatchCurrentlyLinked =
@@ -4212,23 +4354,27 @@ export default function SalonWorkScreen() {
 
                 if (isPhoneForeground) {
                   // ★ パターン①: スマホを開いている時（フォアグラウンド）
-                  //   Watch連動あり/なし共通で、スマホ側のみ「全タブ共通トースト通知 ＋ 振動」を表示し、Watch側は鳴らさない（客席データのみ同期）
-                  //   ※ ただし相手によるタイマー停止・チェック停止時は、手首下げ中のWatchのスマートアラームを確実に即時キャンセルさせるため highPriorityWake を付与
+                  //   スマホに「全タブ共通トースト通知 ＋ 振動」を表示し、さらに Watch連動ありの場合は
+                  //   施術中でスマホ画面を見ていないケース（ワゴン・充電台放置など）でも手首で確実に気づけるよう
+                  //   Apple Watch側にも notification + highPriorityWake を同時送信して振動＆通知バナーを表示する！
                   syncSeatsToWatch(updated, activeUser, activeMembers, {
                     immediate: true,
-                    highPriorityWake: didRemoteStopAlarmTarget,
+                    ...(isWatchCurrentlyLinked && !alreadyDeliveredViaPush ? { notification: enrichedNotif } : {}),
+                    highPriorityWake: didRemoteStopAlarmTarget || isWatchCurrentlyLinked,
                   });
-                  setTimeout(() => {
-                    if (isMounted) {
-                      showPeerActionBanner(enrichedNotif.text, enrichedNotif.color, enrichedNotif.id);
-                    }
-                  }, 0);
+                  if (!alreadyDeliveredViaPush) {
+                    setTimeout(() => {
+                      if (isMounted) {
+                        showPeerActionBanner(enrichedNotif.text, enrichedNotif.color, enrichedNotif.id);
+                      }
+                    }, 0);
+                  }
                 } else if (isWatchCurrentlyLinked) {
                   // ★ パターン②: スマホを開いていない時（ロック中 / バックグラウンド / 別アプリ） × Watch連動あり
-                  //   Apple Watch側に通知（振動＋画面表示）を出し、スマホOSバナーやトーストは出さない
+                  //   Apple Watch側に通知（振動＋画面表示）を出し、スマホOSローカルバナーやトーストは出さない
                   syncSeatsToWatch(updated, activeUser, activeMembers, {
                     immediate: true,
-                    notification: enrichedNotif,
+                    ...(alreadyDeliveredViaPush ? {} : { notification: enrichedNotif }),
                     highPriorityWake: true,
                   });
                 } else {
@@ -4238,7 +4384,7 @@ export default function SalonWorkScreen() {
                     immediate: true,
                     highPriorityWake: didRemoteStopAlarmTarget,
                   });
-                  if (Platform.OS === 'ios') {
+                  if (Platform.OS === 'ios' && !alreadyDeliveredViaPush) {
                     WatchConnectivity.presentLocalNotification('サロン共有通知', enrichedNotif.text).catch(() => {});
                   }
                 }
@@ -4309,9 +4455,154 @@ export default function SalonWorkScreen() {
     };
   }, [currentSalon?.id, currentSalon?.inviteCode, isDataLoaded, myUserId]);
 
+  // ★ リモートプッシュ通知（APNs / Expo Push）バックグラウンド受信時の最新タイマー同期＆Apple Watch高優先度ウェイク中継
+  useEffect(() => {
+    configurePushNotificationHandler();
+    const unsubscribePush = subscribeRemotePushEvents(async ({ title, body, data, appState }) => {
+      const pushSalonId = data?.salonId ? String(data.salonId) : '';
+      const activeCloudId =
+        cloudSalonIdRef.current ||
+        (isCloudUUID(currentSalonRef.current?.id) ? currentSalonRef.current.id : '');
+      if (pushSalonId && activeCloudId && pushSalonId !== activeCloudId) {
+        return;
+      }
+      const targetSalonId = pushSalonId || activeCloudId;
+      if (!isCloudUUID(targetSalonId)) return;
+
+      const notifId = data?.notifId ? String(data.notifId) : `push_${Date.now()}`;
+      const eventType = data?.eventType ? String(data.eventType) : 'status_change';
+      const timerKey = data?.timerId || data?.seatLabel || '';
+      const semanticKey = buildPeerEventSemanticKey(timerKey, eventType);
+      const pushColor = data?.color ? String(data.color) : '#FF9500';
+      const notifText = (body || title || '').trim();
+
+      // フォアグラウンド（active）時は Supabase Realtime 側でアプリ内トースト＋Watch同時通知を行うため重複送出を抑止
+      if (appState === 'active') {
+        return;
+      }
+
+      const alreadyHandled = hasHandledPeerNotification({ notifId, semanticKey });
+      markPeerNotificationHandled({ notifId, semanticKey });
+
+      const latestCloudSeats = await fetchSalonTimers(targetSalonId, { returnNullOnError: true });
+      if (!Array.isArray(latestCloudSeats)) return;
+
+      const prevSeats = Array.isArray(seatsRef.current) ? seatsRef.current : [];
+      const mergedSeats = latestCloudSeats.map((cloudSeat) => {
+        const prevMatch = prevSeats.find(
+          (p) =>
+            p &&
+            (p.id === cloudSeat.id ||
+              p.cloudTimerId === cloudSeat.id ||
+              Number(p.seatNumber) === Number(cloudSeat.seatNumber))
+        );
+        if (!prevMatch) {
+          return shouldRetainSeatHistory(cloudSeat)
+            ? { ...cloudSeat, history: [buildStartHistoryEntryFromSeat(cloudSeat)] }
+            : { ...cloudSeat, history: [] };
+        }
+        const didStopMain =
+          (prevMatch.status === 'running' && cloudSeat.status !== 'running') ||
+          (prevMatch.status === 'paused' && !prevMatch.isReset && (cloudSeat.isReset || cloudSeat.status === 'idle'));
+        const didStopCheck =
+          prevMatch.status === 'running' &&
+          !prevMatch.isCheckCompleted &&
+          Number(prevMatch.checkEndTimestamp) > 0 &&
+          (cloudSeat.isCheckCompleted ||
+            cloudSeat.checkStatus === 'completed' ||
+            cloudSeat.checkStatus === 'stopped' ||
+            !cloudSeat.checkEndTimestamp);
+
+        if (didStopMain) {
+          stopAlarm('salon', `${prevMatch.id}-main`);
+          stopAlarm('salon', `${prevMatch.id}-check`);
+          if (cloudSeat.id !== prevMatch.id) {
+            stopAlarm('salon', `${cloudSeat.id}-main`);
+            stopAlarm('salon', `${cloudSeat.id}-check`);
+          }
+          WatchConnectivity.notifyLocalStopOrReset(
+            cloudSeat.id || prevMatch.id,
+            prevMatch.targetEndTimestamp || 0
+          );
+          setExpandedPausedSeatIds((prevExp) =>
+            prevExp[cloudSeat.id] ? { ...prevExp, [cloudSeat.id]: false } : prevExp
+          );
+        } else if (didStopCheck) {
+          stopAlarm('salon', `${prevMatch.id}-check`);
+          if (cloudSeat.id !== prevMatch.id) {
+            stopAlarm('salon', `${cloudSeat.id}-check`);
+          }
+        }
+
+        return {
+          ...prevMatch,
+          ...cloudSeat,
+          checkProcess: sanitizeCheckProcess(cloudSeat.checkProcess || prevMatch.checkProcess),
+          alarmSoundEnabled: prevMatch.alarmSoundEnabled ?? cloudSeat.alarmSoundEnabled,
+          watchAlarmSoundEnabled: prevMatch.watchAlarmSoundEnabled ?? cloudSeat.watchAlarmSoundEnabled,
+          collapsedAtEnd: didStopMain
+            ? Date.now()
+            : (cloudSeat.status === 'running' || cloudSeat.isReset ? null : prevMatch.collapsedAtEnd),
+          history: didStopMain
+            ? []
+            : reconcileRealtimeSeatHistory(prevMatch, cloudSeat, getCurrentTimeFormatted()),
+          ...(didStopMain
+            ? {
+                lastStoppedAt: Date.now(),
+                lastStoppedTargetEndTimestamp:
+                  Number(prevMatch.targetEndTimestamp) || Number(prevMatch.lastStoppedTargetEndTimestamp) || 0,
+              }
+            : {}),
+        };
+      });
+
+      mergedSeats.forEach((ct) => {
+        if (ct?.id) {
+          lastSyncedSeatsStateRef.current[ct.id] = getSeatCloudSignature(ct);
+        }
+      });
+
+      isRemoteSyncRef.current = true;
+      setSeats(mergedSeats);
+      persistSeatsForSalonId(targetSalonId, mergedSeats, isSalonOwnerRef.current).catch(() => {});
+      setTimeout(() => {
+        isRemoteSyncRef.current = false;
+      }, 300);
+
+      const isWatchCurrentlyLinked =
+        Platform.OS === 'ios' &&
+        (watchLinkedRef.current || (WatchConnectivity.isPaired() && WatchConnectivity.isWatchAppInstalled()));
+
+      syncSeatsToWatch(
+        mergedSeats,
+        userNameRef.current || _cachedUserName || 'スタイリスト',
+        staffMembersRef.current || _cachedStaffMembers,
+        {
+          immediate: true,
+          highPriorityWake: true,
+          ...(isWatchCurrentlyLinked && !alreadyHandled && notifText
+            ? {
+                notification: {
+                  id: notifId,
+                  text: notifText,
+                  color: pushColor,
+                  sourceUser: '__remote__',
+                },
+              }
+            : {}),
+        }
+      );
+    });
+
+    return () => {
+      unsubscribePush();
+    };
+  }, []);
+
   const loadInitialData = async () => {
     try {
       const activeUserId = await getOrCreateUserId();
+      myUserIdRef.current = activeUserId;
       setMyUserId(activeUserId);
 
       const savedName = await AsyncStorage.getItem('@assist_timer_user_name');
@@ -4929,8 +5220,9 @@ export default function SalonWorkScreen() {
       resetSalonRuntimeStateForSwitch();
       didSwitchSalonRef.current = true;
 
-      // クラウドサロンIDを即時保持
+      // クラウドサロンIDを即時保持＆プッシュ通知トークンを登録
       cloudSalonIdRef.current = salon.id;
+      registerAndSyncSalonPushToken({ salonId: salon.id, userId: uid }).catch(() => {});
 
       // 親サロンの客席タイマーを即時取得して自分のローカル席を100%上書き置換（0件の場合も旧サロン席やサンプル席を残さない）
       const cloudTimers = await fetchSalonTimers(salon.id, { returnNullOnError: true });
@@ -5245,7 +5537,7 @@ export default function SalonWorkScreen() {
       ? Math.max(1, Math.round(actionTargetSeat.checkTargetSeconds / 60))
       : 5;
     setLateCheckMinutes(existingMins);
-    setLateCheckProcess(actionTargetSeat.checkProcess || 'チェック');
+    setLateCheckProcess(sanitizeCheckProcess(actionTargetSeat.checkProcess));
     setLateCheckStaffName(actionTargetSeat.checkStaffName || '');
     setIsAddingLateCheck(true);
   };
@@ -5257,7 +5549,7 @@ export default function SalonWorkScreen() {
     const mins = Math.max(1, Number(lateCheckMinutes) || 5);
     const checkSec = mins * 60;
     const checkEndTs = Date.now() + checkSec * 1000;
-    const chkProcess = (lateCheckProcess || 'チェック').trim();
+    const chkProcess = sanitizeCheckProcess(lateCheckProcess);
     const chkStaff = (lateCheckStaffName || '').trim();
     const currentUser = (userName || 'スタッフ').trim();
     const nowStr = getCurrentTimeFormatted();
@@ -5319,7 +5611,7 @@ export default function SalonWorkScreen() {
     setModalCheckMinutes(Math.floor(chkSec / 60));
     setModalCheckSeconds(chkSec % 60);
     setModalCheckStaffName(seat.checkStaffName || '');
-    setModalCheckProcess(seat.checkProcess || 'チェック');
+    setModalCheckProcess(sanitizeCheckProcess(seat.checkProcess));
     setModalWatchAlarmSoundEnabled(!!seat.watchAlarmSoundEnabled);
     setModalAlarmSoundEnabled(!!seat.alarmSoundEnabled);
     setModalColorStaff(seat.colorStaffName || userName || 'スタイリスト');
@@ -5378,7 +5670,8 @@ export default function SalonWorkScreen() {
     setIsSetTimerModalVisible(true);
   };
 
-  // モーダルから「タイマーを止める / 施術状態（コーミング/シャンプー等）に変更」を押した時
+  // モーダルから「タイマーを止める / 施術状態（シャンプー・コーミング・チェック・呼び出し・その他）に変更」を押した時
+  // ★ 大元の共有タイマーはどの停止・工程移行ボタンでも大元・チェック共に00:00にリセットして終了し、席カードを折りたたむ（iPhone/Watch完全統一）
   const handleStopTimerWithNotification = (newActionStatusOverride) => {
     if (!actionTargetSeat) return;
     const seat = actionTargetSeat;
@@ -5393,33 +5686,22 @@ export default function SalonWorkScreen() {
 
     const actionInfo = getActionStatusInfo(determinedActionId, determinedActionId === 'shampoo');
 
-    // ★ ユーザー指定: シャンプーの場合はアコーディオンをしまう。シャンプー以外（コーミング、チェック等）の場合は開けたままにしておく
-    const isShampoo = determinedActionId === 'shampoo';
+    // ★ どの工程移行・停止ボタンでも必ず席カードを折りたたむ（スリムバー状態）
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setExpandedPausedSeatIds((prev) => ({ ...prev, [seat.id]: !isShampoo }));
+    setExpandedPausedSeatIds((prev) => ({ ...prev, [seat.id]: false }));
 
     const actionLabel = actionInfo ? actionInfo.label : null;
 
-    // タイマーを一時停止状態にし、指定されたステータスに変更、確認フラグをON（緑色シグナルへ移行）、停止者を記録、施術履歴はタイマー停止・シャンプー移行時にクリア
     stopAlarm('salon', `${seat.id}-main`);
     stopAlarm('salon', `${seat.id}-check`);
     WatchConnectivity.notifyLocalStopOrReset(seat.id, seat.targetEndTimestamp || 0);
+    if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[seat.id] = false;
+    if (checkAlertedRef.current) checkAlertedRef.current[seat.id] = false;
+    if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[seat.id] = false;
+    if (escalatedAlertRef.current) escalatedAlertRef.current[seat.id] = false;
+
     const updatedSeats = seats.map((s) => {
       if (s.id !== seat.id) return s;
-      const remaining = s.targetEndTimestamp
-        ? Math.max(0, Math.floor((s.targetEndTimestamp - Date.now()) / 1000))
-        : Math.max(0, Number(s.pausedRemainingSeconds) || 0);
-      const isZeroRem = remaining <= 0;
-      let checkRemaining = null;
-      if (!isZeroRem && s.checkTargetSeconds > 0 && (s.checkStatus === 'running' || s.checkStatus === 'timeup') && s.checkEndTimestamp) {
-        checkRemaining = Math.max(0, Math.floor((s.checkEndTimestamp - Date.now()) / 1000));
-      }
-      if (isZeroRem) {
-        if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[s.id] = false;
-        if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
-        if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[s.id] = false;
-        if (escalatedAlertRef.current) escalatedAlertRef.current[s.id] = false;
-      }
       const preservedAssistOnAction =
         s.assistantStaffName && s.assistantStaffName !== 'ヘルプなし' && s.assistantStaffName !== 'none'
           ? s.assistantStaffName
@@ -5427,27 +5709,27 @@ export default function SalonWorkScreen() {
       return {
         ...s,
         status: 'paused',
-        pausedRemainingSeconds: remaining,
-        checkPausedRemainingSeconds: checkRemaining,
+        pausedRemainingSeconds: 0,
+        targetSeconds: 0,
+        initialMinutes: 0,
+        targetEndTimestamp: null,
+        isOver: false,
+        isReset: true,
+        timeUpTimestamp: null,
+        escalationLevel: 0,
+        collapsedAtEnd: Date.now(),
         lastStoppedAt: Date.now(),
         lastStoppedTargetEndTimestamp: Number(s.targetEndTimestamp) || Number(s.lastStoppedTargetEndTimestamp) || 0,
-        ...(isZeroRem
-          ? {
-              targetEndTimestamp: null,
-              isOver: false,
-              timeUpTimestamp: null,
-              escalationLevel: 0,
-              checkTargetSeconds: null,
-              checkTotalSeconds: null,
-              checkEndTimestamp: null,
-              checkInitialMinutes: null,
-              checkStaffName: '',
-              checkProcess: 'チェック',
-              checkStatus: 'stopped',
-              isCheckCompleted: false,
-              checkAlerted: false,
-            }
-          : {}),
+        checkTargetSeconds: null,
+        checkTotalSeconds: null,
+        checkEndTimestamp: null,
+        checkPausedRemainingSeconds: null,
+        checkInitialMinutes: null,
+        checkStaffName: '',
+        checkProcess: 'チェック',
+        checkStatus: 'stopped',
+        isCheckCompleted: false,
+        checkAlerted: false,
         actionStatus: determinedActionId || null,
         isShampooing: determinedActionId === 'shampoo',
         mainStaffConfirmed: true,
@@ -5460,15 +5742,11 @@ export default function SalonWorkScreen() {
               isRecruiting: false,
               isNoHelpNeeded: false,
             }
-          : isZeroRem
-          ? {
+          : {
               assistantStaffName: '',
               helpProcess: null,
               isRecruiting: false,
               isNoHelpNeeded: false,
-            }
-          : {
-              helpProcess: null,
             }),
         history: [],
       };
@@ -5764,20 +6042,23 @@ export default function SalonWorkScreen() {
     }
   };
 
-  // ★ ユーザー指定: 席のチェックタイマー停止・完了（タイマー設定者へ通知送信）
+  // ★ ユーザー指定: 席のチェックタイマー停止・完了（大元タイマーは一切止めずカードも閉じない・タイマー設定者へ通知送信）
   const handleCompleteCheck = (seatId) => {
     stopAlarm('salon', `${seatId}-check`);
+    if (checkAlertedRef.current) {
+      checkAlertedRef.current[seatId] = false;
+    }
     const targetSeat = seats.find((s) => s.id === seatId);
     const nowStr = getCurrentTimeFormatted();
     const currentUser = (userName || 'スタッフ').trim();
     const creatorName = (targetSeat?.colorStaffName || 'タイマー作成者').trim();
     const checker = (targetSeat?.checkStaffName || currentUser).trim();
-    const targetChkProc = (targetSeat?.checkProcess || 'チェック').trim() || 'チェック';
+    const targetChkProc = sanitizeCheckProcess(targetSeat?.checkProcess);
 
     const updatedSeats = seats.map((s) => {
       if (s.id !== seatId) return s;
       const prevHistory = s.history || [];
-      const chkProcLabel = (s.checkProcess || 'チェック').trim() || 'チェック';
+      const chkProcLabel = sanitizeCheckProcess(s.checkProcess);
       const chkText = `${checker}${chkProcLabel}完了`;
       const historyItem = {
         id: `h-${Date.now()}`,
@@ -5791,8 +6072,10 @@ export default function SalonWorkScreen() {
         isCheckCompleted: true,
         checkStatus: 'completed',
         checkEndTimestamp: null,
+        checkPausedRemainingSeconds: null,
         checkTargetSeconds: preservedCheckSec,
         checkTotalSeconds: preservedCheckSec,
+        checkProcess: chkProcLabel,
         history: [...prevHistory, historyItem],
       };
     });
@@ -5961,7 +6244,7 @@ export default function SalonWorkScreen() {
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
             colorStaffName: userName || 'スタイリスト',
-            createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+            createdBy: myUserIdRef.current || myUserId || null,
             dirtySync: true,
             // ★ 新しく測る時は前の施術のヘルプを勝手に引き継がない
             assistantStaffName: (modalAssistantStaff || '').trim() || '',
@@ -5987,7 +6270,7 @@ export default function SalonWorkScreen() {
             checkStatus: hasCheckTimer ? 'running' : null,
             isCheckCompleted: false,
             checkStaffName: hasCheckTimer ? (modalCheckStaffName || null) : null,
-            checkProcess: hasCheckTimer ? (modalCheckProcess || 'チェック') : 'チェック',
+            checkProcess: hasCheckTimer ? sanitizeCheckProcess(modalCheckProcess) : 'チェック',
             checkAlerted: false,
             watchAlarmSoundEnabled: !!modalWatchAlarmSoundEnabled,
             alarmSoundEnabled: !!modalAlarmSoundEnabled,
@@ -6018,8 +6301,8 @@ export default function SalonWorkScreen() {
             ...s,
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
-            colorStaffName: userName || s.colorStaffName || 'スタイリスト',
-            createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+            colorStaffName: userName || 'スタイリスト',
+            createdBy: myUserIdRef.current || myUserId || null,
             dirtySync: true,
             assistantStaffName: resolvedAssist,
             isNoHelpNeeded: resolvedIsNoHelp,
@@ -6041,7 +6324,7 @@ export default function SalonWorkScreen() {
             checkStatus: hasCheckTimer ? 'running' : null,
             isCheckCompleted: false,
             checkStaffName: hasCheckTimer ? (modalCheckStaffName || s.checkStaffName || null) : null,
-            checkProcess: hasCheckTimer ? (modalCheckProcess || s.checkProcess || 'チェック') : 'チェック',
+            checkProcess: hasCheckTimer ? sanitizeCheckProcess(modalCheckProcess || s.checkProcess) : 'チェック',
             checkAlerted: false,
             watchAlarmSoundEnabled: !!modalWatchAlarmSoundEnabled,
             alarmSoundEnabled: !!modalAlarmSoundEnabled,
@@ -6068,12 +6351,17 @@ export default function SalonWorkScreen() {
             ? modalAssistantStaff.trim()
             : (s.assistantStaffName || '');
           const resolvedIsNoHelp = resolvedAssist === 'ヘルプなし' || resolvedAssist === 'none';
+          const isRestartFromInactive = s.status !== 'running';
           return {
             ...s,
             seatLabel: modalSeatLabel.trim() || s.seatLabel,
             status: 'running',
-            colorStaffName: userName || s.colorStaffName || 'スタイリスト',
-            createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+            colorStaffName: isRestartFromInactive
+              ? (userName || 'スタイリスト')
+              : (s.colorStaffName || userName || 'スタイリスト'),
+            createdBy: isRestartFromInactive
+              ? (myUserIdRef.current || myUserId || null)
+              : (s.createdBy || myUserIdRef.current || myUserId || null),
             dirtySync: true,
             assistantStaffName: resolvedAssist,
             isNoHelpNeeded: resolvedIsNoHelp,
@@ -6095,7 +6383,7 @@ export default function SalonWorkScreen() {
             checkStatus: hasCheckTimer ? 'running' : null,
             isCheckCompleted: false,
             checkStaffName: hasCheckTimer ? (modalCheckStaffName || s.checkStaffName || null) : null,
-            checkProcess: hasCheckTimer ? (modalCheckProcess || s.checkProcess || 'チェック') : 'チェック',
+            checkProcess: hasCheckTimer ? sanitizeCheckProcess(modalCheckProcess || s.checkProcess) : 'チェック',
             checkAlerted: false,
             watchAlarmSoundEnabled: !!modalWatchAlarmSoundEnabled,
             alarmSoundEnabled: !!modalAlarmSoundEnabled,
@@ -6118,7 +6406,7 @@ export default function SalonWorkScreen() {
           seatLabel: modalSeatLabel.trim() || s.seatLabel,
           status: 'running',
           colorStaffName: userName || 'スタイリスト',
-          createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+          createdBy: myUserIdRef.current || myUserId || null,
           dirtySync: true,
           // ★ 新規開始時はモーダルの指定がなければ空文字
           assistantStaffName: (modalAssistantStaff || '').trim() || '',
@@ -6146,7 +6434,7 @@ export default function SalonWorkScreen() {
           checkStatus: hasCheckTimer ? 'running' : null,
           isCheckCompleted: false,
           checkStaffName: hasCheckTimer ? (modalCheckStaffName || null) : null,
-          checkProcess: hasCheckTimer ? (modalCheckProcess || 'チェック') : 'チェック',
+          checkProcess: hasCheckTimer ? sanitizeCheckProcess(modalCheckProcess) : 'チェック',
           checkAlerted: false,
           watchAlarmSoundEnabled: !!modalWatchAlarmSoundEnabled,
           alarmSoundEnabled: !!modalAlarmSoundEnabled,
@@ -6162,6 +6450,9 @@ export default function SalonWorkScreen() {
       return updated;
     });
     if (targetSeatId) {
+      setExpandedPausedSeatIds((prev) =>
+        prev[targetSeatId] ? { ...prev, [targetSeatId]: false } : prev
+      );
       oneMinuteHelpAlertRef.current[targetSeatId] = false;
       if (checkAlertedRef.current) {
         checkAlertedRef.current[targetSeatId] = false;
@@ -6397,6 +6688,7 @@ export default function SalonWorkScreen() {
         return {
           ...s,
           checkStaffName: trimmed || null,
+          checkProcess: sanitizeCheckProcess(s.checkProcess),
         };
       });
       saveSeatsToStorage(updated);
@@ -6406,6 +6698,28 @@ export default function SalonWorkScreen() {
     setIsCheckStaffModalVisible(false);
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 80]);
+    }
+  };
+
+  // ★ チェックタイマー（中間タイマー）の工程（4種・シャンプー完全除外）を変更・保存
+  const handleSelectCheckProcess = (seatId, nextProcess) => {
+    if (!seatId) return;
+    const sanitized = sanitizeCheckProcess(nextProcess);
+    setSeats((prev) => {
+      const updated = prev.map((s) => {
+        if (s.id !== seatId) return s;
+        return {
+          ...s,
+          checkProcess: sanitized,
+        };
+      });
+      saveSeatsToStorage(updated);
+      syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
+      return updated;
+    });
+    setCheckStaffTargetSeat((prev) => (prev && prev.id === seatId ? { ...prev, checkProcess: sanitized } : prev));
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate([0, 40]);
     }
   };
 
@@ -6426,8 +6740,8 @@ export default function SalonWorkScreen() {
     const nextHelpProcess = actionInfo ? actionInfo.label : '';
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     if (seat.status === 'paused') {
-      // ★ ユーザー指定: 停止中席の場合、シャンプーならしまう、シャンプー以外なら開けたままにする
-      setExpandedPausedSeatIds((prev) => ({ ...prev, [seat.id]: !isShampoo }));
+      // ★ 停止中スリムバー上でステータスを変更しても勝手にカードが開かないよう折りたたみ状態を維持
+      setExpandedPausedSeatIds((prev) => ({ ...prev, [seat.id]: false }));
     }
 
     setSeats((prev) => {
@@ -6456,6 +6770,7 @@ export default function SalonWorkScreen() {
         };
       });
       saveSeatsToStorage(updated);
+      syncSeatsToWatch(updated, userName, staffMembers, { immediate: true });
       return updated;
     });
 
@@ -6464,7 +6779,7 @@ export default function SalonWorkScreen() {
     }
   };
 
-  // 一時停止 / 再開（第3者停止時の3名通知 & アコーディオン折りたたみ連動）
+  // 停止 / 再開（大元タイマー停止時は00:00リセット＆チェック解除＆カード折りたたみに統一）
   const handleTogglePause = (seatId) => {
     const seat = seats.find((s) => s.id === seatId);
     if (!seat) return;
@@ -6474,48 +6789,57 @@ export default function SalonWorkScreen() {
       return;
     }
     const currentUser = (userName || 'スタッフ').trim();
-    const isShampoo = seat.actionStatus === 'shampoo' || seat.isShampooing;
 
-    // アコーディオン開閉アニメーション
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     if (isStopping) {
       stopAlarm('salon', `${seatId}-main`);
       stopAlarm('salon', `${seatId}-check`);
       WatchConnectivity.notifyLocalStopOrReset(seatId, seat.targetEndTimestamp || 0);
-      // ★ ユーザー指定: 停止時、シャンプーならアコーディオンをしまい、シャンプー以外なら開けたままにする
-      setExpandedPausedSeatIds((prev) => ({ ...prev, [seatId]: !isShampoo }));
+      if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[seatId] = false;
+      if (checkAlertedRef.current) checkAlertedRef.current[seatId] = false;
+      if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[seatId] = false;
+      if (escalatedAlertRef.current) escalatedAlertRef.current[seatId] = false;
+      setExpandedPausedSeatIds((prev) => ({ ...prev, [seatId]: false }));
     }
 
     setSeats((prev) => {
       const updated = prev.map((s) => {
         if (s.id !== seatId) return s;
         if (s.status === 'running') {
-          const remaining = Math.max(0, Math.floor((s.targetEndTimestamp - Date.now()) / 1000));
-          const isZeroRem = remaining <= 0;
-          let checkRemaining = null;
-          if (s.checkTargetSeconds > 0 && (s.checkStatus === 'running' || s.checkStatus === 'timeup') && s.checkEndTimestamp) {
-            checkRemaining = Math.max(0, Math.floor((s.checkEndTimestamp - Date.now()) / 1000));
-          }
           return {
             ...s,
             status: 'paused',
-            pausedRemainingSeconds: remaining,
-            checkPausedRemainingSeconds: checkRemaining,
+            pausedRemainingSeconds: 0,
+            targetSeconds: 0,
+            initialMinutes: 0,
+            targetEndTimestamp: null,
+            isOver: false,
+            isReset: true,
+            timeUpTimestamp: null,
+            escalationLevel: 0,
+            collapsedAtEnd: Date.now(),
             lastStoppedAt: Date.now(),
             lastStoppedTargetEndTimestamp: Number(s.targetEndTimestamp) || Number(s.lastStoppedTargetEndTimestamp) || 0,
             mainStaffConfirmed: true,
             assistantStaffConfirmed: true,
             stoppedBy: currentUser,
+            assistantStaffName: '',
+            actionStatus: null,
+            isShampooing: false,
+            helpProcess: null,
+            isRecruiting: false,
+            isNoHelpNeeded: false,
+            checkTargetSeconds: null,
+            checkTotalSeconds: null,
+            checkEndTimestamp: null,
+            checkPausedRemainingSeconds: null,
+            checkInitialMinutes: null,
+            checkStaffName: '',
+            checkProcess: 'チェック',
+            checkStatus: 'stopped',
+            isCheckCompleted: false,
+            checkAlerted: false,
             history: [],
-            ...(isZeroRem ? {
-              assistantStaffName: '',
-              assistantStaffConfirmed: false,
-              actionStatus: null,
-              isShampooing: false,
-              helpProcess: null,
-              isRecruiting: false,
-              isNoHelpNeeded: false,
-            } : {}),
           };
         } else {
           const endTs = Date.now() + (s.pausedRemainingSeconds || 0) * 1000;
@@ -6546,32 +6870,31 @@ export default function SalonWorkScreen() {
       }
       const mainStaff = (seat.colorStaffName || '').trim();
       const assistStaff = (seat.assistantStaffName || '').trim();
-      const isMain = mainStaff && mainStaff.toLowerCase() === currentUser.toLowerCase();
-      const isAssist = assistStaff && assistStaff.toLowerCase() === currentUser.toLowerCase();
+      const isMain = isMainStaffOfSeat(seat, userName, myUserId, staffMembers);
+      const isAssist = isStaffNameMe(assistStaff, userName, myUserId, staffMembers);
       const isThirdParty = !isMain && !isAssist;
 
       if (isThirdParty) {
-        // 第3者が一時停止した場合 -> 3名に通知
         Alert.alert(
-          '🔔 第3者によるタイマー一時停止通知 (3名共有)',
-          `「${seat.seatLabel}」のタイマーを【${currentUser}】（第3者）さんが一時停止しました。\n\n【関係者3名へリアルタイム通知完了】\n・🎨 ${mainStaff || 'メイン担当'}\n・🤝 ${assistStaff || 'ヘルプ担当'}\n・👤 ${currentUser}（停止操作者）\n\n関係者3名全員の端末およびApple Watchに通知が届きました。`,
+          '🔔 第3者によるタイマー停止通知 (3名共有)',
+          `「${seat.seatLabel}」のタイマーを【${currentUser}】（第3者）さんが停止しました。\n\n【関係者3名へリアルタイム通知完了】\n・🎨 ${mainStaff || 'メイン担当'}\n・🤝 ${assistStaff || 'ヘルプ担当'}\n・👤 ${currentUser}（停止操作者）\n\n関係者3名全員の端末およびApple Watchに通知が届きました。`,
           [{ text: 'OK' }]
         );
       } else {
         Alert.alert(
-          '🔔 タイマー一時停止・確認通知',
-          `「${seat.seatLabel}」のタイマーを一時停止しました。\n\n【お互いへの確認通知】\n・🎨 ${mainStaff || 'メイン担当'} に通知\n・🤝 ${assistStaff || 'ヘルプ担当'} に通知\n\n両者の端末およびApple Watchに通知が届きました。`,
+          '🔔 タイマー停止・確認通知',
+          `「${seat.seatLabel}」のタイマーを停止しました。\n\n【お互いへの確認通知】\n・🎨 ${mainStaff || 'メイン担当'} に通知\n・🤝 ${assistStaff || 'ヘルプ担当'} に通知\n\n両者の端末およびApple Watchに通知が届きました。`,
           [{ text: 'OK' }]
         );
       }
     }
   };
 
-  // ★ ユーザー指定: カードの一時停止を「リセット」に変更。タイムを0に戻し、カードは開いたまま、チェックも消え、自分以外の関係者へ通知
+  // ★ 大元タイマーの「リセット」: 大元・チェックタイマー両方を00:00にリセットし、席カードを折りたたみ、自分以外の関係者へ通知（iPhone/Watch完全統一）
   const handleConfirmResetSeatTimer = (seat) => {
     Alert.alert(
       'タイマーをリセットしますか？',
-      `「${seat.seatLabel}」のタイマーを0:00に戻し、チェックタイマーを解除します。\n※カードは開いたまま保持され、すぐに新しいタイムを入れ直せます。`,
+      `「${seat.seatLabel}」のタイマーとチェックタイマーを00:00に戻し、席カードを閉じます。`,
       [
         { text: 'キャンセル', style: 'cancel' },
         {
@@ -6592,9 +6915,9 @@ export default function SalonWorkScreen() {
 
     const currentUser = (userName || 'スタッフ').trim();
 
-    // ★ ユーザー指定: カードは開いたまま保持する
+    // ★ 席カードを折りたたむ（スリムバー状態）
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setExpandedPausedSeatIds((prev) => ({ ...prev, [seatId]: true }));
+    setExpandedPausedSeatIds((prev) => ({ ...prev, [seatId]: false }));
 
     const updatedSeats = seats.map((s) => {
       if (s.id !== seatId) return s;
@@ -6609,6 +6932,9 @@ export default function SalonWorkScreen() {
         targetSeconds: 0,
         isOver: false,
         isReset: true,
+        timeUpTimestamp: null,
+        escalationLevel: 0,
+        collapsedAtEnd: Date.now(),
         // ★ 00:00席のヘルプ・助手・希望プロセスを完全解除（固定残り防止）
         assistantStaffName: '',
         assistantStaffConfirmed: false,
@@ -6617,15 +6943,15 @@ export default function SalonWorkScreen() {
         helpProcess: null,
         isRecruiting: false,
         isNoHelpNeeded: false,
-        // ★ ユーザー指定: チェックも消える
+        // ★ チェックタイマーも完全解除
         checkTargetSeconds: null,
         checkTotalSeconds: null,
         checkEndTimestamp: null,
         checkPausedRemainingSeconds: null,
-        checkStatus: null,
+        checkStatus: 'stopped',
         isCheckCompleted: false,
         checkInitialMinutes: null,
-        checkStaffName: null,
+        checkStaffName: '',
         checkProcess: 'チェック',
         checkAlerted: false,
         watchAlarmSoundEnabled: false,
@@ -6650,26 +6976,30 @@ export default function SalonWorkScreen() {
     if (oneMinuteHelpAlertRef.current) {
       oneMinuteHelpAlertRef.current[seatId] = false;
     }
+    if (escalatedAlertRef.current) {
+      escalatedAlertRef.current[seatId] = false;
+    }
 
     // 触覚振動
     if (Platform.OS !== 'web') {
       Vibration.vibrate([0, 150, 100, 150]);
     }
 
-    // ★ ユーザー指定: 自分以外の関係者には通知する
+    // ★ 自分以外の関係者には通知する
     const mainStaff = (seat.colorStaffName || '').trim();
     const assistStaff = (seat.assistantStaffName || '').trim();
     const checkStaff = (seat.checkStaffName || '').trim();
+    const isMainMe = isMainStaffOfSeat(seat, userName, myUserId, staffMembers);
 
     const otherRecipients = [];
-    if (mainStaff && mainStaff.toLowerCase() !== currentUser.toLowerCase()) {
-      otherRecipients.push(`・🎨 メイン担当: ${mainStaff}`);
+    if ((mainStaff || seat.createdBy) && !isMainMe) {
+      otherRecipients.push(`・🎨 メイン担当: ${mainStaff || 'タイマー作成者'}`);
     }
     if (
       assistStaff &&
       assistStaff !== 'ヘルプなし' &&
       assistStaff !== 'none' &&
-      assistStaff.toLowerCase() !== currentUser.toLowerCase() &&
+      !isStaffNameMe(assistStaff, userName, myUserId, staffMembers) &&
       !otherRecipients.some((r) => r.includes(assistStaff))
     ) {
       otherRecipients.push(`・🤝 ヘルプ担当: ${assistStaff}`);
@@ -6677,7 +7007,7 @@ export default function SalonWorkScreen() {
     if (
       checkStaff &&
       checkStaff !== '未定' &&
-      checkStaff.toLowerCase() !== currentUser.toLowerCase() &&
+      !isStaffNameMe(checkStaff, userName, myUserId, staffMembers) &&
       !otherRecipients.some((r) => r.includes(checkStaff))
     ) {
       otherRecipients.push(`・🔍 チェック担当: ${checkStaff}`);
@@ -6686,13 +7016,13 @@ export default function SalonWorkScreen() {
     if (otherRecipients.length > 0) {
       Alert.alert(
         '🔔 タイマーリセット通知 (関係者共有)',
-        `「${seat.seatLabel}」のタイマーを【${currentUser}】さんがリセットしました（タイム0:00・チェック解除）。\n\n【自分以外の関係者へリアルタイム通知完了】\n${otherRecipients.join('\n')}\n\n関係者全員の端末およびApple Watchに通知が届きました。`,
+        `「${seat.seatLabel}」のタイマーを【${currentUser}】さんがリセットしました（タイム00:00・チェック解除・カード折りたたみ）。\n\n【自分以外の関係者へリアルタイム通知完了】\n${otherRecipients.join('\n')}\n\n関係者全員の端末およびApple Watchに通知が届きました。`,
         [{ text: 'OK' }]
       );
     } else {
       Alert.alert(
         '🔄 タイマーをリセットしました',
-        `「${seat.seatLabel}」のタイマーを0:00に戻しました（チェックタイマーも解除されました）。\n\nカードは開いたままですので、「タイム変更」や数字タップですぐに新しいタイムを入れ直せます。`,
+        `「${seat.seatLabel}」のタイマーとチェックタイマーを00:00に戻し、カードを閉じました。\n\nスリムバーをタップするとすぐに新しいタイムを入れ直せます。`,
         [{ text: 'OK' }]
       );
     }
@@ -6997,6 +7327,9 @@ export default function SalonWorkScreen() {
                 }
               }
             } else {
+              setExpandedPausedSeatIds((prevExp) =>
+                prevExp[seatId] ? { ...prevExp, [seatId]: false } : prevExp
+              );
               setSeats((prev) => {
                 const updated = prev.map((s) => {
                   if (s.id !== seatId) return s;
@@ -7117,7 +7450,7 @@ export default function SalonWorkScreen() {
       name: label,
       status: 'idle',
       colorStaffName: '',
-      createdBy: myUserIdRef.current || myUserId || null,
+      createdBy: null,
       dirtySync: true,
       assistantStaffName: null,
       actionStatus: null,
@@ -7159,7 +7492,7 @@ export default function SalonWorkScreen() {
           ...s,
           status: 'running',
           colorStaffName: userName || 'スタイリスト',
-          createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+          createdBy: myUserIdRef.current || myUserId || null,
           dirtySync: true,
           assistantStaffName: '',
           actionStatus: null,
@@ -7673,12 +8006,8 @@ export default function SalonWorkScreen() {
           // 【パターンB: 停止中 ＆ アコーディオン閉じ状態（スリムバー）】
           // ==============================
           const isPaused = item.status === 'paused';
-          const isShampoo = item.isShampooing || item.actionStatus === 'shampoo';
-          // ★ ユーザー指定: シャンプー以外の場合は開けたままにしておく。シャンプーの場合はアコーディオンをしまう。
-          const isExpanded =
-            expandedPausedSeatIds[item.id] !== undefined
-              ? !!expandedPausedSeatIds[item.id]
-              : !isShampoo;
+          // ★ 大元の共有タイマーはどの停止・工程移行・リセットでもカードを折りたたむ（手動タップ展開時のみ開く）
+          const isExpanded = !!expandedPausedSeatIds[item.id];
 
           let remainingSec = 0;
           let isOver = false;
@@ -8102,6 +8431,7 @@ export default function SalonWorkScreen() {
 
                 const isCompleted = item.checkStatus === 'completed';
                 const isTimeUp = !isCompleted && (item.checkStatus === 'timeup' || isCheckOver);
+                const chkProcDisp = sanitizeCheckProcess(item.checkProcess);
 
                 return (
                   <View
@@ -8145,10 +8475,10 @@ export default function SalonWorkScreen() {
                         ]}
                       >
                         {isCompleted
-                          ? 'チェック確認済み'
+                          ? `${chkProcDisp}確認済み`
                           : isTimeUp
-                          ? 'チェック時間！'
-                          : 'チェックまで あと'}
+                          ? `${chkProcDisp}時間！`
+                          : `${chkProcDisp}まで あと`}
                       </Text>
 
                       {!isCompleted && (
@@ -9459,9 +9789,42 @@ export default function SalonWorkScreen() {
                   )}
                 </View>
 
-                {/* ★ ユーザー指定: チェックタイマー設定時、チェック担当スタッフも同時に指定可能 */}
+                {/* ★ チェックタイマー設定時、チェック内容（4種・シャンプー完全除外）とチェック担当スタッフを同時に指定可能 */}
                 {modalCheckMinutes > 0 && (
                   <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderColor: isEcoMode ? '#2C2C2E' : '#E5E7EB' }}>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: theme.textSecondary, marginBottom: 6 }}>
+                      🔍 チェック内容（中間工程）:
+                    </Text>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                      {CHECK_PROCESS_OPTIONS.map((proc) => {
+                        const isProcSelected = sanitizeCheckProcess(modalCheckProcess) === proc;
+                        return (
+                          <TouchableOpacity
+                            key={`modal-chk-proc-${proc}`}
+                            style={[
+                              styles.checkStaffChip,
+                              {
+                                backgroundColor: isProcSelected ? '#0EA5E9' : theme.inputBg,
+                                borderColor: isProcSelected ? '#0EA5E9' : theme.cardBorder,
+                              },
+                            ]}
+                            onPress={() => setModalCheckProcess(proc)}
+                            activeOpacity={0.7}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 11,
+                                fontWeight: isProcSelected ? '700' : '600',
+                                color: isProcSelected ? '#FFFFFF' : theme.textPrimary,
+                              }}
+                            >
+                              {proc}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+
                     <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                       <Text style={{ fontSize: 11, fontWeight: '700', color: theme.textSecondary }}>
                         🔍 チェック担当スタッフ（省略可）:
@@ -10615,13 +10978,13 @@ export default function SalonWorkScreen() {
                         </TouchableOpacity>
                       </View>
 
-                      {/* ② ヘルプ内容（工程）選択 */}
+                      {/* ② ヘルプ内容（工程）選択（4種・シャンプー完全除外） */}
                       <Text style={{ fontSize: 11.5, fontWeight: '700', color: theme.textSecondary, marginBottom: 6 }}>
                         2. チェック内容（任意）
                       </Text>
                       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
-                        {['チェック', 'コーミング', '1液2液', '担当を呼ぶ'].map((proc) => {
-                          const isSel = lateCheckProcess === proc;
+                        {CHECK_PROCESS_OPTIONS.map((proc) => {
+                          const isSel = sanitizeCheckProcess(lateCheckProcess) === proc;
                           return (
                             <TouchableOpacity
                               key={proc}
@@ -10721,8 +11084,8 @@ export default function SalonWorkScreen() {
             onStartShouldSetResponder={() => true}
           >
             {(() => {
-              const modalChkProc = (checkStopTargetSeat?.checkProcess || 'チェック').trim() || 'チェック';
-              const hasExplicitModalChkProc = modalChkProc !== 'チェック';
+              const modalChkProc = sanitizeCheckProcess(checkStopTargetSeat?.checkProcess);
+              const hasExplicitModalChkProc = ['コーミング', '1液2液', '担当を呼ぶ'].includes(modalChkProc);
               const procBtnColor =
                 modalChkProc === 'コーミング'
                   ? '#0A84FF'
@@ -11485,6 +11848,43 @@ export default function SalonWorkScreen() {
               contentContainerStyle={{ paddingBottom: 16 }}
               keyboardShouldPersistTaps="handled"
             >
+              {/* ⓪ チェック内容（工程）選択（4種・シャンプー完全除外） */}
+              <Text style={[styles.helpSectionLabel, { color: theme.textTertiary, marginTop: 2, marginBottom: 6 }]}>
+                チェック内容（中間工程）
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+                {CHECK_PROCESS_OPTIONS.map((proc) => {
+                  const currentChkProc = sanitizeCheckProcess(checkStaffTargetSeat?.checkProcess);
+                  const isProcCurrent = currentChkProc === proc;
+                  return (
+                    <TouchableOpacity
+                      key={`chk-staff-modal-proc-${proc}`}
+                      style={[
+                        styles.staffChip,
+                        {
+                          backgroundColor: isProcCurrent ? '#0EA5E9' : (isEcoMode ? '#2C2C2E' : '#F2F2F7'),
+                          borderColor: isProcCurrent ? '#0EA5E9' : theme.cardBorder,
+                        },
+                      ]}
+                      onPress={() => handleSelectCheckProcess(checkStaffTargetSeat?.id, proc)}
+                      activeOpacity={0.7}
+                    >
+                      <Text
+                        style={[
+                          styles.staffChipText,
+                          {
+                            color: isProcCurrent ? '#FFFFFF' : theme.textPrimary,
+                            fontWeight: isProcCurrent ? '700' : '600',
+                          },
+                        ]}
+                      >
+                        {proc}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
               {/* ① ワンタップで自分がチェックに入る */}
               <TouchableOpacity
                 style={[

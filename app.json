@@ -15,14 +15,15 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.assisttimer",
-      "buildNumber": "97",
+      "buildNumber": "98",
       "infoPlist": {
         "NSCameraUsageDescription": "練習の記録にウィッグや施術の写真を撮影・添付するためにカメラを使用します。",
         "NSPhotoLibraryUsageDescription": "練習の記録にアルバムから写真を選択・添付するために写真ライブラリを使用します。",
         "NSPhotoLibraryAddUsageDescription": "撮影した練習の写真を端末の写真ライブラリに保存するために使用します。",
         "NSAlarmKitUsageDescription": "タイマー終了時に、マナーモード中や画面ロック中でも止めるまでアラームでお知らせするために使用します。",
         "UIBackgroundModes": [
-          "audio"
+          "audio",
+          "remote-notification"
         ],
         "ITSAppUsesNonExemptEncryption": false
       }
@@ -51,6 +52,7 @@
           "iosAppId": "ca-app-pub-3646959221255515~3936890861"
         }
       ],
+      "expo-notifications",
       "@bacons/apple-targets"
     ],
     "runtimeVersion": {

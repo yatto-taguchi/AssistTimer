@@ -752,7 +752,7 @@
        - 微調整ボタン: `[ -30秒 ]` `[ +30秒 ]`（差分クリアリセット付き）
        - 現在の残り時間と変更後タイムをリアルタイムプレビュー比較表示し、「変更を適用する」で即座に反映。
        - タイム入れ直しや細かな時間調整を現場で爆速に行え、施術履歴（タイムライン）へ自動記録（例: `3分追加放置` / `30秒短縮`）および触覚振動を送信。
-     - **リセット（旧: 一時停止）**: タップでタイマーを0:00に戻し、チェックタイマーを解除。カードは開いたまま（フル展開）を維持し、自分以外の関係者（メイン担当・ヘルプ担当等）へリアルタイム通知を送信。早めにチェックしたくなった際などの「その地点からまたタイムを入れ直す」運用に即応。誤操作防止の確認ダイアログ付き。
+     - **リセット（旧: 一時停止）**: タップで大元タイマーおよびチェックタイマーの両方を `00:00` に戻して終了し、席カードを折りたたんでスリムバー状態へ収納（Apple Watch側 `isCollapsed = true` と完全統一）。自分以外の関係者（メイン担当・ヘルプ担当・チェック担当）へリアルタイム通知を送信。スリムバーをタップすればすぐに新しいタイムを入れ直し可能。誤操作防止の確認ダイアログ付き。
      - **施術終了**: カードを削除せず待機中スリムバーへ安全リセット。
 
 7. **タイム設定モーダル (`SetSeatTimerModal`)**:
@@ -787,6 +787,7 @@
    - **🔍 チェックタイマー（途中の発色・薬剤確認）クイックチップ同時設定システム**:
      - いつも同じタイムのお客様や白髪染めなどの固定タイム施術に対応するため、全体放置タイムの直下に「チェックタイマー」設定セクションを新設。
      - **クイックチップラインナップ**: `[ なし ]` / `[ 3分 ]` / `[ 5分 ]` / `[ 7分 ]` / `[ 10分 ]` / `[ 15分 ]` および `-1分` / `+1分` 微調整ボタン。
+     - **チェック内容（中間工程）の4種統一（シャンプー完全除外）**: チェックタイマーで選択できる工程は **`チェック` / `コーミング` / `1液2液` / `担当を呼ぶ`** の4種のみとし、新規設定・後から追加・変更・担当指定・停止確認（iPhone / Apple Watch 全画面）から **`シャンプー` を完全除外**。
      - ワンタップで「全体20分 ＋ チェック7分」のような現場必須のペアタイムを爆速設定可能。
      - チェック時間は全体放置時間より短い時間のみ指定可能とする安全バリデーションを搭載。
      - **お気に入りパネルとの完全連動**:
@@ -807,10 +808,10 @@
            - 担当スタッフ未指定時の表示には「未設定」ではなく**「未定（ヘルプ未定 / チェック未定）」**を採用。
            - **現場の能動的な行動喚起**: 「未設定」だとシステム側の入力漏れ・設定不備のように受動的に捉えられがちだが、「未定」と表現することで「まだ誰が入るか決まっていない＝手が空いたスタッフの立候補・フォロー待ち」という美容室チームワークの自然なアクションを喚起する。
            - **狭小画面での視認性・余白確保**: 「ヘルプ未設定（6文字）」「チェック未設定（7文字）」に比べ、「ヘルプ未定（5文字）」「チェック未定（6文字）」は短くスマートに収まり、小型端末でもボタン幅にゆとりを保ち誤タップや文字潰れを完全に防止。
-       - **🛑 チェックタイマー停止確認モーダル (`CheckStopModal`) ＆ タイマー設定者への完了通知送信**:
-         - チェックタイマー部分を押した際に専用モーダルがポップアップ。「チェックタイマーを止めますか？」の確認とともに、タイマー設定者（📝 ◯◯ さん）へ通知される旨を明示。
-         - 「タイマーを止める」を確定するとチェックタイマーが停止・完了（`checkStatus: 'completed'`）となり、施術履歴に「◯◯チェック完了」と記録。
-         - **タイマー設定者（メイン担当）の端末およびApple Watchへチェック完了のリアルタイム通知とお互いへの確認を自動送信**。
+       - **🛑 チェックタイマー停止確認モーダル (`CheckStopModal`) ＆ タイマー設定者への完了通知送信（iPhone / Watch 完全統一）**:
+         - チェックタイマー部分を押した際（または Apple Watch でチェックタイマーの数字タップ／チェックアラーム発火時）に専用確認画面がポップアップ。
+         - 選択された中間工程に応じた工程ボタン（`コーミングに入る` / `1液2液に入る` / `担当を呼ぶ` / `チェックに入る`）および赤色の `タイマーを止める` ボタンの**いずれを押した場合でも、チェックタイマーのみを停止・完了（`checkStatus: 'completed'`）とし、大元の共有タイマーは絶対に止めずカウントダウンを継続し、席カードも絶対に閉じない（展開状態を維持）**。
+         - 施術履歴に「◯◯チェック完了（／コーミング完了 等）」と記録し、**タイマー設定者（メイン担当）の端末および Apple Watch へ完了のリアルタイム通知を自動送信**。
        - **🔍 チェック担当スタッフ指定モーダル (`CheckStaffAssignModal`)**:
          - チェック担当ボタンのタップで専用モーダルが展開。
          - 「私（◯◯）がチェックに入ります（ワンタップ立候補）」
@@ -874,9 +875,9 @@
          - シャンプー指定時: `[ 💧 タイマーを止めてシャンプーする ]`（紫系・アイコン付き）
          - チェック指定時: `[ 🔍 タイマーを止めてチェックする ]`（緑系・アイコン付き）
          - 未指定時: `[ 🛑 タイマーを止める。 ]`
-       - タップ時、タイマーが停止すると同時に席のステータスが自動的にその項目（コーミング中・シャンプー中等）へ切り替わり、施術履歴タイムラインにも「◯◯コーミング」「◯◯シャンプー」が担当者名付きで自動記録される。
+       - タップ時、**どの停止・工程移行ボタン（`シャンプー` / `コーミング` / `チェック` / `呼び出し` / `その他` / `タイマーを止める`）を押した場合でも、大元タイマーおよびチェックタイマーの両方を `00:00` にリセットして終了し、席カードを自動的に折りたたむ（スリムバー収納、Apple Watch 側 `isCollapsed = true` と完全統一）**。
        - **状態変更ピル（クイックピル群）**:
-         - ヘルプ指定とは別の状態に変更して止めたい場合や、未指定から直接ステータスを切り替えるためのピル（`[🪮 コーミング]` `[💧 シャンプー]` `[🔍 チェック]` `[🛑 通常停止]`）を直下に常設。ワンタップで任意の状態に変更してタイマーを停止可能。
+         - ヘルプ指定とは別の状態に変更して止めたい場合や、未指定から直接ステータスを切り替えるためのピル（`[🔔 呼び出し]` `[🪮 コーミング]` `[🔍 チェック]` `[💧 シャンプー]` `[💬 その他]` `[🛑 通常停止]`）を直下に常設。ワンタップで任意の状態に変更して `00:00` 終了＆カード折りたたみが可能。
    - **② タイマー停止中（`status === 'paused'`）に数字を押した時**:
      - 既に停止しているため、キャンセルや変更、停止ボタンは非表示となり、現場が求める2大アクションに特化：
      - モーダルタイトル: `タイマー操作を選択`（右上 `✕` または背景タップでクローズ可能）
@@ -928,12 +929,12 @@
         - メイン担当と自分（ヘルプ）の2名にお互い通知。
       - 手元を見ずに施術している現場でも、誰が誰をヘルプに指名したかがサロン関係者全員にタイムラグなく完璧に伝達される。
 
-11. **タイマー停止時のアコーディオン自動折りたたみ（停止時タイム & 施術ステータス表示）**:
-    - **自動コンパクト化（省スペース化）**:
-      - タイマーが一時停止（「タイマーを止める。」または「一時停止」ボタン押下）されると、大きなフル展開カードが `LayoutAnimation` 連動により**アコーディオンでスッと自動的に閉まり、コンパクトなスリムバー（`pausedRow`、高さ約48px）へと最小化**。
-      - 秒数を常時注視する必要がない停止中席を自動で小さく畳むことで、現在進行中の稼働席や危険域の超過席が埋もれず、サロンボード全体が一望可能。
+11. **大元の共有タイマー停止・工程移行・リセット時のアコーディオン自動折りたたみ ＆ `00:00` リセット統一（iPhone / Watch 完全統一）**:
+    - **全停止・全工程移行での自動コンパクト化（省スペース化）**:
+      - 大元の共有タイマーにおいて、`シャンプー` / `コーミング` / `チェック` / `呼び出し` / `その他` / `タイマーを止める` / `リセット` のいずれが押された場合でも、大元タイマーおよびチェックタイマーの両方を `00:00` にリセットして終了し、`LayoutAnimation` 連動により**アコーディオンでスッと自動的に閉まり、コンパクトなスリムバー（`pausedRow`、高さ約48px、Watch 側 `isCollapsed = true`）へと最小化**。
+      - 秒数を常時注視する必要がない停止終了席を自動で小さく畳むことで、現在進行中の稼働席や危険域の超過席が埋もれず、サロンボード全体が一望可能。
     - **停止中スリムバーの表示内容**:
-      - **左側**: 席ラベルバッジ（`⌚️ 1番席`）＋ **停止時タイム（最後に入れられたタイム、例: `⏸️ 12:05`）** を明示。最後に何分何秒で止まったかが一目で判明。
+      - **左側**: 席ラベルバッジ（`⌚️ 1番席`）＋ **`⏸️ 00:00`** を明示。
       - **右側**: **施術ステータスバッジ（例: `💧 シャンプー中` / `🪮 コーミング中` / `🔍 チェック中` / `🔔 呼び出し中` / `💬 その他`）**、担当カラー担当者名（例: `🎨タグチ`）、およびアコーディオン展開アイコン（`chevron-down`）。
       - 状態が未設定の場合でも「`＋ 状態`」ボタンが表示され、バーを閉じたままでもワンタップで施術ステータスを即座に付与・変更可能。
     - **手動開閉（アコーディオン）トグル**:
@@ -1286,6 +1287,8 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 | 2026-10-08 | タイム設定モーダルからの「カラー担当」手動入力削除およびタイマー作成者の自動記録・更新システムの実装 | ①タイム設定モーダルに残っていた「カラー担当」入力欄（テキスト・インプット）を完全削除。これによりタイム設定モーダルはタイム決定・開始に100%全集中したスリム構成を完成。②固定的な「カラー担当」手入力を撤廃し、タイマーを新規開始・追加タイム設定した操作スタッフ（`userName`）の名前を「タイマー作成者（`colorStaffName`）」として自動的に書き換え・記録・更新するインテリジェント連動を実装。③客席カード下段の表示ラベルを「カラー担当」から「タイマー作成（⏱️ ◯◯）」へ刷新し、カラー施術に限らないサロン現場の多様なタイマー利用（パーマ、トリートメント等）と作成スタッフのリアルタイム自動判別を実現 |
 | 2026-10-08 | タイマー作成者（指定した人）の超過確認不要化およびヘルプ担当確認への一本化（現場オペレーション最適化） | ①タイマー作成者（メイン担当）は自分でタイマーを入れているため、タイム超過時の「メイン確認」を完全不要化（初期値およびタイマー開始時から完了済み `mainStaffConfirmed: true`）。②安全確認ボックス（`safetyStatusBox`）の右側表示から不要な「メイン: ✓済」を撤廃し、ヘルプ担当（ヤマモト）の確認状況（`ヘルプ（ヤマモト）: ✕未` ➜ `✓済`）のみを明快に表示。③確認アクションボタンをヘルプ担当本人（`[ ✓ ヘルプ確認する ]`）とそれ以外のスタッフ（`[ 🛡️ ヘルプを代理確認 ▾ ]`）に整理し、タイマー作成者に不要な「メイン確認する」を一切要求しない快適な導線を確立。④ヘルプ担当の確認完了のみで即座に「🟢 ヘルプ確認完了 (安全)」およびカード枠線の緑色化へ遷移する現場即応アーキテクチャを実現 |
 | 2026-10-08 | 右上ヘルプボタンのテキスト明示化（絵文字全撤廃、コーミング/シャンプー等工程名表示、未選択時は「未定」）および未定時1分前アラートの確実化 | ①カード右上のヘルプアサインボタンから絵文字・アイコン（✋や🤝等）を完全撤廃し、純粋なテキスト＋下矢印のみのスッキリしたデザインへ刷新。②何も選択していない時は「未定 ▾」と表示。③コーミングやシャンプー等の工程が選ばれている時は「コーミング 渡辺 ▾」「コーミング未定 ▾」「シャンプー 渡辺 ▾」のように工程名を文字で明示。④ヘルプ指定モーダルに「担当者未定のまま【◯◯】を依頼する」選択肢を新設し、工程だけを先行指定した現場運用を可能に。⑤タイマー開始時・割り当て時に1分前アラート発動フラグを確実にリセットし、未定（完全未定および工程指定のみで担当者未定）の席が残り1分になった際にサロン全員へバイブレーション連打＋【サロン全員ヘルプ募集】アラートが100%確実に発動する安全設計を確立 |
+| 2026-10-30 | チェックタイマー終了時の大元タイマー誤停止防止、チェック工程からのシャンプー完全除外、および大元共有タイマー終了・工程移行・リセット時の `00:00` リセット＆カード折りたたみ挙動の iPhone/Watch 完全統一（Issue #5） | ①チェックタイマー（中間タイマー）の工程選択肢から `シャンプー` を完全除外し、iPhone/Watch 全画面で `チェック` / `コーミング` / `1液2液` / `担当を呼ぶ` の4種のみに統一（`sanitizeCheckProcess` で入出力も正規化）。②チェックタイマーの完了確認画面・アラーム画面において、工程ボタン（`コーミングに入る` / `1液2液に入る` / `担当を呼ぶ` / `チェックに入る`）および `タイマーを止める` ボタンのいずれを押してもチェックタイマーのみ完了とし、大元タイマーを絶対に止めず、席カードも絶対に閉じないよう修正（Watch の `alarmOverlay` での `stop(explicitTarget:)` ピンポイント停止、`TimeActionSheet` の初期分岐フラグ残留リセットおよび `00:00` 通過時の `.subCheckActionBranch` 乗っ取り防止を含む）。③大元の共有タイマーにおいて、`シャンプー` / `コーミング` / `チェック` / `呼び出し` / `その他` / `タイマーを止める` / `リセット` のいずれを押した場合も、大元・チェック両方を `00:00` にリセットして終了し、席カードを折りたたむ（スリムバー収納 / `isCollapsed = true`）挙動に iPhone/Watch を完全統一 |
+| 2026-10-30 | 他端末でのタイマー停止・操作時の関係者 Apple Watch 通知保証、主担当（`created_by`）保護＆操作者（`updated_by`）分離、および APNs / Expo Push ＋ Supabase Edge Function バックグラウンドプッシュ通知基盤の導入（Issue #6） | ①iPhone フォアグラウンド（`active`）かつ Apple Watch 連動中の場合、スマホのアプリ内トースト通知に加えて Apple Watch へも `notification` ＋ `highPriorityWake: true` を同時送信し、スマホをワゴンや充電台に置いた施術中でも手首の振動＋バナーで即時認知可能に改善。②タイマー停止・リセット・施術終了時に `created_by` が停止操作者の `userId` で上書きされる不具合を解消し、`salon_timers.updated_by` で操作者を分離記録するとともに、新規開始／再設定時は必ず新しい操作者の `userId`（`createdBy`）と表示名（`colorStaffName`）へ主担当を更新。③Watch 側の `WatchSessionManager.processReceivedData` で `timestamp` 逆転による早期 `return` より前に未読 `notifId`（直近30件リング保持）を判定・発火し、メインタイマー同期パケット先行時の共有通知取りこぼしを根絶。④`expo-notifications` / `expo-device` / `expo-constants`、`UIBackgroundModes: ["audio", "remote-notification"]`、`salon_member_push_tokens` テーブル、`pg_net` トリガー、および Supabase Edge Function `notify-salon-event` を導入し、iPhone ロック中・バックグラウンド中・アプリキル中でも関係者へ Time-Sensitive リモートプッシュ＋`content-available: 1` による Watch 即時同期を配信（フォアグラウンド時は OS プッシュバナーを抑止して二重通知を防止、通知タップ時は `Salon` タブへ直行） |
 
 ---
 
@@ -1347,11 +1350,13 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
   - 何も選択していない時は「未定 ▾」と表示。
   - ヘルプ担当指定モーダルから「担当者未定のまま【◯◯】を依頼する」登録に対応。
   - タイマー開始・割り当て時にアラート発動フラグを確実にリセットし、未定の席が残り1分に達した際にサロン全員へ強い振動連打＋【サロン全員ヘルプ募集アラート】を100%確実に発出。
-- **タイマー停止時のアコーディオン開閉制御（シャンプーのみ収納・他は展開維持）**:
-  - タイマー停止時（数字タップでの停止や一時停止、工程変更時）：
-    - **シャンプー時**: お客様がシャンプー台へ移動するため、アコーディオンを自動で閉じてコンパクトなスリムバー（1行）に収納。
-    - **シャンプー以外（コーミング、チェック、呼び出し、その他、未設定など）**: 席での施術や経過確認、追加操作をスムーズに行えるよう、アコーディオンを閉まわずカードを開けたまま（展開状態）に維持。
-    - カード右上には「閉じる」ボタンを常設し、必要に応じて手動での折りたたみも可能。
+- **大元の共有タイマー vs チェックタイマーのアコーディオン開閉・リセット統一仕様（iPhone / Watch 完全統一）**:
+  - **大元の共有タイマー停止・工程移行・リセット時**:
+    - `シャンプー` / `コーミング` / `チェック` / `呼び出し` / `その他` / `タイマーを止める` / `リセット` の**いずれのボタン**を押した場合でも、大元タイマーおよびチェックタイマーの両方を **`00:00` にリセットして終了**し、**席カードを自動的に折りたたんでコンパクトなスリムバー（1行、Watch 側 `isCollapsed = true`）に収納**する。
+    - スリムバーをタップすればいつでも手動展開や新規タイムの再設定が可能。
+  - **チェックタイマー（中間タイマー）終了時**:
+    - 工程選択肢は `チェック` / `コーミング` / `1液2液` / `担当を呼ぶ` の4種のみ（`シャンプー` は完全除外）。
+    - どの完了ボタン（`コーミングに入る` / `1液2液に入る` / `担当を呼ぶ` / `チェックに入る` / `タイマーを止める`）を押しても、**チェックタイマーのみを完了**とし、**大元の共有タイマーは一切止めずカウントダウンを継続し、席カードも絶対に閉じない（展開維持）**。
 - **タイム設定モーダルの秒微調整パネル増設（1段追加: -30秒, -10秒, +10秒, +30秒）**:
   - 分単位の微調整バー（[-5分] [-1分] [+1分] [+5分]）の直下に、1段増やして秒単位の微調整バー（[-30秒] [-10秒] [+10秒] [+30秒]）を新設。
   - 「7分10秒」「7分30秒」「30秒」など、サロン現場で頻発する細やかなタイム指定・追加放置に対応。
@@ -3654,3 +3659,83 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
    - `npx eas-cli build --platform ios --profile simulator` により、`Release-iphonesimulator/AssistTimer.app`（`com.assisttimer`）と `Release-watchsimulator/AssistTimerWatch.app`（`com.assisttimer.watchkitapp`）の双方を同時生成し、`xcrun simctl install` でペアリング済みの iPhone / Apple Watch シミュレーターへ導入する。
 2. **シミュレーター専用 OTA 即時反映（`channel: "simulator"`）**:
    - JS 層の修正時はネイティブ再ビルドを行わず、`npx eas-cli update --branch simulator` で `"simulator"` チャンネルのみへ配信することで、本番・TestFlight 環境に影響を与えずにシミュレーターへ十数秒で反映・検証できる。
+
+---
+
+## 57. チェックタイマー終了時の大元タイマー誤停止完全防止・シャンプー除外・iPhone/Watch挙動完全統一仕様 (Issue #5 / 2026-10-30)
+
+### 57.1 背景・課題
+
+1. **Apple Watch でチェックタイマー終了時に大元タイマーまで停止したりカードが閉じてしまう経路**:
+   - `alarmOverlay` の赤色「`タイマーを止める`」ボタンが `WatchAlarmCoordinator.shared.stop()` をターゲット未指定で呼び出しており、`-check@`（チェックタイマー）鳴動中でも全イベントを一括消火し大元タイマーまで停止させていた。
+   - `TimeActionSheet` の初期分岐フラグ（`timeActionInitialBranchMode` / `timeActionInitialSubCheckBranchMode`）がシート閉鎖時等にリセットされない経路があり、また `TimeActionSheet` の `.onReceive(WatchRealtimeClock.shared.publisher)` が `.subCheckActionBranch` 表示中に大元タイマーの `00:00` 到達を検知すると強制的に `.timerActionBranch`（大元停止画面）へ書き換えていた。
+2. **iPhone と Apple Watch 間の挙動不一致およびチェック工程選択肢の保護**:
+   - チェックタイマーは薬剤放置途中の確認用であるため、`シャンプー` が絶対に混入しないよう入出力および全設定・変更・停止画面で4種（`チェック` / `コーミング` / `1液2液` / `担当を呼ぶ`）に厳格統一する必要があった。
+   - iPhone 側では従来、`シャンプー` 以外の工程移行時や `リセット` 押下時にカードを開いたままにしたり残り時間を一時停止保持していたため、Apple Watch 側の `00:00` リセット＆カード折りたたみ挙動と乖離していた。また `formatSeatsPayload` の `isCollapsedSeat` 計算式が `!s.isReset` を条件に含んでいたため、`isReset: true` の席が Watch 同期時に展開されてしまう不具合があった。
+
+### 57.2 確定仕様・実装詳細 (`targets/watch/alarm.swift`, `targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)
+
+1. **チェックタイマー（中間タイマー）の確定仕様（Apple Watch & iPhone 完全統一）**:
+   - **工程選択肢からの「シャンプー」完全除外**:
+     - `SeatTimerItem.allowedCheckProcesses` / `CHECK_PROCESS_OPTIONS` を `['チェック', 'コーミング', '1液2液', '担当を呼ぶ']` の4種のみに限定し、`sanitizeCheckProcess` により初期設定・途中追加・時間変更・担当変更・Watch/クラウド同期の全経路で `シャンプー` を完全排除（万一不正値が届いても `'チェック'` に正規化）。
+     - iPhone のタイム設定モーダル（`isSetTimerModalVisible`）およびチェック担当モーダル（`isCheckStaffModalVisible`）にも同4種のチェック内容選択チップを統合し、Watch と 100% 同一の選択体験に統一。
+   - **どの終了・完了ボタンを押してもチェックタイマーのみ終了（大元継続・カード展開維持）**:
+     - チェックタイマーの確認画面・アラーム画面におけるすべてのアクションボタン（`コーミングに入る` / `チェックに入る` / `1液2液に入る` / `担当を呼ぶ` / `タイマーを止める`）で、チェックタイマーのアラームのみをピンポイント停止（`acknowledgeSeatTimer(..., checkOnly: true)` / `stop(explicitTarget:)` / `stopAlarm('salon', '${seatId}-check')`）し、チェック完了記録と設定者通知を行う。
+     - 大元の共有タイマーは一切停止せずカウントダウン（および残りのスマートアラーム予約 `restartRemainingTimerAfterCheck`）を継続し、席カードも絶対に閉じない（`isCollapsed = false` + `setCollapseOverride(..., collapsed: false)` / iPhone フル展開カード維持）。
+2. **大元の共有タイマーの確定仕様（Apple Watch & iPhone 完全統一）**:
+   - **全停止・全工程移行・リセットでの `00:00` リセット ＆ カード折りたたみ**:
+     - 大元の共有タイマーにおいて、`シャンプー` / `コーミング` / `チェック` / `呼び出し` / `その他` / `タイマーを止める` / `リセット` のいずれが押された場合でも、大元タイマーおよびチェックタイマーの両方を **`00:00` にリセットして終了**し、**席カードを折りたたむ**（Watch: `isCollapsed = true` / iPhone: `expandedPausedSeatIds[seatId] = false` による折りたたみスリムバー）。
+     - `formatSeatsPayload` の `isCollapsedSeat` を `!isRunning && (s.status === 'idle' || isZero || s.collapsedAtEnd != null)` に是正し、`isReset: true` を含むすべての `00:00` 停止席が iPhone ⇄ Watch 間で一貫して折りたたみ同期されることを保証。
+
+
+---
+
+## 58. 他端末でのタイマー停止・操作時の関係者 Apple Watch 通知保証、主担当保護・操作者分離、およびバックグラウンドプッシュ通知仕様 (Issue #6 / 2026-10-30)
+
+### 58.1 背景・課題
+
+1. **iPhone フォアグラウンド表示中の Apple Watch 通知スキップ**:
+   - 従来、`SalonWorkScreen.js` の Realtime 通知配信分岐（パターン① `isPhoneForeground === true`）では、iPhone 側のアプリ内トースト通知のみを表示し Apple Watch 側へ `notification` ペイロードを送っていなかったため、iPhone をワゴンや充電台で点灯表示したまま離れて施術しているスタッフの手首の Apple Watch が振動しなかった。
+2. **他端末での停止・施術終了時の主担当（`created_by`）上書きおよび再設定時の旧主担当残留**:
+   - `mapSeatToCloudTimer`（`src/utils/salonCloudService.js`）が `created_by: seat.createdBy || userId` となっていたため、`seat.createdBy` が `null` 化された施術終了（`idle`）や未保持状態で別スタッフが停止操作を行うと、停止操作者の `userId` で `created_by` が上書きされる経路があった。また、停止・リセット後に別スタッフが新しくタイマーを入れ直した際、`createdBy: myUserIdRef.current || myUserId || s.createdBy` や `getSeatCloudSignature` の `createdBy` 未含有により主担当の切り替えが確実に伝播しないケースがあった。
+3. **Apple Watch 側のタイムスタンプ逆転による未読 `notifId` 取りこぼし**:
+   - `WatchSessionManager.processReceivedData`（`targets/watch/content.swift`）において、`ts < previousPayloadTimestamp` の早期 `return` が `data["notification"]` の判定より前に置かれていたため、メインタイマー同期等のわずかに新しい `timestamp` を持つパケットが先行到着した直後に `transferUserInfo` 等で共有通知パケットが到着すると、未読の `notifId` ごと破棄されていた。
+4. **iPhone ロック・バックグラウンド・アプリ終了時の WebSocket 切断による通知遅延**:
+   - Supabase Realtime（WebSocket）のみでは iPhone 画面ロック後しばらくして iOS により通信がサスペンドされるため、ロック中やアプリ終了時でも確実に関係者の iPhone / Apple Watch へ即時到達するリモートプッシュ通知（APNs / Expo Push）基盤が必要であった。
+
+### 58.2 確定仕様・実装詳細
+
+1. **iPhone フォアグラウンド × Apple Watch 連動時の同時通知 (`src/screens/SalonWorkScreen.js`)**:
+   - `subscribeSalonTimers` のパターン①（`isPhoneForeground === true`）において、`isWatchCurrentlyLinked === true` の場合は `syncSeatsToWatch` に `notification: enrichedNotif` および `highPriorityWake: true` を付与し、iPhone のアプリ内トースト通知と同時に Apple Watch でも触覚振動＋通知バナーを即時表示する。
+2. **主担当（`createdBy` / `created_by`）の保護、再設定時の新主担当切替、および `updated_by` 分離 (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)**:
+   - **タイマー開始・再設定時の主担当確定**:
+     - iPhone（`handleStartSeatTimer` の新規・追加・非稼働からの再開、`handleAssignMainTimerToSeat`、`handleAssignMainTimerWithoutSeat`）および Apple Watch（`START_TIMER`、`watchActiveSeats` 採用処理）のいずれからタイマーを開始・再設定した場合も、旧 `s.createdBy` へフォールバックせず、設定操作を行ったスタッフの `userId`（`createdBy`）と表示名（`colorStaffName`）を新しい主担当として確定セットする（新規追加された空席 `status: 'idle'` は `createdBy: null, colorStaffName: ''`）。
+     - `getSeatCloudSignature` に `seat.createdBy` を含め、主担当変更を漏れなくクラウドへ同期する。
+   - **停止・リセット時の元主担当保護と即時通知、`updated_by` による自己エコー除外**:
+     - `mapSeatToCloudTimer` では `created_by: seat.createdBy ? seat.createdBy : (seat.status === 'running' ? userId : null)` とし、停止・リセット・施術終了操作者の `userId` で元の `created_by` を絶対に上書きしない。
+     - 操作実行者の `userId` は新カラム `salon_timers.updated_by` に記録し（マイグレーション未適用環境向けの自動フォールバック再試行付き）、`subscribeSalonTimers` および Edge Function 双方で操作者本人の自己通知（セルフエコー）を確実に除外する。
+     - 稼働中（`running`）・超過中だけでなく、一時停止中（非リセットの `paused`）のタイマーが他端末で `00:00` リセット／施術終了された場合も、元の設定者および関係者へ即時通知する。
+3. **Apple Watch 側の未読 `notifId` 先行発火保護 (`targets/watch/content.swift`)**:
+   - `WatchSessionManager` に直近30件の通知IDを保持する `handledPeerNotifIds: [String]` と `handleIncomingPeerNotificationIfNeeded` を実装し、`processReceivedData` 冒頭（`incomingPayloadTs < previousPayloadTimestamp` による早期 `return` より前）で評価する。
+   - `kind != "保存データ"`、90秒以内、`sourceUser == "__remote__"`、かつ未処理の `notifId` であれば通知バナー表示および `WatchAlarmCoordinator.shared.postPeerActionNotification` を確実に1回発火しつつ、古い `seats` / `mainTimer` スナップショットによる状態巻き戻しは従来通り早期 `return` でブロックする。
+4. **バックグラウンドプッシュ通知基盤（APNs / Expo Push ＋ Supabase Edge Function）**:
+   - **クライアント構成 (`app.json`, `src/utils/pushNotificationService.js`, `App.js`, `ExpoWatchConnectivityModule.swift`)**:
+     - `app.json` の `ios.infoPlist.UIBackgroundModes` に `"remote-notification"`、`plugins` に `"expo-notifications"` を追加。
+     - 実機起動・サロン参加（`handleJoinByCode`）・サロン同期（`initCloudSalon`）時に通知権限を確認して Expo Push Token を取得し、Supabase の `salon_member_push_tokens` テーブルへ UPSERT する。サロン退出・メンバー解除（`deleteSalonMember` / `detachFromRemovedGuestSalon`）時は対象トークンを DELETE する。
+     - **フォアグラウンド二重通知防止**: `ExpoWatchConnectivityModule.swift`（`PeerNotificationCenterDelegate.willPresent`）および `Notifications.setNotificationHandler` の双方で、`UIApplication.shared.applicationState == .active` 時のリモートプッシュ（`UNPushNotificationTrigger`）OSバナー・サウンドを抑制（`completionHandler([])`）し、Realtime 側のアプリ内トースト＋Watch直接通知に一本化する。また `notifId`＋セマンティックキー（`timerId|eventType`）の共通キャッシュにより Realtime と Push の重複発火を防止する。
+     - **バックグラウンド起床時の Watch 即時中継**: リモートプッシュ（`_contentAvailable: true` / `content-available: 1`）をバックグラウンドで受信した際、`fetchSalonTimers` で最新客席状態を取得して停止済み AlarmKit アラームを消火し、`syncSeatsToWatch(..., { immediate: true, highPriorityWake: true, notification })` で Apple Watch を即座に起床させ、鳴動中の超過スマートアラーム停止・`00:00` 更新・手首への通知振動を実行する。
+     - **通知タップ遷移**: ロック画面・通知センターのプッシュ通知をタップして起動・復帰した際は、`navigationRef.navigate('Salon')` で直接「サロン」タブを開く。
+   - **バックエンド構成 (`supabase/migrations/20261030000000_issue6_push_notifications.sql`, `supabase/functions/notify-salon-event/index.ts`)**:
+     - `salon_timers` に `REPLICA IDENTITY FULL` と `updated_by text` カラムを設定し、`salon_member_push_tokens` テーブル（`UNIQUE(salon_id, user_id, expo_push_token)`、RLS有効）および `AFTER INSERT OR UPDATE` の `pg_net` トリガー `on_salon_timers_push_notify` を定義。
+     - Edge Function `notify-salon-event` が `old_record` と `record` の差分から ①稼働中・超過中・一時停止中タイマーの停止／リセット／工程移行、②チェックタイマー完了／解除、③ヘルプ・チェック担当の指名／立候補、④ヘルプ・チェック全員募集開始（`募集中`）等を判定し、操作者（`updated_by`）を除いた関係者（`created_by`、`color_staff_name`、`assistant_staff_name`、`check_staff_name`、募集時はサロン全員）へ `interruptionLevel: 'time-sensitive'`・`_contentAvailable: true` 付きで Expo Push API 配信を行う（`DeviceNotRegistered` 無効トークンの自動削除機能付き）。
+
+
+### 58.3 本番データベース適用実績およびビルド・TestFlight運用仕様
+
+1. **本番 Supabase プロジェクト（`hcmjcwcmvcwicjmnhtdc`）へのマイグレーション適用完了**:
+   - `salon_timers.updated_by` カラム追加および `salon_timers` の `replica identity full` 設定完了。
+   - `salon_member_push_tokens` テーブル・インデックスおよび RLS ポリシー（anon/authenticated の select, insert, update, delete 許可）適用完了。
+   - `pg_net` 拡張、HTTP POST トリガー関数 `public.notify_salon_timer_event()`、および `salon_timers` への `AFTER INSERT OR UPDATE` トリガー `on_salon_timers_push_notify` の登録完了。
+2. **ネイティブビルド（Build 98）と TestFlight 自動提出**:
+   - `app.json` の `buildNumber` を `98` にインクリメント。
+   - `expo-notifications`、`expo-device`、`expo-constants`、および `UIBackgroundModes: ["audio", "remote-notification"]` を組み込んだネイティブバイナリを EAS Build 経由でコンパイルし、App Store Connect（TestFlight）へ直接提出する運用を確立。
