@@ -25,10 +25,15 @@ import WatchDiagnosticsBar from '../components/WatchDiagnosticsBar';
 import { setAlarms, stopAlarm, stopAllAlarms, subscribeUserStoppedAlarms } from '../utils/alarmScheduler';
 import {
   getOrCreateUserId,
+  normalizeInviteCode,
+  generateRandomInviteCode as generateCloudSafeRandomInviteCode,
+  isDummyExampleInviteCode,
+  isLegacyExposedInviteCode,
   syncOrCreateSalonInCloud,
   updateSalonInviteCode,
   joinSalonByInviteCode,
   fetchSalonMembers,
+  deleteSalonMember,
   subscribeSalonMembers,
   updateMemberDisplayName,
   fetchSalonTimers,
@@ -74,28 +79,11 @@ export const getActionStatusInfo = (statusId, isShampooing) => {
   return SALON_ACTION_STATUS_OPTIONS.find((opt) => opt.id === actualId || opt.label === actualId) || null;
 };
 
-// ランダムな6桁（3桁-3桁）の安全な招待コード生成関数（例: 738-921）
-export const generateRandomInviteCode = () => {
-  const part1 = Math.floor(100 + Math.random() * 900); // 100〜999
-  const part2 = Math.floor(100 + Math.random() * 900); // 100〜999
-  return `${part1}-${part2}`;
-};
+// ランダムな6桁（3桁-3桁）の安全な招待コード生成関数（入力例 000-000 や過去露出コードは完全除外）
+export const generateRandomInviteCode = () => generateCloudSafeRandomInviteCode();
 
 // 共有コード・招待コードの共通正規化・サニタイズ関数（全角英数の半角化、各種ハイフン・長音記号の統一、空白除去、6桁自動整形）
-export const sanitizeInviteCode = (input) => {
-  if (!input) return '';
-  // 全角英数を半角に変換
-  let s = String(input).replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0));
-  // 全角スペースや制御文字、通常の空白を除去
-  s = s.replace(/[\s\u3000]+/g, '').toUpperCase();
-  // 各種ハイフン（全角ハイフン・長音記号・ダッシュ・波ダッシュ等）を半角 '-' に統一
-  s = s.replace(/[ー−―‐—ｰ〜~]/g, '-');
-  // ハイフンなしの連続6桁数字なら '123-456' にフォーマット
-  if (/^\d{6}$/.test(s)) {
-    s = `${s.slice(0, 3)}-${s.slice(3)}`;
-  }
-  return s;
-};
+export const sanitizeInviteCode = (input) => normalizeInviteCode(input);
 
 // デフォルトのワークスペース（タイマー同期モード・2人まで同期無料・1名利用中）
 export const createDefaultFreeSalon = (customCode) => ({
@@ -1237,8 +1225,9 @@ export default function SalonWorkScreen() {
   // ユーザー・サロン状態
   const [userName, setUserName] = useState('スタイリスト');
   const [myUserId, setMyUserId] = useState(null);
-  const [currentSalon, setCurrentSalon] = useState(DEFAULT_FREE_SALON);
-  const [savedSalons, setSavedSalons] = useState([DEFAULT_FREE_SALON]);
+  const [initialFreeSalon] = useState(() => createDefaultFreeSalon());
+  const [currentSalon, setCurrentSalon] = useState(initialFreeSalon);
+  const [savedSalons, setSavedSalons] = useState([initialFreeSalon]);
   const [filterMode, setFilterMode] = useState('all'); // 'all' | 'my'
   const [now, setNow] = useState(Date.now());
 
@@ -1793,8 +1782,115 @@ export default function SalonWorkScreen() {
   const lastSyncedSeatsStateRef = useRef({});
   const currentSalonRef = useRef(currentSalon);
   currentSalonRef.current = currentSalon;
+  const savedSalonsRef = useRef(savedSalons);
+  savedSalonsRef.current = savedSalons;
   const cloudSalonIdRef = useRef(null);
   const didSwitchSalonRef = useRef(false);
+
+  const buildSalonMemberDescription = (salonObj, count, activeUid = myUserIdRef.current || myUserId) => {
+    if (!salonObj) return 'オンライン中';
+    if (salonObj.id === 'workspace-pro-demo') return salonObj.description || 'オンライン中';
+    const isOwner = checkIsSalonOwner(salonObj, activeUid);
+    if (!salonObj.isPro && isOwner && count <= 1) {
+      return '2人までタイマー同期無料 (1名利用中 / ペア招待可能)';
+    }
+    if (count > 0) {
+      return `${count}名参加中 (クラウド同期中)`;
+    }
+    return salonObj.description || 'オンライン中';
+  };
+
+  const updateCloudSalonMemberCountDescription = (targetSalonId, count) => {
+    if (!targetSalonId) return;
+    const activeUid = myUserIdRef.current || myUserId;
+    setCurrentSalon((prev) => {
+      if (!prev || prev.id !== targetSalonId) return prev;
+      const nextDesc = buildSalonMemberDescription(prev, count, activeUid);
+      if (prev.description === nextDesc) return prev;
+      const updated = { ...prev, description: nextDesc };
+      currentSalonRef.current = updated;
+      return updated;
+    });
+    setSavedSalons((prev) => {
+      let changed = false;
+      const next = prev.map((s) => {
+        if (!s || s.id !== targetSalonId) return s;
+        const nextDesc = buildSalonMemberDescription(s, count, activeUid);
+        if (s.description === nextDesc) return s;
+        changed = true;
+        return { ...s, description: nextDesc };
+      });
+      if (changed) {
+        AsyncStorage.setItem('@salon_saved_salons', JSON.stringify(next)).catch(() => {});
+        return next;
+      }
+      return prev;
+    });
+  };
+
+  const detachFromRemovedGuestSalon = async (removedSalonId, reasonMessage = null) => {
+    const activeUid = myUserIdRef.current || myUserId;
+    const activeName = userNameRef.current || userName || 'スタイリスト';
+    const prevList = Array.isArray(savedSalonsRef.current) ? savedSalonsRef.current : [];
+    const remainingSalons = prevList.filter((s) => s && s.id !== removedSalonId);
+    const fallbackSalon =
+      remainingSalons.find((s) => checkIsSalonOwner(s, activeUid)) ||
+      remainingSalons[0] ||
+      createDefaultFreeSalon();
+    const nextSalons = remainingSalons.length > 0 ? remainingSalons : [fallbackSalon];
+
+    resetSalonRuntimeStateForSwitch();
+    didSwitchSalonRef.current = true;
+    cloudSalonIdRef.current =
+      fallbackSalon.id && fallbackSalon.id !== 'workspace-free' && fallbackSalon.id !== 'workspace-pro-demo'
+        ? fallbackSalon.id
+        : null;
+    const fallbackIsOwner = checkIsSalonOwner(fallbackSalon, activeUid);
+    _cachedIsSalonOwner = fallbackIsOwner;
+    _cachedActiveSalonId = fallbackSalon.id || 'workspace-free';
+
+    const selfOnlyMembers = activeUid
+      ? [
+          {
+            id: activeUid,
+            user_id: activeUid,
+            originalNickname: activeName,
+            customNickname: activeName,
+            role: fallbackIsOwner ? 'owner' : 'assistant',
+            isMe: true,
+            joinedAt: Date.now(),
+          },
+        ]
+      : [];
+
+    setSavedSalons(nextSalons);
+    savedSalonsRef.current = nextSalons;
+    setCurrentSalon(fallbackSalon);
+    currentSalonRef.current = fallbackSalon;
+    setStaffMembers(selfOnlyMembers);
+    staffMembersRef.current = selfOnlyMembers;
+    setIsMemberManageModalVisible(false);
+    await saveSalonsToStorage(nextSalons, fallbackSalon.id);
+    await AsyncStorage.setItem('@salon_staff_members', JSON.stringify(selfOnlyMembers)).catch(() => {});
+
+    pendingDeletedSeatsRef.current = await readPendingDeletedSeats(fallbackSalon.id);
+    const rawFallbackSeats = await readSeatsForSalonFromStorage(
+      fallbackSalon,
+      activeName,
+      activeUid,
+      fallbackSalon.id
+    );
+    const { seats: fallbackSeats } = sanitizeLoadedSeats(rawFallbackSeats);
+    setSeats(fallbackSeats);
+    syncSeatsToWatch(fallbackSeats, activeName, selfOnlyMembers, {
+      immediate: true,
+      forceEmpty: fallbackSeats.length === 0,
+    });
+
+    if (reasonMessage) {
+      Alert.alert('サロン共有の解除', reasonMessage);
+    }
+  };
 
   const resetSalonRuntimeStateForSwitch = () => {
     lastSyncedSeatsStateRef.current = {};
@@ -3569,6 +3665,10 @@ export default function SalonWorkScreen() {
         });
 
         if (!cloudSalon || !isMounted) return;
+        if (cloudSalon._removedFromMembers) {
+          await detachFromRemovedGuestSalon(cloudSalon.id);
+          return;
+        }
         cloudSalonIdRef.current = cloudSalon.id;
         const resolvedIsOwner = cloudSalon.owner_user_id === myUserId;
         const resolvedRole = resolvedIsOwner ? 'owner' : 'assistant';
@@ -3610,17 +3710,40 @@ export default function SalonWorkScreen() {
         }
 
         // 2. クラウド上のメンバー一覧を取得して反映
-        const cloudMembers = await fetchSalonMembers(cloudSalon.id);
-        if (isMounted && Array.isArray(cloudMembers) && cloudMembers.length > 0) {
-          const normalized = normalizeStaffMembers(cloudMembers, myUserId, staffMembersRef.current);
-          setStaffMembers(normalized);
-          AsyncStorage.setItem('@salon_staff_members', JSON.stringify(normalized)).catch(() => {});
-          syncSeatsToWatch(_cachedCurrentSeats || seatsRef.current, userNameRef.current || userName, normalized);
+        const cloudMembers = await fetchSalonMembers(cloudSalon.id, { returnNullOnError: true });
+        if (isMounted && Array.isArray(cloudMembers)) {
+          if (
+            !resolvedIsOwner &&
+            cloudMembers.length > 0 &&
+            !cloudMembers.some((m) => m && m.user_id === myUserId)
+          ) {
+            await detachFromRemovedGuestSalon(cloudSalon.id);
+            return;
+          }
+          if (cloudMembers.length > 0) {
+            const normalized = normalizeStaffMembers(cloudMembers, myUserId, staffMembersRef.current);
+            setStaffMembers(normalized);
+            staffMembersRef.current = normalized;
+            updateCloudSalonMemberCountDescription(cloudSalon.id, normalized.length);
+            AsyncStorage.setItem('@salon_staff_members', JSON.stringify(normalized)).catch(() => {});
+            syncSeatsToWatch(_cachedCurrentSeats || seatsRef.current, userNameRef.current || userName, normalized);
+          }
         }
 
-        // 3. Supabase Realtimeでメンバー変更（参加・更新）をリアルタイム監視
+        // 3. Supabase Realtimeでメンバー変更（参加・更新・解除）をリアルタイム監視
         unsubscribeMembers = subscribeSalonMembers(cloudSalon.id, (updatedMembers) => {
-          if (!isMounted) return;
+          if (!isMounted || !Array.isArray(updatedMembers)) return;
+          if (
+            !resolvedIsOwner &&
+            updatedMembers.length > 0 &&
+            !updatedMembers.some((m) => m && m.user_id === myUserId)
+          ) {
+            detachFromRemovedGuestSalon(
+              cloudSalon.id,
+              'サロン共有のメンバーから解除されたため、個人タイマー画面に戻りました。'
+            );
+            return;
+          }
           const prevMembers = staffMembersRef.current || [];
           const normalized = normalizeStaffMembers(updatedMembers, myUserId, prevMembers);
           const renamedMap = {};
@@ -3640,6 +3763,8 @@ export default function SalonWorkScreen() {
             }
           });
           setStaffMembers(normalized);
+          staffMembersRef.current = normalized;
+          updateCloudSalonMemberCountDescription(cloudSalon.id, normalized.length);
           AsyncStorage.setItem('@salon_staff_members', JSON.stringify(normalized)).catch(() => {});
           if (Object.keys(renamedMap).length > 0) {
             setSeats((prevSeats) => {
@@ -4208,11 +4333,16 @@ export default function SalonWorkScreen() {
         try {
           const parsed = JSON.parse(savedSalonsJson);
           if (Array.isArray(parsed) && parsed.length > 0) {
-            // 古いデモコード「FREE-01」があれば自動でランダムな6桁安全コードへアップグレード
-            // かつ「マイサロン」「二人通信モード」等があれば「タイマー同期モード (無料)」へ自動更新
+            // 古いデモコード・例文露出コード・ダミーコード等があれば、ローカルサロン（オーナー分）は自動でランダムな6桁安全コードへアップグレード
             loadedSalons = parsed.map((s) => {
               let updated = { ...s };
-              if (updated.inviteCode === 'FREE-01' || !updated.inviteCode) {
+              const cleanExisting = sanitizeInviteCode(updated.inviteCode);
+              const isLocalOwnerSalon = checkIsSalonOwner(updated, activeUserId);
+              if (
+                !cleanExisting ||
+                isDummyExampleInviteCode(cleanExisting) ||
+                (isLocalOwnerSalon && !isCloudUUID(updated.id) && isLegacyExposedInviteCode(cleanExisting))
+              ) {
                 updated.inviteCode = generateRandomInviteCode();
               }
               if (updated.id === 'workspace-free') {
@@ -4222,10 +4352,15 @@ export default function SalonWorkScreen() {
               return updated;
             });
             saveSalonsToStorage(loadedSalons);
+          } else {
+            saveSalonsToStorage(loadedSalons);
           }
         } catch (e) {
           console.warn('Failed to parse saved salons', e);
+          saveSalonsToStorage(loadedSalons);
         }
+      } else {
+        saveSalonsToStorage(loadedSalons);
       }
       setSavedSalons(loadedSalons);
 
@@ -4520,29 +4655,83 @@ export default function SalonWorkScreen() {
     }
   };
 
-  // ★ スタッフメンバーの削除
+  // ★ スタッフメンバーの削除・共有連携解除（Supabaseクラウド連動）
   const handleRemoveStaffMember = (memberItem) => {
+    if (!memberItem) return;
+    if (typeof memberItem === 'object' && memberItem.role === 'owner') {
+      Alert.alert('解除できません', 'サロン作成者（オーナー）はメンバーから削除できません。');
+      return;
+    }
+
     const displayName = getMemberDisplayName(memberItem);
     const targetId = typeof memberItem === 'object' ? memberItem.id : memberItem;
+    const targetCloudMemberId = typeof memberItem === 'object' ? memberItem.cloudMemberId : null;
+    const targetUserId =
+      typeof memberItem === 'object'
+        ? memberItem.user_id || (isCloudUUID(memberItem.id) ? memberItem.id : null)
+        : (isCloudUUID(memberItem) ? memberItem : null);
+    const isSelfLeave =
+      typeof memberItem === 'object' && !!memberItem.isMe && !isSalonOwnerRef.current;
 
     Alert.alert(
-      'メンバーの解除',
-      `「${displayName}」さんとの共有連携を解除しますか？`,
+      isSelfLeave ? 'サロンからの退出' : 'メンバーの解除',
+      isSelfLeave
+        ? `「${currentSalon?.name || 'このサロン'}」から退出して共有連携を解除しますか？`
+        : `「${displayName}」さんとの共有連携を解除しますか？`,
       [
         { text: 'キャンセル', style: 'cancel' },
         {
-          text: '解除する',
+          text: isSelfLeave ? '退出する' : '解除する',
           style: 'destructive',
           onPress: async () => {
-            const updated = staffMembers.filter((m) => {
-              if (typeof m === 'object') return m.id !== targetId;
+            const activeCloudSalonId =
+              cloudSalonIdRef.current ||
+              (isCloudUUID(currentSalonRef.current?.id) ? currentSalonRef.current.id : null);
+            const isCloudMember = !!(isCloudUUID(targetCloudMemberId) || targetUserId);
+
+            if (activeCloudSalonId && isCloudMember) {
+              const ok = await deleteSalonMember({
+                salonId: activeCloudSalonId,
+                cloudMemberId: targetCloudMemberId,
+                targetUserId: targetUserId,
+              });
+              if (!ok) {
+                Alert.alert('通信エラー', 'クラウドからのメンバー解除に失敗しました。通信環境をご確認のうえ再度お試しください。');
+                return;
+              }
+            }
+
+            if (isSelfLeave && activeCloudSalonId) {
+              await detachFromRemovedGuestSalon(activeCloudSalonId);
+              return;
+            }
+
+            const prevList = Array.isArray(staffMembersRef.current) ? staffMembersRef.current : staffMembers;
+            const updated = prevList.filter((m) => {
+              if (!m) return false;
+              if (typeof m === 'object') {
+                if (targetId && m.id === targetId) return false;
+                if (targetCloudMemberId && m.cloudMemberId === targetCloudMemberId) return false;
+                if (targetUserId && (m.user_id === targetUserId || m.id === targetUserId)) return false;
+                return true;
+              }
               return m !== targetId;
             });
+
             setStaffMembers(updated);
+            staffMembersRef.current = updated;
+            if (activeCloudSalonId) {
+              updateCloudSalonMemberCountDescription(activeCloudSalonId, updated.length);
+            }
             try {
               await AsyncStorage.setItem('@salon_staff_members', JSON.stringify(updated));
               // Apple Watchへ即時同期
-              syncSeatsToWatch(seats, userName, updated, { immediate: true });
+              syncSeatsToWatch(
+                seatsRef.current || seats,
+                userNameRef.current || userName,
+                updated,
+                { immediate: true }
+              );
             } catch (e) {
               console.warn('Failed to save staff members after remove', e);
             }
@@ -4631,6 +4820,10 @@ export default function SalonWorkScreen() {
       Alert.alert('入力エラー', '招待コードは4〜15文字で入力してください');
       return;
     }
+    if (isDummyExampleInviteCode(clean)) {
+      Alert.alert('入力エラー', '入力例（000-000 などのサンプル番号）は招待コードに設定できません。別のコードを指定してください。');
+      return;
+    }
 
     const targetId = editingSalonForCode.id;
     let finalCode = clean;
@@ -4673,6 +4866,10 @@ export default function SalonWorkScreen() {
     const code = sanitizeInviteCode(inputInviteCode);
     if (!code) {
       Alert.alert('入力エラー', '6桁の招待コードを入力してください');
+      return;
+    }
+    if (isDummyExampleInviteCode(code)) {
+      Alert.alert('入力エラー', '「000-000」などの番号は入力例です。親端末に表示されている実際の6桁の招待コードを入力してください。');
       return;
     }
 
@@ -4783,7 +4980,7 @@ export default function SalonWorkScreen() {
       id: testId,
       name: '表参道店 (PROサロン共有)',
       type: 'salon',
-      inviteCode: '888-999',
+      inviteCode: generateRandomInviteCode(),
       isPro: true,
       role: 'owner',
       memberCount: 5,
@@ -7183,7 +7380,9 @@ export default function SalonWorkScreen() {
             <Text style={[styles.subInfoText, { color: theme.textSecondary }]}>
               {currentSalon?.type === 'pair'
                 ? '2人までタイマー同期無料 (ペア招待可能)'
-                : (currentSalon?.description || 'オンライン中')}
+                : isCloudUUID(currentSalon?.id) && staffMembers.length > 0
+                  ? buildSalonMemberDescription(currentSalon, staffMembers.length)
+                  : (currentSalon?.description || 'オンライン中')}
             </Text>
             {currentSalon?.isPro ? (
               <View style={[styles.proBadge, { backgroundColor: '#FFD700' }]}>
@@ -8594,6 +8793,8 @@ export default function SalonWorkScreen() {
                     style={[styles.switcherActionBtn, { backgroundColor: theme.inputBg, borderColor: theme.cardBorder }]}
                     onPress={() => {
                       setIsSwitcherModalVisible(false);
+                      setInputInviteCode('');
+                      setInputStaffName(userName || 'アシスタント');
                       setIsJoinCodeModalVisible(true);
                     }}
                   >
@@ -8712,7 +8913,7 @@ export default function SalonWorkScreen() {
                             borderColor: theme.cardBorder,
                           },
                         ]}
-                        placeholder="例: 738-921"
+                        placeholder="例: 000-000"
                         placeholderTextColor={theme.textTertiary}
                         value={inputNewInviteCode}
                         onChangeText={setInputNewInviteCode}
@@ -8842,14 +9043,14 @@ export default function SalonWorkScreen() {
                     color: theme.accent,
                     borderColor: theme.cardBorder,
                     marginBottom: 12,
-                    fontSize: 22,
-                    fontWeight: '800',
-                    letterSpacing: 2,
+                    fontSize: inputInviteCode ? 22 : 17,
+                    fontWeight: inputInviteCode ? '800' : '500',
+                    letterSpacing: inputInviteCode ? 2 : 1,
                     textAlign: 'center',
                     paddingVertical: 10,
                   },
                 ]}
-                placeholder="358-220"
+                placeholder="例: 000-000"
                 placeholderTextColor={theme.textTertiary}
                 value={inputInviteCode}
                 onChangeText={setInputInviteCode}
@@ -12056,7 +12257,7 @@ export default function SalonWorkScreen() {
                       fontSize: 14,
                     },
                   ]}
-                  placeholder="例: 738-921 (未入力でも追加可能)"
+                  placeholder="例: 000-000 (未入力でも追加可能)"
                   placeholderTextColor={theme.textTertiary}
                   value={inputJoinMemberCode}
                   onChangeText={setInputJoinMemberCode}
@@ -12147,13 +12348,15 @@ export default function SalonWorkScreen() {
                             >
                               <Text style={{ fontSize: 11, fontWeight: '600', color: theme.accent }}>呼び名</Text>
                             </TouchableOpacity>
-                            <TouchableOpacity
-                              onPress={() => handleRemoveStaffMember(member)}
-                              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                              style={{ padding: 4 }}
-                            >
-                              <Ionicons name="trash-outline" size={17} color={theme.danger} />
-                            </TouchableOpacity>
+                            {member.role !== 'owner' ? (
+                              <TouchableOpacity
+                                onPress={() => handleRemoveStaffMember(member)}
+                                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                                style={{ padding: 4 }}
+                              >
+                                <Ionicons name="trash-outline" size={17} color={theme.danger} />
+                              </TouchableOpacity>
+                            ) : null}
                           </View>
                         </View>
                       );

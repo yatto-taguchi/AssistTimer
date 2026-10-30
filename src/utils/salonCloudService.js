@@ -29,8 +29,113 @@ const isValidUUID = (val) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
 
 /**
+ * 共有コード・招待コードの共通正規化関数（全角英数の半角化、各種ハイフン統一、空白除去、6桁数字の XXX-XXX 自動整形）
+ */
+export const normalizeInviteCode = (input) => {
+  if (!input) return '';
+  let s = String(input).replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0));
+  s = s.replace(/[\s\u3000]+/g, '').toUpperCase();
+  s = s.replace(/[ー−―‐—ｰ〜~]/g, '-');
+  if (/^\d{6}$/.test(s)) {
+    s = `${s.slice(0, 3)}-${s.slice(3)}`;
+  }
+  return s;
+};
+
+// UIのプレースホルダー（入力例）やダミー文字列として予約し、実サロンコードとしての生成・変更保存・参加を禁止するコード群
+export const DUMMY_EXAMPLE_INVITE_CODES = new Set([
+  '000-000',
+  '000000',
+  'XXX-XXX',
+  'XXXXXX',
+  'ABC-DEF',
+  'ABCDEF',
+  '123-456',
+  '123456',
+]);
+
+// 過去ビルドでプレースホルダーやテスト固定値として露出していたコード群（新規生成から完全除外し、オーナー端末の同期時に自動で新しいランダムコードへローテーション）
+export const LEGACY_EXPOSED_INVITE_CODES = new Set([
+  'FREE-01',
+  '358-220',
+  '738-921',
+  '888-999',
+]);
+
+export const isDummyExampleInviteCode = (code) => {
+  const clean = normalizeInviteCode(code);
+  if (!clean) return false;
+  if (DUMMY_EXAMPLE_INVITE_CODES.has(clean)) return true;
+  const digitsOnly = clean.replace(/-/g, '');
+  if (/^0+$/.test(digitsOnly)) return true;
+  if (/^(\d)\1{5}$/.test(digitsOnly)) return true;
+  return false;
+};
+
+export const isLegacyExposedInviteCode = (code) => {
+  const clean = normalizeInviteCode(code);
+  return !!clean && LEGACY_EXPOSED_INVITE_CODES.has(clean);
+};
+
+const getSecureRandomInt = (maxExclusive) => {
+  try {
+    if (
+      typeof globalThis !== 'undefined' &&
+      globalThis.crypto &&
+      typeof globalThis.crypto.getRandomValues === 'function'
+    ) {
+      const arr = new Uint32Array(1);
+      globalThis.crypto.getRandomValues(arr);
+      return arr[0] % maxExclusive;
+    }
+  } catch (e) {
+    // Math.random フォールバック
+  }
+  return Math.floor(Math.random() * maxExclusive);
+};
+
+/**
+ * ランダムな6桁（100〜999 - 100〜999）の安全な招待コード生成関数
+ * 入力例（000-000 等）・単純ゾロ目・過去ビルド露出コード（358-220 等）を完全除外
+ */
+export const generateRandomInviteCode = () => {
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const part1 = 100 + getSecureRandomInt(900); // 100〜999
+    const part2 = 100 + getSecureRandomInt(900); // 100〜999
+    if (part1 === part2) continue;
+    const candidate = `${part1}-${part2}`;
+    if (!isDummyExampleInviteCode(candidate) && !isLegacyExposedInviteCode(candidate)) {
+      return candidate;
+    }
+  }
+  const fallback1 = 100 + ((Date.now() + Math.floor(Math.random() * 899)) % 900);
+  const fallback2 = 100 + ((Math.floor(Math.random() * 899) + 37) % 900);
+  return `${fallback1}-${fallback2}`;
+};
+
+/**
+ * Supabaseクラウド上で未使用のランダム招待コードを取得
+ */
+const findUnusedRandomInviteCode = async (maxAttempts = 8) => {
+  for (let i = 0; i < maxAttempts; i += 1) {
+    const candidate = generateRandomInviteCode();
+    const { data: conflict, error } = await supabase
+      .from('salons')
+      .select('id')
+      .eq('invite_code', candidate)
+      .maybeSingle();
+    if (!error && !conflict) {
+      return candidate;
+    }
+  }
+  return generateRandomInviteCode();
+};
+
+/**
  * サロン・招待コードをSupabaseクラウドに登録（または既存を取得）
  * - salonId(UUID)が既知の場合はまずIDで検索し、招待コード変更後の再起動でも同一サロンを確実に維持する
+ * - オーナー自身のサロンが過去の例文露出コード・ダミーコードだった場合は、席とメンバーを維持したまま自動で未使用ランダムコードへローテーションする
+ * - 新規サロン作成時に万一コードが他ユーザーのサロンと衝突した場合は、絶対に他人のサロンへ混入させず新しい未使用コードを再発行して独立作成する
  * - allowCreate === false（ゲスト参加サロン）の場合は、サロン未発見時に勝手な新規空サロン作成を行わない
  */
 export const syncOrCreateSalonInCloud = async ({
@@ -42,9 +147,9 @@ export const syncOrCreateSalonInCloud = async ({
   allowCreate = true,
 }) => {
   const hasValidSalonId = isValidUUID(salonId);
-  if (!inviteCode && !hasValidSalonId) return null;
+  if (!inviteCode && !hasValidSalonId && allowCreate === false) return null;
   const userId = await getOrCreateUserId();
-  const cleanCode = inviteCode ? inviteCode.replace(/\s+/g, '').toUpperCase() : '';
+  let cleanCode = normalizeInviteCode(inviteCode);
 
   try {
     let salonData = null;
@@ -60,64 +165,126 @@ export const syncOrCreateSalonInCloud = async ({
       }
       if (existingById) {
         salonData = existingById;
+        const currentCloudCode = normalizeInviteCode(salonData.invite_code);
+        if (
+          salonData.owner_user_id === userId &&
+          (!currentCloudCode ||
+            isDummyExampleInviteCode(currentCloudCode) ||
+            isLegacyExposedInviteCode(currentCloudCode))
+        ) {
+          const rotatedCode = await findUnusedRandomInviteCode();
+          const { data: rotatedSalon, error: rotateErr } = await supabase
+            .from('salons')
+            .update({ invite_code: rotatedCode })
+            .eq('id', salonData.id)
+            .select()
+            .single();
+          if (!rotateErr && rotatedSalon) {
+            salonData = rotatedSalon;
+          }
+        }
       }
     }
 
     if (!salonData && cleanCode) {
-      const { data: existing, error: searchErr } = await supabase
-        .from('salons')
-        .select('*')
-        .eq('invite_code', cleanCode)
-        .maybeSingle();
-
-      if (searchErr) {
-        console.warn('Error searching salon by code:', searchErr);
-      }
-      salonData = existing;
-    }
-
-    if (!salonData) {
-      if (allowCreate === false || !cleanCode) {
-        return null;
-      }
-      const { data: created, error: insertErr } = await supabase
-        .from('salons')
-        .insert({
-          name: salonName || 'サロン',
-          owner_user_id: userId,
-          invite_code: cleanCode,
-          is_pro: !!isPro,
-        })
-        .select()
-        .single();
-
-      if (insertErr) {
-        console.warn('Error creating salon:', insertErr);
-        const { data: retry } = await supabase
+      if (allowCreate === false) {
+        const { data: existing, error: searchErr } = await supabase
           .from('salons')
           .select('*')
           .eq('invite_code', cleanCode)
           .maybeSingle();
-        salonData = retry;
+        if (searchErr) {
+          console.warn('Error searching salon by code:', searchErr);
+        }
+        salonData = existing;
+      } else if (!isDummyExampleInviteCode(cleanCode) && !isLegacyExposedInviteCode(cleanCode)) {
+        const { data: existing, error: searchErr } = await supabase
+          .from('salons')
+          .select('*')
+          .eq('invite_code', cleanCode)
+          .maybeSingle();
+        if (searchErr) {
+          console.warn('Error searching salon by code:', searchErr);
+        }
+        if (existing) {
+          if (existing.owner_user_id === userId) {
+            salonData = existing;
+          } else {
+            // 他ユーザーのサロンとコードが偶然衝突した場合は絶対に合流せず新しい未使用コードへ差し替える
+            cleanCode = '';
+          }
+        }
       } else {
-        salonData = created;
+        cleanCode = '';
+      }
+    }
+
+    if (!salonData) {
+      if (allowCreate === false) {
+        return null;
+      }
+      let candidateCode =
+        cleanCode && !isDummyExampleInviteCode(cleanCode) && !isLegacyExposedInviteCode(cleanCode)
+          ? cleanCode
+          : await findUnusedRandomInviteCode();
+
+      for (let attempt = 0; attempt < 4 && !salonData; attempt += 1) {
+        const { data: created, error: insertErr } = await supabase
+          .from('salons')
+          .insert({
+            name: salonName || 'サロン',
+            owner_user_id: userId,
+            invite_code: candidateCode,
+            is_pro: !!isPro,
+          })
+          .select()
+          .single();
+
+        if (!insertErr && created) {
+          salonData = created;
+          break;
+        }
+        console.warn('Error creating salon (retrying with fresh code):', insertErr);
+        candidateCode = await findUnusedRandomInviteCode();
       }
     }
 
     if (!salonData) return null;
 
-    const role = salonData.owner_user_id === userId ? 'owner' : 'assistant';
-    await supabase
-      .from('salon_members')
-      .upsert(
-        {
-          salon_id: salonData.id,
-          user_id: userId,
-          display_name: (userName || 'スタイリスト').trim(),
-          role: role,
-        },
-        { onConflict: 'salon_id,user_id' }
-      );
+    const isOwner = salonData.owner_user_id === userId;
+    if (isOwner) {
+      await supabase
+        .from('salon_members')
+        .upsert(
+          {
+            salon_id: salonData.id,
+            user_id: userId,
+            display_name: (userName || 'スタイリスト').trim(),
+            role: 'owner',
+          },
+          { onConflict: 'salon_id,user_id' }
+        );
+    } else {
+      // ゲスト起動時: すでにオーナー側からメンバー解除（削除）されている場合は勝手に再登録せず解除状態を返す
+      const { data: existingMember, error: memberCheckErr } = await supabase
+        .from('salon_members')
+        .select('id, display_name, role')
+        .eq('salon_id', salonData.id)
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (!memberCheckErr && !existingMember) {
+        return { ...salonData, _removedFromMembers: true };
+      }
+
+      const trimmedName = (userName || '').trim();
+      if (existingMember && trimmedName && existingMember.display_name !== trimmedName) {
+        await supabase
+          .from('salon_members')
+          .update({ display_name: trimmedName })
+          .eq('id', existingMember.id);
+      }
+    }
 
     return salonData;
   } catch (e) {
@@ -131,9 +298,12 @@ export const syncOrCreateSalonInCloud = async ({
  */
 export const updateSalonInviteCode = async ({ salonId, newInviteCode }) => {
   if (!isValidUUID(salonId) || !newInviteCode) return null;
-  const cleanCode = newInviteCode.replace(/\s+/g, '').toUpperCase();
+  const cleanCode = normalizeInviteCode(newInviteCode);
   if (!cleanCode) {
     throw new Error('招待コードを入力してください');
+  }
+  if (isDummyExampleInviteCode(cleanCode)) {
+    throw new Error('入力例（000-000 などのサンプルコード）は設定できません。別の招待コードを指定してください。');
   }
 
   const { data: conflict, error: conflictErr } = await supabase
@@ -172,7 +342,13 @@ export const joinSalonByInviteCode = async ({ inviteCode, userName }) => {
   }
 
   const userId = await getOrCreateUserId();
-  const cleanCode = inviteCode.replace(/\s+/g, '').toUpperCase();
+  const cleanCode = normalizeInviteCode(inviteCode);
+  if (!cleanCode) {
+    throw new Error('招待コードを入力してください');
+  }
+  if (isDummyExampleInviteCode(cleanCode)) {
+    throw new Error('「000-000」などのサンプル番号は入力例です。親端末に表示されている実際の招待コードを入力してください。');
+  }
 
   const { data: salon, error: searchErr } = await supabase
     .from('salons')
@@ -212,7 +388,8 @@ export const joinSalonByInviteCode = async ({ inviteCode, userName }) => {
 /**
  * サロンに所属するメンバー一覧を取得
  */
-export const fetchSalonMembers = async (salonId) => {
+export const fetchSalonMembers = async (salonId, options = {}) => {
+  const { returnNullOnError = false } = options || {};
   if (!salonId) return [];
   try {
     const { data, error } = await supabase
@@ -223,12 +400,50 @@ export const fetchSalonMembers = async (salonId) => {
 
     if (error) {
       console.warn('fetchSalonMembers error:', error);
-      return [];
+      return returnNullOnError ? null : [];
     }
     return data || [];
   } catch (e) {
     console.warn('fetchSalonMembers failed:', e);
-    return [];
+    return returnNullOnError ? null : [];
+  }
+};
+
+/**
+ * サロンメンバーをクラウド（salon_members）から削除・連携解除
+ */
+export const deleteSalonMember = async ({ salonId, cloudMemberId = null, targetUserId = null }) => {
+  if (!isValidUUID(salonId) || (!cloudMemberId && !targetUserId)) return false;
+  try {
+    let deletedAny = false;
+    if (isValidUUID(cloudMemberId)) {
+      const { error } = await supabase
+        .from('salon_members')
+        .delete()
+        .eq('salon_id', salonId)
+        .eq('id', cloudMemberId);
+      if (error) {
+        console.warn('deleteSalonMember by id error:', error);
+        return false;
+      }
+      deletedAny = true;
+    }
+    if (targetUserId && !String(targetUserId).startsWith('mem_')) {
+      const { error } = await supabase
+        .from('salon_members')
+        .delete()
+        .eq('salon_id', salonId)
+        .eq('user_id', String(targetUserId));
+      if (error) {
+        console.warn('deleteSalonMember by user_id error:', error);
+        return deletedAny;
+      }
+      deletedAny = true;
+    }
+    return deletedAny;
+  } catch (e) {
+    console.warn('deleteSalonMember failed:', e);
+    return false;
   }
 };
 
@@ -249,8 +464,8 @@ export const subscribeSalonMembers = (salonId, onMembersChange) => {
         filter: `salon_id=eq.${salonId}`,
       },
       async (payload) => {
-        const updatedMembers = await fetchSalonMembers(salonId);
-        if (typeof onMembersChange === 'function') {
+        const updatedMembers = await fetchSalonMembers(salonId, { returnNullOnError: true });
+        if (Array.isArray(updatedMembers) && typeof onMembersChange === 'function') {
           onMembersChange(updatedMembers, payload);
         }
       }
@@ -471,13 +686,66 @@ export const fetchSalonTimers = async (salonId, options = {}) => {
       .select('*')
       .eq('salon_id', salonId)
       .order('sort_order', { ascending: true })
-      .order('created_at', { ascending: true });
+      .order('updated_at', { ascending: false });
 
     if (error) {
       console.warn('fetchSalonTimers error:', error);
       return returnNullOnError ? null : [];
     }
-    const mapped = (data || []).map((row, idx) => mapCloudTimerToSeat(row, idx));
+
+    const rawMapped = (data || []).map((row, idx) => mapCloudTimerToSeat(row, idx));
+
+    // 同一サロン内で同じ席名（「1番」と「1番席」の表記ゆれ含む）の重複レコードが存在する場合は、
+    // 稼働中（running）＞ 最終更新日時（updatedAt）が新しい方 ＞ sortOrder設定済みの順で正規の1席に統合
+    const dedupedByLabel = new Map();
+    const unkeyedSeats = [];
+    rawMapped.forEach((seat) => {
+      const labelKey = String(seat.seatLabel || seat.name || '')
+        .replace(/\s*[\(（]サンプル[\)）]/g, '')
+        .replace(/席$/, '')
+        .trim();
+      if (!labelKey) {
+        unkeyedSeats.push(seat);
+        return;
+      }
+      const existing = dedupedByLabel.get(labelKey);
+      if (!existing) {
+        dedupedByLabel.set(labelKey, seat);
+        return;
+      }
+      const existingRunning = existing.status === 'running' ? 1 : 0;
+      const candidateRunning = seat.status === 'running' ? 1 : 0;
+      if (candidateRunning !== existingRunning) {
+        if (candidateRunning > existingRunning) {
+          dedupedByLabel.set(labelKey, seat);
+        }
+        return;
+      }
+      const existingUpdated = Number(existing.updatedAt || 0);
+      const candidateUpdated = Number(seat.updatedAt || 0);
+      if (candidateUpdated !== existingUpdated) {
+        if (candidateUpdated > existingUpdated) {
+          dedupedByLabel.set(labelKey, seat);
+        }
+        return;
+      }
+      const existingHasOrder = Number(existing.sortOrder) > 0 ? 1 : 0;
+      const candidateHasOrder = Number(seat.sortOrder) > 0 ? 1 : 0;
+      if (candidateHasOrder > existingHasOrder) {
+        dedupedByLabel.set(labelKey, seat);
+      }
+    });
+
+    const mapped = [...dedupedByLabel.values(), ...unkeyedSeats].sort((a, b) => {
+      const orderA = Number(a.sortOrder) > 0 ? Number(a.sortOrder) : (Number(a.seatNumber) > 0 ? Number(a.seatNumber) : 999999);
+      const orderB = Number(b.sortOrder) > 0 ? Number(b.sortOrder) : (Number(b.seatNumber) > 0 ? Number(b.seatNumber) : 999999);
+      if (orderA !== orderB) return orderA - orderB;
+      const numA = Number(a.seatNumber || 0);
+      const numB = Number(b.seatNumber || 0);
+      if (numA !== numB) return numA - numB;
+      return String(a.id || '').localeCompare(String(b.id || ''));
+    });
+
     const usedNums = new Set();
     let maxUsed = 0;
     mapped.forEach((seat) => {

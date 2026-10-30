@@ -1063,7 +1063,7 @@ CREATE TABLE salons (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,                     -- サロン名（例: 'LITT HAIR DESIGN'）
   owner_user_id TEXT NOT NULL,            -- オーナー端末UUID（課金契約者）
-  invite_code TEXT UNIQUE NOT NULL,       -- 6桁招待コード（例: '738921'）
+  invite_code TEXT UNIQUE NOT NULL,       -- ランダム発行招待コード（100〜999-100〜999、UI入力例は非実在の '000-000'）
   is_pro BOOLEAN DEFAULT FALSE,           -- Proサロンプラン加入フラグ
   created_at TIMESTAMPTZ DEFAULT now()
 );
@@ -1083,8 +1083,8 @@ CREATE TABLE salon_members (
 );
 ```
 > **参加制限ルール**:
-> - 参加メンバー数 <= 2名: 完全無料（1対1ペア共有）。
-> - 参加メンバー数 >= 3名: `salons.is_pro = true` が必須。未加入の場合はオーナー課金案内を返却。
+> - 現行実装（複数端末・シミュレーター検証対応）: `joinSalonByInviteCode` / `handleJoinByCode` に人数上限のハードブロックは設けず、無料状態でも3人目以降の参加・リアルタイム同期が可能。
+> - ビジネスモデル設計: 参加メンバー数 <= 2名は完全無料（1対1ペア共有）、3名以上は `salons.is_pro = true`（Proサロンプラン）対象。
 
 #### ③ `salon_timers`（客席タイマーリアルタイムボード）
 ```sql
@@ -1122,6 +1122,7 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 
 ### 6.2. 変更履歴 (Changelog)
 
+| 2026-10-30 | **招待コードの端末別ランダム一意発行・例文分離、ゲスト参加時の初期客席同期（`fetchSalonTimers`）スタック解消、メンバー削除・退出のクラウド連動（`deleteSalonMember`）＆人数リアルタイム反映、および iPhone/Watch シミュレータービルド基盤構築 (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`, `eas.json`)** | ①**サロン招待コードのランダム一意発行・衝突遮断・入力例プレースホルダー非実在コード分離（セクション53）**: サロン参加・コード変更・メンバー連携の全入力欄プレースホルダーを実在不能な `例: 000-000` に統一し、ダミー例（`000-000`, `123-456`, 全桁ゾロ目等）での参加・保存をブロック。`crypto.getRandomValues` による `100〜999-100〜999` ランダム生成を導入し、過去露出コード（`358-220`, `738-921`, `888-999`, `FREE-01`）を新規発行から除外。`syncOrCreateSalonInCloud` での他ユーザーサロンとのコード衝突時は絶対に合流せず未使用ランダムコードを再発行し、オーナー端末の過去露出コードも客席・メンバーを維持したまま自動ローテーション。<br>②**ゲスト参加時の初期客席一覧取得（`fetchSalonTimers`）カラム不整合修正 ＆ 重複席レコード自動統合（セクション54）**: `salon_timers` テーブルに存在しない `created_at` ソートによる PostgreSQL `42703` エラー（「招待元の客席データを同期中 / 全0席」のまま進まない不具合）を解消し、実在カラム `sort_order` + `updated_at` ソートへ適正化。さらに同一席名（「1番」と「1番席」表記ゆれ含む）の重複レコードを `running` ＞ 最新 `updatedAt` ＞ `sortOrder > 0` 優先で正規の1席へ自動統合。<br>③**サロンメンバー削除・退出の Supabase `salon_members` 連動 ＆ 参加人数リアルタイム同期（セクション55）**: `deleteSalonMember` を新設し、`handleRemoveStaffMember` 実行時にクラウドの `salon_members` から確実に `DELETE`（オーナー行 `role === 'owner'` は削除アイコン非表示で保護）。解除されたゲスト端末はリアルタイム監視（`subscribeSalonMembers`）および次回起動時（`syncOrCreateSalonInCloud` での勝手な再UPSERT抑止＋`detachFromRemovedGuestSalon`）に自動で個人無料ワークスペースへ切り離し。ヘッダーの `X名参加中 (クラウド同期中)` 表示も `staffMembers.length` にリアルタイム連動。<br>④**iPhone ⇄ Apple Watch ペアシミュレーター検証プロファイル追加（セクション56）**: `eas.json` に `"simulator"` プロファイル（`"ios": { "simulator": true }, "channel": "simulator"`）を追加し、Expo Go では動作しないネイティブモジュール（`ExpoWatchConnectivity`, `ExpoAlarmKit`, `AssistTimerWatch.app`）を含むシミュレーター用ネイティブビルドと `eas update --branch simulator` による即時OTA検証フローを確立。 |
 | 2026-10-28 | **Supabase クラウドバックエンド完全連携、端末固有UUID発行、招待コードによるサロン参加・メンバーおよび客席タイマーリアルタイム双方向同期（Realtime WebSocket）実装 (Build 88) (`src/utils/supabase.js`, `src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)** | ①**Supabase クラウド基盤の公式本番接続 (`src/utils/supabase.js`)**: 専用の新規プロジェクト「AssistTimer」を開設し、`salons`、`salon_members`、`salon_timers` の3テーブル構成および `supabase_realtime` リアルタイム発行を設定。`@supabase/supabase-js` を導入し、AsyncStorageセッション永続化と環境変数フォールバック接続を確立。<br>②**端末固有UUID自動発行 ＆ サロン自動確保 (`src/utils/salonCloudService.js`)**: 端末ごとに一意のUUID（`getOrCreateUserId()`）を生成・保存。サロン起動・作成・招待コード共有時にSupabaseクラウドへサロン情報を自動登録し、作成者をオーナー（`role: 'owner'`）として登録。<br>③**招待コードによるサロン参加 ＆ メンバー自動登録 (`handleJoinByCode`)**: 参加スタッフが招待コードを入力すると、Supabaseクラウドから該当サロンを検索し、`salon_members` へ自動参加登録（`joinSalonByInviteCode`）。参加完了時に即座にサロン切替、メンバー一覧の取得・永続化、および手元Apple Watchへの即時プッシュ同期を実行。<br>④**サロンメンバーの Realtime WebSocket 双方向リアルタイム同期 (`subscribeSalonMembers`)**: 所属サロンのメンバーテーブル変更をリアルタイム監視し、別端末からスタッフが参加または表示名変更を行った瞬間に、全員の画面のメンバー一覧およびヘッダーバッジ（`メンバー (X)`）がリロード不要で即時自動更新。<br>⑤**客席タイマー（salon_timers）の差分検出リアルタイム双方向同期 (`subscribeSalonTimers`, `syncChangedSeatsToCloud`)**: タイマー開始・延長（+1分/+3分/+5分/秒微調整）・一時停止・再開・リセット停止・施術終了・ヘルプ担当指定・チェックタイマー追加/完了・席名変更・席追加/削除のあらゆる操作において、シグネチャ差分検知により状態変化の瞬間のみSupabaseクラウドへ即座にUPSERT/DELETEを送信。他端末の操作イベントを受信した際もリモートフラグガードによりエコー・無限ループを遮断し、手元のApple Watchまで含めて全員のタイマー盤面が1秒未満で完全一致連動。 |
 | 2026-10-27 | **超過・操作分岐画面へのタイマー名バッジ表示（メインタイマー／◯番席／チェック）およびヘルプ未設定アラート（残り3分以下）の0.5秒周期連続発火・ちらつきバグ完全根絶 (Build 87) (`targets/watch/content.swift`)** | ①**超過・操作分岐画面のタイマー名バッジ明示 (`MainTimerActionSheet`, `TimeActionSheet`)**: タイム超過時に自動表示される画面や操作分岐画面でどのタイマーか一目で判別できるよう、デジタル数字の直上にメインタイマーは `⏱️ メインタイマー`、客席タイマーは `⏲️ 1番席`（設定した席名）、チェックタイマーは `🔍 1番席（チェック）` の高視認性ピルバッジを常時表示。<br>②**ヘルプ未設定アラート（`checkUnassignedHelpAlerts` / `showNotification`）の連続発火・ちらつき完全解消**: `checkUnassignedHelpAlerts()` が `ContentView.timers` のみ `hasAlertedHelpUnassigned = true` に更新して `sessionManager.timers` を更新していなかったため、次の0.5秒周期 `WatchRealtimeClock` ティックの `self.timers != sessionManager.timers` 判定で `false` に巻き戻り、0.5秒ごとに通知バナー再生成と過去 `asyncAfter` による消去が衝突して激しくちらついていた不具合を抜本修正。発火時に `sessionManager.timers` も同期更新し、`SeatTimerItem` の辞書シリアライズ（`init?(dictionary:)` / `toDictionary()`）と `processReceivedData` でも `hasAlertedHelpUnassigned` を保持。さらに `showNotification` に `DispatchWorkItem` キャンセル制御と同一バナー重複アニメーション抑止を導入し、1回のタイマー稼働につき確実に1度だけスムーズに表示されるよう修正。 |
 | 2026-10-27 | **システムアラーム「終了」押下時の超過カウントアップ（`+00:xx`）継続表示、文字盤モジュラー・アプリ内超過タップ時の「タイマーを止める」最上段即時起動、および1タップ `00:00` 完全停止・双方向同期仕様 (Build 86)** | ①**システムアラーム `[終了]` 押下時の超過タイム（`+00:xx`）維持 (`targets/watch/alarm.swift`, `targets/watch/content.swift`)**: watchOSシステムアラーム（「"AssistTimer" からのアラームです。 [開く] [終了]」）で右側の `[終了]` を押した際、アラームの振動・音・リピート通知のみを即座に停止し、メインタイマー・客席タイマー・中間チェックタイマーのすべてにおいて `00:00` にリセットせず超過タイム（`+00:xx`）のカウントアップ表示を文字盤コンプリケーションおよびWatchアプリ双方で継続。中間チェックタイマーも `acknowledged` 記録により残りの本タイマー第2段階スマートアラームへ自動引き継ぎしつつ超過表示を維持。<br>②**超過タイムタップ時／超過中Watch起動時の `[ ⏹️ タイマーを止める ]` 最上段即時表示 ＆ シート自動遷移 (`targets/watch/content.swift`, `targets/watch-widget/widget.swift`, `targets/watch/widget_sync.swift`)**: 文字盤モジュラーコンプリケーション（`超過 +00:xx`）やWatchアプリ内の超過カードをタップした際、および超過中にアプリアイコン・ドック・デジタルクラウンからWatchアプリを開いた際（`scenePhase == .active`）に、即座に `[ ⏹️ タイマーを止める ]` を最上段に配置した操作画面（`MainTimerActionSheet` の `.timerActionBranch`、または `TimeActionSheet` の `.timerActionBranch` / `.subCheckActionBranch`）を自動で開く。既に操作シートを開いている最中に `00:00` に到達して超過突入した場合も自動的に該当超過モードへ遷移。中間チェック超過（`isCheckOvertime`）時もサムネイル・リストカードを赤枠パルス発光＋`検超過` バッジで最優先表示。<br>③**`[ ⏹️ タイマーを止める ]` 1タップでの確実な `00:00` リセット ＆ 文字盤コンプリケーション・iPhone即時同期 (`targets/watch/content.swift`, `src/screens/HomeScreen.js`, `src/screens/SalonWorkScreen.js`)**: `[ ⏹️ タイマーを止める ]` を1回タップするだけで、Watchアプリ・文字盤コンプリケーション（`forceReload: true` 強制タイムライン更新）・iPhoneのすべてが確実に `00:00`（`稼働中0席`）へリセット。シートを閉じた際（`onDismiss` / `deferMainTimerSheetCloseAction`）にも即時コンプリケーション同期を実行。<br>④**超過中の時間延長（`+1分` / `+5分` 等）時の未来基準カウントダウン復帰 ＆ 双方向停止同期の整合性保証 (`targets/watch/content.swift`, `src/screens/HomeScreen.js`, `src/screens/SalonWorkScreen.js`)**: 超過中に時間延長した際は現在時刻 `Date()` 基準で未来へ延長し、Watchローカル保護（`markLocalSeatMod` / `ADJUST` ホールド条件の厳格化）およびiPhone側稼働復帰を保証。さらにiPhone側の全停止経路に `lastResetAt` / `lastResetTargetEndTimestamp` を付与し開始・再開・延長時に `0` クリアするとともに、`!isAutoFinished` ガードによりカウントアップOFF自動終了時の誤リセットを完全防止。 |
@@ -3060,7 +3061,7 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
 - **確定仕様**:
   - **入力項目**:
     1. **あなたのスタッフ名（必須）**: 参加するスタッフの名前（例: 「アシスタント田中」「スタイリスト佐藤」）。現在の表示名が初期値としてプレースホルダー・初期値に入り、即座に編集可能。
-    2. **6桁の招待コード（必須）**: 親端末に表示されている6桁コード（例: `358-220`）。中央揃え大文字・ハイフン自動整形対応。
+    2. **6桁の招待コード（必須）**: 親端末に表示されている6桁コード（プレースホルダー表示は実在しない入力例 `例: 000-000`）。中央揃え大文字・ハイフン自動整形対応。
     3. **サロンの表示名（任意）**: 端末内でのサロン別名（未入力でも親サロン名が自動設定）。
   - **参加実行時（`handleJoinByCode`）の自動処理**:
     - 入力されたスタッフ名を `userName` および `@assist_timer_user_name` に保存。
@@ -3583,3 +3584,73 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
      - Apple Watch からの停止・シャンプー開始操作（`STOP_TIMER`、`RESET_ZERO`、`FINISH_MEASURE`、`STOP_ALARM(main)`、`ENTER_HELP`、`START_SHAMPOO`、`UPDATE_STATUS(shampoo)`）
      - Supabase Realtime / クラウド同期（`reconcileRealtimeSeatHistory`、`reconcileCloudTimers`、`mapCloudTimerToSeat`）による他端末でのタイマー停止・シャンプー移行
    - **既存保存データの自動クリーンアップ**: `sanitizeLoadedSeats`（アプリ起動時・サロン切替時）において、非稼働席（`status !== 'running'`）またはシャンプー中席に残っていた過去の蓄積履歴も自動的に `history: []` へクリーンアップし、稼働中タイマーの履歴のみを保護する。
+
+---
+
+## 53. サロン招待コードの端末別ランダム一意発行保証・衝突完全遮断・入力例プレースホルダー非実在コード分離仕様 (2026-10-30)
+
+### 53.1 背景・課題
+
+1. サロン参加モーダル等のプレースホルダー（グレー表示の入力例）に実在サロンのコードと同じ `358-220`（および `738-921`、テストサロン固定値 `888-999`）が記載されていたため、他ユーザーが例文の番号をそのまま入力して同一サロンへ入ってしまうリスクがあった。
+2. また新規サロンの初回クラウド登録（`syncOrCreateSalonInCloud`）において、万一ローカル生成コードが他ユーザーの既存サロン `invite_code` と偶然一致した場合に新規コードを再発行せず既存サロンを取得してしまう経路が残っていた。
+
+### 53.2 確定仕様・実装詳細 (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)
+
+1. **入力例プレースホルダーを実在不能な `例: 000-000` に統一＆誤入力ブロック**:
+   - サロン参加モーダル・招待コード変更欄・メンバー共有コード入力欄のすべてのプレースホルダーを **`例: 000-000`**（未入力時は例文と一目で分かるフォントウェイト）に統一。
+   - `generateRandomInviteCode()` は `100〜999` の3桁×2ブロック（`part1 !== part2`）のみを生成するため `000-000` は絶対に生成されず、さらに `DUMMY_EXAMPLE_INVITE_CODES`（`000-000`, `123-456`, `XXX-XXX`, 全桁ゾロ目等）でのサロン参加およびコード保存を明示エラーでブロック。
+2. **端末ごとの完全ランダム発行とクラウド一意性保証・過去露出コードの自動ローテーション**:
+   - `crypto.getRandomValues`（フォールバック付き）による乱数生成を採用し、過去の露出コード群 `LEGACY_EXPOSED_INVITE_CODES`（`FREE-01`, `358-220`, `738-921`, `888-999`）およびダミー例を新規生成対象から完全除外（開発用テストPROサロン作成時もランダム発行に変更）。
+   - `syncOrCreateSalonInCloud` において、新規オーナーサロン登録時に他ユーザーの `invite_code` と衝突した場合は絶対に合流せず Supabase 上で未使用のランダムコードを再取得して独立サロンを作成。また、オーナー自身のサロンが過去露出コード（`358-220` 等）のままだった場合は、既存の客席データ・参加済みメンバー（`salonId` UUID紐付け）を維持したまま自動的に新しい未使用ランダムコードへローテーションする。
+
+---
+
+## 54. ゲスト参加時の初期客席一覧取得（`fetchSalonTimers`）カラム不整合修正および重複席レコード正規化仕様 (2026-10-30)
+
+### 54.1 背景・課題
+
+1. `fetchSalonTimers`（`src/utils/salonCloudService.js`）のクエリに `.order('created_at', { ascending: true })` が指定されていたが、Supabase の `salon_timers` テーブルには `created_at` カラムが存在しない（`updated_at`, `sort_order` のみ存在）ため、PostgreSQL エラー `42703 (column salon_timers.created_at does not exist)` が発生し常に `null` が返っていた。
+2. その結果、招待コードで参加したゲスト端末の初期取得（`handleJoinByCode` / `reconcileCloudTimers`）で客席配列が空（`[]`）のままとなり、親端末が各席を1席ずつ Realtime 更新するまで **`サロン全体 (全0席)` / `招待元の客席データを同期中`** から進まない状態となっていた。
+
+### 54.2 確定仕様・実装詳細 (`src/utils/salonCloudService.js`)
+
+1. **`salon_timers` クエリソート条件の適正化**:
+   - 存在しない `created_at` ソートを廃止し、実在カラムである `.order('sort_order', { ascending: true }).order('updated_at', { ascending: false })` に修正。サロン参加直後およびアプリ起動時の `reconcileCloudTimers` で招待元の全客席を即時一括取得する。
+2. **同一サロン内での同名重複レコード自動統合**:
+   - 過去に `fetchSalonTimers` 失敗下で蓄積した同一席名（「1番」と「1番席」の表記ゆれ含む）の重複レコードが存在する場合、`status === 'running'`（稼働中）＞ `updatedAt`（最新更新）＞ `sortOrder > 0` の優先順位で正規の1席に統合し、`sortOrder`（未設定時は席番号）順に整列して返却する。
+
+---
+
+## 55. サロンメンバー削除・退出のクラウド連動（`salon_members` DELETE）および参加人数リアルタイム反映仕様 (2026-10-30)
+
+### 55.1 背景・課題
+
+1. メンバー管理モーダルの削除処理（`handleRemoveStaffMember`）がローカル配列 `staffMembers` のみを更新し、Supabase の `salon_members` テーブルに対して `DELETE` を実行していなかったため、メンバーを削除してもクラウド上および他端末の人数が減らず、再同期時に削除したメンバーが復活していた。
+2. またヘッダーの参加人数テキスト（`X名参加中 (クラウド同期中)`）が参加時の固定文字列 `currentSalon.description` のままで、`staffMembers.length` の増減に追従していなかった。さらに解除されたゲスト端末が次回起動時に `syncOrCreateSalonInCloud` で自動的に `salon_members` へ再UPSERTされる経路があった。
+
+### 55.2 確定仕様・実装詳細 (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)
+
+1. **クラウドメンバー削除API（`deleteSalonMember`）とオーナー保護**:
+   - `deleteSalonMember({ salonId, cloudMemberId, targetUserId })` を新設し、`handleRemoveStaffMember` 実行時に Supabase の `salon_members` から対象レコードを確実に `DELETE` する。
+   - サロン作成者（`role === 'owner'`）の行には削除アイコンを表示せず誤削除を防止する。
+2. **解除されたゲスト端末の自動切り離しと勝手な再登録防止**:
+   - ゲスト自身が自分を削除（退出）した場合、または他端末からメンバー解除され `subscribeSalonMembers` / 起動時 `fetchSalonMembers` で自分の `user_id` が存在しなくなった場合、`detachFromRemovedGuestSalon` により自動的に共有サロンから切り離して個人の無料ワークスペースへ戻す。
+   - `syncOrCreateSalonInCloud` は非オーナー（ゲスト）起動時に `salon_members` を確認し、すでに解除済みの場合は勝手に再UPSERTせず `_removedFromMembers: true` を返す。
+3. **参加人数表示のリアルタイム連動**:
+   - ヘッダーのサブタイトルおよび保存済みサロン情報の `description` を `staffMembers.length` とリアルタイム連動させ、メンバー追加・削除時に全端末の `X名参加中 (クラウド同期中)` と `メンバー(X)` が即座に一致して増減する。
+
+---
+
+## 56. iPhone ⇄ Apple Watch ペアシミュレーター検証用 EAS ビルドプロファイル & OTA配信仕様 (2026-10-30)
+
+### 56.1 背景・目的
+
+1. Expo Go 上の iPhone シミュレーターではカスタムネイティブモジュール（`ExpoWatchConnectivity`、`ExpoAlarmKit`）およびペアリングされた watchOS シミュレーター用アプリ（`AssistTimerWatch.app`）がロードされないため、実機（オーナー）⇄ シミュレーター（スマホ＋Apple Watch 参加者）間でのリアルタイム同期・通知・アラーム検証を行うためのネイティブシミュレータービルド基盤が必要であった。
+
+### 56.2 構成・運用手順 (`eas.json`)
+
+1. **`eas.json` の `"simulator"` プロファイル**:
+   - `"simulator": { "ios": { "simulator": true }, "channel": "simulator" }` を定義。
+   - `npx eas-cli build --platform ios --profile simulator` により、`Release-iphonesimulator/AssistTimer.app`（`com.assisttimer`）と `Release-watchsimulator/AssistTimerWatch.app`（`com.assisttimer.watchkitapp`）の双方を同時生成し、`xcrun simctl install` でペアリング済みの iPhone / Apple Watch シミュレーターへ導入する。
+2. **シミュレーター専用 OTA 即時反映（`channel: "simulator"`）**:
+   - JS 層の修正時はネイティブ再ビルドを行わず、`npx eas-cli update --branch simulator` で `"simulator"` チャンネルのみへ配信することで、本番・TestFlight 環境に影響を与えずにシミュレーターへ十数秒で反映・検証できる。
