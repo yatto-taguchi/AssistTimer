@@ -172,6 +172,13 @@ public class ExpoWatchConnectivityModule: Module {
       return self.buildStatus()
     }
 
+    // ★ ネイティブビルドバージョン（CFBundleShortVersionString + CFBundleVersion）を同期取得（TestFlightアップデート検知用）
+    Function("getAppBuildVersion") { () -> String in
+      let shortVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+      let buildVer = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+      return "\(shortVer) (\(buildVer))"
+    }
+
     // ★ JSの受信準備完了を通知し、それまでに保留していた受信をまとめて受け取る
     // 戻り値: [{ "name": イベント名, "body": イベント本体 }]
     Function("takePendingEvents") { () -> [[String: Any]] in
@@ -275,7 +282,14 @@ public class ExpoWatchConnectivityModule: Module {
         return
       }
 
-      if let msgType = cleanUserInfo["type"] as? String {
+      let isHighPriorityWake =
+        (cleanUserInfo["highPriorityWake"] as? Bool) == true ||
+        (cleanUserInfo["highPriorityWake"] as? NSNumber)?.boolValue == true ||
+        cleanUserInfo["notification"] != nil
+      var wireUserInfo = cleanUserInfo
+      wireUserInfo.removeValue(forKey: "highPriorityWake")
+
+      if let msgType = wireUserInfo["type"] as? String {
         for transfer in session.outstandingUserInfoTransfers where transfer.isTransferring {
           if let existingType = transfer.userInfo["type"] as? String,
              existingType == msgType,
@@ -285,11 +299,18 @@ public class ExpoWatchConnectivityModule: Module {
         }
       }
 
+      // ★ 1日50回の transferCurrentComplicationUserInfo 優先起床枠のうち最後の15回は、
+      //   タイマー停止・一時停止・リセットおよび共有通知（isHighPriorityWake）専用に温存し、通常同期による枯渇を防止する
+      let canUseComplicationTransfer =
+        session.isComplicationEnabled &&
+        session.remainingComplicationUserInfoTransfers > 0 &&
+        (isHighPriorityWake || session.remainingComplicationUserInfoTransfers > 15)
+
       let transfer: WCSessionUserInfoTransfer
-      if session.isComplicationEnabled && session.remainingComplicationUserInfoTransfers > 0 {
-        transfer = session.transferCurrentComplicationUserInfo(cleanUserInfo)
+      if canUseComplicationTransfer {
+        transfer = session.transferCurrentComplicationUserInfo(wireUserInfo)
       } else {
-        transfer = session.transferUserInfo(cleanUserInfo)
+        transfer = session.transferUserInfo(wireUserInfo)
       }
       self.eventLock.lock()
       self.pendingUserInfo = nil
@@ -351,10 +372,20 @@ public class ExpoWatchConnectivityModule: Module {
     self.pendingUserInfo = nil
     self.eventLock.unlock()
     guard let pending = pending else { return }
-    if session.isComplicationEnabled && session.remainingComplicationUserInfoTransfers > 0 {
-      session.transferCurrentComplicationUserInfo(pending)
+    let isHighPriorityWake =
+      (pending["highPriorityWake"] as? Bool) == true ||
+      (pending["highPriorityWake"] as? NSNumber)?.boolValue == true ||
+      pending["notification"] != nil
+    var wirePending = pending
+    wirePending.removeValue(forKey: "highPriorityWake")
+    let canUseComplicationTransfer =
+      session.isComplicationEnabled &&
+      session.remainingComplicationUserInfoTransfers > 0 &&
+      (isHighPriorityWake || session.remainingComplicationUserInfoTransfers > 15)
+    if canUseComplicationTransfer {
+      session.transferCurrentComplicationUserInfo(wirePending)
     } else {
-      session.transferUserInfo(pending)
+      session.transferUserInfo(wirePending)
     }
   }
 

@@ -370,12 +370,12 @@ export const mapSeatToCloudTimer = (seat, salonId, userId) => {
 export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
   const rawName = cloudTimer.seat_label || '1番席';
   const name = String(rawName).replace(/\s*[\(（]サンプル[\)）]/g, '').trim() || '1番席';
-  const targetSeconds = Math.round(Number(cloudTimer.target_seconds || 0));
+  const rawTargetSeconds = Math.round(Number(cloudTimer.target_seconds || 0));
   const checkSec = cloudTimer.check_total_seconds ? Math.round(Number(cloudTimer.check_total_seconds)) : 0;
   const checkEndTs = cloudTimer.check_target_end_timestamp ? Math.round(Number(cloudTimer.check_target_end_timestamp)) : null;
   const status = cloudTimer.status || 'idle';
-  const targetEndTs = Math.round(Number(cloudTimer.target_end_timestamp || 0));
-  const pausedRemSec = Math.round(Number(cloudTimer.paused_remaining_seconds || 0));
+  const rawTargetEndTs = Math.round(Number(cloudTimer.target_end_timestamp || 0));
+  const rawPausedRemSec = Math.round(Number(cloudTimer.paused_remaining_seconds || 0));
   const hasActiveCheck = checkSec > 0 && checkEndTs && checkEndTs > 0;
   const isCheckCompleted = !hasActiveCheck && checkSec > 0;
   const numMatch = String(name).match(/\d+/);
@@ -393,11 +393,29 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
   const helpProcess = cloudTimer.help_process || '';
   const isShampooing = !!cloudTimer.is_shampooing;
   const actionStatus = isShampooing ? 'shampoo' : (LABEL_TO_ACTION_ID[helpProcess] || null);
-  const isReset = (status === 'paused' || status === 'idle') && pausedRemSec <= 0 && targetEndTs <= 0;
+  const rawComment = String(cloudTimer.comment || '').trim();
+  const isLegacySampleSeat =
+    status !== 'running' &&
+    (rawComment === 'タップして操作・編集できます' ||
+      (status === 'paused' &&
+        rawTargetSeconds === 1200 &&
+        rawPausedRemSec === 1200 &&
+        rawTargetEndTs <= 0 &&
+        !rawAssist &&
+        !helpProcess &&
+        !isShampooing &&
+        checkSec <= 0));
+
+  const targetSeconds = isLegacySampleSeat ? 0 : rawTargetSeconds;
+  const targetEndTs = isLegacySampleSeat ? 0 : rawTargetEndTs;
+  const pausedRemSec = isLegacySampleSeat ? 0 : rawPausedRemSec;
+  const normalizedStatus = isLegacySampleSeat ? 'idle' : status;
+  const isReset =
+    isLegacySampleSeat || ((normalizedStatus === 'paused' || normalizedStatus === 'idle') && pausedRemSec <= 0 && targetEndTs <= 0);
   const nowMs = Date.now();
-  const isOver = status === 'running' && targetEndTs > 0 && targetEndTs <= nowMs;
+  const isOver = normalizedStatus === 'running' && targetEndTs > 0 && targetEndTs <= nowMs;
   const checkPausedRemainingSeconds =
-    status === 'paused' && hasActiveCheck ? Math.max(0, Math.round((checkEndTs - nowMs) / 1000)) : null;
+    normalizedStatus === 'paused' && hasActiveCheck ? Math.max(0, Math.round((checkEndTs - nowMs) / 1000)) : null;
 
   return {
     id: cloudTimer.id,
@@ -407,11 +425,12 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
     name: name,
     targetSeconds: targetSeconds,
     targetTime: targetSeconds,
-    initialMinutes: targetSeconds > 0 ? Math.max(1, Math.round(targetSeconds / 60)) : 20,
+    initialMinutes: targetSeconds > 0 ? Math.max(1, Math.round(targetSeconds / 60)) : 0,
     targetEndTimestamp: targetEndTs,
     pausedRemainingSeconds: pausedRemSec,
-    status: status,
+    status: normalizedStatus,
     isReset: isReset,
+    isLegacySampleSeat: isLegacySampleSeat,
     isOver: isOver,
     timeUpTimestamp: isOver ? targetEndTs : null,
     escalationLevel: 0,
@@ -422,7 +441,7 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
     isShampooing: isShampooing,
     isRecruiting: isRecruiting,
     isNoHelpNeeded: isNoHelpNeeded,
-    comment: cloudTimer.comment || '',
+    comment: isLegacySampleSeat ? '' : (cloudTimer.comment || ''),
     sortOrder: cloudTimer.sort_order || 0,
     createdBy: cloudTimer.created_by,
     checkEndTimestamp: checkEndTs,
@@ -435,6 +454,7 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
     checkStaff: cloudTimer.check_staff_name || '',
     checkStatus: hasActiveCheck ? (status === 'running' && checkEndTs <= nowMs ? 'timeup' : 'running') : (isCheckCompleted ? 'completed' : 'stopped'),
     isCheckCompleted: isCheckCompleted,
+    history: [],
     updatedAt: cloudTimer.updated_at ? new Date(cloudTimer.updated_at).getTime() : nowMs,
   };
 };

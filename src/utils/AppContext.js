@@ -51,6 +51,7 @@ export const AppProvider = ({ children }) => {
   const [isCheerModeEnabled, setIsCheerModeEnabled] = useState(false); // 応援モード（キャラクター【やまいも】登場）マスター
   const [isCheerInEcoEnabled, setIsCheerInEcoEnabled] = useState(true); // エコモード中も応援モードを稼働（初期値: ON）
   const [isCheerSoundEnabled, setIsCheerSoundEnabled] = useState(true); // 応援モード登場サウンド（効果音・レアボイス）有効/無効
+  const [isSettingsLoaded, setIsSettingsLoaded] = useState(false); // AsyncStorageからの設定初期ロード完了フラグ
 
   // NEWS（お知らせ）関連State
   const [readNewsIds, setReadNewsIds] = useState([]);
@@ -316,6 +317,8 @@ export const AppProvider = ({ children }) => {
         }
       } catch (e) {
         console.error("Failed to load settings.", e);
+      } finally {
+        setIsSettingsLoaded(true);
       }
     };
     loadSettings();
@@ -998,6 +1001,7 @@ export const AppProvider = ({ children }) => {
         controlsVisible,
         showControls,
         resetControlsVisible,
+        isSettingsLoaded,
       }}
     >
       {children}

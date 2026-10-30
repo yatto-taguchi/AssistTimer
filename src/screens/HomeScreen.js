@@ -22,9 +22,16 @@ import NewsModal from '../components/NewsModal';
 import { getUnreadNewsCount } from '../data/newsData';
 import { setAlarms, stopAllAlarms, subscribeUserStoppedAlarms } from '../utils/alarmScheduler';
 import WatchConnectivity from 'watch-connectivity';
-import { syncSeatsToWatch, syncMainTimerToWatch, updateCachedMainTimerState, ensureSalonSeatsCached } from './SalonWorkScreen';
+import {
+  syncSeatsToWatch,
+  syncMainTimerToWatch,
+  updateCachedMainTimerState,
+  ensureSalonSeatsCached,
+  adoptWatchActiveSeatsIntoCache,
+} from './SalonWorkScreen';
 
 const MAIN_ALARM_KEY = 'main-timer';
+const ACTIVE_MAIN_TIMER_STORAGE_KEY = '@assist_timer_active_main_timer_v1';
 
 const SILENT_LOOP_SOUND = require('../../assets/silent_loop.wav');
 
@@ -193,7 +200,8 @@ export default function HomeScreen({ navigation }) {
     hideNewsUntilNextUpdate,
     restoreNewsIcon,
     setMainTimerState,
-    mainTimerActionRequest
+    mainTimerActionRequest,
+    isSettingsLoaded,
   } = useContext(AppContext);
   const isFocused = useIsFocused();
 
@@ -245,6 +253,13 @@ export default function HomeScreen({ navigation }) {
   const idleCheerTimeoutRef = useRef(null);
   const lastAutoFinishedAtRef = useRef(0);
   const lastAutoFinishedEndTimestampRef = useRef(0);
+  const isMainTimerRestoredRef = useRef(false);
+  const restoreActiveMainTimerPromiseRef = useRef(null);
+  const restoredCategoryFromTimerRef = useRef(false);
+  const restoredCountUpEnabledRef = useRef(null);
+  const isSettingsLoadedRef = useRef(false);
+  isSettingsLoadedRef.current = !!isSettingsLoaded;
+  const lastPersistedMainTimerJsonRef = useRef(null);
 
   // ★ Watch主導タイマー操作によるiPhone消音管理（Watchから開始時はデフォルト消音、ウォッチ振動のみ）
   const [isWatchMuted, setIsWatchMuted] = useState(false);
@@ -525,8 +540,10 @@ export default function HomeScreen({ navigation }) {
         const lastCat = await AsyncStorage.getItem('lastUsedCategory');
         if (lastCat) {
           setLastUsedCategory(lastCat);
-          // 初期状態としてセット
-          setSelectedCategory(lastCat);
+          // 初期状態としてセット（稼働中タイマー復元によるジャンル設定済みの場合は上書きしない）
+          if (!restoredCategoryFromTimerRef.current) {
+            setSelectedCategory(lastCat);
+          }
         }
 
         // お気に入りタイマー時間のロード
@@ -1139,7 +1156,7 @@ export default function HomeScreen({ navigation }) {
             setMainTimerState(cancelState);
           }
           updateCachedMainTimerState(cancelState);
-          syncMainTimerToWatch(cancelState, { immediate: true });
+          syncMainTimerToWatch(cancelState, { immediate: true, highPriorityWake: true });
         }
         cancelVibration();
         cheerOverlayRef.current?.dismiss();
@@ -1155,6 +1172,7 @@ export default function HomeScreen({ navigation }) {
           lastAutoFinishedEndTimestampRef.current = 0;
           lastResetTargetEndRef.current = 0;
           lastMainTimerResetAtRef.current = 0;
+          lastMainTimerPauseAtRef.current = 0;
           // スタート/再開
           if (!currentIsCountUp) {
             const nowMs = Date.now();
@@ -1218,7 +1236,12 @@ export default function HomeScreen({ navigation }) {
           if (stoppedEndTs > 0) {
             lastResetTargetEndRef.current = stoppedEndTs;
           }
-          lastMainTimerResetAtRef.current = Date.now();
+          if (wasOverOrZero) {
+            lastMainTimerResetAtRef.current = Date.now();
+            lastMainTimerPauseAtRef.current = 0;
+          } else {
+            lastMainTimerPauseAtRef.current = Date.now();
+          }
           lastAutoFinishedAtRef.current = 0;
           WatchConnectivity.notifyLocalStopOrReset('main-timer', stoppedEndTs);
           isRunningRef.current = false;
@@ -1255,7 +1278,7 @@ export default function HomeScreen({ navigation }) {
                 setMainTimerState(stoppedOverState);
               }
               updateCachedMainTimerState(stoppedOverState);
-              syncMainTimerToWatch(stoppedOverState, { immediate: true });
+              syncMainTimerToWatch(stoppedOverState, { immediate: true, highPriorityWake: true });
             }
           }
           cancelVibration();
@@ -1309,6 +1332,7 @@ export default function HomeScreen({ navigation }) {
       lastResetTargetEndRef.current = overStartTimeRef.current;
     }
     lastMainTimerResetAtRef.current = Date.now();
+    lastMainTimerPauseAtRef.current = 0;
     lastAutoFinishedAtRef.current = 0;
     WatchConnectivity.notifyLocalStopOrReset('main-timer', lastResetTargetEndRef.current || 0);
     targetEndTimeRef.current = null;
@@ -1356,7 +1380,7 @@ export default function HomeScreen({ navigation }) {
         setMainTimerState(resetState);
       }
       updateCachedMainTimerState(resetState);
-      syncMainTimerToWatch(resetState, { immediate: true });
+      syncMainTimerToWatch(resetState, { immediate: true, highPriorityWake: true });
     }
 
     // リセットボタン押下後の待機中やまいもウォーキング演出（クールダウン30秒、出現率50%）
@@ -1400,19 +1424,22 @@ export default function HomeScreen({ navigation }) {
       endMs = prepEnd + (targetTime || 600) * 1000;
     }
 
+    const lastStopOrResetAt = Math.max(lastMainTimerResetAtRef.current || 0, lastMainTimerPauseAtRef.current || 0);
     const isAutoFinishedNow = !effectiveIsRunning && !effectiveIsPre && !saveModalVisible
-      && lastAutoFinishedAtRef.current > 0 && lastAutoFinishedAtRef.current > lastMainTimerResetAtRef.current;
+      && lastAutoFinishedAtRef.current > 0 && lastAutoFinishedAtRef.current > lastStopOrResetAt;
     const isExplicitResetNow = !effectiveIsRunning && !effectiveIsPre && !isAutoFinishedNow
       && (Date.now() - lastMainTimerResetAtRef.current < 5000);
+    const isExplicitStopNow = !effectiveIsRunning && !effectiveIsPre && !isAutoFinishedNow
+      && (Date.now() - lastStopOrResetAt < 5000);
 
     if (!endMs && isAutoFinishedNow && lastAutoFinishedEndTimestampRef.current > 0) {
       endMs = lastAutoFinishedEndTimestampRef.current;
     }
 
     const newState = {
-      explicitStop: isExplicitResetNow || !!saveModalVisible,
+      explicitStop: isExplicitStopNow || !!saveModalVisible,
       lastResetTargetEndTimestamp: lastResetTargetEndRef.current || 0,
-      lastResetAt: lastMainTimerResetAtRef.current || 0,
+      lastResetAt: lastStopOrResetAt,
       remainingTime: effectiveRemaining,
       targetTime,
       targetEndTimestamp: endMs,
@@ -1433,7 +1460,34 @@ export default function HomeScreen({ navigation }) {
     if (setMainTimerState) {
       setMainTimerState(newState);
     }
+    // ★ 初回起動時の稼働中メインタイマー復元完了前（数ミリ秒間）は、未復元の停止状態で共有キャッシュや永続ストレージを上書きしない
+    if (!isMainTimerRestoredRef.current) {
+      return;
+    }
     updateCachedMainTimerState(newState);
+
+    // ★ 稼働中メインタイマーの永続化（TestFlightアップデートやアプリ再起動を跨いでも絶対時刻からシームレス継続させる）
+    if (effectiveIsRunning || effectiveIsPre) {
+      const persistedJson = JSON.stringify({
+        isRunning: effectiveIsRunning,
+        isPreCountingDown: effectiveIsPre,
+        isCountUp: effectiveIsCountUp,
+        isCountUpEnabled: !!isCountUpEnabled,
+        targetTime,
+        targetEndTimestamp: endMs || 0,
+        prepEndTimestamp: effectiveIsPre ? (prepEndTimeRef.current || 0) : 0,
+        overStartTimestamp: effectiveIsCountUp ? (overStartTimeRef.current || endMs || 0) : 0,
+        isWatchMuted: !!isWatchMutedRef.current,
+        genre: selectedCategory || '',
+      });
+      if (lastPersistedMainTimerJsonRef.current !== persistedJson) {
+        lastPersistedMainTimerJsonRef.current = persistedJson;
+        AsyncStorage.setItem(ACTIVE_MAIN_TIMER_STORAGE_KEY, persistedJson).catch(() => {});
+      }
+    } else if (lastPersistedMainTimerJsonRef.current !== '') {
+      lastPersistedMainTimerJsonRef.current = '';
+      AsyncStorage.removeItem(ACTIVE_MAIN_TIMER_STORAGE_KEY).catch(() => {});
+    }
 
     // ★ Watchへの即時同期: スタート/ストップの切り替わり、設定時間変更、準備中カウントダウンの開始/終了、設定の変更、超過状態の変化、または停止中の秒数変化時に送信
     const isStateToggled = prevIsRunningForWatchRef.current !== effectiveIsRunning;
@@ -1454,7 +1508,8 @@ export default function HomeScreen({ navigation }) {
       prevIsCountUpForWatchRef.current = effectiveIsCountUp;
       prevIsCountUpEnabledForWatchRef.current = isCountUpEnabled;
       if (Platform.OS === 'ios') {
-        syncMainTimerToWatch(newState, { immediate: true });
+        const shouldWakeWatchForStop = (isStateToggled || isPreCountdownToggled) && !effectiveIsRunning && !effectiveIsPre && !isAutoFinishedNow;
+        syncMainTimerToWatch(newState, { immediate: true, highPriorityWake: shouldWakeWatchForStop });
       }
     } else {
       prevRemainingTimeForWatchRef.current = effectiveRemaining;
@@ -1478,6 +1533,7 @@ export default function HomeScreen({ navigation }) {
   const isCountUpEnabledRef = useRef(isCountUpEnabled);
   isCountUpEnabledRef.current = isCountUpEnabled;
   const lastMainTimerResetAtRef = useRef(0);
+  const lastMainTimerPauseAtRef = useRef(0);
   const lastResetTargetEndRef = useRef(0);
 
   // ★ メインタイマー操作（Watch直接受信 ＆ サロン画面等のUIリクエスト）の共通実行ハンドラ
@@ -1875,7 +1931,10 @@ export default function HomeScreen({ navigation }) {
     let isOver = !!isCountUpRef.current;
     let currentRemaining = remainingTimeRef.current;
     const currentTarget = targetTimeRef.current || 180;
-    const allowCountUp = !!isCountUpEnabledRef.current;
+    const allowCountUp =
+      !isSettingsLoadedRef.current && restoredCountUpEnabledRef.current !== null
+        ? !!restoredCountUpEnabledRef.current
+        : !!isCountUpEnabledRef.current;
     let endMs = 0;
 
     // ★ バックグラウンド中に準備カウントダウンが終了していた場合は、本番稼働・超過（または終了）へ正規化
@@ -1993,6 +2052,181 @@ export default function HomeScreen({ navigation }) {
     };
   }, []);
 
+  // ★ TestFlightアップデートやアプリ再起動後に、進行中だったメインタイマー（カウントダウン・準備カウントダウン・3時間以内の超過）を絶対時刻からシームレス復元
+  const ensureActiveMainTimerRestored = useCallback(() => {
+    if (restoreActiveMainTimerPromiseRef.current) {
+      return restoreActiveMainTimerPromiseRef.current;
+    }
+    restoreActiveMainTimerPromiseRef.current = (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(ACTIVE_MAIN_TIMER_STORAGE_KEY);
+        if (!raw) return;
+        const saved = JSON.parse(raw);
+        if (!saved || typeof saved !== 'object') return;
+        // 復元完了前にユーザー操作やWatchからの新規操作がすでに入った場合はそちらを優先
+        if (isRunningRef.current || isPreCountingDownRef.current || lastMainTimerResetAtRef.current > 0) {
+          return;
+        }
+        if (!saved.isRunning && !saved.isPreCountingDown) {
+          await AsyncStorage.removeItem(ACTIVE_MAIN_TIMER_STORAGE_KEY).catch(() => {});
+          lastPersistedMainTimerJsonRef.current = '';
+          return;
+        }
+
+        const now = Date.now();
+        const abandonedCutoff = now - 3 * 3600 * 1000;
+        const savedTarget = Math.max(10, Math.round(Number(saved.targetTime) || DEFAULT_SECONDS));
+        const savedPrepEnd = Math.round(Number(saved.prepEndTimestamp) || 0);
+        const savedEnd = Math.round(Number(saved.targetEndTimestamp || saved.overStartTimestamp) || 0);
+        if (saved.isCountUpEnabled !== undefined) {
+          restoredCountUpEnabledRef.current = !!saved.isCountUpEnabled;
+        }
+
+        // Watch上で明示停止済みのタイマー終了時刻であれば復元せずクリーンアップ
+        if (savedEnd > 0 && WatchConnectivity.isMainTimerEndStopped && WatchConnectivity.isMainTimerEndStopped(savedEnd)) {
+          await AsyncStorage.removeItem(ACTIVE_MAIN_TIMER_STORAGE_KEY).catch(() => {});
+          lastPersistedMainTimerJsonRef.current = '';
+          return;
+        }
+
+        if (saved.isPreCountingDown && savedPrepEnd > now) {
+          targetTimeRef.current = savedTarget;
+          setTargetTime(savedTarget);
+          remainingTimeRef.current = savedTarget;
+          setRemainingTime(savedTarget);
+          if (saved.genre && typeof saved.genre === 'string') {
+            restoredCategoryFromTimerRef.current = true;
+            selectedCategoryRef.current = saved.genre;
+            setSelectedCategory(saved.genre);
+          }
+          setWatchMutedState(!!saved.isWatchMuted);
+          prepEndTimeRef.current = savedPrepEnd;
+          const nextPrep = Math.max(1, Math.ceil((savedPrepEnd - now) / 1000));
+          preCountdownTimeRef.current = nextPrep;
+          setPreCountdownTime(nextPrep);
+          triggeredPrepVoicesRef.current.clear();
+          [900, 600, 300, 240, 180, 120, 60, 30, 10, 5].forEach((t) => {
+            if (nextPrep <= t) triggeredPrepVoicesRef.current.add(t);
+          });
+          triggeredPrepVoicesRef.current.add('cheer_prep_first');
+          isPreCountingDownRef.current = true;
+          setIsPreCountingDown(true);
+          prevIsPreCountdownForWatchRef.current = true;
+          prevTargetTimeForWatchRef.current = savedTarget;
+          prevRemainingTimeForWatchRef.current = savedTarget;
+          return;
+        }
+
+        const resolvedEndTs =
+          saved.isPreCountingDown && savedPrepEnd > 0
+            ? (savedEnd > 0 ? savedEnd : savedPrepEnd + savedTarget * 1000)
+            : savedEnd;
+
+        if (resolvedEndTs <= abandonedCutoff) {
+          await AsyncStorage.removeItem(ACTIVE_MAIN_TIMER_STORAGE_KEY).catch(() => {});
+          lastPersistedMainTimerJsonRef.current = '';
+          return;
+        }
+
+        if (resolvedEndTs > now) {
+          // カウントダウン進行中としてシームレス継続
+          targetTimeRef.current = savedTarget;
+          setTargetTime(savedTarget);
+          if (saved.genre && typeof saved.genre === 'string') {
+            restoredCategoryFromTimerRef.current = true;
+            selectedCategoryRef.current = saved.genre;
+            setSelectedCategory(saved.genre);
+          }
+          setWatchMutedState(!!saved.isWatchMuted);
+          targetEndTimeRef.current = resolvedEndTs;
+          overStartTimeRef.current = null;
+          const nextRem = Math.max(1, Math.ceil((resolvedEndTs - now) / 1000));
+          remainingTimeRef.current = nextRem;
+          setRemainingTime(nextRem);
+          triggeredVoicesRef.current.clear();
+          [300, 180, 60, 30, 10, 5].forEach((t) => {
+            if (nextRem <= t) triggeredVoicesRef.current.add(t);
+          });
+          isFirstCheerTriggeredRef.current = true;
+          lastCheerTriggerTimeRef.current = now;
+          isCountUpRef.current = false;
+          setIsCountUp(false);
+          isRunningRef.current = true;
+          setIsRunning(true);
+          prevIsRunningForWatchRef.current = true;
+          prevIsCountUpForWatchRef.current = false;
+          prevTargetTimeForWatchRef.current = savedTarget;
+          prevRemainingTimeForWatchRef.current = nextRem;
+        } else {
+          // アップデート中に終了時刻を跨いだ場合: カウントアップ有効なら超過カウントアップとして継続（起動直後のアラーム音暴発は抑止）
+          const allowCountUp =
+            saved.isCountUpEnabled !== undefined ? !!saved.isCountUpEnabled : !!isCountUpEnabledRef.current;
+          if (!allowCountUp) {
+            await AsyncStorage.removeItem(ACTIVE_MAIN_TIMER_STORAGE_KEY).catch(() => {});
+            lastPersistedMainTimerJsonRef.current = '';
+            return;
+          }
+          targetTimeRef.current = savedTarget;
+          setTargetTime(savedTarget);
+          if (saved.genre && typeof saved.genre === 'string') {
+            restoredCategoryFromTimerRef.current = true;
+            selectedCategoryRef.current = saved.genre;
+            setSelectedCategory(saved.genre);
+          }
+          setWatchMutedState(!!saved.isWatchMuted);
+          targetEndTimeRef.current = resolvedEndTs;
+          overStartTimeRef.current = resolvedEndTs;
+          const overSec = Math.max(0, Math.floor((now - resolvedEndTs) / 1000));
+          remainingTimeRef.current = overSec;
+          setRemainingTime(overSec);
+          triggeredVoicesRef.current.add('alarm');
+          triggeredOverVoicesRef.current.clear();
+          if (overSec >= 2) triggeredOverVoicesRef.current.add('start');
+          [60, 180, 300, 600, 900].forEach((t) => {
+            if (overSec >= t) triggeredOverVoicesRef.current.add(t);
+          });
+          lastCheerTriggerTimeRef.current = now;
+          isCountUpRef.current = true;
+          setIsCountUp(true);
+          isRunningRef.current = true;
+          setIsRunning(true);
+          prevIsRunningForWatchRef.current = true;
+          prevIsCountUpForWatchRef.current = true;
+          prevTargetTimeForWatchRef.current = savedTarget;
+          prevRemainingTimeForWatchRef.current = overSec;
+        }
+      } catch (e) {
+        console.warn('[HomeScreen] ensureActiveMainTimerRestored error:', e);
+      } finally {
+        isMainTimerRestoredRef.current = true;
+        const latest = getLatestMainTimerState();
+        if (setMainTimerState) {
+          setMainTimerState(latest);
+        }
+        updateCachedMainTimerState(latest);
+      }
+    })();
+    return restoreActiveMainTimerPromiseRef.current;
+  }, [getLatestMainTimerState, setMainTimerState, setWatchMutedState]);
+
+  useEffect(() => {
+    ensureActiveMainTimerRestored();
+  }, [ensureActiveMainTimerRestored]);
+
+  // ★ AppContext の非同期設定ロード（isCountUpEnabled / isCountdownEnabled 等）完了後に最新設定を反映して Watch へ確定再送
+  useEffect(() => {
+    if (!isSettingsLoaded) return;
+    restoredCountUpEnabledRef.current = null;
+    if (Platform.OS !== 'ios') return;
+    Promise.all([ensureSalonSeatsCached(), ensureActiveMainTimerRestored()])
+      .then(() => {
+        const latest = getLatestMainTimerState();
+        updateCachedMainTimerState(latest);
+        syncMainTimerToWatch(latest, { immediate: true });
+      })
+      .catch(() => {});
+  }, [isSettingsLoaded, getLatestMainTimerState, ensureActiveMainTimerRestored]);
+
   useEffect(() => {
     if (Platform.OS !== 'ios') return undefined;
 
@@ -2061,7 +2295,8 @@ export default function HomeScreen({ navigation }) {
             }
           }
         }
-        ensureSalonSeatsCached().then(() => {
+        Promise.all([ensureSalonSeatsCached(), ensureActiveMainTimerRestored()]).then(async () => {
+          await adoptWatchActiveSeatsIntoCache(payload);
           const latest = getLatestMainTimerState();
           updateCachedMainTimerState(latest);
           syncMainTimerToWatch(latest, { immediate: true });
@@ -2086,9 +2321,9 @@ export default function HomeScreen({ navigation }) {
       }
     });
 
-    // ★ マウント直後（アプリ起動時）に客席キャッシュ（1番席サンプル等）を確実に準備し、メインタイマー＆客席をWatchへ送信
-    //   （WatchConnectivity.subscribeActions 登録後に実行することで、起動時の保留アクションを先に反映した最新状態を送る）
-    ensureSalonSeatsCached().then(() => {
+    // ★ マウント直後（アプリ起動時）に客席キャッシュ＆稼働中メインタイマー復元を完了させてから、最新状態をWatchへ送信
+    //   （TestFlight更新中に稼働していたメインタイマーを初期値3:00停止で誤上書きするのを完全防止）
+    Promise.all([ensureSalonSeatsCached(), ensureActiveMainTimerRestored()]).then(() => {
       const initialState = getLatestMainTimerState();
       updateCachedMainTimerState(initialState);
       syncMainTimerToWatch(initialState, { immediate: true });
@@ -2109,7 +2344,7 @@ export default function HomeScreen({ navigation }) {
       if (unsubscribe) unsubscribe();
       if (unsubAlarmStopped) unsubAlarmStopped();
     };
-  }, [getLatestMainTimerState]);
+  }, [getLatestMainTimerState, ensureActiveMainTimerRestored]);
 
   // サロン画面等からの操作リクエスト（一時停止/再開/リセット/時間変更/微調整）の実行
   useEffect(() => {
@@ -2613,6 +2848,7 @@ export default function HomeScreen({ navigation }) {
       lastResetTargetEndRef.current = overStartTimeRef.current;
     }
     lastMainTimerResetAtRef.current = Date.now();
+    lastMainTimerPauseAtRef.current = 0;
     lastAutoFinishedAtRef.current = 0;
     WatchConnectivity.notifyLocalStopOrReset('main-timer', lastResetTargetEndRef.current || 0);
     targetEndTimeRef.current = null;
@@ -2695,6 +2931,7 @@ export default function HomeScreen({ navigation }) {
       lastResetTargetEndRef.current = overStartTimeRef.current;
     }
     lastMainTimerResetAtRef.current = Date.now();
+    lastMainTimerPauseAtRef.current = 0;
     lastAutoFinishedAtRef.current = 0;
     WatchConnectivity.notifyLocalStopOrReset('main-timer', lastResetTargetEndRef.current || 0);
     targetEndTimeRef.current = null;

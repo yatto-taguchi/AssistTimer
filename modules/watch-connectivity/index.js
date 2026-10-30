@@ -542,53 +542,32 @@ export const WatchConnectivity = {
           return copy;
         })()
       : data;
+    const isHighPriorityWake = !!(cleanWireData?.highPriorityWake || cleanWireData?.notification);
+    const sendMessagePayload = cleanWireData && typeof cleanWireData === 'object' && 'highPriorityWake' in cleanWireData
+      ? (() => {
+          const copy = { ...cleanWireData };
+          delete copy.highPriorityWake;
+          return copy;
+        })()
+      : cleanWireData;
     const seatCount = cleanWireData && Array.isArray(cleanWireData.seats)
       ? cleanWireData.seats.length
       : (Array.isArray(lastSyncedSeats) ? lastSyncedSeats.length : diagnostics.lastSendSeatCount);
     let messageResult = '';
     let contextResult = '';
-    try {
-      let reachable = false;
+
+    // ★ 永続保存される applicationContext は sendMessage の応答待ち（手首下げ直後の最大5秒タイムアウト）にブロックさせず、
+    //   0msで並列即時更新する。これにより、直後にWatch側でスマートアラームのバックグラウンド起床が走っても
+    //   receivedApplicationContext から最新の停止状態を同期読み取りして誤発火を確実に阻止できる。
+    const contextUpdatePromise = (async () => {
       try {
-        reachable = typeof NativeModule.isReachable === 'function'
-          ? NativeModule.isReachable()
-          : !!NativeModule.isReachable;
-      } catch {}
-
-      if (reachable) {
-        try {
-          // ★ リアルタイム送信（sendMessage）は渡された data をそのまま送る
-          //   （メインタイマー同期時は seats を含めないことで Watch 側の稼働中客席タイマーを絶対保護）
-          await NativeModule.sendMessage(cleanWireData);
-          messageResult = '即時OK';
-        } catch (sendErr) {
-          messageResult = `失敗: ${errorText(sendErr)}`;
-        }
-      } else {
-        messageResult = '未接続のため即時送信なし';
-      }
-
-      // ★ Watchがバックグラウンド（文字盤表示中・消灯中）で即時通信（sendMessage）できなかった場合、
-      //   updateApplicationContext だけでは Watch アプリがバックグラウンド起床せず文字盤モジュールが更新されないため、
-      //   transferUserInfo（コンプリケーション優先転送）も併用してバックグラウンドの Watch Extension を確実に起こす
-      const isSyncPayload = cleanWireData?.type === 'SYNC_MAIN_TIMER' || cleanWireData?.type === 'SYNC_SEATS' || !!cleanWireData?.notification;
-      const needUserInfoFallback = isSyncPayload && (!reachable || messageResult.startsWith('失敗'));
-      if (needUserInfoFallback && typeof NativeModule.transferUserInfo === 'function') {
-        try {
-          await NativeModule.transferUserInfo(cleanWireData);
-        } catch (uErr) {
-          console.warn('[WatchConnectivity] transferUserInfo fallback error:', uErr);
-        }
-      }
-
-      try {
-        // ★ 永続保存される applicationContext には一時通知（notification）を含めない
-        //   また、WCSession.updateApplicationContext は辞書全体を置換するため、
-        //   メインタイマー単独同期（data.seats 未指定）時も前回保存済みの lastSyncedSeats を引き継いで客席消失を防ぐ
         const contextPayload = cleanWireData && typeof cleanWireData === 'object' ? { ...cleanWireData } : cleanWireData;
         if (contextPayload && typeof contextPayload === 'object') {
           if ('notification' in contextPayload) {
             delete contextPayload.notification;
+          }
+          if ('highPriorityWake' in contextPayload) {
+            delete contextPayload.highPriorityWake;
           }
           if (!Array.isArray(contextPayload.seats) && Array.isArray(lastSyncedSeats)) {
             contextPayload.seats = lastSyncedSeats;
@@ -602,9 +581,78 @@ export const WatchConnectivity = {
       } catch (ctxErr) {
         contextResult = `失敗: ${errorText(ctxErr)}`;
       }
+    })();
+
+    try {
+      let reachable = false;
+      try {
+        reachable = typeof NativeModule.isReachable === 'function'
+          ? NativeModule.isReachable()
+          : !!NativeModule.isReachable;
+      } catch {}
+
+      let userInfoFallbackSent = false;
+      const sendUserInfoFallback = async () => {
+        if (userInfoFallbackSent || typeof NativeModule.transferUserInfo !== 'function') return;
+        userInfoFallbackSent = true;
+        try {
+          await NativeModule.transferUserInfo(cleanWireData);
+        } catch (uErr) {
+          console.warn('[WatchConnectivity] transferUserInfo fallback error:', uErr);
+        }
+      };
+
+      if (reachable) {
+        if (isHighPriorityWake) {
+          // ★ タイマー停止・一時停止・リセット等の緊急同期時:
+          //   手首を下げた直後は isReachable が古い true のまま sendMessage が約5秒ハングすることがあるため、
+          //   600ms以内に応答がなければタイムアウトを待たずに即座に transferUserInfo（背景優先起床）も併用発火させる
+          let raceTimer = null;
+          const sendPromise = Promise.resolve()
+            .then(() => NativeModule.sendMessage(sendMessagePayload))
+            .then(() => ({ status: 'ok' }))
+            .catch((sendErr) => ({ status: 'err', err: sendErr }));
+          const timeoutPromise = new Promise((resolve) => {
+            raceTimer = setTimeout(() => resolve({ status: 'timeout' }), 600);
+          });
+          const outcome = await Promise.race([sendPromise, timeoutPromise]);
+          if (raceTimer) clearTimeout(raceTimer);
+          if (outcome.status === 'ok') {
+            messageResult = '即時OK';
+          } else if (outcome.status === 'timeout') {
+            messageResult = '即時応答遅延→背景起床転送';
+            await sendUserInfoFallback();
+          } else {
+            messageResult = `失敗: ${errorText(outcome.err)}`;
+            await sendUserInfoFallback();
+          }
+        } else {
+          try {
+            // ★ リアルタイム送信（sendMessage）は渡された data をそのまま送る
+            //   （メインタイマー同期時は seats を含めないことで Watch 側の稼働中客席タイマーを絶対保護）
+            await NativeModule.sendMessage(sendMessagePayload);
+            messageResult = '即時OK';
+          } catch (sendErr) {
+            messageResult = `失敗: ${errorText(sendErr)}`;
+          }
+        }
+      } else {
+        messageResult = '未接続のため即時送信なし';
+      }
+
+      // ★ Watchがバックグラウンド（文字盤表示中・消灯中）で即時通信（sendMessage）できなかった場合、
+      //   updateApplicationContext だけでは Watch アプリがバックグラウンド起床せず文字盤モジュールやアラーム予約が更新されないため、
+      //   transferUserInfo（緊急停止時はコンプリケーション優先枠使用）も併用してバックグラウンドの Watch Extension を確実に起こす
+      const isSyncPayload = cleanWireData?.type === 'SYNC_MAIN_TIMER' || cleanWireData?.type === 'SYNC_SEATS' || isHighPriorityWake;
+      const needUserInfoFallback = isSyncPayload && (!reachable || messageResult.startsWith('失敗'));
+      if (needUserInfoFallback) {
+        await sendUserInfoFallback();
+      }
     } catch (e) {
       messageResult = messageResult || `失敗: ${errorText(e)}`;
     }
+
+    await contextUpdatePromise;
 
     updateDiagnostics({
       lastSendAt: Date.now(),
@@ -655,6 +703,18 @@ export const WatchConnectivity = {
     return safeAddListener('onUserInfoReceived', (event) => {
       if (event && event.userInfo) callback(event.userInfo);
     });
+  },
+
+  // ★ ネイティブ Info.plist のビルドバージョン（例: "1.0.6 (97)"）を同期取得（TestFlight更新検知用）
+  getAppBuildVersion: () => {
+    if (!NativeModule || typeof NativeModule.getAppBuildVersion !== 'function') {
+      return '';
+    }
+    try {
+      return String(NativeModule.getAppBuildVersion() || '');
+    } catch {
+      return '';
+    }
   },
 
   // ★ サロン共有時のOS標準ローカル通知（スマホ閉鎖・別アプリ使用中かつWatch未連動時用）
