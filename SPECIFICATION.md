@@ -3775,3 +3775,13 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
 4. **Apple Watch ピア通知の確実な発火・履歴保持・シート閉鎖後バナー再表示 (`targets/watch/alarm.swift`, `targets/watch/content.swift`)**:
    - `handledPeerNotifIds` を `UserDefaults` に永続化し、手首上げ復帰時の `applicationContext`（`"保存データ"`）であっても直近 25 秒以内の未読 `notifId` が含まれていれば即座に通知を発火する。
    - リモートピア通知は 2 段階ハプティック（`.notification` ＋ `.directionUp`）と 5.5 秒バナー表示を行い、モーダルシート表示中に受信した場合はシステムバナー強制表示（`[.banner, .sound, .list]`）に加えてシート閉鎖直後にアプリ内バナーも自動表示する。また `.active` 中のピア通知も watchOS 通知センター履歴（`.list`）へ記録する。
+
+
+### 59.3 本番反映完了ステータス (2026-10-31 完了)
+
+1. **本番 Edge Function `notify-salon-event` デプロイ完了**:
+   - 本番 Supabase プロジェクト（`hcmjcwcmvcwicjmnhtdc` / AssistTimer）に対し、Supabase CLI 経由で `notify-salon-event`（`verify_jwt = false`）の本番デプロイを実施・完了（Status: `ACTIVE`）。
+   - これにより、DB トリガー `on_salon_timers_push_notify` からの HTTP POST に対する 404 が解消され、端末画面ロック中およびバックグラウンド時のリモート Push 通知配信パイプラインが完全開通。
+2. **クライアントおよびウェアラブル (Build 101)**:
+   - 全 Swift / TypeScript / JavaScript 修正を反映したネイティブビルド（Build 101）を App Store Connect へ提出済み（TestFlight 配信処理中）。
+   - OTA 即時配信（EAS Update）により、既存の TestFlight（Build 98）上でも JavaScript 層の修正（自己エコー判定根絶、指名通知保証、表示名同期）が即時適用可能。
