@@ -38,8 +38,11 @@ let _tokenFetchPromise = null;
 const _recentTokenSyncMap = new Map();
 
 // Realtime と Remote Push 間の二重通知（トースト・Watch振動）を防ぐ共通キャッシュ
+// ※ 同一チャネル内（例: Realtime でタイマー開始直後にチェック追加・担当変更が連続したケース）で誤って後続通知を握り潰さないよう、
+//   semanticKey はチャネル別（push / realtime）に記録し、異チャネル間の重複のみを抑止する。
 const _handledNotifIds = new Map();
-const _handledSemanticKeys = new Map();
+const _handledPushSemanticKeys = new Map();
+const _handledRealtimeSemanticKeys = new Map();
 const NOTIF_ID_TTL_MS = 5 * 60 * 1000;
 const SEMANTIC_KEY_TTL_MS = 6500;
 
@@ -130,15 +133,29 @@ export const buildPeerEventSemanticKey = (timerIdOrLabel, eventType) => {
 /**
  * 指定した notifId またはセマンティックキーが既に処理済みかどうか判定
  */
-export const hasHandledPeerNotification = ({ notifId = '', semanticKey = '' } = {}) => {
+export const hasHandledPeerNotification = ({ notifId = '', semanticKey = '', channel = 'any' } = {}) => {
   const now = Date.now();
   if (notifId) {
     const ts = _handledNotifIds.get(String(notifId));
     if (ts && now - ts <= NOTIF_ID_TTL_MS) return true;
   }
   if (semanticKey) {
-    const ts = _handledSemanticKeys.get(String(semanticKey));
-    if (ts && now - ts <= SEMANTIC_KEY_TTL_MS) return true;
+    const key = String(semanticKey);
+    if (channel === 'realtime') {
+      const pushTs = _handledPushSemanticKeys.get(key);
+      if (pushTs && now - pushTs <= SEMANTIC_KEY_TTL_MS) return true;
+    } else if (channel === 'push') {
+      const rtTs = _handledRealtimeSemanticKeys.get(key);
+      if (rtTs && now - rtTs <= SEMANTIC_KEY_TTL_MS) return true;
+      const pushTs = _handledPushSemanticKeys.get(key);
+      if (pushTs && now - pushTs <= SEMANTIC_KEY_TTL_MS) return true;
+    } else {
+      const pushTs = _handledPushSemanticKeys.get(key);
+      const rtTs = _handledRealtimeSemanticKeys.get(key);
+      if ((pushTs && now - pushTs <= SEMANTIC_KEY_TTL_MS) || (rtTs && now - rtTs <= SEMANTIC_KEY_TTL_MS)) {
+        return true;
+      }
+    }
   }
   return false;
 };
@@ -146,15 +163,26 @@ export const hasHandledPeerNotification = ({ notifId = '', semanticKey = '' } = 
 /**
  * notifId およびセマンティックキーを処理済みとして記録
  */
-export const markPeerNotificationHandled = ({ notifId = '', semanticKey = '' } = {}) => {
+export const markPeerNotificationHandled = ({ notifId = '', semanticKey = '', channel = 'any' } = {}) => {
   const now = Date.now();
   if (notifId) {
     _handledNotifIds.set(String(notifId), now);
     pruneMapByTtl(_handledNotifIds, NOTIF_ID_TTL_MS, 150);
   }
   if (semanticKey) {
-    _handledSemanticKeys.set(String(semanticKey), now);
-    pruneMapByTtl(_handledSemanticKeys, SEMANTIC_KEY_TTL_MS, 100);
+    const key = String(semanticKey);
+    if (channel === 'push') {
+      _handledPushSemanticKeys.set(key, now);
+      pruneMapByTtl(_handledPushSemanticKeys, SEMANTIC_KEY_TTL_MS, 100);
+    } else if (channel === 'realtime') {
+      _handledRealtimeSemanticKeys.set(key, now);
+      pruneMapByTtl(_handledRealtimeSemanticKeys, SEMANTIC_KEY_TTL_MS, 100);
+    } else {
+      _handledPushSemanticKeys.set(key, now);
+      _handledRealtimeSemanticKeys.set(key, now);
+      pruneMapByTtl(_handledPushSemanticKeys, SEMANTIC_KEY_TTL_MS, 100);
+      pruneMapByTtl(_handledRealtimeSemanticKeys, SEMANTIC_KEY_TTL_MS, 100);
+    }
   }
 };
 

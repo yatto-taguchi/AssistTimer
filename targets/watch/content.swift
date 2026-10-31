@@ -640,6 +640,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     }
     private var lastHandledPeerNotifId: String = ""
     private var handledPeerNotifIds: [String] = []
+    private let savedHandledPeerNotifIdsKey = "assisttimer.watch.handledPeerNotifIds.v1"
+    var isModalSheetCurrentlyPresented: Bool = false
     
     // ★ Watch または iPhone で止めた席（古い「稼働中」スナップショットや applicationContext で超過・稼働へゾンビ復活しないよう4時間保持＆永続化）
     private var localStops: [String: (at: Date, end: Double)] = [:]
@@ -791,6 +793,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         let nowInitMs = nowDate.timeIntervalSince1970 * 1000.0
         if savedLastTs > 0 && savedLastTs <= nowInitMs + 120_000 {
             self.lastPayloadTimestamp = savedLastTs
+        }
+        if let savedNotifIds = UserDefaults.standard.stringArray(forKey: savedHandledPeerNotifIdsKey) {
+            self.handledPeerNotifIds = Array(savedNotifIds.suffix(30))
+            self.lastHandledPeerNotifId = self.handledPeerNotifIds.last ?? ""
         }
 
         if let savedName = (UserDefaults.standard.string(forKey: savedUserNameKey)
@@ -1256,14 +1262,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     //   未読の notifId を取りこぼさないよう、古いスナップショット早期 return より前に判定・発火する。
     //   保存データ（applicationContext）や90秒以上前の古いデータでは発火させず、sourceUser == "__remote__" のみ発火して自己エコーを防止する。
     private func handleIncomingPeerNotificationIfNeeded(_ data: [String: Any], kind: String, payloadTs: Double, nowMs: Double) {
-        let isRecentNotif = (kind != "保存データ") && (payloadTs <= 0 || abs(nowMs - payloadTs) <= 90_000)
-        guard isRecentNotif,
-              let notif = data["notification"] as? [String: Any],
+        guard let notif = data["notification"] as? [String: Any],
               let text = notif["text"] as? String,
               !text.isEmpty else {
             return
         }
         let notifId = notif["id"] as? String ?? ""
+        let isFreshSavedContext = (kind == "保存データ" && !notifId.isEmpty && payloadTs > 0 && abs(nowMs - payloadTs) <= 25_000)
+        let isRecentNotif = ((kind != "保存データ") && (payloadTs <= 0 || abs(nowMs - payloadTs) <= 90_000)) || isFreshSavedContext
+        guard isRecentNotif else { return }
         let colorHex = notif["color"] as? String ?? "#30D158"
         let sourceUser = notif["sourceUser"] as? String ?? ""
         guard sourceUser == "__remote__" else { return }
@@ -1277,11 +1284,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             if self.handledPeerNotifIds.count > 30 {
                 self.handledPeerNotifIds.removeFirst(self.handledPeerNotifIds.count - 30)
             }
+            UserDefaults.standard.set(self.handledPeerNotifIds, forKey: self.savedHandledPeerNotifIdsKey)
         }
 
         let fireAlert = {
             self.incomingNotification = (text: text, color: colorHex)
-            WatchAlarmCoordinator.shared.postPeerActionNotification(text: text)
+            WatchAlarmCoordinator.shared.postPeerActionNotification(
+                text: text,
+                forceSystemBanner: self.isModalSheetCurrentlyPresented
+            )
         }
         if Thread.isMainThread {
             fireAlert()
@@ -2247,6 +2258,7 @@ struct ContentView: View {
     @State private var notificationBannerText: String? = nil
     @State private var notificationBannerColor: Color = Color(hex: "#0A84FF")
     @State private var notificationDismissWorkItem: DispatchWorkItem? = nil
+    @State private var pendingRemotePeerBanner: (text: String, color: Color, receivedAt: Date)? = nil
     @State private var alertedUnassignedHelpKeys: Set<String> = []
     
     // 客席サムネイル・バードビュー（一覧）表示フラグ（起動時およびモジュラー文字盤タップ時は一覧をデフォルト表示）
@@ -2335,14 +2347,27 @@ struct ContentView: View {
     private func showNotification(
         text: String,
         color: Color = Color(hex: "#0A84FF"),
-        playHapticFeedback: Bool = false
+        playHapticFeedback: Bool = false,
+        isRemotePeer: Bool = false
     ) {
         notificationDismissWorkItem?.cancel()
         if playHapticFeedback {
             playHaptic(.notification)
+            if isRemotePeer {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
+                    WKInterfaceDevice.current().play(.directionUp)
+                }
+            }
         }
-        // モーダルシート表示中に背面のバナーアニメーションを走らせると watchOS SwiftUI のシート制御と競合するためスキップ
-        guard !isAnyModalSheetPresented else { return }
+        // モーダルシート表示中に背面のバナーアニメーションを走らせると watchOS SwiftUI のシート制御と競合するため、
+        // リモート共有通知の場合はシート閉鎖直後に再表示できるよう保持してスキップする（OSバナーは前面表示される）
+        guard !isAnyModalSheetPresented else {
+            if isRemotePeer {
+                pendingRemotePeerBanner = (text: text, color: color, receivedAt: Date())
+            }
+            return
+        }
+        pendingRemotePeerBanner = nil
         let isSameBannerShowing = (notificationBannerText == text)
         if !isSameBannerShowing {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
@@ -2353,6 +2378,7 @@ struct ContentView: View {
             notificationBannerColor = color
         }
         
+        let displayDuration: TimeInterval = isRemotePeer ? 5.5 : 3.5
         let workItem = DispatchWorkItem {
             withAnimation(.easeOut(duration: 0.3)) {
                 if notificationBannerText == text {
@@ -2361,7 +2387,7 @@ struct ContentView: View {
             }
         }
         notificationDismissWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + displayDuration, execute: workItem)
     }
     
     // ★ シート表示中に親の `timers` が更新されても `.sheet(item:)` に渡す `SeatTimerItem` が変化して
@@ -2865,8 +2891,27 @@ struct ContentView: View {
             }
             .onReceive(sessionManager.$incomingNotification) { notif in
                 if let notif = notif {
-                    showNotification(text: notif.text, color: Color(hex: notif.color), playHapticFeedback: true)
+                    showNotification(
+                        text: notif.text,
+                        color: Color(hex: notif.color),
+                        playHapticFeedback: true,
+                        isRemotePeer: true
+                    )
                     sessionManager.incomingNotification = nil
+                }
+            }
+            .onChange(of: isAnyModalSheetPresented) { _, isPresented in
+                sessionManager.isModalSheetCurrentlyPresented = isPresented
+                if !isPresented, let pending = pendingRemotePeerBanner {
+                    pendingRemotePeerBanner = nil
+                    if Date().timeIntervalSince(pending.receivedAt) <= 12.0 {
+                        showNotification(
+                            text: pending.text,
+                            color: pending.color,
+                            playHapticFeedback: false,
+                            isRemotePeer: true
+                        )
+                    }
                 }
             }
             .onAppear {

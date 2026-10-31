@@ -3739,3 +3739,39 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
 2. **ネイティブビルド（Build 98）と TestFlight 自動提出**:
    - `app.json` の `buildNumber` を `98` にインクリメント。
    - `expo-notifications`、`expo-device`、`expo-constants`、および `UIBackgroundModes: ["audio", "remote-notification"]` を組み込んだネイティブバイナリを EAS Build 経由でコンパイルし、App Store Connect（TestFlight）へ直接提出する運用を確立。
+
+---
+
+## 59. 旧ビルド混在時の `updated_by` 自己エコー誤判定根絶、他者によるタイマー設定・担当者指定時の通知完全保証、および Watch 通知取りこぼし根絶仕様 (Build 100–101 / 2026-10-31)
+
+### 59.1 背景・課題
+
+1. **旧ビルド（`updated_by` 未送信クライアント）混在時の残留 `updated_by` による通知スキップ**:
+   - Build 98 で導入した `salon_timers.updated_by` に対し、Build 97 以前の端末（シミュレーター等）が停止・更新操作を行うと `updated_by` カラムが更新されず、最初にタイマーを設定したスタッフの `userId` がデータベース上に残留していた。
+   - その結果、設定者本人の端末が他端末からの停止イベントを `newRec.updated_by === localUserId`（自己操作エコー）と誤判定し、自身の iPhone トースト通知および Apple Watch 通知を完全に破棄していた。
+2. **他スタッフによる新規タイマー設定・担当者指定時の通知漏れ経路**:
+   - 稼働開始時や稼働途中に自分の名前がチェック担当・ヘルプ担当・主担当に指定された際、`else if` 分岐の競合（ステータス変更・時間変更・初期設定との同時発生や、`prevCheck === newCheck` のままチェックタイマーだけ途中追加されたケース）および INSERT イベント時の通知未発火により、指名された本人に通知が届かないケースがあった。
+   - また `pushNotificationService.js` の `semanticKey`（`timerId|eventType`）重複排除キャッシュが同一チャネル（Realtime 同士）にも 6.5 秒間適用され、`eventType` 未設定（`'peer'` フォールバック）と重なることで、タイマー開始直後のチェックタイマー追加・担当指定通知が握り潰される経路があった。
+3. **本番 Edge Function `notify-salon-event` 未デプロイおよびメンバー表示名のクラウド未同期**:
+   - DB トリガー `on_salon_timers_push_notify` の送信先である Edge Function `notify-salon-event` が本番環境に未デプロイ（HTTP 404）であり、またメンバー管理での表示名変更がローカル配列のみの更新で `salon_members.display_name` に反映されていなかった。
+4. **Apple Watch 側のモーダル表示中・手首下げ復帰時のピア通知視認性**:
+   - Watch アプリ上でシート表示中に他端末通知が届いた場合に背面バナーが隠れ、かつ `.active` 時は watchOS 通知センター履歴に残らず、`applicationContext`（`"保存データ"`）経由で手首上げ復帰した際の直近未読ピア通知もスキップされていた。
+
+### 59.2 確定仕様・実装詳細
+
+1. **ローカル書き込み時刻照合付きの自己エコー判定 `isRecentLocalActorEcho` (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)**:
+   - 席単位および全体でのローカルクラウド書き込み時刻（`_recentLocalSeatWriteAt` / `_lastLocalAnyCloudWriteAt`）を記録し、`rec.updated_by === localUserId` であっても直近 12 秒以内に自端末からクラウド書き込みを行っていない場合は「旧クライアント操作による残留 `updated_by`」と判定して自己エコー除外を行わない。
+2. **他者によるタイマー設定・自分への担当者指定時の通知 100% 保証 (`src/screens/SalonWorkScreen.js`, `supabase/functions/notify-salon-event/index.ts`)**:
+   - **Realtime 側（UPDATE & INSERT 両対応）**:
+     - 最優先の自分宛て指名検知ブロックを新設し、自分以外のスタッフが ①チェック担当に自分を指定（新規・変更・途中チェック追加での再指定含む）、②ヘルプ／工程担当に自分を指定（停止時の次工程担当指定および `'call'` 呼び出し含む）、③自分を主担当としてタイマーを開始した場合に、他の分岐に優先して確実に `"担当に指定されました"` / `"あなた主担当で設定されました"` を通知する。
+     - 全 `peerNotification` に明示的な `eventType`（`check_done`, `stop`, `recruit`, `status_change`, `assign_assist`, `assign_check`, `assign_main`, `timer_start`, `add_check`, `time_adjust`）を付与。
+   - **チャネル分離型重複排除 (`src/utils/pushNotificationService.js`)**:
+     - `semanticKey` キャッシュを `_handledPushSemanticKeys` と `_handledRealtimeSemanticKeys` に分離し、異チャネル間（Push ⇄ Realtime）の二重通知のみを抑止して同一チャネル内の連続操作通知を一切破棄しない。
+   - **Edge Function `notify-salon-event` 本番デプロイ & マルチプラン配信 (`supabase/config.toml`, `supabase/functions/notify-salon-event/index.ts`)**:
+     - `verify_jwt = false` 設定を追加して本番プロジェクト（`hcmjcwcmvcwicjmnhtdc`）へデプロイ。
+     - `else if` による排他分岐を優先度順の独立 `plans.push(...)` 方式（`sentTokens` による同一端末重複防止付き）へ刷新し、タイマー開始と同時にチェック担当・ヘルプ担当が指定された場合でも各担当者へ漏れなく個別文言でバックグラウンド Push 通知を配信する。
+3. **メンバー表示名変更のクラウド即時同期 (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)**:
+   - メンバー管理での名前変更時に `updateMemberDisplayName` で `salon_members.display_name` を更新し、`subscribeSalonMembers` で自身の表示名変更を受信した端末はローカルの `userName` および Watch 側の `currentUserName` を即時自動同期する。
+4. **Apple Watch ピア通知の確実な発火・履歴保持・シート閉鎖後バナー再表示 (`targets/watch/alarm.swift`, `targets/watch/content.swift`)**:
+   - `handledPeerNotifIds` を `UserDefaults` に永続化し、手首上げ復帰時の `applicationContext`（`"保存データ"`）であっても直近 25 秒以内の未読 `notifId` が含まれていれば即座に通知を発火する。
+   - リモートピア通知は 2 段階ハプティック（`.notification` ＋ `.directionUp`）と 5.5 秒バナー表示を行い、モーダルシート表示中に受信した場合はシステムバナー強制表示（`[.banner, .sound, .list]`）に加えてシート閉鎖直後にアプリ内バナーも自動表示する。また `.active` 中のピア通知も watchOS 通知センター履歴（`.list`）へ記録する。

@@ -501,17 +501,36 @@ export const subscribeSalonMembers = (salonId, onMembersChange) => {
 };
 
 /**
- * メンバー表示名の更新（ニックネーム変更）
+ * メンバー表示名の更新（自分のニックネーム変更、またはオーナーによるメンバー呼び名のクラウド同期）
  */
-export const updateMemberDisplayName = async ({ salonId, displayName }) => {
+export const updateMemberDisplayName = async ({
+  salonId,
+  displayName,
+  targetUserId = null,
+  cloudMemberId = null,
+}) => {
   if (!salonId || !displayName) return;
-  const userId = await getOrCreateUserId();
+  const trimmed = displayName.trim();
+  if (!trimmed) return;
   try {
+    if (cloudMemberId && isValidUUID(cloudMemberId)) {
+      await supabase
+        .from('salon_members')
+        .update({ display_name: trimmed })
+        .eq('salon_id', salonId)
+        .eq('id', cloudMemberId);
+      return;
+    }
+    const resolvedUserId =
+      targetUserId && !String(targetUserId).startsWith('mem_')
+        ? String(targetUserId)
+        : await getOrCreateUserId();
+    if (!resolvedUserId) return;
     await supabase
       .from('salon_members')
-      .update({ display_name: displayName.trim() })
+      .update({ display_name: trimmed })
       .eq('salon_id', salonId)
-      .eq('user_id', userId);
+      .eq('user_id', resolvedUserId);
   } catch (e) {
     console.warn('updateMemberDisplayName failed:', e);
   }
@@ -813,16 +832,37 @@ export const fetchSalonTimers = async (salonId, options = {}) => {
 };
 
 /**
- * 自端末から直近に送信したクラウド更新のシグネチャを記録し、Realtimeエコーバック（自己通知）を判定
+ * 自端末から直近に送信したクラウド更新のシグネチャと送信時刻を記録し、Realtimeエコーバック（自己通知）を判定
+ * ※ 旧ビルド（Build ≤97）の端末が updated_by カラムを含めずに UPSERT した場合、PostgreSQL 上の既存 updated_by が保持されるため、
+ *   無期限に updated_by === localUserId だけで判定すると相手端末の停止・変更通知まで自己エコーと誤認してしまう。
+ *   そのため自端末が実際にクラウド更新を送信した直近ウィンドウ（LOCAL_ACTOR_ECHO_WINDOW_MS）内のみ自己エコーと判定する。
  */
 const _recentLocalPayloadSigs = new Map();
+const _recentLocalSeatWriteAt = new Map();
+let _lastLocalAnyCloudWriteAt = 0;
+const LOCAL_ACTOR_ECHO_WINDOW_MS = 12000;
 
 const getCloudPayloadSignature = (p) => {
   if (!p) return '';
   return `${p.seat_label || ''}|${p.color_staff_name || ''}|${p.status || ''}|${Number(p.target_seconds || 0)}|${Number(p.target_end_timestamp || 0)}|${Number(p.paused_remaining_seconds || 0)}|${p.assistant_staff_name || ''}|${p.help_process || ''}|${p.is_shampooing ? 1 : 0}|${p.comment || ''}|${Number(p.check_target_end_timestamp || 0)}|${Number(p.check_total_seconds || 0)}|${p.check_process || ''}|${p.check_staff_name || ''}`;
 };
 
+const markLocalSeatWriteTimestamp = (p) => {
+  const now = Date.now();
+  _lastLocalAnyCloudWriteAt = now;
+  const idKey = p?.id ? `id:${String(p.id).trim()}` : '';
+  const labelKey = p?.seat_label ? `lbl:${String(p.seat_label).replace(/席$/, '').trim()}` : '';
+  if (idKey) _recentLocalSeatWriteAt.set(idKey, now);
+  if (labelKey) _recentLocalSeatWriteAt.set(labelKey, now);
+  if (_recentLocalSeatWriteAt.size > 100) {
+    for (const [k, ts] of _recentLocalSeatWriteAt.entries()) {
+      if (now - ts > LOCAL_ACTOR_ECHO_WINDOW_MS * 2) _recentLocalSeatWriteAt.delete(k);
+    }
+  }
+};
+
 const recordLocalCloudPayload = (p) => {
+  markLocalSeatWriteTimestamp(p);
   const sig = getCloudPayloadSignature(p);
   if (!sig) return;
   const now = Date.now();
@@ -838,6 +878,22 @@ const isRecentLocalCloudPayload = (rec, windowMs = 6000) => {
   const sig = getCloudPayloadSignature(rec);
   if (!sig || !_recentLocalPayloadSigs.has(sig)) return false;
   return Date.now() - _recentLocalPayloadSigs.get(sig) < windowMs;
+};
+
+export const isRecentLocalActorEcho = (rec, localUserId, windowMs = LOCAL_ACTOR_ECHO_WINDOW_MS) => {
+  const recUpdatedBy = rec?.updated_by || rec?.updatedBy || null;
+  if (!recUpdatedBy || !localUserId || recUpdatedBy !== localUserId) return false;
+  const now = Date.now();
+  const idKey = rec?.id ? `id:${String(rec.id).trim()}` : '';
+  const rawLabel = rec?.seat_label || rec?.seatLabel || rec?.name || '';
+  const labelKey = rawLabel ? `lbl:${String(rawLabel).replace(/\s*[\(（]サンプル[\)）]/g, '').replace(/席$/, '').trim()}` : '';
+  if (idKey && _recentLocalSeatWriteAt.has(idKey)) {
+    if (now - _recentLocalSeatWriteAt.get(idKey) < windowMs) return true;
+  }
+  if (labelKey && _recentLocalSeatWriteAt.has(labelKey)) {
+    if (now - _recentLocalSeatWriteAt.get(labelKey) < windowMs) return true;
+  }
+  return _lastLocalAnyCloudWriteAt > 0 && now - _lastLocalAnyCloudWriteAt < 6000;
 };
 
 /**
@@ -894,6 +950,7 @@ export const upsertCloudTimer = async (salonId, seat) => {
 
     if (isUUID) {
       payload.id = seat.cloudTimerId || seat.id;
+      markLocalSeatWriteTimestamp(payload);
       const { data, error } = await executeSalonTimerUpsert(payload);
       if (error) console.warn('upsertCloudTimer update error:', error);
       return data ? mapCloudTimerToSeat(data) : null;
@@ -916,6 +973,7 @@ export const upsertCloudTimer = async (salonId, seat) => {
           || existingList[0];
         if (matched?.id) {
           payload.id = matched.id;
+          markLocalSeatWriteTimestamp(payload);
         }
       }
       const { data, error } = await executeSalonTimerUpsert(payload);
@@ -995,7 +1053,7 @@ export const subscribeSalonTimers = (salonId, onTimerEvent) => {
       (payload) => {
         if (typeof onTimerEvent === 'function') {
           const { eventType, new: newRec, old: oldRec } = payload;
-          const isUpdatedByMe = !!(newRec?.updated_by && localUserId && newRec.updated_by === localUserId);
+          const isUpdatedByMe = isRecentLocalActorEcho(newRec, localUserId);
           const isSelfEcho = newRec ? (isUpdatedByMe || isRecentLocalCloudPayload(newRec)) : false;
           const rawOldLabel = oldRec?.seat_label
             ? String(oldRec.seat_label).replace(/\s*[\(（]サンプル[\)）]/g, '').trim()

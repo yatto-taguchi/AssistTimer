@@ -308,92 +308,7 @@ Deno.serve(async (req: Request) => {
         color: '#FF9F0A',
       });
     }
-    // ④ タイマー停止を伴わない施術ステータス（呼び出し・コーミング・シャンプー等）の変更
-    else if (
-      currAssist !== '募集中' &&
-      (prevActionId !== currActionId || Boolean(prev?.is_shampooing) !== Boolean(curr.is_shampooing)) &&
-      !(prev?.status !== 'running' && curr.status === 'running') &&
-      !(curr.status === 'running' && prevAssist !== currAssist && isNamedAssistant(currAssist) && currActionId !== 'call')
-    ) {
-      const targets =
-        currActionId === 'call'
-          ? mergeSets(allMemberUserIds, collectAssignedStakeholders(prev), collectAssignedStakeholders(curr))
-          : mergeSets(
-              collectAssignedStakeholders(prev),
-              collectAssignedStakeholders(curr),
-              collectMainTimerAlertCandidates(prev)
-            );
-      const namedActor = isNamedAssistant(currAssist) ? currAssist : '';
-
-      if (currMeta) {
-        let body = `${currMeta.emoji} ${label}が${currMeta.label}に入りました`;
-        if (currMeta.id === 'call') {
-          body = `🔔 ${label}から呼び出しがあります！`;
-        } else if (curr.status === 'running' && !curr.is_shampooing) {
-          body = `${currMeta.emoji} ${label}のヘルプ内容が「${currMeta.label}」に変更されました`;
-        } else if (namedActor) {
-          body = `${currMeta.emoji} ${label}の${currMeta.label}に ${namedActor} さんが入りました`;
-        }
-        plans.push({
-          userIds: targets,
-          eventType: 'status_change',
-          body,
-          color: currMeta.color,
-        });
-      } else if (prevMeta && prev?.status !== 'running' && curr.status !== 'running' && !isSeatResetOrIdle(curr)) {
-        plans.push({
-          userIds: targets,
-          eventType: 'status_change',
-          body: `✅ ${label}の${prevMeta.label}が完了しました`,
-          color: '#30D158',
-        });
-      }
-    }
-    // ⑤ ヘルプ担当・チェック担当の指名／立候補
-    else if (prevAssist !== currAssist && isNamedAssistant(currAssist)) {
-      const assignedIds = new Set(resolveUserIdsByName(currAssist));
-      const stakeholderIds = mergeSets(collectMainStaffIds(curr), collectAssignedStakeholders(prev));
-      for (const uid of assignedIds) stakeholderIds.delete(uid);
-
-      if (assignedIds.size > 0) {
-        plans.push({
-          userIds: assignedIds,
-          eventType: 'assign_assist',
-          body: `🙋‍♂️ ${label}の${helpProcLabel}担当に指定されました`,
-          color: '#0A84FF',
-        });
-      }
-      if (stakeholderIds.size > 0) {
-        plans.push({
-          userIds: stakeholderIds,
-          eventType: 'assign_assist',
-          body: `🤝 ${label}の${helpProcLabel}に ${currAssist} さんが入りました`,
-          color: '#30D158',
-        });
-      }
-    } else if (prevCheck !== currCheck && isNamedCheckStaff(currCheck)) {
-      const assignedIds = new Set(resolveUserIdsByName(currCheck));
-      const stakeholderIds = mergeSets(collectMainStaffIds(curr), collectAssignedStakeholders(prev));
-      for (const uid of assignedIds) stakeholderIds.delete(uid);
-
-      if (assignedIds.size > 0) {
-        plans.push({
-          userIds: assignedIds,
-          eventType: 'assign_check',
-          body: `🔍 ${label}の${checkProcLabel}担当に指定されました`,
-          color: '#FF9F0A',
-        });
-      }
-      if (stakeholderIds.size > 0) {
-        plans.push({
-          userIds: stakeholderIds,
-          eventType: 'assign_check',
-          body: `🔍 ${label}の${checkProcLabel}に ${currCheck} さんが入りました`,
-          color: '#30D158',
-        });
-      }
-    }
-    // ⑥ 新規タイマー開始時の担当同時指名、または稼働中席への途中チェック追加
+    // ④ 新規タイマー開始時（担当同時指名＋主担当設定＋関係者/ヘルプ未定メンバーへの開始通知をすべて独立判定）
     else if ((!prev || prev.status !== 'running') && curr.status === 'running') {
       const mins = Math.max(1, Math.round(Number(curr.target_seconds || 600) / 60));
       const notified = new Set<string>();
@@ -414,23 +329,193 @@ Deno.serve(async (req: Request) => {
       if (isNamedAssistant(currAssist)) {
         const assistUsers = new Set(resolveUserIdsByName(currAssist).filter((u) => !notified.has(u)));
         if (assistUsers.size > 0) {
+          for (const u of assistUsers) notified.add(u);
           plans.push({
             userIds: assistUsers,
             eventType: 'assign_assist',
-            body: `🙋‍♂️ ${label}の${helpProcLabel}（${mins}分）担当に指定されました`,
-            color: '#0A84FF',
+            body:
+              currActionId === 'call'
+                ? `🔔 ${label}からあなたへ呼び出しがあります！`
+                : `🙋‍♂️ ${label}の${helpProcLabel}（${mins}分）担当に指定されました`,
+            color: currActionId === 'call' ? '#FF9500' : '#0A84FF',
           });
         }
       }
-    } else if (!prevHadActiveCheck && currHasActiveCheck && prev?.status === 'running' && curr.status === 'running') {
-      const chkMins = Math.max(1, Math.round(Number(curr.check_total_seconds || 300) / 60));
-      const targets = collectCheckTimerAlertCandidates(curr);
-      plans.push({
-        userIds: targets,
-        eventType: 'add_check',
-        body: `🔍 ${label}に${checkProcLabel}（${chkMins}分）が追加されました`,
-        color: '#FF9F0A',
-      });
+      const mainStaffUsers = new Set(Array.from(collectMainStaffIds(curr)).filter((u) => !notified.has(u)));
+      if (mainStaffUsers.size > 0) {
+        for (const u of mainStaffUsers) notified.add(u);
+        plans.push({
+          userIds: mainStaffUsers,
+          eventType: 'assign_main',
+          body: `🎨 ${label}のタイマー（${mins}分）があなた主担当で設定されました`,
+          color: '#AF52DE',
+        });
+      }
+      const startCandidates = mergeSets(
+        collectMainTimerAlertCandidates(curr),
+        currHasActiveCheck ? collectCheckTimerAlertCandidates(curr) : new Set<string>()
+      );
+      for (const u of notified) startCandidates.delete(u);
+      if (startCandidates.size > 0) {
+        plans.push({
+          userIds: startCandidates,
+          eventType: 'timer_start',
+          body: `▶️ ${label}のタイマー（${mins}分）が開始されました`,
+          color: '#0A84FF',
+        });
+      }
+    }
+    // ⑤ 稼働中・停止中における担当者指名・途中チェック追加・施術ステータス変更・残り時間変更
+    else {
+      const prevColor = String(prev?.color_staff_name || '').trim();
+      const currColor = String(curr.color_staff_name || '').trim();
+      const isAddingCheck = !prevHadActiveCheck && currHasActiveCheck && prev?.status === 'running' && curr.status === 'running';
+
+      // 5-1. 本人への担当指名通知を最優先でプラン登録（sentTokens により本人へ確実に「担当に指定されました」が届く）
+      if ((prevCheck !== currCheck || isAddingCheck) && isNamedCheckStaff(currCheck)) {
+        const assignedCheckIds = new Set(resolveUserIdsByName(currCheck));
+        if (assignedCheckIds.size > 0) {
+          const chkMins = Math.max(1, Math.round(Number(curr.check_total_seconds || 300) / 60));
+          plans.push({
+            userIds: assignedCheckIds,
+            eventType: 'assign_check',
+            body: currHasActiveCheck
+              ? `🔍 ${label}の${checkProcLabel}（${chkMins}分）担当に指定されました`
+              : `🔍 ${label}の${checkProcLabel}担当に指定されました`,
+            color: '#FF9F0A',
+          });
+        }
+      }
+
+      if (
+        (prevAssist !== currAssist || (prevActionId !== currActionId && Boolean(currActionId))) &&
+        isNamedAssistant(currAssist)
+      ) {
+        const assignedAssistIds = new Set(resolveUserIdsByName(currAssist));
+        if (assignedAssistIds.size > 0) {
+          plans.push({
+            userIds: assignedAssistIds,
+            eventType: 'assign_assist',
+            body:
+              currActionId === 'call'
+                ? `🔔 ${label}からあなたへ呼び出しがあります！`
+                : `🙋‍♂️ ${label}の${helpProcLabel}担当に指定されました`,
+            color: currActionId === 'call' ? '#FF9500' : '#0A84FF',
+          });
+        }
+      }
+
+      if (prevColor !== currColor && currColor && currColor !== 'スタッフ') {
+        const assignedMainIds = new Set(resolveUserIdsByName(currColor));
+        if (assignedMainIds.size > 0) {
+          const mins = Math.max(1, Math.round(Number(curr.target_seconds || 600) / 60));
+          plans.push({
+            userIds: assignedMainIds,
+            eventType: 'assign_main',
+            body:
+              curr.status === 'running'
+                ? `🎨 ${label}のタイマー（${mins}分）があなた主担当で設定されました`
+                : `🎨 ${label}の主担当に設定されました`,
+            color: '#AF52DE',
+          });
+        }
+      }
+
+      // 5-2. 稼働中席への途中チェック追加（担当者以外の主担当・関係者・未定時の全員へ共有）
+      if (isAddingCheck) {
+        const chkMins = Math.max(1, Math.round(Number(curr.check_total_seconds || 300) / 60));
+        const targets = collectCheckTimerAlertCandidates(curr);
+        const staffSuffix = isNamedCheckStaff(currCheck) ? `（担当: ${currCheck}）` : '';
+        plans.push({
+          userIds: targets,
+          eventType: 'add_check',
+          body: `🔍 ${label}に${checkProcLabel}（${chkMins}分）が追加されました${staffSuffix}`,
+          color: '#FF9F0A',
+        });
+      }
+
+      // 5-3. タイマー停止を伴わない施術ステータス（呼び出し・コーミング・シャンプー等）の変更
+      if (
+        currAssist !== '募集中' &&
+        (prevActionId !== currActionId || Boolean(prev?.is_shampooing) !== Boolean(curr.is_shampooing)) &&
+        !(curr.status === 'running' && prevAssist !== currAssist && isNamedAssistant(currAssist) && currActionId !== 'call')
+      ) {
+        const targets =
+          currActionId === 'call'
+            ? mergeSets(allMemberUserIds, collectAssignedStakeholders(prev), collectAssignedStakeholders(curr))
+            : mergeSets(
+                collectAssignedStakeholders(prev),
+                collectAssignedStakeholders(curr),
+                collectMainTimerAlertCandidates(prev)
+              );
+        const namedActor = isNamedAssistant(currAssist) ? currAssist : '';
+
+        if (currMeta) {
+          let body = `${currMeta.emoji} ${label}が${currMeta.label}に入りました`;
+          if (currMeta.id === 'call') {
+            body = `🔔 ${label}から呼び出しがあります！`;
+          } else if (curr.status === 'running' && !curr.is_shampooing) {
+            body = `${currMeta.emoji} ${label}のヘルプ内容が「${currMeta.label}」に変更されました`;
+          } else if (namedActor) {
+            body = `${currMeta.emoji} ${label}の${currMeta.label}に ${namedActor} さんが入りました`;
+          }
+          plans.push({
+            userIds: targets,
+            eventType: 'status_change',
+            body,
+            color: currMeta.color,
+          });
+        } else if (prevMeta && prev?.status !== 'running' && curr.status !== 'running' && !isSeatResetOrIdle(curr)) {
+          plans.push({
+            userIds: targets,
+            eventType: 'status_change',
+            body: `✅ ${label}の${prevMeta.label}が完了しました`,
+            color: '#30D158',
+          });
+        }
+      }
+
+      // 5-4. ヘルプ担当・チェック担当への参戦／指名共有（主担当・既存関係者へ通知）
+      if (prevAssist !== currAssist && isNamedAssistant(currAssist)) {
+        const stakeholderIds = mergeSets(collectMainStaffIds(curr), collectAssignedStakeholders(prev));
+        for (const uid of resolveUserIdsByName(currAssist)) stakeholderIds.delete(uid);
+        if (stakeholderIds.size > 0) {
+          plans.push({
+            userIds: stakeholderIds,
+            eventType: 'assign_assist',
+            body: `🤝 ${label}の${helpProcLabel}に ${currAssist} さんが入りました`,
+            color: '#30D158',
+          });
+        }
+      }
+
+      if (prevCheck !== currCheck && isNamedCheckStaff(currCheck)) {
+        const stakeholderIds = mergeSets(collectMainStaffIds(curr), collectAssignedStakeholders(prev));
+        for (const uid of resolveUserIdsByName(currCheck)) stakeholderIds.delete(uid);
+        if (stakeholderIds.size > 0) {
+          plans.push({
+            userIds: stakeholderIds,
+            eventType: 'assign_check',
+            body: `🔍 ${label}の${checkProcLabel}に ${currCheck} さんが入りました`,
+            color: '#30D158',
+          });
+        }
+      }
+
+      // 5-5. 稼働中タイマーの残り時間変更（25秒以上の変更時）
+      if (
+        prev?.status === 'running' &&
+        curr.status === 'running' &&
+        Math.abs(Number(curr.target_end_timestamp || 0) - Number(prev.target_end_timestamp || 0)) >= 25000
+      ) {
+        const targets = mergeSets(collectMainTimerAlertCandidates(curr), collectAssignedStakeholders(curr));
+        plans.push({
+          userIds: targets,
+          eventType: 'time_adjust',
+          body: `⏱ ${label}の残り時間が変更されました`,
+          color: '#0A84FF',
+        });
+      }
     }
 
     // 操作実行者自身（actorUserId）を全プランから除外（自己エコー通知の完全防止）

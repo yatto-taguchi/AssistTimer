@@ -82,9 +82,10 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
 
     private var lastPeerNotifText: String = ""
     private var lastPeerNotifAt: Date = .distantPast
+    private var forceSystemBannerRequestIds: Set<String> = []
 
     /// 共有相手（関係者の席）でチェック完了・タイマー停止・担当指名・募集などが行われた際にWatchへ通知する
-    func postPeerActionNotification(text: String) {
+    func postPeerActionNotification(text: String, forceSystemBanner: Bool = false) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let now = Date()
@@ -94,21 +95,31 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         lastPeerNotifText = trimmed
         lastPeerNotifAt = now
 
-        // 手首への触覚フィードバック（フォアグラウンド時は showNotification 側でも鳴るためバックグラウンド時のみ直接鳴らす）
-        if WKApplication.shared().applicationState != .active {
+        let isActive = (WKApplication.shared().applicationState == .active)
+        if !isActive {
             WKInterfaceDevice.current().play(.notification)
-            let content = UNMutableNotificationContent()
-            content.title = "AssistTimer"
-            content.body = trimmed
-            content.sound = .default
-            if #available(watchOS 8.0, *) {
-                content.interruptionLevel = .timeSensitive
-            }
-            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.2, repeats: false)
-            let reqId = "assisttimer.peer.\(UUID().uuidString)"
-            let req = UNNotificationRequest(identifier: reqId, content: content, trigger: trigger)
-            UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
         }
+
+        // フォアグラウンド時も通知センター履歴(.list)に残し、さらにモーダルシート表示中(forceSystemBanner)や
+        // バックグラウンド／常時表示(.inactive)時はOS標準バナー＋サウンドで確実に見逃しを防止する
+        let content = UNMutableNotificationContent()
+        content.title = "AssistTimer"
+        content.body = trimmed
+        content.sound = .default
+        if #available(watchOS 8.0, *) {
+            content.interruptionLevel = .timeSensitive
+        }
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.15, repeats: false)
+        let reqId = "assisttimer.peer.\(UUID().uuidString)"
+        if forceSystemBanner {
+            forceSystemBannerRequestIds.insert(reqId)
+            if forceSystemBannerRequestIds.count > 20 {
+                forceSystemBannerRequestIds.removeAll()
+                forceSystemBannerRequestIds.insert(reqId)
+            }
+        }
+        let req = UNNotificationRequest(identifier: reqId, content: content, trigger: trigger)
+        UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
     }
 
     private var events: [WatchAlarmEvent] = []
@@ -2665,10 +2676,15 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         let reqId = notification.request.identifier
         DispatchQueue.main.async {
             if reqId.hasPrefix("assisttimer.peer.") {
-                if WKApplication.shared().applicationState == .active {
-                    completionHandler([])
+                let shouldForceBanner = self.forceSystemBannerRequestIds.remove(reqId) != nil
+                let isActive = (WKApplication.shared().applicationState == .active)
+                if isActive && !shouldForceBanner {
+                    // フォアグラウンド通常画面ではカスタムバナー＋ダブル触覚を表示しつつ、通知センター履歴(.list)にも残して見逃しを防止
+                    completionHandler([.list])
                 } else {
-                    WKInterfaceDevice.current().play(.notification)
+                    if !isActive {
+                        WKInterfaceDevice.current().play(.notification)
+                    }
                     completionHandler([.banner, .sound, .list])
                 }
                 return

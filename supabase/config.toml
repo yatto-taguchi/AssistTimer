@@ -1,0 +1,4 @@
+project_id = "hcmjcwcmvcwicjmnhtdc"
+
+[functions.notify-salon-event]
+verify_jwt = false
