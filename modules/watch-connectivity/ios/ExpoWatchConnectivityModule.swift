@@ -501,30 +501,29 @@ public class ExpoWatchConnectivityModule: Module {
   }
 
   // ★ Watchからバックグラウンド中のiPhoneへ操作（STOP_TIMER等）が届いた際、
+  //   WCSessionデリゲートスレッド上で即座（同期）にバックグラウンド実行タスクを確保し、
   //   replyHandler返却直後にiOSがプロセスを即サスペンドしてSupabaseへのクラウド同期（upsertCloudTimer）が中断されるのを防止する
   fileprivate func beginWatchActionBackgroundTask() {
-    let runBlock = {
-      var actionTaskId: UIBackgroundTaskIdentifier = .invalid
-      actionTaskId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerWatchActionCloudSync") {
-        if actionTaskId != .invalid {
-          let expiredId = actionTaskId
-          actionTaskId = .invalid
-          UIApplication.shared.endBackgroundTask(expiredId)
-        }
-      }
-      guard actionTaskId != .invalid else { return }
-      DispatchQueue.main.asyncAfter(deadline: .now() + 20.0) {
-        if actionTaskId != .invalid {
-          let doneId = actionTaskId
-          actionTaskId = .invalid
-          UIApplication.shared.endBackgroundTask(doneId)
-        }
+    var actionTaskId: UIBackgroundTaskIdentifier = .invalid
+    let taskLock = NSLock()
+    let endTaskSafely = {
+      taskLock.lock()
+      let taskToEnd = actionTaskId
+      actionTaskId = .invalid
+      taskLock.unlock()
+      if taskToEnd != .invalid {
+        UIApplication.shared.endBackgroundTask(taskToEnd)
       }
     }
-    if Thread.isMainThread {
-      runBlock()
-    } else {
-      DispatchQueue.main.async(execute: runBlock)
+    let startedId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerWatchActionCloudSync") {
+      endTaskSafely()
+    }
+    guard startedId != .invalid else { return }
+    taskLock.lock()
+    actionTaskId = startedId
+    taskLock.unlock()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 25.0) {
+      endTaskSafely()
     }
   }
 }
@@ -646,7 +645,15 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
     DispatchQueue.main.async {
       self.module?.recordReceived(kind: "message", body: message)
       self.module?.dispatchEvent("onMessageReceived", ["message": message])
-      replyHandler(["status": "acknowledged"])
+      if UIApplication.shared.applicationState != .active {
+        // バックグラウンド起床時はJSスレッドが handleWatchAction -> upsertCloudTimer (fetch開始) まで走り切れるよう
+        // WCSessionのIPC起床アサーションを0.45秒保持してから replyHandler を返す
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+          replyHandler(["status": "acknowledged"])
+        }
+      } else {
+        replyHandler(["status": "acknowledged"])
+      }
     }
   }
 

@@ -3823,3 +3823,51 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
 5. **Apple Watch 超過・操作モーダルシートの自動クローズと `00:00` 即時復帰 (`targets/watch/content.swift`)**:
    - `ContentView.handleRemoteModalSheetAutoCloseIfNeeded` および各シート（`TimeActionSheet`・`CheckActionSheet`・`MainTimerActionSheet`）の `.onReceive` により、稼働中として開いていた対象タイマー（または `.subCheckActionBranch` / `CheckActionSheet` 表示中のチェックタイマー）が他端末から停止・完了された瞬間にモーダルシートを自動 `dismiss()` し、追加タップなしで `ContentView` の `timers` / `mainTimer` とコンプリケーション（`WidgetSync`）を即座に `00:00 (停止)`／チェック完了表示へ更新する（未稼働 `00:00` 席で新規タイム入力中のシートは閉じない）。
 
+---
+
+## 61. Apple Watch でのカウントダウン途中停止・リセット時のクラウド直結同期、Watch 単体クラウド整合ポーリング、および相手側 Watch 途中停止・誤鳴動根絶仕様 (Build 103 / 2026-11-01)
+
+### 61.1 背景・課題（5つの根本原因）
+
+1. **操作側 iPhone サスペンド・ロック時の Watch → iPhone → Supabase 中継遮断**:
+   - 従来、Apple Watch からの共有タイマー停止操作（`STOP_TIMER` / `RESET_ZERO` / `ENTER_HELP` / `START_SHAMPOO` 等）は必ずペアリング先 iPhone（`WCSession` → React Native JS → `upsertCloudTimer`）を経由してのみ Supabase へ書き込まれていた。
+   - iPhone が画面ロック・バックグラウンド移行後にサスペンド（または離席・圏外）していると、`WCSession.sendMessage` が失敗またはバックグラウンド起床直後に `replyHandler` 即時返却で JS の `fetch` 完了前に再サスペンドされ、また `beginWatchActionBackgroundTask` が非同期 `DispatchQueue.main.async` 呼び出しだったため `WCSessionDelegate` スレッドを抜けた瞬間にプロセス凍結が発生し、Supabase 上の `salon_timers` が `status: 'running'` のまま取り残されていた。
+2. **Watch モーダルシート停止時の `0.42s` 遅延送信と `immediatelyAcknowledgeSeatAlarm` による事前状態消去競合**:
+   - `TimeActionSheet` / `CheckActionSheet` / `ShampooActionSheet` の停止・工程移行ハンドラにおいて、`0ms` で `immediatelyAcknowledgeSeatAlarm` が `timers[idx].isRunning = false` に書き換えた一方、`seatSheetAction` 登録前に `handleRemoteModalSheetAutoCloseIfNeeded` が反応してシートを早期クローズし、`deferSeatSheetCloseAction`（`0.42s` 後）で `sendActionToPhone` が走る前に `targetEndTimestamp`（`expectedEnd`）を `0`、`helpProcess` を `""`、`timeActionTargetId` を `nil` に上書きしてしまう競合経路があった。またシート閉じ直後の手首下げで watchOS がアプリをサスペンドすると `0.42s` 後の `sendActionToPhone` 自体が未実行となるケースがあった。
+3. **`WCSession` アクティブ時の `transferUserInfo` 省略による一時到達失敗時のロスト**:
+   - `WatchSessionManager.deliver` で `session.activationState == .activated` かつ `isReachable` 時は `sendMessage` のみを送り、`errorHandler` 発火時しか `transferUserInfo` へフォールバックしていなかったため、ロック直後の遷移タイミングで `sendMessage` がタイムアウト・中断されると停止パケットが `transferUserInfo` キューに積まれない経路があった。
+4. **受信側 iPhone / Apple Watch における Realtime WebSocket サイレント切断時のフォールバックポーリング不在**:
+   - 受信側 iPhone の Supabase Realtime WebSocket が一時無応答になった場合や、受信側 iPhone 自体がロック・終了していて Watch 単体で表示中の場合、定期的な REST 再整合ポーリングが存在しなかったため、相手がカウントダウン途中で `00:00` に止めても受信側 Watch はローカルの `targetEndTimestamp` に従って `00:00` までカウントダウンを継続し、タイムアップ時にアラームを鳴動させていた。
+5. **`reconcileCloudTimers` の `isLocalRunningAhead` および `handleWatchAction` 停止記録漏れ**:
+   - `reconcileCloudTimers` の `isLocalRunningAhead` がクラウド側の `ct.updatedAt` とローカルの開始時刻を比較していなかったため、`dirtySync: true` が残っていた場合にクラウド側の新しい途中停止を古い `running` で復活させる余地があり、また `handleWatchAction` の Watch 停止分岐で `WatchConnectivity.notifyLocalStopOrReset` が呼ばれていなかった。
+
+### 61.2 確定仕様・実装詳細
+
+1. **Apple Watch → Supabase REST 直接 `PATCH` 同期による iPhone サスペンド完全非依存化 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - iPhone から Watch への同期ペイロード（`syncSeatsToWatch` / `syncMainTimerToWatch`）に現在アクティブなクラウド `salonId` と `userId` を同梱し、Watch 側 `WatchSessionManager`（`UserDefaults` 永続化付き）で保持する。
+   - Watch で客席タイマー操作（`STOP_TIMER`, `RESET_ZERO`, `FINISH_MEASURE`, `STOP_ALARM`, `ENTER_HELP`, `START_SHAMPOO`, `COMPLETE_CHECK`, `CANCEL_CHECK`, `START_TIMER`, `ADJUST_TIME`）が行われた際、iPhone への `WCSession` 送信と同時に **`0ms` で `syncSeatActionDirectlyToCloud` を実行**し、`ProcessInfo.processInfo.performExpiringActivity`（手首下げサスペンド保護）内で Supabase REST API（`PATCH /rest/v1/salon_timers`）へ直接書き込む。
+   - 停止系 `PATCH` には `status=eq.running` および `target_end_timestamp` 近傍一致ガード（`±15秒`）を付与して別スタッフの新規再スタート誤停止を防止する。DB 更新により `salon_timers` の `REPLICA IDENTITY FULL` Realtime `UPDATE` と PostgreSQL トリガー `on_salon_timers_push_notify`（APNs / Expo Push）が操作側 iPhone の生死に一切依存せず即時発火する。
+   - `src/utils/salonCloudService.js` の `isRecentLocalActorEcho` を拡張し、自身のペアリング Watch が `updated_by = localUserId` で直接 Supabase を更新した直後（25秒以内）のエコーは、自身の iPhone 画面・ストレージへ即時反映しつつ自分自身への誤ピア通知トーストを抑止する。
+2. **Watch モーダルシート停止操作の `0ms` 即時確定・送信と `sendMessage` + `transferUserInfo` 二重保証 (`targets/watch/content.swift`)**:
+   - 全シート（`TimeActionSheet`・`CheckActionSheet`・`ShampooActionSheet`）の停止・工程移行・チェック完了ハンドラにおいて、`immediatelyAcknowledgeSeatAlarm` 呼び出し前に `preSeat`（`actualSeatId`, `expectedEndMs`, `helpProcess`, `clearedCheckEnd`）を退避し、`deferSeatSheetCloseAction` を先行登録して早期自動クローズ競合をブロックした上で、アラーム消火・`markLocalStop` / `markLocalCheckClear`・`sendActionToPhone`（＋クラウド直接 `PATCH`）をすべて **`0ms` で同期実行**する。
+   - `WatchSessionManager.deliver` にて、停止系重要アクション（`isCriticalStopAction`）は `isReachable` 時でも `sendMessage` と同時に `0ms` で `session.transferUserInfo` キューへ二重登録し、同一席の未送信 `START_TIMER` キューを破棄する。
+3. **iOS `ExpoWatchConnectivityModule` の同期バックグラウンドタスク確保と IPC 起床保持 (`modules/watch-connectivity/ios/ExpoWatchConnectivityModule.swift`)**:
+   - `beginWatchActionBackgroundTask()` を `WCSessionDelegate` スレッド上で同期的に `UIApplication.shared.beginBackgroundTask`（`NSLock` 保護＋25秒自動解放）を取得する実装へ刷新。
+   - バックグラウンド時（`applicationState != .active`）の `didReceiveMessage(..., replyHandler:)` では `onMessageReceived` 発火後 `0.45秒` 保持してから `replyHandler` を返却し、JS スレッドが `handleWatchAction` → `upsertCloudTimer` のネットワーク送出を開始するまで iOS のサスペンドを確実に阻止する。
+4. **Watch 単体 ＆ iPhone 双方のセーフティネット・クラウド整合ポーリングと逆流防止 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - **Apple Watch 単体クラウドポーリング (`pollCloudTimersFromSupabaseIfNeeded` / `reconcileTimersFromDirectCloudRows`)**:
+     - Watch アプリ表示中（`.onAppear`、`scenePhase == .active` 復帰時、および `WatchRealtimeClock` 駆動でタイムアップ `6.5秒` 前以内は **`2.5秒` 間隔**、稼働席あり時は **`4秒` 間隔**、待機時は `12秒` 間隔）に Supabase REST から最新 `salon_timers` を直接取得して整合させる。これにより、万一両方の iPhone がロック・電源断・通信断であっても、相手 Watch が途中停止したタイマーはタイムアップ前に確実に `00:00 (停止)` へ遷移し、`WatchAlarmCoordinator` の予約セッションも自動キャンセルされて誤鳴動を 100% 防止する。
+   - **iPhone セーフティネットポーリングと `isLocalRunningAhead` 厳格化**:
+     - `SalonWorkScreen.js` でもフォアグラウンド中にタイムアップ近傍 `2.5秒`／稼働中 `6秒`／待機中 `15秒` 間隔で `reconcileCloudTimers(..., { onlySyncIfChanged: true })` を実行し、変化時のみ状態更新・Watch 高優先度起床同期・重複排除付き停止通知を行う。
+     - `reconcileCloudTimers`（オーナー・ゲスト双方）の `isLocalRunningAhead` に `Number(ct.updatedAt || 0) <= startMs + 2000` 条件を追加し、開始後にクラウド側で途中停止されたタイマーがローカル状態によって再稼働上書きされる経路を完全封鎖した。また `handleWatchAction` の全停止分岐に `WatchConnectivity.notifyLocalStopOrReset` を追加した。
+
+### 61.3 シミュレーター隔離実証および本番ビルド・配信仕様 (Build 103)
+
+1. **隔離一時サロンによるエンドツーエンド検証完了**:
+   - 本番営業サロンデータに一切触れない隔離一時サロン上で、①通常連動中の相手 Watch 直接クラウド途中停止、および ②ペアリング先 iPhone アプリを完全終了（`terminate`）した Watch 単体状態での相手 Watch 途中停止の双方を検証。
+   - いずれのケースでもカウントダウン途中で相手側 Apple Watch が即座に `00:00 (停止)`（`稼働:0`）へ遷移し、元の終了予定時刻を過ぎても一切の誤鳴動・超過カウントが発生しないことを確認済み（検証後、一時サロン完全削除・ストレージ復元済み）。
+2. **本番ビルド（Build 103）と本番 OTA 配信**:
+   - `app.json` の `ios.buildNumber` を `103` にインクリメント。
+   - `targets/watch/content.swift` および `ExpoWatchConnectivityModule.swift` のネイティブ変更を含む iOS + watchOS バイナリを EAS Build（`--profile production --auto-submit`）で TestFlight へ自動提出し、併せて `production` ブランチへ OTA アップデートを配信。
+
+

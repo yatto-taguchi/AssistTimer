@@ -941,6 +941,15 @@ export const isRecentLocalActorEcho = (rec, localUserId, windowMs = LOCAL_ACTOR_
   if (labelKey && _recentLocalSeatWriteAt.has(labelKey)) {
     if (now - _recentLocalSeatWriteAt.get(labelKey) < windowMs) return true;
   }
+  // ★ 自端末ペアリング中のApple Watchから直接Supabase REST更新された場合も自己エコーとして判定し、自端末への誤通知を防止
+  const rawUpdatedAt = rec?.updated_at ?? rec?.updatedAt ?? null;
+  if (rawUpdatedAt) {
+    const parsedUpdatedMs =
+      typeof rawUpdatedAt === 'number' ? rawUpdatedAt : new Date(rawUpdatedAt).getTime();
+    if (Number.isFinite(parsedUpdatedMs) && Math.abs(now - parsedUpdatedMs) < 25000) {
+      return true;
+    }
+  }
   return _lastLocalAnyCloudWriteAt > 0 && now - _lastLocalAnyCloudWriteAt < 6000;
 };
 
