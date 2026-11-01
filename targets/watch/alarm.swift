@@ -276,6 +276,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             return checkOnly ? ev.key.contains("-check@") : true
         }
         if ringing.contains(where: matchesEvent) { return true }
+        if restoredOverlayEvents.values.contains(where: matchesEvent) { return true }
         let now = Date()
         return events.contains { ev in
             matchesEvent(ev) && ev.date <= now && isArmed(ev.key) && !isAcknowledged(ev.key)
@@ -483,10 +484,49 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             }
         }
         // システムアラーム画面で「開く」を押してフォアグラウンド復帰し、alarmOverlay 表示を維持しているイベントがあれば保持
-        for (key, restoredEv) in restoredOverlayEvents {
+        // （※ iPhoneや他端末から停止・完了されたタイマーの restoredOverlayEvents は即時破棄し、removedFromList を妨害して鳴り続けるのを完全防止）
+        for (key, restoredEv) in Array(restoredOverlayEvents) {
             if isAcknowledged(key) {
                 restoredOverlayEvents.removeValue(forKey: key)
-            } else if !list.contains(where: { isSameTarget(key1: $0.key, key2: key) }) {
+                continue
+            }
+            if !isStaleContextSnapshot {
+                let isCheckEvent = key.contains("-check@")
+                let isMainTimerEvent = (restoredEv.seatId == "main-timer" || key.hasPrefix("main-timer"))
+                let isStillActiveInModel: Bool
+                if isMainTimerEvent {
+                    if let m = mainTimer {
+                        isStillActiveInModel = m.isRunning || m.isPreCountingDown || m.isAutoFinished
+                    } else {
+                        isStillActiveInModel = false
+                    }
+                } else {
+                    let candidates = resolveCandidateSeatIds(seatId: restoredEv.seatId)
+                    if let matchedSeat = timers.first(where: { $0.id == restoredEv.seatId || candidates.contains($0.id) }) {
+                        if isCheckEvent {
+                            isStillActiveInModel =
+                                matchedSeat.isRunning &&
+                                !matchedSeat.isCheckCompleted &&
+                                matchedSeat.checkTargetEndTime != nil &&
+                                (matchedSeat.checkTotalSeconds ?? 0) > 0
+                        } else {
+                            isStillActiveInModel = matchedSeat.isRunning
+                        }
+                    } else {
+                        isStillActiveInModel = false
+                    }
+                }
+                if !isStillActiveInModel {
+                    restoredOverlayEvents.removeValue(forKey: key)
+                    acknowledged[key] = restoredEv.date.timeIntervalSince1970
+                    removeForceRinging(matching: key)
+                    scheduledNotificationEventKeys.remove(key)
+                    removeNotifications(forEventKey: key)
+                    ackChanged = true
+                    continue
+                }
+            }
+            if !list.contains(where: { isSameTarget(key1: $0.key, key2: key) }) {
                 list.append(restoredEv)
             }
         }
@@ -504,10 +544,15 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 }
             }
         }
-        // ★ iPhone側やWatchの席カード操作で停止・完了され、同一席・同一種別の予定がリストから完全に消えた場合のみ、
-        //   表示済みの1枚目（通知）も鳴動中・予約中の2枚目（スマートアラーム）も即座に自動消去する
+        // ★ iPhone側・他端末・Watchの席カード操作で停止・完了され、同一席・同一種別の予定がリストから完全に消えた場合のみ、
+        //   表示済みの1枚目（通知）・鳴動中の alarmOverlay (ringing)・予約中/起動中の2枚目（スマートアラーム）・フォアグラウンド振動/音声を 0ms で完全自動消火する
         //   （※時間延長・微調整等で同一席の新しい終了時刻イベントが list にある場合は消火扱いにしない。また "seat-N" <-> UUID 移行も同一席として保護する）
-        let removedFromList = events.filter { oldEv in
+        var combinedPriorEvents: [WatchAlarmEvent] = []
+        var seenPriorKeys = Set<String>()
+        for ev in (events + ringing) where seenPriorKeys.insert(ev.key).inserted {
+            combinedPriorEvents.append(ev)
+        }
+        let removedFromList = combinedPriorEvents.filter { oldEv in
             let isCheck = oldEv.key.contains("-check@")
             let kindTag = isCheck ? "-check@" : "-main@"
             let oldCandidates = resolveCandidateSeatIds(seatId: oldEv.seatId)
@@ -518,12 +563,57 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         if !removedFromList.isEmpty {
             events = list
             for oldEv in removedFromList {
+                let isCheck = oldEv.key.contains("-check@")
+                let kindTag = isCheck ? "-check@" : "-main@"
+                let oldCandidates = resolveCandidateSeatIds(seatId: oldEv.seatId)
+                let baseEp = Int(oldEv.date.timeIntervalSince1970)
                 acknowledged[oldEv.key] = oldEv.date.timeIntervalSince1970
-                removeForceRinging(matching: oldEv.key)
-                removeNotifications(forEventKey: oldEv.key)
-                if let sKey = sessionKey, isSameTarget(key1: sKey, key2: oldEv.key) {
-                    invalidateCurrentSession()
+                for cid in oldCandidates {
+                    for ep in (baseEp - 15)...(baseEp + 15) {
+                        let nearKey = "\(cid)\(kindTag)\(ep)"
+                        if acknowledged[nearKey] == nil {
+                            acknowledged[nearKey] = Double(ep)
+                        }
+                    }
                 }
+                scheduledNotificationEventKeys.remove(oldEv.key)
+                removeForceRinging(matching: oldEv.key)
+                restoredOverlayEvents = restoredOverlayEvents.filter { !isSameTarget(key1: $0.key, key2: oldEv.key) }
+                if let opened = pendingOpenedAlarmEvent, isSameTarget(key1: opened.key, key2: oldEv.key) {
+                    pendingOpenedAlarmEvent = nil
+                }
+                if let snap = lastSystemDismissedSnapshot, isSameTarget(key1: snap.event.key, key2: oldEv.key) {
+                    lastSystemDismissedSnapshot = nil
+                    pendingSystemDismissPhoneSyncWorkItem?.cancel()
+                    pendingSystemDismissPhoneSyncWorkItem = nil
+                }
+                ringing.removeAll {
+                    isSameTarget(key1: $0.key, key2: oldEv.key) ||
+                    (($0.seatId == oldEv.seatId || oldCandidates.contains($0.seatId)) && $0.key.contains(kindTag))
+                }
+                removeNotifications(forEventKey: oldEv.key)
+                if let s = session {
+                    let sKey = sessionKeysBySession[s] ?? sessionKey
+                    if (sKey != nil && isSameTarget(key1: sKey!, key2: oldEv.key)) || (events.isEmpty && ringing.isEmpty) {
+                        invalidateCurrentSession()
+                    }
+                } else if let sKey = sessionKey, isSameTarget(key1: sKey, key2: oldEv.key) {
+                    setSessionKey(nil)
+                }
+                for extraSession in Array(backgroundAdoptedSessions.union(notifiedSessions)) {
+                    let sKey = sessionKeysBySession[extraSession]
+                    let matchesRemoved =
+                        (sKey != nil && isSameTarget(key1: sKey!, key2: oldEv.key)) ||
+                        (events.isEmpty && ringing.isEmpty)
+                    if matchesRemoved {
+                        safeInvalidateSession(extraSession, wasStarted: true, associatedKey: sKey)
+                    }
+                }
+            }
+            if ringing.isEmpty {
+                stopForegroundHaptics()
+            } else {
+                updateAlarmAudio()
             }
             ackChanged = true
         } else {

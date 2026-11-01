@@ -2,11 +2,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from './supabase';
 
 const USER_ID_KEY = '@assist_timer_user_id';
+let _cachedLocalUserId = null;
 
 /**
  * 端末固有の一意UUIDを生成または取得
  */
 export const getOrCreateUserId = async () => {
+  if (_cachedLocalUserId) return _cachedLocalUserId;
   try {
     let uid = await AsyncStorage.getItem(USER_ID_KEY);
     if (!uid) {
@@ -17,6 +19,7 @@ export const getOrCreateUserId = async () => {
       });
       await AsyncStorage.setItem(USER_ID_KEY, uid);
     }
+    _cachedLocalUserId = uid;
     return uid;
   } catch (e) {
     console.warn('Failed to getOrCreateUserId', e);
@@ -567,19 +570,31 @@ const LABEL_TO_ACTION_ID = {
 export const mapSeatToCloudTimer = (seat, salonId, userId) => {
   const rawLabel = (seat.seatLabel || seat.name || '1番席').trim();
   const seatLabel = rawLabel.replace(/\s*[\(（]サンプル[\)）]/g, '').trim() || '1番席';
-  const targetSeconds = Math.round(Number(seat.targetSeconds || seat.targetTime || 0));
-  const rawCheckSec = Math.round(Number(seat.checkTargetSeconds || seat.checkTotalSeconds || 0));
-  const checkPausedRem = Math.round(Number(seat.checkPausedRemainingSeconds || 0));
+  const rawTargetEndTs = Math.round(Number(seat.targetEndTimestamp || 0));
+  const rawPausedRemSec = Math.round(Number(seat.pausedRemainingSeconds || 0));
+  const isStoppedZero =
+    seat.status !== 'running' &&
+    (!!seat.isReset || (rawPausedRemSec <= 0 && rawTargetEndTs <= 0));
+  const rawTargetSecVal =
+    seat.targetSeconds !== undefined && seat.targetSeconds !== null
+      ? Number(seat.targetSeconds)
+      : Number(seat.targetTime || 0);
+  const targetSeconds = isStoppedZero ? 0 : Math.max(0, Math.round(rawTargetSecVal || 0));
+  const rawCheckSec = isStoppedZero ? 0 : Math.round(Number(seat.checkTargetSeconds || seat.checkTotalSeconds || 0));
+  const checkPausedRem = isStoppedZero ? 0 : Math.round(Number(seat.checkPausedRemainingSeconds || 0));
   const hasRunningCheck =
+    !isStoppedZero &&
     (seat.checkStatus === 'running' || seat.checkStatus === 'timeup') &&
     (Number(seat.checkEndTimestamp) > 0 || checkPausedRem > 0);
-  const isCheckDone = !hasRunningCheck && (seat.checkStatus === 'completed' || !!seat.isCheckCompleted);
-  const checkTotalSeconds = isCheckDone
+  const isCheckDone = !isStoppedZero && !hasRunningCheck && (seat.checkStatus === 'completed' || !!seat.isCheckCompleted);
+  const checkTotalSeconds = isStoppedZero
+    ? 0
+    : isCheckDone
     ? (rawCheckSec > 0 ? rawCheckSec : Math.max(60, Math.round(Number(seat.checkInitialMinutes || 1) * 60)))
     : (seat.checkStatus === 'stopped' && !seat.checkEndTimestamp && checkPausedRem <= 0 ? 0 : rawCheckSec);
-  const targetEndTs = Math.round(Number(seat.targetEndTimestamp || 0));
-  const pausedRemSec = Math.round(Number(seat.pausedRemainingSeconds || 0));
-  const checkEndTs = !isCheckDone
+  const targetEndTs = isStoppedZero ? 0 : rawTargetEndTs;
+  const pausedRemSec = isStoppedZero ? 0 : rawPausedRemSec;
+  const checkEndTs = !isStoppedZero && !isCheckDone
     ? (seat.checkEndTimestamp
         ? Math.round(Number(seat.checkEndTimestamp))
         : (checkPausedRem > 0 ? Date.now() + checkPausedRem * 1000 : null))
@@ -600,11 +615,14 @@ export const mapSeatToCloudTimer = (seat, salonId, userId) => {
       : (Number(seat.seatNumber) > 0 ? Math.round(Number(seat.seatNumber)) : 0);
 
   const isIdleEmpty = (seat.status === 'idle') && !seat.colorStaffName;
+  const trimmedCreatedBy = String(seat.createdBy || '').trim();
   // ★ タイマー停止・リセット・施術終了(idle)時に、停止操作者の userId で元の主担当(created_by)が上書きされないよう保護。
   //   稼働開始(status === 'running')かつ createdBy 未設定時のみ操作者の userId をフォールバック使用する。
-  const resolvedCreatedBy = seat.createdBy
-    ? seat.createdBy
-    : (seat.status === 'running' ? userId : null);
+  //   ※ createdBy 未設定の既存席を停止・リセットする場合は UPDATE クエリ側で created_by カラム自体を省略し、
+  //     PostgreSQL の NOT NULL 制約違反 (23502) を回避しつつ DB 上の既存 created_by を保持する。
+  const resolvedCreatedBy = trimmedCreatedBy
+    ? trimmedCreatedBy
+    : (seat.status === 'running' ? (userId || 'unknown') : null);
 
   return {
     salon_id: salonId,
@@ -659,6 +677,12 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
   const isShampooing = !!cloudTimer.is_shampooing;
   const actionStatus = isShampooing ? 'shampoo' : (LABEL_TO_ACTION_ID[helpProcess] || null);
   const rawComment = String(cloudTimer.comment || '').trim();
+  const nowMs = Date.now();
+  const abandonedCutoffMs = nowMs - 3 * 3600 * 1000;
+  // 終了時刻が無効、または3時間以上前の古い放置稼働データは00:00待機状態へ正規化し、無限超過カウントアップを防止
+  const isAbandonedRunningSeat =
+    status === 'running' &&
+    (rawTargetEndTs <= 0 || rawTargetEndTs <= abandonedCutoffMs);
   const isLegacySampleSeat =
     status !== 'running' &&
     (rawComment === 'タップして操作・編集できます' ||
@@ -671,16 +695,22 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
         !isShampooing &&
         checkSec <= 0));
 
-  const targetSeconds = isLegacySampleSeat ? 0 : rawTargetSeconds;
-  const targetEndTs = isLegacySampleSeat ? 0 : rawTargetEndTs;
-  const pausedRemSec = isLegacySampleSeat ? 0 : rawPausedRemSec;
-  const normalizedStatus = isLegacySampleSeat ? 'idle' : status;
+  const shouldForceIdleZero = isLegacySampleSeat || isAbandonedRunningSeat;
+  const targetSeconds = shouldForceIdleZero ? 0 : rawTargetSeconds;
+  const targetEndTs = shouldForceIdleZero ? 0 : rawTargetEndTs;
+  const pausedRemSec = shouldForceIdleZero ? 0 : rawPausedRemSec;
+  const normalizedStatus = shouldForceIdleZero ? 'idle' : status;
   const isReset =
-    isLegacySampleSeat || ((normalizedStatus === 'paused' || normalizedStatus === 'idle') && pausedRemSec <= 0 && targetEndTs <= 0);
-  const nowMs = Date.now();
+    shouldForceIdleZero || ((normalizedStatus === 'paused' || normalizedStatus === 'idle') && pausedRemSec <= 0 && targetEndTs <= 0);
+  const effectiveCheckSec = shouldForceIdleZero ? 0 : checkSec;
+  const effectiveCheckEndTs = shouldForceIdleZero ? null : checkEndTs;
+  const effectiveHasActiveCheck = !shouldForceIdleZero && hasActiveCheck;
+  const effectiveIsCheckCompleted = !shouldForceIdleZero && isCheckCompleted;
   const isOver = normalizedStatus === 'running' && targetEndTs > 0 && targetEndTs <= nowMs;
   const checkPausedRemainingSeconds =
-    normalizedStatus === 'paused' && hasActiveCheck ? Math.max(0, Math.round((checkEndTs - nowMs) / 1000)) : null;
+    normalizedStatus === 'paused' && effectiveHasActiveCheck
+      ? Math.max(0, Math.round((effectiveCheckEndTs - nowMs) / 1000))
+      : null;
 
   return {
     id: cloudTimer.id,
@@ -696,6 +726,7 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
     status: normalizedStatus,
     isReset: isReset,
     isLegacySampleSeat: isLegacySampleSeat,
+    isAbandonedRunningSeat: isAbandonedRunningSeat,
     isOver: isOver,
     timeUpTimestamp: isOver ? targetEndTs : null,
     escalationLevel: 0,
@@ -703,26 +734,28 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
       normalizedStatus === 'idle' && isReset && !cloudTimer.color_staff_name
         ? ''
         : (cloudTimer.color_staff_name || 'スタッフ'),
-    assistantStaffName: assistantStaffName,
-    helpProcess: helpProcess,
-    actionStatus: actionStatus,
-    isShampooing: isShampooing,
-    isRecruiting: isRecruiting,
-    isNoHelpNeeded: isNoHelpNeeded,
+    assistantStaffName: shouldForceIdleZero ? '' : assistantStaffName,
+    helpProcess: shouldForceIdleZero ? '' : helpProcess,
+    actionStatus: shouldForceIdleZero ? null : actionStatus,
+    isShampooing: shouldForceIdleZero ? false : isShampooing,
+    isRecruiting: shouldForceIdleZero ? false : isRecruiting,
+    isNoHelpNeeded: shouldForceIdleZero ? false : isNoHelpNeeded,
     comment: isLegacySampleSeat ? '' : (cloudTimer.comment || ''),
     sortOrder: cloudTimer.sort_order || 0,
     createdBy: cloudTimer.created_by || null,
     updatedBy: cloudTimer.updated_by || null,
-    checkEndTimestamp: checkEndTs,
+    checkEndTimestamp: effectiveCheckEndTs,
     checkPausedRemainingSeconds: checkPausedRemainingSeconds,
-    checkTargetSeconds: checkSec > 0 ? checkSec : null,
-    checkTotalSeconds: checkSec > 0 ? checkSec : null,
-    checkInitialMinutes: checkSec > 0 ? Math.max(1, Math.round(checkSec / 60)) : null,
-    checkProcess: cloudTimer.check_process || 'チェック',
-    checkStaffName: cloudTimer.check_staff_name || '',
-    checkStaff: cloudTimer.check_staff_name || '',
-    checkStatus: hasActiveCheck ? (status === 'running' && checkEndTs <= nowMs ? 'timeup' : 'running') : (isCheckCompleted ? 'completed' : 'stopped'),
-    isCheckCompleted: isCheckCompleted,
+    checkTargetSeconds: effectiveCheckSec > 0 ? effectiveCheckSec : null,
+    checkTotalSeconds: effectiveCheckSec > 0 ? effectiveCheckSec : null,
+    checkInitialMinutes: effectiveCheckSec > 0 ? Math.max(1, Math.round(effectiveCheckSec / 60)) : null,
+    checkProcess: shouldForceIdleZero ? 'チェック' : (cloudTimer.check_process || 'チェック'),
+    checkStaffName: shouldForceIdleZero ? '' : (cloudTimer.check_staff_name || ''),
+    checkStaff: shouldForceIdleZero ? '' : (cloudTimer.check_staff_name || ''),
+    checkStatus: effectiveHasActiveCheck
+      ? (normalizedStatus === 'running' && effectiveCheckEndTs <= nowMs ? 'timeup' : 'running')
+      : (effectiveIsCheckCompleted ? 'completed' : 'stopped'),
+    isCheckCompleted: effectiveIsCheckCompleted,
     history: [],
     updatedAt: cloudTimer.updated_at ? new Date(cloudTimer.updated_at).getTime() : nowMs,
   };
@@ -750,8 +783,9 @@ export const fetchSalonTimers = async (salonId, options = {}) => {
     const rawMapped = (data || []).map((row, idx) => mapCloudTimerToSeat(row, idx));
 
     // 同一サロン内で同じ席名（「1番」と「1番席」の表記ゆれ含む）の重複レコードが存在する場合は、
-    // 稼働中（running）＞ 最終更新日時（updatedAt）が新しい方 ＞ sortOrder設定済みの順で正規の1席に統合
+    // 最終更新日時（updatedAt）が最も新しいレコードを最優先（停止操作が古いrunning重複行に負けないようにする）＞ 稼働中 ＞ sortOrder設定済みの順で正規の1席に統合
     const dedupedByLabel = new Map();
+    const duplicateIdsByLabel = new Map();
     const unkeyedSeats = [];
     rawMapped.forEach((seat) => {
       const labelKey = String(seat.seatLabel || seat.name || '')
@@ -765,30 +799,44 @@ export const fetchSalonTimers = async (salonId, options = {}) => {
       const existing = dedupedByLabel.get(labelKey);
       if (!existing) {
         dedupedByLabel.set(labelKey, seat);
+        duplicateIdsByLabel.set(labelKey, []);
         return;
       }
-      const existingRunning = existing.status === 'running' ? 1 : 0;
-      const candidateRunning = seat.status === 'running' ? 1 : 0;
-      if (candidateRunning !== existingRunning) {
-        if (candidateRunning > existingRunning) {
-          dedupedByLabel.set(labelKey, seat);
-        }
-        return;
-      }
+      const dups = duplicateIdsByLabel.get(labelKey) || [];
       const existingUpdated = Number(existing.updatedAt || 0);
       const candidateUpdated = Number(seat.updatedAt || 0);
+      let candidateWins = false;
       if (candidateUpdated !== existingUpdated) {
-        if (candidateUpdated > existingUpdated) {
-          dedupedByLabel.set(labelKey, seat);
+        candidateWins = candidateUpdated > existingUpdated;
+      } else {
+        const existingRunning = existing.status === 'running' ? 1 : 0;
+        const candidateRunning = seat.status === 'running' ? 1 : 0;
+        if (candidateRunning !== existingRunning) {
+          candidateWins = candidateRunning > existingRunning;
+        } else {
+          const existingHasOrder = Number(existing.sortOrder) > 0 ? 1 : 0;
+          const candidateHasOrder = Number(seat.sortOrder) > 0 ? 1 : 0;
+          candidateWins = candidateHasOrder > existingHasOrder;
         }
-        return;
       }
-      const existingHasOrder = Number(existing.sortOrder) > 0 ? 1 : 0;
-      const candidateHasOrder = Number(seat.sortOrder) > 0 ? 1 : 0;
-      if (candidateHasOrder > existingHasOrder) {
+      if (candidateWins) {
+        if (existing.id && existing.id !== seat.id) dups.push(existing.id);
         dedupedByLabel.set(labelKey, seat);
+      } else if (seat.id && seat.id !== existing.id) {
+        dups.push(seat.id);
       }
+      duplicateIdsByLabel.set(labelKey, dups);
     });
+
+    for (const [labelKey, winningSeat] of dedupedByLabel.entries()) {
+      const dups = duplicateIdsByLabel.get(labelKey) || [];
+      if (dups.length > 0) {
+        dedupedByLabel.set(labelKey, {
+          ...winningSeat,
+          duplicateCloudTimerIds: dups,
+        });
+      }
+    }
 
     const mapped = [...dedupedByLabel.values(), ...unkeyedSeats].sort((a, b) => {
       const orderA = Number(a.sortOrder) > 0 ? Number(a.sortOrder) : (Number(a.seatNumber) > 0 ? Number(a.seatNumber) : 999999);
@@ -901,13 +949,17 @@ export const isRecentLocalActorEcho = (rec, localUserId, windowMs = LOCAL_ACTOR_
  */
 let _updatedByColumnUnsupported = false;
 
-const executeSalonTimerUpsert = async (rawPayload) => {
+const executeSalonTimerUpsert = async (rawPayload, fallbackUserId = null) => {
+  const safePayload = {
+    ...rawPayload,
+    created_by: String(rawPayload.created_by || '').trim() || fallbackUserId || 'unknown',
+  };
   const payloadToSend = _updatedByColumnUnsupported
     ? (() => {
-        const { updated_by, ...rest } = rawPayload;
+        const { updated_by, ...rest } = safePayload;
         return rest;
       })()
-    : rawPayload;
+    : safePayload;
 
   const res = await supabase
     .from('salon_timers')
@@ -924,7 +976,7 @@ const executeSalonTimerUpsert = async (rawPayload) => {
       String(res.error.message || '').includes('updated_by'))
   ) {
     _updatedByColumnUnsupported = true;
-    const { updated_by, ...fallbackPayload } = rawPayload;
+    const { updated_by, ...fallbackPayload } = safePayload;
     return supabase
       .from('salon_timers')
       .upsert(fallbackPayload)
@@ -936,7 +988,54 @@ const executeSalonTimerUpsert = async (rawPayload) => {
 };
 
 /**
- * 1席のタイマー状態をクラウドへ保存/更新（UPSERT）
+ * 既存席の停止・リセット・施術終了時など、ローカルに createdBy が欠落している場合に
+ * created_by カラム自体を更新対象から省略して DB 上の既存 created_by を保護し、
+ * PostgreSQL の NOT NULL 制約違反 (23502) を完全に防ぐ UPDATE ヘルパー
+ */
+const executeSalonTimerUpdateById = async (salonId, timerId, rawPayload) => {
+  const { id, salon_id, created_by, ...restCols } = rawPayload;
+  const trimmedCb = String(created_by || '').trim();
+  const baseUpdateBody = trimmedCb ? { ...restCols, created_by: trimmedCb } : restCols;
+
+  const payloadToSend = _updatedByColumnUnsupported
+    ? (() => {
+        const { updated_by, ...rest } = baseUpdateBody;
+        return rest;
+      })()
+    : baseUpdateBody;
+
+  const res = await supabase
+    .from('salon_timers')
+    .update(payloadToSend)
+    .eq('salon_id', salonId)
+    .eq('id', timerId)
+    .select()
+    .maybeSingle();
+
+  if (
+    res.error &&
+    !_updatedByColumnUnsupported &&
+    Object.prototype.hasOwnProperty.call(payloadToSend, 'updated_by') &&
+    (res.error.code === 'PGRST204' ||
+      res.error.code === '42703' ||
+      String(res.error.message || '').includes('updated_by'))
+  ) {
+    _updatedByColumnUnsupported = true;
+    const { updated_by, ...fallbackBody } = baseUpdateBody;
+    return supabase
+      .from('salon_timers')
+      .update(fallbackBody)
+      .eq('salon_id', salonId)
+      .eq('id', timerId)
+      .select()
+      .maybeSingle();
+  }
+
+  return res;
+};
+
+/**
+ * 1席のタイマー状態をクラウドへ保存/更新（UPSERT / UPDATE）
  */
 export const upsertCloudTimer = async (salonId, seat) => {
   if (!salonId || !seat) return null;
@@ -951,7 +1050,17 @@ export const upsertCloudTimer = async (salonId, seat) => {
     if (isUUID) {
       payload.id = seat.cloudTimerId || seat.id;
       markLocalSeatWriteTimestamp(payload);
-      const { data, error } = await executeSalonTimerUpsert(payload);
+      if (!payload.created_by) {
+        const updRes = await executeSalonTimerUpdateById(salonId, payload.id, payload);
+        if (!updRes.error && updRes.data) {
+          return mapCloudTimerToSeat(updRes.data);
+        }
+        if (updRes.error) {
+          console.warn('upsertCloudTimer update-by-id error:', updRes.error);
+          return null;
+        }
+      }
+      const { data, error } = await executeSalonTimerUpsert(payload, userId);
       if (error) console.warn('upsertCloudTimer update error:', error);
       return data ? mapCloudTimerToSeat(data) : null;
     } else {
@@ -963,7 +1072,7 @@ export const upsertCloudTimer = async (salonId, seat) => {
 
       const { data: existingList } = await supabase
         .from('salon_timers')
-        .select('id, seat_label')
+        .select('id, seat_label, created_by')
         .eq('salon_id', salonId)
         .in('seat_label', candidates);
 
@@ -973,10 +1082,19 @@ export const upsertCloudTimer = async (salonId, seat) => {
           || existingList[0];
         if (matched?.id) {
           payload.id = matched.id;
+          if (!payload.created_by && matched.created_by) {
+            payload.created_by = matched.created_by;
+          }
           markLocalSeatWriteTimestamp(payload);
+          if (!payload.created_by) {
+            const updRes = await executeSalonTimerUpdateById(salonId, payload.id, payload);
+            if (!updRes.error && updRes.data) {
+              return mapCloudTimerToSeat(updRes.data);
+            }
+          }
         }
       }
-      const { data, error } = await executeSalonTimerUpsert(payload);
+      const { data, error } = await executeSalonTimerUpsert(payload, userId);
 
       if (error) console.warn('upsertCloudTimer insert error:', error);
       return data ? mapCloudTimerToSeat(data) : null;

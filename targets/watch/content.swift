@@ -1063,6 +1063,48 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         if !activeWatchSeats.isEmpty {
             extra["watchActiveSeats"] = activeWatchSeats
         }
+        // ★ iPhoneがバックグラウンド休止中にWatchで「タイマーを止める」を押した客席も REQUEST_SYNC に同梱し、
+        //   再接続・起動時にiPhoneとSupabaseクラウドの稼働中タイマーを確実に00:00停止へ同期する！
+        var stoppedWatchSeats: [[String: Any]] = []
+        var addedStopKeys: Set<String> = []
+        for (stopKey, stopVal) in self.localStops {
+            guard nowDate.timeIntervalSince(stopVal.at) < self.localStopHoldSeconds,
+                  stopVal.end > 0 else { continue }
+            let matchedTimer = self.timers.first(where: { $0.id == stopKey })
+                ?? self.timers.first(where: { "seat-\($0.seatNumber)" == stopKey })
+            if let t = matchedTimer {
+                if t.isRunning && abs(t.targetEndTime.timeIntervalSince1970 - stopVal.end) > 15 {
+                    continue
+                }
+                let dedupKey = "\(t.id)|\(Int(stopVal.end))"
+                guard !addedStopKeys.contains(dedupKey) else { continue }
+                addedStopKeys.insert(dedupKey)
+                stoppedWatchSeats.append([
+                    "id": t.id,
+                    "seatNumber": t.seatNumber,
+                    "seatLabel": t.seatLabel ?? "\(t.seatNumber)番席",
+                    "stoppedTargetEndTimestamp": stopVal.end * 1000.0,
+                    "stoppedAt": stopVal.at.timeIntervalSince1970 * 1000.0
+                ])
+            } else {
+                let dedupKey = "\(stopKey)|\(Int(stopVal.end))"
+                guard !addedStopKeys.contains(dedupKey) else { continue }
+                addedStopKeys.insert(dedupKey)
+                var dict: [String: Any] = [
+                    "id": stopKey,
+                    "stoppedTargetEndTimestamp": stopVal.end * 1000.0,
+                    "stoppedAt": stopVal.at.timeIntervalSince1970 * 1000.0
+                ]
+                if stopKey.hasPrefix("seat-"), let num = Int(stopKey.dropFirst(5)), num > 0 {
+                    dict["seatNumber"] = num
+                    dict["seatLabel"] = "\(num)番席"
+                }
+                stoppedWatchSeats.append(dict)
+            }
+        }
+        if !stoppedWatchSeats.isEmpty {
+            extra["watchStoppedSeats"] = stoppedWatchSeats
+        }
         sendActionToPhone(action: "REQUEST_SYNC", seatId: "", extra: extra)
     }
     
@@ -1399,9 +1441,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
             }
             // ★ メインタイマーは「タイマーを止める」が明示的に押されるまで超過（カウントアップ）を維持する。
-            //   保存データや古いスナップショットでも3時間以内は継続させ、3時間以上前の放置データのみ停止
+            //   3時間以内は継続させ、3時間以上前の放置データのみ自動停止
             if parsedMain.isRunning || parsedMain.isPreCountingDown {
-                if isStaleSnapshot && parsedMain.targetEndTime <= nowDate.addingTimeInterval(-10800) {
+                if parsedMain.targetEndTime <= nowDate.addingTimeInterval(-10800) {
                     parsedMain.isRunning = false
                     parsedMain.isPreCountingDown = false
                     parsedMain.preCountdownSeconds = 0
@@ -1679,10 +1721,17 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     let lastStoppedAtSec = lastStoppedAtMs > 0 ? (lastStoppedAtMs / 1000.0) : 0
                     let lastStoppedEndMs = (rawSeat["lastStoppedTargetEndTimestamp"] as? NSNumber)?.doubleValue ?? (rawSeat["lastStoppedTargetEndTimestamp"] as? Double) ?? 0
                     let lastStoppedEndSec = lastStoppedEndMs > 0 ? (lastStoppedEndMs / 1000.0) : 0
-                    // ★ 保存データ（applicationContext）や古いスナップショットでも、超過カウントアップ中（3時間以内）の稼働席は勝手に00:00へリセットしない（3時間以上前の放置データのみ停止）
-                    if isStaleSnapshot && parsed[i].isRunning && parsed[i].targetEndTime <= nowDate.addingTimeInterval(-10800) {
+                    // ★ 超過カウントアップ中（3時間以内）の稼働席は勝手に00:00へリセットしないが、3時間以上前（-10800秒）の放置データは即時/保存データ問わず確実に00:00停止へ正規化
+                    if parsed[i].isRunning && parsed[i].targetEndTime <= nowDate.addingTimeInterval(-10800) {
                         parsed[i].isRunning = false
+                        parsed[i].totalSeconds = 0
                         parsed[i].pausedRemainingSeconds = 0
+                        parsed[i].status = .normal
+                        parsed[i].shampooStaff = nil
+                        parsed[i].helpProcess = ""
+                        parsed[i].isRecruiting = false
+                        parsed[i].isNoHelpNeeded = false
+                        parsed[i].isCollapsed = true
                         parsed[i].clearCheck()
                     }
                     // ★ Watch で直近3.5秒以内に行われた客席操作（ヘルプ募集・担当指名・時間微調整等）は、iPhone側の未反映 SYNC_SEATS パケットで巻き戻されないよう保護
@@ -1725,7 +1774,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         let isAuthoritativeWatchSeatStop = !parsed[i].isRunning && (
                             matchesStoppedSeatEnd ||
                             hasExplicitPeerNotification ||
-                            (lastStoppedAtSec > startedAt.timeIntervalSince1970 + 0.5)
+                            (lastStoppedAtSec > startedAt.timeIntervalSince1970 + 0.5) ||
+                            (!isStaleSnapshot && isGenuinelyNewerPayload && payloadTs > (startedAt.timeIntervalSince1970 * 1000.0 + 15_000))
                         )
                         if parsed[i].isRunning || isAuthoritativeWatchSeatStop {
                             watchStartedSeatTimes[id] = nil
@@ -1794,7 +1844,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     }
                     // ★ iPhone側（または共有相手）で停止・一時停止・リセット・計測終了された席は、
                     //   終了時刻を記録するとともに WatchAlarmCoordinator 側でも即時 acknowledge してバックグラウンドのスマートアラームを確実に消火する
-                    let canTrustSeatStop = !isStaleSnapshot || isGenuinelyNewerPayload || matchesStoppedSeatEnd
+                    let canTrustSeatStop = !isStaleSnapshot || isGenuinelyNewerPayload || matchesStoppedSeatEnd || hasExplicitPeerNotification
                     if !parsed[i].isRunning && canTrustSeatStop {
                         if let prev = matchedPrevByNum, prev.isRunning {
                             if parsed[i].isZero {
@@ -1824,11 +1874,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                 skipRefresh: true
                             )
                         }
-                    } else if parsed[i].isRunning && (!isStaleSnapshot || isGenuinelyNewerPayload) {
+                    } else if parsed[i].isRunning && (!isStaleSnapshot || isGenuinelyNewerPayload || hasExplicitPeerNotification) {
+                        let isIncomingCheckInactive = parsed[i].isCheckCompleted || parsed[i].checkTargetEndTime == nil
                         if let prev = matchedPrevByNum,
                            !prev.isCheckCompleted,
                            prev.checkTargetEndTime != nil,
-                           (parsed[i].isCheckCompleted || parsed[i].checkTargetEndTime == nil) {
+                           isIncomingCheckInactive {
                             markLocalCheckClear(seatId: id, checkEndTime: prev.checkTargetEndTime)
                             if prevKey != id {
                                 markLocalCheckClear(seatId: prevKey, checkEndTime: prev.checkTargetEndTime)
@@ -1839,10 +1890,17 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                 checkOnly: true,
                                 skipRefresh: true
                             )
+                        } else if isIncomingCheckInactive && WatchAlarmCoordinator.shared.isSeatRingingOrDue(seatId: id, seatNumber: parsed[i].seatNumber, checkOnly: true) {
+                            WatchAlarmCoordinator.shared.acknowledgeSeatTimer(
+                                seatId: id,
+                                seatNumber: parsed[i].seatNumber,
+                                checkOnly: true,
+                                skipRefresh: true
+                            )
                         }
                     }
                     guard let stop = localStops[id] ?? localStops[prevKey] else { continue }
-                    let sameEnd = abs(parsed[i].targetEndTime.timeIntervalSince1970 - stop.end) <= 2
+                    let sameEnd = abs(parsed[i].targetEndTime.timeIntervalSince1970 - stop.end) <= 15
                     if nowDate.timeIntervalSince(stop.at) >= localStopHoldSeconds {
                         localStops[id] = nil
                         localStops[prevKey] = nil
@@ -2533,6 +2591,100 @@ struct ContentView: View {
         selectCheckStaffTargetId = nil
         showingMainTimerSheet = false
     }
+
+    private func findMatchingReceivedSeat(targetId: String, cached: SeatTimerItem?, in receivedTimers: [SeatTimerItem]) -> SeatTimerItem? {
+        if let exact = receivedTimers.first(where: { $0.id == targetId }) {
+            return exact
+        }
+        if let cachedNum = cached?.seatNumber, cachedNum > 0,
+           let byCachedNum = receivedTimers.first(where: { $0.seatNumber == cachedNum }) {
+            return byCachedNum
+        }
+        if targetId.hasPrefix("seat-"),
+           let num = Int(targetId.replacingOccurrences(of: "seat-", with: "")),
+           let byPrefixNum = receivedTimers.first(where: { $0.seatNumber == num }) {
+            return byPrefixNum
+        }
+        if let localMatch = timers.first(where: { $0.id == targetId }),
+           let byLocalNum = receivedTimers.first(where: { $0.seatNumber == localMatch.seatNumber }) {
+            return byLocalNum
+        }
+        return nil
+    }
+
+    // ★ スマホや他端末から対象タイマー（または途中チェックタイマー）が停止・完了された場合、
+    //   開いたままの超過・操作シート（TimeActionSheet / CheckActionSheet / MainTimerActionSheet）を自動で閉じて即座に 00:00 停止画面へ復帰させる
+    @discardableResult
+    private func handleRemoteModalSheetAutoCloseIfNeeded(receivedTimers: [SeatTimerItem], receivedMain: SeatTimerItem?) -> Bool {
+        var didAutoClose = false
+
+        if pendingMainTimerSheetActionBox.seatSheetAction == nil {
+            if let targetId = timeActionTargetId {
+                let cached = pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"]
+                let latest = findMatchingReceivedSeat(targetId: targetId, cached: cached, in: receivedTimers)
+                let wasRunningWhenOpened = (cached?.isRunning == true) || timeActionInitialBranchMode
+                let wasPausedNonZeroWhenOpened = (cached != nil && cached?.isRunning == false && cached?.isZero == false)
+                let shouldCloseForMainStop =
+                    (wasRunningWhenOpened && (latest == nil || latest?.isRunning == false)) ||
+                    (wasPausedNonZeroWhenOpened && (latest == nil || latest?.isZero == true))
+                let shouldCloseForSubCheckStop =
+                    timeActionInitialSubCheckBranchMode &&
+                    (latest == nil || latest?.isRunning == false || latest?.isCheckCompleted == true || latest?.checkTargetEndTime == nil)
+                if shouldCloseForMainStop || shouldCloseForSubCheckStop {
+                    timeActionTargetId = nil
+                    timeActionInitialBranchMode = false
+                    timeActionInitialSubCheckBranchMode = false
+                    pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: "timeAction")
+                    didAutoClose = true
+                }
+            }
+
+            if let targetId = checkActionTargetId {
+                let cached = pendingMainTimerSheetActionBox.cachedSheetItems["checkAction"]
+                let latest = findMatchingReceivedSeat(targetId: targetId, cached: cached, in: receivedTimers)
+                if latest == nil || latest?.isRunning == false || latest?.isCheckCompleted == true || latest?.checkTargetEndTime == nil {
+                    checkActionTargetId = nil
+                    pendingMainTimerSheetActionBox.cachedSheetItems.removeValue(forKey: "checkAction")
+                    didAutoClose = true
+                }
+            }
+        }
+
+        if pendingMainTimerSheetActionBox.action == nil && showingMainTimerSheet {
+            let cachedMain = pendingMainTimerSheetActionBox.cachedMainTimerItem ?? self.mainTimer
+            if let m = receivedMain {
+                let wasMainActive = (cachedMain?.isRunning == true || cachedMain?.isPreCountingDown == true)
+                let wasMainPausedNonZero = (cachedMain != nil && !wasMainActive && cachedMain?.isZero == false)
+                if (wasMainActive && !m.isRunning && !m.isPreCountingDown) ||
+                   (wasMainPausedNonZero && !m.isRunning && !m.isPreCountingDown && m.isZero) {
+                    showingMainTimerSheet = false
+                    mainTimerSheetInitialSubMode = nil
+                    pendingMainTimerSheetActionBox.cachedMainTimerItem = nil
+                    didAutoClose = true
+                }
+            }
+        }
+
+        if didAutoClose {
+            pendingOvertimeSheetWorkItem?.cancel()
+            pendingOvertimeSheetWorkItem = nil
+            pendingMainTimerSheetActionBox.suppressOvertimeSheetUntil = Date().addingTimeInterval(1.5)
+            if self.timers != receivedTimers && (!receivedTimers.isEmpty || timers.isEmpty) {
+                self.timers = receivedTimers
+            }
+            if let m = receivedMain, self.mainTimer != m {
+                self.mainTimer = m
+            }
+            WidgetSync.save(
+                timers: self.timers,
+                mainTimer: self.mainTimer ?? sessionManager.mainTimer,
+                userName: currentUserName,
+                forceReload: true
+            )
+            mapCrownFocusTrigger += 1
+        }
+        return didAutoClose
+    }
     
     // ★ MainTimerActionSheet の dismiss() トランザクションと親画面の @State/@Published 更新が衝突しないようシート閉鎖後に実行（手首を下げる前にスマートアラーム予約を完了させる）
     //   watchOS のモーダルシート閉鎖アニメーション（約0.35秒）の途中で親 State を書き換えると View 階層破棄や dismiss() 無視が発生するため、
@@ -2828,6 +2980,11 @@ struct ContentView: View {
                 if !isAnyModalSheetPresented || !alarm.ringing.isEmpty {
                     now = input
                 }
+                // ★ スマホ・他端末から停止されたタイマーの超過/操作シートが開いていた場合は自動で閉じて即座に 00:00 へ更新
+                _ = handleRemoteModalSheetAutoCloseIfNeeded(
+                    receivedTimers: sessionManager.timers,
+                    receivedMain: sessionManager.mainTimer
+                )
                 // ★ システムアラームの「終了」等で WatchSessionManager 側が 00:00 リセットされた場合も、追加タップなしで即座に画面へ反映
                 if !isAnyModalSheetPresented {
                     if let latestMain = sessionManager.mainTimer, self.mainTimer != latestMain {
@@ -2863,12 +3020,20 @@ struct ContentView: View {
                 handleOpenedAlarmEvent(ev)
             }
             .onReceive(sessionManager.$timers) { received in
+                _ = handleRemoteModalSheetAutoCloseIfNeeded(
+                    receivedTimers: received,
+                    receivedMain: sessionManager.mainTimer
+                )
                 // ★ モーダルシート表示中（閉鎖アニメーション中を含む）は親 View の @State 再評価による閉鎖デッドロックを防ぐため onDismiss / scenePhase で同期
                 if !isAnyModalSheetPresented && self.timers != received {
                     self.timers = received
                 }
             }
             .onReceive(sessionManager.$mainTimer) { receivedMain in
+                _ = handleRemoteModalSheetAutoCloseIfNeeded(
+                    receivedTimers: sessionManager.timers,
+                    receivedMain: receivedMain
+                )
                 if !isAnyModalSheetPresented, let receivedMain = receivedMain, self.mainTimer != receivedMain {
                     self.mainTimer = receivedMain
                 }
@@ -6967,13 +7132,33 @@ struct MainTimerActionSheet: View {
         .onReceive(WatchRealtimeClock.shared.publisher) { input in
             guard !isClosingSheet else { return }
             now = input
-            if subMode != .reinput, accumulatedDelta == 0, let latest = WatchSessionManager.shared.mainTimer, latest != displayItem {
-                displayItem = latest
+            if let latest = WatchSessionManager.shared.mainTimer {
+                let wasActive = displayItem.isRunning || displayItem.isPreCountingDown
+                let wasPausedNonZero = !wasActive && !displayItem.isZero
+                if (wasActive && !latest.isRunning && !latest.isPreCountingDown) ||
+                   (wasPausedNonZero && !latest.isRunning && !latest.isPreCountingDown && latest.isZero) {
+                    isClosingSheet = true
+                    dismiss()
+                    return
+                }
+                if subMode != .reinput, accumulatedDelta == 0, latest != displayItem {
+                    displayItem = latest
+                }
             }
             if subMode == .standard && isOvertime && accumulatedDelta <= 0 {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                     subMode = .timerActionBranch
                 }
+            }
+        }
+        .onReceive(WatchSessionManager.shared.$mainTimer) { latest in
+            guard !isClosingSheet, let latest = latest else { return }
+            let wasActive = displayItem.isRunning || displayItem.isPreCountingDown
+            let wasPausedNonZero = !wasActive && !displayItem.isZero
+            if (wasActive && !latest.isRunning && !latest.isPreCountingDown) ||
+               (wasPausedNonZero && !latest.isRunning && !latest.isPreCountingDown && latest.isZero) {
+                isClosingSheet = true
+                dismiss()
             }
         }
     }
@@ -7997,8 +8182,23 @@ struct TimeActionSheet: View {
         .onReceive(WatchRealtimeClock.shared.publisher) { input in
             guard !isClosingSheet else { return }
             now = input
-            if let latest = WatchSessionManager.shared.timers.first(where: { $0.id == liveItem.id }) ?? WatchSessionManager.shared.timers.first(where: { $0.seatNumber == liveItem.seatNumber }), latest != liveItem {
-                liveItem = latest
+            let latest = WatchSessionManager.shared.timers.first(where: { $0.id == liveItem.id })
+                ?? WatchSessionManager.shared.timers.first(where: { $0.seatNumber == liveItem.seatNumber })
+            if let latest = latest {
+                if (liveItem.isRunning && !latest.isRunning) ||
+                   (!liveItem.isRunning && !liveItem.isZero && latest.isZero) ||
+                   (subMode == .subCheckActionBranch && (!latest.isRunning || latest.isCheckCompleted || latest.checkTargetEndTime == nil)) {
+                    isClosingSheet = true
+                    dismiss()
+                    return
+                }
+                if latest != liveItem {
+                    liveItem = latest
+                }
+            } else if liveItem.isRunning && !WatchSessionManager.shared.timers.isEmpty {
+                isClosingSheet = true
+                dismiss()
+                return
             }
             if !isOvertime {
                 hasAutoMovedToMainOvertimeBranch = false
@@ -8020,6 +8220,22 @@ struct TimeActionSheet: View {
                         subMode = .subCheckActionBranch
                     }
                 }
+            }
+        }
+        .onReceive(WatchSessionManager.shared.$timers) { received in
+            guard !isClosingSheet else { return }
+            let latest = received.first(where: { $0.id == liveItem.id })
+                ?? received.first(where: { $0.seatNumber == liveItem.seatNumber })
+            if let latest = latest {
+                if (liveItem.isRunning && !latest.isRunning) ||
+                   (!liveItem.isRunning && !liveItem.isZero && latest.isZero) ||
+                   (subMode == .subCheckActionBranch && (!latest.isRunning || latest.isCheckCompleted || latest.checkTargetEndTime == nil)) {
+                    isClosingSheet = true
+                    dismiss()
+                }
+            } else if liveItem.isRunning && !received.isEmpty {
+                isClosingSheet = true
+                dismiss()
             }
         }
     }
@@ -10659,6 +10875,14 @@ struct CheckActionSheet: View {
             }
             .padding(.horizontal, WatchLayout.sheetHorizontalPadding)
             .padding(.vertical, 4)
+        }
+        .onReceive(WatchSessionManager.shared.$timers) { received in
+            guard !received.isEmpty else { return }
+            let latest = received.first(where: { $0.id == item.id })
+                ?? received.first(where: { $0.seatNumber == item.seatNumber })
+            if latest == nil || latest?.isRunning == false || latest?.isCheckCompleted == true || latest?.checkTargetEndTime == nil {
+                dismiss()
+            }
         }
     }
 }

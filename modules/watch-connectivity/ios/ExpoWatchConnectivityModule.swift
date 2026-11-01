@@ -499,6 +499,34 @@ public class ExpoWatchConnectivityModule: Module {
     bgTaskId = .invalid
     UIApplication.shared.endBackgroundTask(taskToEnd)
   }
+
+  // ★ Watchからバックグラウンド中のiPhoneへ操作（STOP_TIMER等）が届いた際、
+  //   replyHandler返却直後にiOSがプロセスを即サスペンドしてSupabaseへのクラウド同期（upsertCloudTimer）が中断されるのを防止する
+  fileprivate func beginWatchActionBackgroundTask() {
+    let runBlock = {
+      var actionTaskId: UIBackgroundTaskIdentifier = .invalid
+      actionTaskId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerWatchActionCloudSync") {
+        if actionTaskId != .invalid {
+          let expiredId = actionTaskId
+          actionTaskId = .invalid
+          UIApplication.shared.endBackgroundTask(expiredId)
+        }
+      }
+      guard actionTaskId != .invalid else { return }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 20.0) {
+        if actionTaskId != .invalid {
+          let doneId = actionTaskId
+          actionTaskId = .invalid
+          UIApplication.shared.endBackgroundTask(doneId)
+        }
+      }
+    }
+    if Thread.isMainThread {
+      runBlock()
+    } else {
+      DispatchQueue.main.async(execute: runBlock)
+    }
+  }
 }
 
 // MARK: - OS標準バナー通知表示デリゲート（inactive / background 時の確実なバナー表示＆既存デリゲート委譲）
@@ -606,6 +634,7 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
   }
 
   func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
+    self.module?.beginWatchActionBackgroundTask()
     DispatchQueue.main.async {
       self.module?.recordReceived(kind: "message", body: message)
       self.module?.dispatchEvent("onMessageReceived", ["message": message])
@@ -613,14 +642,16 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
   }
 
   func session(_ session: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
+    self.module?.beginWatchActionBackgroundTask()
     DispatchQueue.main.async {
       self.module?.recordReceived(kind: "message", body: message)
       self.module?.dispatchEvent("onMessageReceived", ["message": message])
+      replyHandler(["status": "acknowledged"])
     }
-    replyHandler(["status": "acknowledged"])
   }
 
   func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
+    self.module?.beginWatchActionBackgroundTask()
     DispatchQueue.main.async {
       self.module?.recordReceived(kind: "context", body: applicationContext)
       self.module?.dispatchEvent("onApplicationContextReceived", ["context": applicationContext])
@@ -629,6 +660,7 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
 
   // ★ 予備ルート（transferUserInfo）で届いた操作は onUserInfoReceived のみで通知し、二重処理を防止
   func session(_ session: WCSession, didReceiveUserInfo userInfo: [String : Any] = [:]) {
+    self.module?.beginWatchActionBackgroundTask()
     DispatchQueue.main.async {
       self.module?.recordReceived(kind: "userInfo", body: userInfo)
       self.module?.dispatchEvent("onUserInfoReceived", ["userInfo": userInfo])

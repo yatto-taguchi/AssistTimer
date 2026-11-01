@@ -3785,3 +3785,41 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
 2. **クライアントおよびウェアラブル (Build 101)**:
    - 全 Swift / TypeScript / JavaScript 修正を反映したネイティブビルド（Build 101）を App Store Connect へ提出済み（TestFlight 配信処理中）。
    - OTA 即時配信（EAS Update）により、既存の TestFlight（Build 98）上でも JavaScript 層の修正（自己エコー判定根絶、指名通知保証、表示名同期）が即時適用可能。
+
+---
+
+## 60. スマホ・他端末からの「タイマーを止める」操作時のクラウド即時停止同期・Apple Watch鳴動0ms消火・超過シート自動クローズ仕様 (Issue #7 / Build 102 / 2026-11-01)
+
+### 60.1 背景・課題（5つの根本原因）
+
+1. **`salon_timers.created_by` の `NOT NULL` 制約違反 (`23502`) およびモーダル表示中の UUID 昇格不一致**:
+   - 本番 Supabase の `salon_timers.created_by` カラムは `TEXT NOT NULL` 制約を持つが、`mapSeatToCloudTimer` で停止・リセット・施術終了（`status !== 'running'`）かつローカルの `seat.createdBy` が未設定／`null` の場合に `created_by: null` を含む `.upsert()` を送出して PostgreSQL エラー `23502` で失敗し、クラウド上のレコードが `status: 'running'` のまま残留していた。
+   - また、停止確認モーダル（`actionTargetSeat` / `checkStopTargetSeat`）を開いている最中に `seat-N` からクラウド UUID へ昇格した際、`s.id !== seat.id` の単一キー比較では対象席を取りこぼす経路があった。
+2. **`reconcileCloudTimers` の `isLocalRunningAhead` による停止状態の逆流上書き・重複 UUID 競合**:
+   - オーナー端末の `reconcileCloudTimers` における `isLocalRunningAhead` が `localMatch.dirtySync` を確認していなかったため、既にクラウド同期済みの稼働中タイマーを他端末が停止した直後にオーナー側で `reconcileCloudTimers`（フォアグラウンド復帰やサイレント Push 起床）が走ると、ローカルの `running` を優先してクラウドを再び `running` に書き戻していた。
+   - また同一席ラベルで複数 UUID レコードが存在した場合に古い `running` 行が残存・優先されるケースがあった。
+3. **`reconcileCloudTimers` 経路でのチェックタイマー完了／停止時のアラーム消火・Watch 起床漏れ**:
+   - Realtime WebSocket 切断中のバックグラウンド復帰や `fetchSalonTimers` 整合時に、本タイマー稼働継続のまま途中チェックタイマーのみが他端末で停止・完了されていた場合、`stopAlarm('salon', '${id}-check')` および `highPriorityWake: true` での Watch 即時同期が発火していなかった。
+4. **Apple Watch `WatchAlarmCoordinator.update` における `restoredOverlayEvents` の無条件再注入による無限鳴動**:
+   - システムアラーム画面から復帰した `restoredOverlayEvents` が、対象タイマーの稼働状態を確認しないまま `removedFromList` 判定より先に `list` へ再追加されていたため、他端末から停止されても `removedFromList` が空となり、`alarmOverlay`・振動・リピート通知が止まらず鳴り続けていた。
+5. **Apple Watch で超過・操作シート（`TimeActionSheet` / `CheckActionSheet` / `MainTimerActionSheet`）表示中のリモート停止フリーズ**:
+   - Watch 側で超過アクションシート等を開いている最中は `isAnyModalSheetPresented == true` により親 `ContentView` の `timers` / `mainTimer` 更新が保留され、シート側も自動で閉じないため、他端末がタイマーを止めても Watch 画面が超過カウントアップ表示のまま残り続けていた。
+
+### 60.2 確定仕様・実装詳細
+
+1. **`created_by` 保護と `NOT NULL` 制約完全遵守の両立・多段階席照合 (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`, `ExpoWatchConnectivityModule.swift`)**:
+   - 既存席（UUID 確定済み、または `seat_label` 照合で既存 ID 解決済み）の更新時に `payload.created_by` が空（停止・リセット・施術終了時にローカル `seat.createdBy` が欠落しているケース）の場合は、`created_by` カラム自体を更新対象から省略する `executeSalonTimerUpdateById`（`UPDATE salon_timers ... WHERE salon_id = ... AND id = ...`）を実行する。これにより PostgreSQL `23502` エラーを 100% 回避しつつ、DB 上の元の主担当 `OLD.created_by` を上書きせず完全保持する。新規 INSERT / UPSERT 時は `fallbackUserId || 'unknown'` を補完し、`created_by: null` のクエリ送出を物理的に根絶する。
+   - 停止状態（`isStoppedZero`）のクラウド送信時は `target_seconds: 0`, `target_end_timestamp: 0`, `paused_remaining_seconds: 0` を明示送信する。
+   - `handleStopTimerWithNotification`、`handleCompleteCheck`、`handleConfirmStopCheckTimer`、`handleApplyLateCheckTimer`、`handleFinishSeat` において、`id`・`cloudTimerId`・正規化 `seatLabel`・`seatNumber` を横断照合する `doesSeatMatchTarget` と関数型 `setSeats((prev) => ...)` を採用し、`dirtySync: true` 設定、旧 ID／新 UUID 双方での `stopAlarm`・`notifyLocalStopOrReset`、`saveSeatsToStorage`（`AsyncStorage` 完了を待たず Watch／Supabase 同期を先行発火）、および `{ immediate: true, highPriorityWake: true }` での Watch 同期を実行する。
+   - `ExpoWatchConnectivityModule.swift` の `didReceiveMessage` / `didReceiveApplicationContext` / `didReceiveUserInfo` 受信時に `beginBackgroundTask`（約20秒）を開始し、バックグラウンド中の iPhone が Supabase への `upsertCloudTimer` を完了する前にサスペンドされるのを防止する。また Watch の `REQUEST_SYNC` に `watchStoppedSeats` を同梱し、再接続時に未反映停止を確実にクラウドへ収束させる。
+2. **`isLocalRunningAhead` の未同期開始限定化と重複 UUID 自動クリーンアップ (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)**:
+   - `reconcileCloudTimers`（オーナー・ゲスト双方）の `isLocalRunningAhead` 条件に `!!localMatch.dirtySync` および `!WatchConnectivity.isSeatTimerEndStopped(...)` を必須化し、既に同期済みの `running` タイマーが他端末からのクラウド停止を逆流上書きすることを完全に禁止する。
+   - `fetchSalonTimers` の正規化席名重複排除を **`updatedAt` 最新最優先** とし、敗北した重複レコード ID（`duplicateCloudTimerIds`）をオーナー端末の `reconcileCloudTimers` で自動 `deleteCloudTimer` する。また 3 時間以上超過放置された異常 `running` レコードは `isAbandonedRunningSeat` として `idle (00:00)` に正規化しクラウドへ書き戻す。
+3. **`reconcileCloudTimers` における本タイマー／チェックタイマー停止遷移の即時消火 (`src/screens/SalonWorkScreen.js`)**:
+   - オーナー・ゲスト双方の `reconcileCloudTimers` で、本タイマー停止（`didTransitionFromRunningToStop`）・一時停止席のリセット（`didTransitionPausedToReset`）に加え、本タイマー継続中のチェックタイマー完了／停止（`didTransitionCheckFromRunningToStop`）を検知し、`stopAlarm('salon', '${id}-check')`（旧 ID 含む）と `syncSeatsToWatch(..., { immediate: true, highPriorityWake: true })` を即時発火する。
+4. **Apple Watch アラーム・`restoredOverlayEvents` の 0ms 完全消火 (`targets/watch/alarm.swift`, `targets/watch/content.swift`)**:
+   - `WatchAlarmCoordinator.update` にて、`restoredOverlayEvents` を `list` へ追加する前に最新モデル（`timers` / `mainTimer`）での稼働継続を検証し、停止・完了済みタイマー（チェックタイマー単独完了時を含む）の `restoredOverlayEvents` は即座に破棄・`acknowledged` 登録・通知削除を行う。
+   - `removedFromList` を `events + ringing` 全体から算出し、対象が消えた瞬間に `acknowledged`（前後±15秒の近傍エポックキー含む）登録、`ringing` 即時除去、`stopForegroundHaptics()` / `updateAlarmAudio()` による 0ms 消音・振動停止、リピート通知一括削除、および現行 `session` と `backgroundAdoptedSessions` / `notifiedSessions` の即時 `invalidate` を実行する。
+5. **Apple Watch 超過・操作モーダルシートの自動クローズと `00:00` 即時復帰 (`targets/watch/content.swift`)**:
+   - `ContentView.handleRemoteModalSheetAutoCloseIfNeeded` および各シート（`TimeActionSheet`・`CheckActionSheet`・`MainTimerActionSheet`）の `.onReceive` により、稼働中として開いていた対象タイマー（または `.subCheckActionBranch` / `CheckActionSheet` 表示中のチェックタイマー）が他端末から停止・完了された瞬間にモーダルシートを自動 `dismiss()` し、追加タップなしで `ContentView` の `timers` / `mainTimer` とコンプリケーション（`WidgetSync`）を即座に `00:00 (停止)`／チェック完了表示へ更新する（未稼働 `00:00` 席で新規タイム入力中のシートは閉じない）。
+
