@@ -2520,7 +2520,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
 
             let wasStarted = (self.sessionStarted && isCurrent) || wasBackgroundAdopted || wasNotified
             let wasSystemAlert = (self.sessionPresentedSystemAlert && isCurrent) || wasBackgroundAdopted || (wasStarted && WKApplication.shared().applicationState != .active)
-            let wasBgWhenShown = (self.wasBackgroundWhenSystemAlertShown && isCurrent) || wasBackgroundAdopted
+            _ = (self.wasBackgroundWhenSystemAlertShown && isCurrent) || wasBackgroundAdopted
             // ★ セッション固有キーを優先参照し、古いチェック用セッションの遅延 didInvalidateWith が
             //   新しく予約された本体タイマーの self.sessionKey を誤って参照して TimeActionSheet を再表示させるバグを防止！
             let endedKey = sessionSpecificKey ?? (isCurrent ? (self.sessionKey ?? UserDefaults.standard.string(forKey: self.sessionKeyStoreKey)) : nil)
@@ -2584,8 +2584,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
 
                 // 文字盤（.background）から「開く」が押され、didInvalidateWith が appBecameActive よりわずかに先に届いた場合に備えてスナップショットを保存。
                 // 「終了」が押された場合はそのまま Watch 側タイマーを 00:00 停止し、0.35秒後に appBecameActive が来なければ iPhone & クラウドへも停止（STOP_ALARM / MAIN_TIMER_RESET）を送信する！
-                pendingSystemDismissPhoneSyncWorkItem?.cancel()
-                pendingSystemDismissPhoneSyncWorkItem = nil
+                self.pendingSystemDismissPhoneSyncWorkItem?.cancel()
+                self.pendingSystemDismissPhoneSyncWorkItem = nil
                 if let ev = matchedEv {
                     let isCheck = ev.key.contains("-check@")
                     let preMain = WatchSessionManager.shared.mainTimer
