@@ -91,6 +91,19 @@ const applyAlarms = async (source, desired, options) => {
     dirty = true;
   });
 
+  // サロン席で鳴らすべき予定が0件になった時は、ローカルID（seat-1等）からクラウドUUIDへの昇格やリロードを跨いで残留したネイティブ予約も一括消火
+  if (stopPassedOnRemove && desiredMap.size === 0) {
+    AlarmKit.cleanupOnSourceInit(source, []);
+    if (source === 'salon') {
+      for (let i = 1; i <= 12; i += 1) {
+        AlarmKit.cancel(`seat-${i}-main`);
+        AlarmKit.cancel(`seat-${i}-check`);
+        AlarmKit.cancel(`${i}-main`);
+        AlarmKit.cancel(`${i}-check`);
+      }
+    }
+  }
+
   // ② 新規・時刻変更・音設定変更の予定を予約
   for (const [key, d] of desiredMap) {
     const prev = current.get(key);
@@ -124,9 +137,21 @@ const applyAlarms = async (source, desired, options) => {
 // source の予約・鳴っているアラームをすべて止める（ユーザーが明示的に止めた時など）
 export const stopAllAlarms = (source) => enqueue(() => {
   const current = scheduledBySource[source];
-  if (!current) return;
-  current.forEach((_, key) => AlarmKit.cancel(key));
-  current.clear();
+  if (current) {
+    current.forEach((_, key) => AlarmKit.cancel(key));
+    current.clear();
+  }
+  AlarmKit.cleanupOnSourceInit(source, []);
+  if (source === 'salon') {
+    for (let i = 1; i <= 12; i += 1) {
+      AlarmKit.cancel(`seat-${i}-main`);
+      AlarmKit.cancel(`seat-${i}-check`);
+      AlarmKit.cancel(`${i}-main`);
+      AlarmKit.cancel(`${i}-check`);
+    }
+  } else if (source === 'main') {
+    AlarmKit.cancel('main-timer');
+  }
   notify();
 });
 

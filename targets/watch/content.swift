@@ -2292,16 +2292,30 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         let rawLabel = ((extra["seatLabel"] as? String) ?? matchedSeat?.seatLabel ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let seatNum = (extra["seatNumber"] as? NSNumber)?.intValue ?? (extra["seatNumber"] as? Int) ?? matchedSeat?.seatNumber ?? 0
         let cleanNumLabel = seatNum > 0 ? "\(seatNum)番" : ""
+        let hasLabelCandidate = !rawLabel.isEmpty || !cleanNumLabel.isEmpty
+        let baseLabel = !rawLabel.isEmpty ? rawLabel.replacingOccurrences(of: "席", with: "") : cleanNumLabel
+        let withSuffixLabel = "\(baseLabel)席"
+        let isStopOrCheckAction = (
+            action == "STOP_TIMER" ||
+            action == "RESET_ZERO" ||
+            action == "FINISH_MEASURE" ||
+            action == "STOP_ALARM" ||
+            action == "ENTER_HELP" ||
+            action == "START_SHAMPOO" ||
+            action == "COMPLETE_CHECK" ||
+            action == "CANCEL_CHECK"
+        )
 
         var queryItems: [URLQueryItem] = [
             URLQueryItem(name: "salon_id", value: "eq.\(salonId)")
         ]
-        if hasUUIDSeatId {
+        if isStopOrCheckAction && hasUUIDSeatId && hasLabelCandidate {
+            // UUID一致行だけでなく、同一サロン内の同じ席ラベル（「1番」「1番席」）の重複行やID昇格前後の行も1回のPATCHで漏れなく停止する
+            queryItems.append(URLQueryItem(name: "or", value: "(id.eq.\(resolvedSeatId),seat_label.in.(\"\(baseLabel)\",\"\(withSuffixLabel)\"))"))
+        } else if hasUUIDSeatId {
             queryItems.append(URLQueryItem(name: "id", value: "eq.\(resolvedSeatId)"))
-        } else if !rawLabel.isEmpty || !cleanNumLabel.isEmpty {
-            let base = !rawLabel.isEmpty ? rawLabel.replacingOccurrences(of: "席", with: "") : cleanNumLabel
-            let withSuffix = "\(base)席"
-            queryItems.append(URLQueryItem(name: "seat_label", value: "in.(\"\(base)\",\"\(withSuffix)\")"))
+        } else if hasLabelCandidate {
+            queryItems.append(URLQueryItem(name: "seat_label", value: "in.(\"\(baseLabel)\",\"\(withSuffixLabel)\")"))
         } else {
             return
         }
@@ -2315,13 +2329,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
 
         let stopKind = ((extra["kind"] as? String) ?? "").lowercased()
+        let nowMs = Date().timeIntervalSince1970 * 1000.0
         switch action {
         case "STOP_TIMER", "RESET_ZERO", "FINISH_MEASURE":
-            queryItems.append(URLQueryItem(name: "status", value: "eq.running"))
+            // 新しく未来へ再スタートされたタイマーだけを守りつつ、時計ズレ・延長後・タイムアップ超過中のタイマーは確実に paused へ更新する
             if expectedEndMs > 1_000_000_000_000 {
-                let minEnd = Int64((expectedEndMs - 15_000).rounded())
-                let maxEnd = Int64((expectedEndMs + 15_000).rounded())
-                queryItems.append(URLQueryItem(name: "target_end_timestamp", value: "gte.\(minEnd)"))
+                let maxEnd = Int64((max(expectedEndMs, nowMs) + 15_000).rounded())
                 queryItems.append(URLQueryItem(name: "target_end_timestamp", value: "lte.\(maxEnd)"))
             }
             body["status"] = "paused"
@@ -2338,17 +2351,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
 
         case "STOP_ALARM":
             if stopKind == "check" {
-                queryItems.append(URLQueryItem(name: "status", value: "eq.running"))
                 let preservedChk = max(60, matchedSeat?.checkTotalSeconds ?? 60)
                 body["check_target_end_timestamp"] = NSNull()
                 body["check_total_seconds"] = preservedChk
                 body["check_staff_name"] = effectiveStaff
             } else {
-                queryItems.append(URLQueryItem(name: "status", value: "eq.running"))
                 if expectedEndMs > 1_000_000_000_000 {
-                    let minEnd = Int64((expectedEndMs - 15_000).rounded())
-                    let maxEnd = Int64((expectedEndMs + 15_000).rounded())
-                    queryItems.append(URLQueryItem(name: "target_end_timestamp", value: "gte.\(minEnd)"))
+                    let maxEnd = Int64((max(expectedEndMs, nowMs) + 15_000).rounded())
                     queryItems.append(URLQueryItem(name: "target_end_timestamp", value: "lte.\(maxEnd)"))
                 }
                 body["status"] = "paused"
@@ -2366,9 +2375,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
 
         case "ENTER_HELP", "START_SHAMPOO":
             if expectedEndMs > 1_000_000_000_000 {
-                let minEnd = Int64((expectedEndMs - 15_000).rounded())
-                let maxEnd = Int64((expectedEndMs + 15_000).rounded())
-                queryItems.append(URLQueryItem(name: "target_end_timestamp", value: "gte.\(minEnd)"))
+                let maxEnd = Int64((max(expectedEndMs, nowMs) + 15_000).rounded())
                 queryItems.append(URLQueryItem(name: "target_end_timestamp", value: "lte.\(maxEnd)"))
             }
             let rawProc = ((extra["helpProcess"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2400,7 +2407,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             body["check_staff_name"] = NSNull()
 
         case "START_TIMER":
-            guard hasUUIDSeatId else { return }
+            guard hasUUIDSeatId || hasLabelCandidate else { return }
             let targetSec = (extra["targetSeconds"] as? NSNumber)?.intValue ?? (extra["targetSeconds"] as? Int) ?? 0
             let targetEndVal = (extra["targetEndTimestamp"] as? NSNumber)?.doubleValue ?? (extra["targetEndTimestamp"] as? Double) ?? 0
             guard targetSec > 0, targetEndVal > 1_000_000_000_000 else { return }
@@ -2430,7 +2437,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
 
         case "ADJUST_TIME":
-            guard hasUUIDSeatId else { return }
+            guard hasUUIDSeatId || hasLabelCandidate else { return }
             queryItems.append(URLQueryItem(name: "status", value: "eq.running"))
             let isSubCheck = (extra["isSubCheck"] as? NSNumber)?.boolValue ?? (extra["isSubCheck"] as? Bool) ?? false
             if isSubCheck {
@@ -4085,14 +4092,17 @@ struct ContentView: View {
             }
 
             let isPersonalMain = (firstEv.seatId == "main-timer" || firstEv.seatId == (self.mainTimer ?? sessionManager.mainTimer)?.id)
-            alarm.stop(explicitTarget: firstEv)
+            if isPersonalMain {
+                handleResetMainTimer(playHapticFeedback: false)
+                alarm.stop(sendToPhone: false, explicitTarget: firstEv)
+            } else {
+                alarm.stop(explicitTarget: firstEv)
+                if let sm = sessionManager.mainTimer {
+                    self.mainTimer = sm
+                }
+            }
             if self.timers != sessionManager.timers {
                 self.timers = sessionManager.timers
-            }
-            if isPersonalMain {
-                handleResetMainTimer()
-            } else if let sm = sessionManager.mainTimer {
-                self.mainTimer = sm
             }
             WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
             WKInterfaceDevice.current().play(.success)
@@ -4100,14 +4110,17 @@ struct ContentView: View {
         }
 
         let hadMain = alarm.isMainTimerRingingOrDue
-        alarm.stop()
+        if hadMain {
+            handleResetMainTimer(playHapticFeedback: false)
+            alarm.stop(sendToPhone: false)
+        } else {
+            alarm.stop()
+            if let sm = sessionManager.mainTimer {
+                self.mainTimer = sm
+            }
+        }
         if self.timers != sessionManager.timers {
             self.timers = sessionManager.timers
-        }
-        if hadMain {
-            handleResetMainTimer()
-        } else if let sm = sessionManager.mainTimer {
-            self.mainTimer = sm
         }
         WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer ?? sessionManager.mainTimer, userName: currentUserName, forceReload: true)
         WKInterfaceDevice.current().play(.success)
@@ -4812,9 +4825,12 @@ struct ContentView: View {
         if playHapticFeedback {
             playHaptic(.click)
         }
-        var main = sessionManager.mainTimer ?? self.mainTimer ?? defaultMainTimer()
+        let curState = self.mainTimer
+        let curSession = sessionManager.mainTimer
+        var main = curSession ?? curState ?? defaultMainTimer()
         let wasOvertime = main.isOvertime
-        let stoppedEnd = (main.isRunning || main.isPreCountingDown) ? main.targetEndTime.timeIntervalSince1970 : 0
+        let activeCandidate = [curSession, curState].compactMap { $0 }.first(where: { $0.isRunning || $0.isPreCountingDown || $0.isOvertime })
+        let stoppedEnd = activeCandidate?.targetEndTime.timeIntervalSince1970 ?? main.targetEndTime.timeIntervalSince1970
         if main.isPreCountingDown || wasOvertime {
             main.pausedRemainingSeconds = 0
             if wasOvertime {

@@ -3870,4 +3870,57 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
    - `app.json` の `ios.buildNumber` を `103` にインクリメント。
    - `targets/watch/content.swift` および `ExpoWatchConnectivityModule.swift` のネイティブ変更を含む iOS + watchOS バイナリを EAS Build（`--profile production --auto-submit`）で TestFlight へ自動提出し、併せて `production` ブランチへ OTA アップデートを配信。
 
+---
+
+## 62. Apple Watch タイマー停止時の店舗シミュレーター／共有端末アラーム無限鳴動・停止未反映の全経路根絶仕様 (2026-11-02)
+
+### 62.1 背景・課題（調査で判明した8つの根本原因）
+
+1. **受動端末（店舗 PC シミュレーター等）の 1 秒監視ループによる `status: 'running'` クラウド逆流上書き (`src/screens/SalonWorkScreen.js`)**:
+   - 500ms 周期のカウントダウン監視ループ内で、タイムアップ到達時（`timeUpTimestamp` 設定）・超過エスカレーション段階更新時（30秒／1分／3分）・途中チェック到達時に `hasChanges = true` となると `saveSeatsToStorage(updated)` を呼び出していた。
+   - `saveSeatsToStorage` は内部で `syncChangedSeatsToCloud(updated)`（`upsertCloudTimer`）と `syncSeatsToWatch` を発火させるため、Watch でタイマーを止めた瞬間と店舗シミュレーター側の時計経過イベントが重なると、シミュレーター側が `status: 'running'` を Supabase クラウドへ逆流上書きして停止操作を打ち消していた。
+2. **Watch システムアラーム画面（「[開く] [終了]」）で「終了」を押した際の停止未送信 (`targets/watch/alarm.swift`)**:
+   - `WatchAlarmCoordinator.extendedRuntimeSession(_:didInvalidateWith:error:)` にて、システムアラームの「終了」が押された際に `acknowledgeRinging(sendToPhone: false, completeCheckIfNeeded: false)` を呼んでいたため、Watch の音・振動だけが止まり、iPhone や Supabase クラウドへ停止（`STOP_ALARM` / `MAIN_TIMER_RESET`）が一切送信されていなかった。
+3. **Watch 直接クラウド `PATCH`・iPhone `isStaleStop`・`REQUEST_SYNC` における `expectedEnd` ±15秒厳密一致制限と UUID／席ラベル不一致 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - `syncSeatActionDirectlyToCloud` の停止 `PATCH` で `target_end_timestamp=gte.(expectedEnd-15s)&lte.(expectedEnd+15s)` および `status=eq.running` を必須としていたため、端末間の時計ズレ・時間延長後・`expectedEnd=0` 時にクエリが 0 件ヒットとなりクラウド上で停止されなかった。また `hasUUIDSeatId` 時は `id=eq.<uuid>` のみで `seat_label` を含めていなかったため、同一席ラベルの重複行や ID 昇格前後のズレがある場合に `running` 行が残存していた。
+   - iPhone 側の `isStaleStop`、`STOP_ALARM` ハンドラ、`REQUEST_SYNC` の `watchStoppedSeats` でも `Math.abs(curEnd - expected) <= 15000` 制限により停止が弾かれるケースがあった。
+4. **ローカル ID（`seat-1`）からクラウド UUID への昇格やリロードを跨いだネイティブ `AlarmKit` 予約・`expo-av` チャイム音の残留 (`src/utils/alarmScheduler.js`, `modules/alarm-kit/ios/AlarmKitBridge.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - 席 ID が `seat-1` からクラウド UUID へ昇格した後やリロード後に停止された際、`stopAlarm` に片方のキーしか渡らないと旧キーのネイティブ予約（`UNUserNotificationCenter` の 30 個リピート通知および iOS 26+ `AlarmManager.shared.alarms`）がキャンセルされず鳴り続けていた。また `playTimeUpSound()` の `Audio.Sound` インスタンスを保持していなかったため停止時に即時消音できなかった。
+5. **`REQUEST_SYNC`（`watchActiveSeats`）およびオーナー側 `reconcileCloudTimers` による停止済みタイマーのゾンビ復活 (`src/screens/SalonWorkScreen.js`)**:
+   - クラウド経由で停止された直後に Watch から古い `watchActiveSeats` を含む `REQUEST_SYNC` が届くと、`status !== 'running'` の席が再び `running` として採用（復活）されていた。
+   - またオーナー端末の `reconcileCloudTimers` で `localMatch.dirtySync && !isCloudActivelyRunning` 条件に `localMatch.status !== 'running'` ガードが無かったため、他端末が停止した直後のポーリングでローカルの古い `running` 状態がクラウドへ再送される抜け穴があった。
+6. **背面ウィンドウ時ポーリング間隔の遅延とホーム画面表示中（`applyWatchStoppedSeatsIntoCache`）のクラウド未送信 (`src/screens/SalonWorkScreen.js`)**:
+   - 稼働席があってもタイムアップ 8 秒前を過ぎるとポーリング間隔が 6 秒に広がり、また `HomeScreen` 側の `applyWatchStoppedSeatsIntoCache` / `adoptWatchActiveSeatsIntoCache` がローカルキャッシュ保存のみで `upsertCloudTimer` を呼んでいなかった。
+7. **`WatchConnectivity` 受信入り口（`handleIncoming` / `deliverAction`）での `expectedEnd` 未参照と起動時 Watch 送信順序の競合 (`modules/watch-connectivity/index.js`, `src/screens/SalonWorkScreen.js`)**:
+   - `handleIncoming` が `body.targetEndTimestamp` のみを参照し `body.expectedEnd` / `body.stoppedEndTime` を読んでおらず、`STOP_ALARM` / `ENTER_HELP` / `START_SHAMPOO` が停止履歴登録から漏れていた。また `deliverAction` でキュー内の古い `REQUEST_SYNC` が新しい `watchStoppedSeats` 付き `REQUEST_SYNC` を阻む条件があった。
+   - さらに `SalonWorkScreen` の `loadInitialData` が、`WatchConnectivity.subscribeActions` で保留中の停止アクションを消化する前に古い `loadedSeats` を Watch へ即時プッシュしていた。
+8. **Watch 全画面アラーム（`alarmOverlay`）での個人メインタイマー停止時の二重送信・未来時刻上書き (`targets/watch/content.swift`)**:
+   - `handleStopButtonInAlarmOverlay` で先に `alarm.stop` を呼んでから `handleResetMainTimer` を呼んでいたため、`alarm.stop` 内でリセット後の未来時刻に書き換わった `targetEndTime` を `handleResetMainTimer` が拾って二重送信していた。
+
+### 62.2 確定仕様・実装詳細
+
+1. **時計経過イベントでのクラウド・Watch 逆流完全遮断 (`src/screens/SalonWorkScreen.js`)**:
+   - 500ms 周期のカウントダウン監視ループ内での状態更新（タイムアップ到達・エスカレーション段階更新・チェック時間到達）では `saveSeatsToStorage`（クラウド・Watch 送信）を呼ばず、`persistSeatsForSalonId` によるローカルストレージ保存のみとする。
+2. **全候補 ID 横断アラーム消火・ネイティブ `AlarmKit` 全走査停止・即時消音 (`src/screens/SalonWorkScreen.js`, `src/utils/alarmScheduler.js`, `modules/alarm-kit/ios/AlarmKitBridge.swift`)**:
+   - `_activeSalonTimeUpSounds` セットを管理する `stopSalonTimeUpSounds()` および、席の `id`・`cloudTimerId`・`seat-${seatNumber}`・`${seatNumber}` すべてに対して `stopAlarm` と `WatchConnectivity.notifyLocalStopOrReset` を一括実行する `stopAllCandidateAlarmsForSeat` を新設し、Watch 操作・Realtime 受信・クラウドポーリング・Push 受信・手動停止／リセットの全経路に統一適用（なお `subscribeSalonTimers` の `setSeats` 外の事前チェックでは `stopAlarm` のみを呼び、通常 `UPDATE` での誤消音・誤停止記録を防止）。
+   - `alarmScheduler.js` の `applyAlarms`（`stopPassedOnRemove && desiredMap.size === 0` 時）および `stopAllAlarms` で `AlarmKit.cleanupOnSourceInit(source, [])` と `seat-1`〜`seat-12` の明示キャンセルを実行。
+   - `AlarmKitBridge.swift` の `cleanupOnSourceInit` で、`records` に残っていない孤立アラームも含め iOS 26+ `AlarmManager.shared.alarms` を直接走査して保護対象外をすべて `stop` ＆ `cancel` する。
+3. **Watch システムアラーム「終了」押下時の遅延停止送信とサスペンド保護 (`targets/watch/alarm.swift`)**:
+   - `extendedRuntimeSession(_:didInvalidateWith:error:)` にて、システムアラーム閉鎖時に即座に Watch 側を `00:00` 停止（`acknowledgeRinging(..., sendToPhone: true, deferPhoneSend: true)`）し、`0.35秒` 以内に `appBecameActive()`（「開く」押下）が来なければ `sendDeferredStopToPhone` で iPhone および Supabase クラウドへ `STOP_ALARM` / `MAIN_TIMER_RESET` を送信する。
+   - 「開く」押下により `appBecameActive()` が後から届いた場合は、直前スナップショットからタイマーを復元（`restoreMainTimerForOpenedAlarm` / `restoreSeatTimerForOpenedAlarm`）して操作分岐シートを開く。
+   - `ProcessInfo.processInfo.performExpiringActivity` の保持時間を `2.0秒` とし、OS による強制サスペンド直前通知（`expired == true`）時は未実行の停止送信タスクをメインスレッドで即座に発火させる。
+4. **Watch 直接クラウド `PATCH` と iPhone 停止判定の緩和・UUID＋席ラベル一括指定 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - `syncSeatActionDirectlyToCloud` の停止系アクションから `status=eq.running` と下限 `gte` 制限を撤廃し、`target_end_timestamp <= max(expectedEndMs, nowMs) + 15000` のみで判定（未来へ新規再スタートされたタイマーのみ保護し、超過中・延長後・時計ズレはすべて確実に `paused` へ更新）。
+   - さらに停止・チェック系アクションで UUID と席ラベルの両方が判明している場合は `or=(id.eq.<uuid>,seat_label.in.("<base>","<base>席"))` を指定し、同一席の重複行や ID 昇格前後の行も 1 回の `PATCH` で漏れなく停止させる。また `START_TIMER` / `ADJUST_TIME` でも UUID 未取得時は席ラベル条件で更新可能とした。
+   - iPhone 側の `isStaleStop`、`STOP_ALARM`、`watchStoppedSeats` 処理でも、`curEnd > Date.now() + 2000 && curEnd > expected + 15000`（15秒以上未来の新規タイマー）のケースのみ保護し、それ以外はすべて確実に停止させる。
+5. **停止済みタイマーの復活防止・常時 2.5 秒ポーリング・起動／キャッシュ同期順序の完全整合 (`src/screens/SalonWorkScreen.js`, `modules/watch-connectivity/index.js`, `targets/watch/content.swift`)**:
+   - クラウドやローカルで停止された席に `lastStoppedAt` と `lastStoppedTargetEndTimestamp` を記録し、`REQUEST_SYNC` の `watchActiveSeats` が停止済みタイマー（`±15秒` 以内または停止時刻以前に開始されたタイマー）を指している場合は採用を拒否して `highPriorityWake: true` で Watch へ `00:00` 停止状態を送り返す。
+   - オーナー側 `reconcileCloudTimers` の `dirtySync` 優先条件に `localMatch.status !== 'running'` を追加し、クラウド停止後のローカル `running` 復活を封鎖。
+   - 稼働中・超過鳴動中の席が 1 つでもある間は、シミュレーター等が背面ウィンドウにあっても常時 **2.5 秒間隔** で `reconcileCloudTimers` ポーリングを実行する。
+   - `applyWatchStoppedSeatsIntoCache` / `adoptWatchActiveSeatsIntoCache` でもクラウドサロン参加中は即座に `upsertCloudTimer` を呼び出す。
+   - `WatchConnectivity`（`modules/watch-connectivity/index.js`）の `handleIncoming` で `expectedEnd` / `stoppedEndTime` をミリ秒正規化して全停止系アクション（`STOP_ALARM`, `ENTER_HELP`, `START_SHAMPOO` 含む）および `seat-${seatNumber}` を即時 `notifyLocalStopOrReset` 登録し、`deliverAction` で保留中の `REQUEST_SYNC` 更新時に `watchStoppedSeats` をマージする。
+   - `saveSeatsToStorage` で `_cachedCurrentSeats` と `seatsRef.current` を `0ms` 即時更新し、`loadInitialData` では先行キャッシュの停止・開始状態をマージした上で、初回の `syncSeatsToWatch` を `WatchConnectivity.subscribeActions` による保留キュー消化直後に実行する。
+   - Watch の `handleStopButtonInAlarmOverlay` で個人メインタイマー停止時は先に `handleResetMainTimer(playHapticFeedback: false)` を呼んでから `alarm.stop(sendToPhone: false, ...)` を呼び、正確な停止対象時刻で 1 回のみリセット送信を行う。
+
+
 

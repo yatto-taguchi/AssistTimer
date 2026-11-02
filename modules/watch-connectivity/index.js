@@ -104,19 +104,23 @@ const deliverAction = (payload) => {
     if (payload.action === 'REQUEST_SYNC') {
       const existingIdx = actionQueue.findIndex((item) => item.payload.action === 'REQUEST_SYNC');
       if (existingIdx !== -1) {
-        // 新しいREQUEST_SYNC（特にwatchMainTimerActiveまたはwatchMainTimerStopped付き）で古い保留を更新
-        if (
-          payload.watchMainTimerStopped ||
-          payload.watchMainTimerActive ||
-          !actionQueue[existingIdx].payload.watchMainTimerActive
-        ) {
-          actionQueue[existingIdx] = {
-            payload,
-            deliveredTo,
-            deliveredCount,
-            enqueuedAt: Date.now(),
-          };
-        }
+        const prevPayload = actionQueue[existingIdx].payload || {};
+        const prevStopped = prevPayload.watchStoppedSeats || prevPayload.extra?.watchStoppedSeats || [];
+        const nextStopped = payload.watchStoppedSeats || payload.extra?.watchStoppedSeats || [];
+        const mergedStopped = [...prevStopped, ...nextStopped];
+        const mergedPayload = mergedStopped.length > 0
+          ? {
+              ...payload,
+              watchStoppedSeats: mergedStopped,
+              extra: payload.extra ? { ...payload.extra, watchStoppedSeats: mergedStopped } : payload.extra,
+            }
+          : payload;
+        actionQueue[existingIdx] = {
+          payload: mergedPayload,
+          deliveredTo,
+          deliveredCount,
+          enqueuedAt: Date.now(),
+        };
         return;
       }
     }
@@ -252,7 +256,9 @@ const STOP_OR_FINISH_ACTIONS = new Set([
   'RESET_ZERO',
   'STOP_ALARM',
   'COMPLETE_CHECK',
+  'CANCEL_CHECK',
   'ENTER_HELP',
+  'START_SHAMPOO',
 ]);
 
 const handleIncoming = (kind, body, seq = null) => {
@@ -262,19 +268,45 @@ const handleIncoming = (kind, body, seq = null) => {
   if (body.action) {
     const actionStr = String(body.action);
     const ts = body.timestamp != null ? Number(body.timestamp) : 0;
+    const isMainTarget =
+      body.seatId === 'main-timer' || body.seatId === '-1' || Number(body.seatId) === -1;
     const isMainAction =
       actionStr.startsWith('MAIN_TIMER_') ||
-      (actionStr === 'STOP_ALARM' && (body.seatId === 'main-timer' || body.seatId === '-1' || Number(body.seatId) === -1));
-    const targetEndTs = Number(body.targetEndTimestamp || body.extra?.targetEndTimestamp || 0);
+      (actionStr === 'STOP_ALARM' && isMainTarget);
+    const rawTargetEndTs = Number(
+      body.targetEndTimestamp ||
+      body.extra?.targetEndTimestamp ||
+      body.expectedEnd ||
+      body.extra?.expectedEnd ||
+      body.stoppedEndTime ||
+      body.extra?.stoppedEndTime ||
+      0
+    );
+    const targetEndTs =
+      rawTargetEndTs > 0 && rawTargetEndTs < 100000000000
+        ? Math.round(rawTargetEndTs * 1000)
+        : Math.round(rawTargetEndTs);
+    const stopKind = String(body.kind || body.extra?.kind || '').toLowerCase();
 
-    // ★ Watchから届いた停止・リセット・計測終了も即座に停止履歴へ登録し、遅延STARTパケットを遮断
-    if (actionStr === 'MAIN_TIMER_RESET') {
+    // ★ Watchから届いた停止・リセット・計測終了・工程移行も即座に停止履歴へ登録し、遅延STARTパケットを遮断
+    if (actionStr === 'MAIN_TIMER_RESET' || (actionStr === 'STOP_ALARM' && isMainTarget)) {
       notifyLocalStopOrReset('main-timer', targetEndTs);
     } else if (
-      (actionStr === 'STOP_TIMER' || actionStr === 'FINISH_MEASURE' || actionStr === 'RESET_ZERO') &&
-      body.seatId != null
+      (actionStr === 'STOP_TIMER' ||
+        actionStr === 'FINISH_MEASURE' ||
+        actionStr === 'RESET_ZERO' ||
+        actionStr === 'ENTER_HELP' ||
+        actionStr === 'START_SHAMPOO' ||
+        (actionStr === 'STOP_ALARM' && stopKind !== 'check')) &&
+      body.seatId != null &&
+      !isMainTarget
     ) {
       notifyLocalStopOrReset(body.seatId, targetEndTs);
+      const seatNum = Number(body.seatNumber || body.extra?.seatNumber || 0);
+      if (seatNum > 0 && seatNum < 1000) {
+        notifyLocalStopOrReset(`seat-${seatNum}`, targetEndTs);
+        notifyLocalStopOrReset(String(seatNum), targetEndTs);
+      }
     }
 
     // ★ メインタイマー操作の順序逆転・ゾンビ復活防止:

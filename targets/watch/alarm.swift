@@ -1100,12 +1100,29 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
 
         // ★ ケースB: 文字盤（.background）でシステムアラームの「開く」を押した際、watchOSの順序で didInvalidateWith が
-        //   appBecameActive より数十〜数百ミリ秒先に呼ばれていた場合も、直前スナップショットからアクション分岐画面へ移行する！
+        //   appBecameActive より数十〜数百ミリ秒先に呼ばれていた場合も、直前スナップショットから超過カウントアップ状態を復元してアクション分岐画面へ移行する！
         if let snap = lastSystemDismissedSnapshot,
            now.timeIntervalSince(snap.dismissedAt) < 1.5 {
             lastSystemDismissedSnapshot = nil
             pendingSystemDismissPhoneSyncWorkItem?.cancel()
             pendingSystemDismissPhoneSyncWorkItem = nil
+            if snap.event.seatId == "main-timer", let preMain = snap.preMainTimer {
+                WatchSessionManager.shared.restoreMainTimerForOpenedAlarm(preMain)
+                WidgetSync.save(
+                    timers: WatchSessionManager.shared.timers,
+                    mainTimer: WatchSessionManager.shared.mainTimer,
+                    userName: WatchSessionManager.shared.currentUserName,
+                    forceReload: true
+                )
+            } else if !snap.isCheckEvent, let preSeat = snap.preSeatTimer {
+                WatchSessionManager.shared.restoreSeatTimerForOpenedAlarm(preSeat)
+                WidgetSync.save(
+                    timers: WatchSessionManager.shared.timers,
+                    mainTimer: WatchSessionManager.shared.mainTimer,
+                    userName: WatchSessionManager.shared.currentUserName,
+                    forceReload: true
+                )
+            }
             pendingOpenedAlarmEvent = snap.event
         } else {
             lastSystemDismissedSnapshot = nil
@@ -2565,25 +2582,60 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     return
                 }
 
-                // 文字盤（.background）から「開く」が押され、didInvalidateWith が appBecameActive よりわずかに先に届いた場合に備えてスナップショットを保存
-                if wasBgWhenShown, let ev = matchedEv {
+                // 文字盤（.background）から「開く」が押され、didInvalidateWith が appBecameActive よりわずかに先に届いた場合に備えてスナップショットを保存。
+                // 「終了」が押された場合はそのまま Watch 側タイマーを 00:00 停止し、0.35秒後に appBecameActive が来なければ iPhone & クラウドへも停止（STOP_ALARM / MAIN_TIMER_RESET）を送信する！
+                pendingSystemDismissPhoneSyncWorkItem?.cancel()
+                pendingSystemDismissPhoneSyncWorkItem = nil
+                if let ev = matchedEv {
                     let isCheck = ev.key.contains("-check@")
                     let preMain = WatchSessionManager.shared.mainTimer
                     let preSeat = self.findMatchingSeat(for: ev.seatId, title: ev.title)
-                    self.lastSystemDismissedSnapshot = SystemDismissedSnapshot(
+                    let snap = SystemDismissedSnapshot(
                         event: ev,
                         dismissedAt: now,
                         isCheckEvent: isCheck,
                         preMainTimer: preMain,
                         preSeatTimer: preSeat
                     )
+                    self.lastSystemDismissedSnapshot = snap
+                    self.acknowledgeRinging(
+                        sendToPhone: true,
+                        completeCheckIfNeeded: true,
+                        explicitTarget: ev,
+                        deferPhoneSend: true
+                    )
+                    let work = DispatchWorkItem { [weak self] in
+                        guard let self = self else { return }
+                        self.pendingSystemDismissPhoneSyncWorkItem = nil
+                        guard let currentSnap = self.lastSystemDismissedSnapshot,
+                              currentSnap.event.key == snap.event.key else {
+                            return
+                        }
+                        self.lastSystemDismissedSnapshot = nil
+                        self.sendDeferredStopToPhone(for: currentSnap)
+                    }
+                    self.pendingSystemDismissPhoneSyncWorkItem = work
+                    ProcessInfo.processInfo.performExpiringActivity(withReason: "watchAlarmSystemDismissSync") { [weak self] expired in
+                        if !expired {
+                            Thread.sleep(forTimeInterval: 2.0)
+                        } else {
+                            DispatchQueue.main.async {
+                                guard let self = self,
+                                      let pendingWork = self.pendingSystemDismissPhoneSyncWorkItem,
+                                      !pendingWork.isCancelled else {
+                                    return
+                                }
+                                pendingWork.cancel()
+                                work.perform()
+                            }
+                        }
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
                 } else {
                     self.lastSystemDismissedSnapshot = nil
+                    self.acknowledgeRinging(sendToPhone: true, completeCheckIfNeeded: true, explicitTarget: nil)
                 }
 
-                // ★ 「終了」押下時: アラーム振動・音・通知のみを消火し、メインタイマー・客席タイマー・中間チェックタイマーすべて超過カウントアップ（+00:xx）を継続させる！
-                //   （チェックタイマーのイベントも acknowledged に記録されるため、残りの本タイマーの第2段階スマートアラームへ自動で引き継がれる）
-                self.acknowledgeRinging(sendToPhone: false, completeCheckIfNeeded: false, explicitTarget: matchedEv)
                 self.stopForegroundHaptics()
                 self.notificationSignature = "__FORCE__"
                 self.refresh()

@@ -52,6 +52,66 @@ import {
   subscribeRemotePushEvents,
 } from '../utils/pushNotificationService';
 
+const _activeSalonTimeUpSounds = new Set();
+
+export const stopSalonTimeUpSounds = () => {
+  _activeSalonTimeUpSounds.forEach((snd) => {
+    try {
+      snd.stopAsync().catch(() => {});
+      snd.unloadAsync().catch(() => {});
+    } catch {}
+  });
+  _activeSalonTimeUpSounds.clear();
+  if (Platform.OS !== 'web') {
+    try {
+      Vibration.cancel();
+    } catch {}
+  }
+};
+
+export const stopAllCandidateAlarmsForSeat = (seatObj, extraSeatId = null, checkOnly = false) => {
+  const candidateIds = new Set();
+  if (seatObj?.id) candidateIds.add(String(seatObj.id));
+  if (seatObj?.cloudTimerId) candidateIds.add(String(seatObj.cloudTimerId));
+  if (extraSeatId) candidateIds.add(String(extraSeatId));
+
+  const nums = new Set();
+  const explicitNum = Number(seatObj?.seatNumber);
+  if (Number.isFinite(explicitNum) && explicitNum > 0 && explicitNum < 1000) {
+    nums.add(explicitNum);
+  }
+  const labelStr = String(seatObj?.seatLabel || seatObj?.name || '');
+  const labelDigits = labelStr.match(/\d+/);
+  if (labelDigits) {
+    const n = parseInt(labelDigits[0], 10);
+    if (n > 0 && n < 1000) nums.add(n);
+  }
+  if (extraSeatId) {
+    const extraDigits = String(extraSeatId).match(/^seat-(\d+)$|^(\d+)$/);
+    if (extraDigits) {
+      const n = parseInt(extraDigits[1] || extraDigits[2], 10);
+      if (n > 0 && n < 1000) nums.add(n);
+    }
+  }
+  nums.forEach((n) => {
+    candidateIds.add(`seat-${n}`);
+    candidateIds.add(String(n));
+  });
+
+  const endTs = Number(seatObj?.targetEndTimestamp) || Number(seatObj?.lastStoppedTargetEndTimestamp) || 0;
+  candidateIds.forEach((cid) => {
+    if (!cid) return;
+    stopAlarm('salon', `${cid}-check`);
+    if (!checkOnly) {
+      stopAlarm('salon', `${cid}-main`);
+      if (WatchConnectivity?.notifyLocalStopOrReset) {
+        WatchConnectivity.notifyLocalStopOrReset(cid, endTs);
+      }
+    }
+  });
+  stopSalonTimeUpSounds();
+};
+
 const playTimeUpSound = async () => {
   try {
     await Audio.setAudioModeAsync({
@@ -63,8 +123,10 @@ const playTimeUpSound = async () => {
     const { sound: newSound } = await Audio.Sound.createAsync(
       require('../../assets/alarm_digital.wav')
     );
+    _activeSalonTimeUpSounds.add(newSound);
     newSound.setOnPlaybackStatusUpdate((status) => {
       if (status.didJustFinish) {
+        _activeSalonTimeUpSounds.delete(newSound);
         newSound.unloadAsync().catch(() => {});
       }
     });
@@ -849,10 +911,120 @@ export const ensureSalonSeatsCached = async () => {
   return _ensureSeatsInFlightPromise;
 };
 
+// ★ Watch から REQUEST_SYNC（watchStoppedSeats 同梱）が届いた際、HomeScreen 側の並列処理でも
+//   客席キャッシュとストレージへ停止を即時反映し、直後の SYNC_MAIN_TIMER (_contextSeats) で止めた客席が復活するのを完全防止
+export const applyWatchStoppedSeatsIntoCache = async (payload) => {
+  try {
+    const incomingStoppedSeats = payload?.watchStoppedSeats || payload?.extra?.watchStoppedSeats;
+    if (!Array.isArray(incomingStoppedSeats) || incomingStoppedSeats.length === 0) return false;
+    const baseSeats = await ensureSalonSeatsCached();
+    if (!Array.isArray(baseSeats) || baseSeats.length === 0) return false;
+
+    const watchUser = (payload?.userName || payload?.extra?.userName || _cachedUserName || 'スタッフ').trim();
+    const nextSeats = [...baseSeats];
+    const stoppedSeatsForCloud = [];
+    let didStop = false;
+
+    incomingStoppedSeats.forEach((ws) => {
+      if (!ws || typeof ws !== 'object') return;
+      const wsStoppedEnd = Math.round(Number(ws.stoppedTargetEndTimestamp || 0));
+      const wsId = String(ws.id || '');
+      const wsNum = Number(ws.seatNumber) || 0;
+      const wsLabelClean = String(ws.seatLabel || '').replace(/席$/, '').trim();
+
+      if (wsId && wsStoppedEnd > 0 && WatchConnectivity?.notifyLocalStopOrReset) {
+        WatchConnectivity.notifyLocalStopOrReset(wsId, wsStoppedEnd);
+      }
+      if (wsNum > 0 && wsStoppedEnd > 0 && WatchConnectivity?.notifyLocalStopOrReset) {
+        WatchConnectivity.notifyLocalStopOrReset(`seat-${wsNum}`, wsStoppedEnd);
+      }
+
+      const idx = nextSeats.findIndex((s) => {
+        if (!s) return false;
+        if (wsId && (s.id === wsId || s.cloudTimerId === wsId)) return true;
+        const sClean = String(s.seatLabel || s.name || '').replace(/席$/, '').trim();
+        if (wsLabelClean && sClean === wsLabelClean) return true;
+        if (wsNum > 0 && Number(s.seatNumber) === wsNum) return true;
+        const sDigits = sClean.match(/\d+/);
+        return wsNum > 0 && sDigits && parseInt(sDigits[0], 10) === wsNum;
+      });
+
+      if (idx >= 0 && nextSeats[idx].status === 'running') {
+        const targetSeat = nextSeats[idx];
+        const curEnd = Number(targetSeat.targetEndTimestamp) || 0;
+        // 停止したタイマーより15秒以上未来の新しいタイマーが既に開始されている場合のみ保護し、それ以外はすべて停止反映
+        const isNewerFutureTimer =
+          wsStoppedEnd > 0 && curEnd > Date.now() + 2000 && curEnd > wsStoppedEnd + 15000;
+        if (!isNewerFutureTimer) {
+          stopAllCandidateAlarmsForSeat(targetSeat, wsId || (wsNum > 0 ? `seat-${wsNum}` : null), false);
+          const stoppedSeatObj = {
+            ...targetSeat,
+            status: 'paused',
+            pausedRemainingSeconds: 0,
+            targetSeconds: 0,
+            targetTime: 0,
+            initialMinutes: 0,
+            targetEndTimestamp: null,
+            lastStoppedAt: Date.now(),
+            lastStoppedTargetEndTimestamp: curEnd || wsStoppedEnd || Number(targetSeat.lastStoppedTargetEndTimestamp) || 0,
+            dirtySync: true,
+            isOver: false,
+            isReset: true,
+            timeUpTimestamp: null,
+            escalationLevel: 0,
+            mainStaffConfirmed: true,
+            assistantStaffConfirmed: true,
+            stoppedBy: watchUser,
+            assistantStaffName: '',
+            isShampooing: false,
+            actionStatus: null,
+            helpProcess: null,
+            isRecruiting: false,
+            isNoHelpNeeded: false,
+            checkTargetSeconds: null,
+            checkTotalSeconds: null,
+            checkEndTimestamp: null,
+            checkPausedRemainingSeconds: null,
+            checkInitialMinutes: null,
+            checkStaffName: '',
+            checkProcess: 'チェック',
+            checkStatus: 'stopped',
+            isCheckCompleted: false,
+            watchAlarmSoundEnabled: false,
+            alarmSoundEnabled: false,
+            collapsedAtEnd: Date.now(),
+            history: [],
+          };
+          nextSeats[idx] = stoppedSeatObj;
+          stoppedSeatsForCloud.push(stoppedSeatObj);
+          didStop = true;
+        }
+      }
+    });
+
+    if (didStop) {
+      _cachedCurrentSeats = nextSeats;
+      await persistSeatsForSalonId(_cachedActiveSalonId, nextSeats, _cachedIsSalonOwner).catch(() => {});
+      if (isCloudUUID(_cachedActiveSalonId)) {
+        stoppedSeatsForCloud.forEach((stoppedSeat) => {
+          if (_cachedIsSalonOwner || isCloudUUID(stoppedSeat.cloudTimerId || stoppedSeat.id)) {
+            upsertCloudTimer(_cachedActiveSalonId, stoppedSeat).catch(() => {});
+          }
+        });
+      }
+    }
+    return didStop;
+  } catch (e) {
+    console.warn('[SalonWorkScreen] applyWatchStoppedSeatsIntoCache error:', e);
+    return false;
+  }
+};
+
 // ★ サロンタブ未マウント時（HomeScreen表示直後）に Watch から REQUEST_SYNC（watchActiveSeats 同梱）が届いた場合も、
 //   客席キャッシュとストレージへ即時引き継ぎ、SYNC_MAIN_TIMER の返信で Watch 側の稼働中客席を 00:00 上書きしないよう保証
 export const adoptWatchActiveSeatsIntoCache = async (payload) => {
   try {
+    await applyWatchStoppedSeatsIntoCache(payload);
     const incomingWatchSeats = payload?.watchActiveSeats || payload?.extra?.watchActiveSeats;
     if (!Array.isArray(incomingWatchSeats) || incomingWatchSeats.length === 0) return false;
     const baseSeats = await ensureSalonSeatsCached();
@@ -862,6 +1034,7 @@ export const adoptWatchActiveSeatsIntoCache = async (payload) => {
     const cutoffMs = nowMs - 3 * 3600 * 1000;
     const watchUser = (payload?.userName || payload?.extra?.userName || _cachedUserName || 'スタイリスト').trim();
     const nextSeats = [...baseSeats];
+    const adoptedSeatsForCloud = [];
     let didAdopt = false;
 
     incomingWatchSeats.forEach((ws) => {
@@ -886,11 +1059,27 @@ export const adoptWatchActiveSeatsIntoCache = async (payload) => {
       });
       if (idx >= 0 && nextSeats[idx].status !== 'running') {
         const targetSec = Math.max(10, Math.round(Number(ws.totalSeconds) || 600));
+        const prevSeat = nextSeats[idx];
+        if (
+          WatchConnectivity?.isSeatTimerEndStopped &&
+          ((prevSeat.id && WatchConnectivity.isSeatTimerEndStopped(String(prevSeat.id), wsEnd)) ||
+            (prevSeat.cloudTimerId && WatchConnectivity.isSeatTimerEndStopped(String(prevSeat.cloudTimerId), wsEnd)))
+        ) {
+          return;
+        }
+        const prevStoppedEnd = Number(prevSeat.lastStoppedTargetEndTimestamp || 0);
+        if (prevStoppedEnd > 0 && Math.abs(prevStoppedEnd - wsEnd) <= 15000) {
+          return;
+        }
+        const wsStartMs = wsEnd - targetSec * 1000;
+        const seatUpdatedMs = Math.max(Number(prevSeat.updatedAt || 0), Number(prevSeat.lastStoppedAt || 0));
+        if (seatUpdatedMs > 0 && wsStartMs <= seatUpdatedMs + 2000) {
+          return;
+        }
         const chkSec = Math.round(Number(ws.checkTargetSeconds || 0));
         const chkEnd = Math.round(Number(ws.checkEndTimestamp || 0));
         const hasActiveChk = chkSec > 0 && chkEnd > cutoffMs;
-        const prevSeat = nextSeats[idx];
-        nextSeats[idx] = {
+        const adoptedSeatObj = {
           ...prevSeat,
           status: 'running',
           colorStaffName: watchUser || 'スタイリスト',
@@ -898,6 +1087,8 @@ export const adoptWatchActiveSeatsIntoCache = async (payload) => {
           targetSeconds: targetSec,
           initialMinutes: Math.max(1, Math.round(targetSec / 60)),
           targetEndTimestamp: wsEnd,
+          lastStoppedAt: 0,
+          lastStoppedTargetEndTimestamp: 0,
           pausedRemainingSeconds: null,
           isReset: false,
           isOver: wsEnd <= nowMs,
@@ -929,6 +1120,8 @@ export const adoptWatchActiveSeatsIntoCache = async (payload) => {
               }
             : {}),
         };
+        nextSeats[idx] = adoptedSeatObj;
+        adoptedSeatsForCloud.push(adoptedSeatObj);
         didAdopt = true;
       }
     });
@@ -936,6 +1129,13 @@ export const adoptWatchActiveSeatsIntoCache = async (payload) => {
     if (didAdopt) {
       _cachedCurrentSeats = nextSeats;
       await persistSeatsForSalonId(_cachedActiveSalonId, nextSeats, _cachedIsSalonOwner).catch(() => {});
+      if (isCloudUUID(_cachedActiveSalonId)) {
+        adoptedSeatsForCloud.forEach((adoptedSeat) => {
+          if (_cachedIsSalonOwner || isCloudUUID(adoptedSeat.cloudTimerId || adoptedSeat.id)) {
+            upsertCloudTimer(_cachedActiveSalonId, adoptedSeat).catch(() => {});
+          }
+        });
+      }
     }
     return didAdopt;
   } catch (e) {
@@ -1455,6 +1655,9 @@ export default function SalonWorkScreen() {
 
   const seatsRef = useRef(seats);
   seatsRef.current = seats;
+  if (Array.isArray(seats) && seats.length > 0) {
+    _cachedCurrentSeats = seats;
+  }
   const pendingDeletedSeatsRef = useRef([]);
   const reconcileInFlightRef = useRef(false);
   const reconcileCloudTimersRef = useRef(null);
@@ -1776,7 +1979,10 @@ export default function SalonWorkScreen() {
         });
 
         if (hasChanges) {
-          saveSeatsToStorage(updated);
+          // ★ 時計経過（タイムアップ到達・エスカレーション段階更新・チェック時間到達）によるローカル表示状態の更新では、
+          //   Watchやクラウド（Supabase）への逆流送信（saveSeatsToStorage）を行わずローカル保存のみとする。
+          //   （受動端末がタイムアップ瞬間に status: 'running' をクラウドやWatchへ上書き送出して停止操作を打ち消すのを防止）
+          persistSeatsForSalonId(getActiveStorageSalonId(), updated, isSalonOwnerRef.current).catch(() => {});
           return updated;
         }
         return prevSeats;
@@ -1927,6 +2133,7 @@ export default function SalonWorkScreen() {
     oneMinuteHelpAlertRef.current = {};
     escalatedAlertRef.current = {};
     stopAllAlarms('salon');
+    stopSalonTimeUpSounds();
   };
 
   // ★ 席の状態変化を検知して Supabase クラウドへ差分同期
@@ -1937,7 +2144,10 @@ export default function SalonWorkScreen() {
       seat.status !== 'running' && (seat.isReset || (Number(seat.pausedRemainingSeconds || 0) <= 0 && Number(seat.targetEndTimestamp || 0) <= 0))
         ? 0
         : (seat.targetSeconds !== undefined && seat.targetSeconds !== null ? seat.targetSeconds : (seat.targetTime || 0));
-    return `${label}_${seat.colorStaffName || ''}_${seat.createdBy || ''}_${seat.status}_${resolvedTargetSec}_${seat.targetEndTimestamp}_${seat.pausedRemainingSeconds}_${seat.assistantStaffName}_${seat.helpProcess}_${seat.actionStatus}_${seat.isRecruiting}_${seat.isNoHelpNeeded}_${seat.checkEndTimestamp}_${seat.checkPausedRemainingSeconds}_${seat.checkTotalSeconds || seat.checkTargetSeconds}_${seat.checkStatus}_${seat.checkProcess}_${seat.checkStaffName}_${seat.comment}_${seat.isShampooing}`;
+    const normalizedCheckStatus = seat.isCheckCompleted
+      ? 'completed'
+      : (Number(seat.checkEndTimestamp) > 0 && seat.checkStatus !== 'stopped' ? 'active' : 'stopped');
+    return `${label}_${seat.colorStaffName || ''}_${seat.createdBy || ''}_${seat.status}_${resolvedTargetSec}_${seat.targetEndTimestamp}_${seat.pausedRemainingSeconds}_${seat.assistantStaffName}_${seat.helpProcess}_${seat.actionStatus}_${seat.isRecruiting}_${seat.isNoHelpNeeded}_${seat.checkEndTimestamp}_${seat.checkPausedRemainingSeconds}_${seat.checkTotalSeconds || seat.checkTargetSeconds}_${normalizedCheckStatus}_${seat.checkProcess}_${seat.checkStaffName}_${seat.comment}_${seat.isShampooing}`;
   };
 
   const getActiveStorageSalonId = () =>
@@ -2040,6 +2250,10 @@ export default function SalonWorkScreen() {
   // ストレージ保存ヘルパー（サロンID別キーへ保存し、サロン間の席上書き・消失を防止）
   const saveSeatsToStorage = async (newSeats) => {
     try {
+      if (Array.isArray(newSeats) && newSeats.length > 0) {
+        _cachedCurrentSeats = newSeats;
+        seatsRef.current = newSeats;
+      }
       const storageSalonId = getActiveStorageSalonId();
       // ★ Apple Watchおよびクラウド（Supabase）への通信はAsyncStorageディスク書き込み完了を待たずに0msで先行開始し、
       //   バックグラウンド起床中（Watchからの停止操作受信時など）にiOSサスペンドでクラウド停止同期が中断されるのを防止
@@ -2205,19 +2419,19 @@ export default function SalonWorkScreen() {
         let nextSeats = currentSeats;
         let didAdoptWatchSeats = false;
         let didApplyWatchStops = false;
+        let didRejectStaleWatchActive = false;
         if (Array.isArray(rawWatchStoppedSeats) && rawWatchStoppedSeats.length > 0 && Array.isArray(nextSeats)) {
           nextSeats = [...nextSeats];
           rawWatchStoppedSeats.forEach((ws) => {
             if (!ws || typeof ws !== 'object') return;
             const wsStoppedEnd = Math.round(Number(ws.stoppedTargetEndTimestamp || 0));
-            if (wsStoppedEnd <= 0) return;
             const wsId = String(ws.id || '');
             const wsNum = Number(ws.seatNumber) || 0;
             const wsLabelClean = String(ws.seatLabel || '').replace(/席$/, '').trim();
-            if (wsId) {
+            if (wsId && wsStoppedEnd > 0) {
               WatchConnectivity.notifyLocalStopOrReset(wsId, wsStoppedEnd);
             }
-            if (wsNum > 0) {
+            if (wsNum > 0 && wsStoppedEnd > 0) {
               WatchConnectivity.notifyLocalStopOrReset(`seat-${wsNum}`, wsStoppedEnd);
             }
             const idx = nextSeats.findIndex((s) => {
@@ -2229,25 +2443,25 @@ export default function SalonWorkScreen() {
               const sDigits = sClean.match(/\d+/);
               return wsNum > 0 && sDigits && parseInt(sDigits[0], 10) === wsNum;
             });
-            if (
-              idx >= 0 &&
-              nextSeats[idx].status === 'running' &&
-              Math.abs((Number(nextSeats[idx].targetEndTimestamp) || 0) - wsStoppedEnd) <= 15000
-            ) {
+            if (idx >= 0 && nextSeats[idx].status === 'running') {
               const targetSeat = nextSeats[idx];
-              stopAlarm('salon', `${targetSeat.id}-main`);
-              stopAlarm('salon', `${targetSeat.id}-check`);
-              WatchConnectivity.notifyLocalStopOrReset(targetSeat.id, targetSeat.targetEndTimestamp || wsStoppedEnd);
-              if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[targetSeat.id] = false;
-              if (checkAlertedRef.current) checkAlertedRef.current[targetSeat.id] = false;
-              if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[targetSeat.id] = false;
-              if (escalatedAlertRef.current) escalatedAlertRef.current[targetSeat.id] = false;
-              const staff = watchUser || userNameRef.current || userName || 'スタッフ';
-              nextSeats[idx] = {
-                ...buildStoppedSeat(targetSeat, staff, `${staff} タイマーを止める（Apple Watch）`),
-                collapsedAtEnd: Date.now(),
-              };
-              didApplyWatchStops = true;
+              const curEnd = Number(targetSeat.targetEndTimestamp) || 0;
+              // すでにWatchの停止操作時よりも15秒以上未来の新しいタイマーが再スタートされている場合のみ保護し、それ以外（超過中・延長後・時計ズレ・wsStoppedEnd=0含む）は全て確実に停止
+              const isNewerFutureTimer =
+                wsStoppedEnd > 0 && curEnd > Date.now() + 2000 && curEnd > wsStoppedEnd + 15000;
+              if (!isNewerFutureTimer) {
+                stopAllCandidateAlarmsForSeat(targetSeat, wsId, false);
+                if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[targetSeat.id] = false;
+                if (checkAlertedRef.current) checkAlertedRef.current[targetSeat.id] = false;
+                if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[targetSeat.id] = false;
+                if (escalatedAlertRef.current) escalatedAlertRef.current[targetSeat.id] = false;
+                const staff = watchUser || userNameRef.current || userName || 'スタッフ';
+                nextSeats[idx] = {
+                  ...buildStoppedSeat(targetSeat, staff, `${staff} タイマーを止める（Apple Watch）`),
+                  collapsedAtEnd: Date.now(),
+                };
+                didApplyWatchStops = true;
+              }
             }
           });
         }
@@ -2265,6 +2479,7 @@ export default function SalonWorkScreen() {
               (wsId && WatchConnectivity.isSeatTimerEndStopped(wsId, wsEnd)) ||
               (wsNum > 0 && WatchConnectivity.isSeatTimerEndStopped(`seat-${wsNum}`, wsEnd))
             ) {
+              didRejectStaleWatchActive = true;
               return;
             }
             const idx = nextSeats.findIndex((s) => {
@@ -2276,10 +2491,32 @@ export default function SalonWorkScreen() {
             });
             if (idx >= 0 && nextSeats[idx].status !== 'running') {
               const targetSec = Math.max(10, Math.round(Number(ws.totalSeconds) || 600));
+              const prevSeat = nextSeats[idx];
+              if (
+                (prevSeat.id && WatchConnectivity.isSeatTimerEndStopped(String(prevSeat.id), wsEnd)) ||
+                (prevSeat.cloudTimerId && WatchConnectivity.isSeatTimerEndStopped(String(prevSeat.cloudTimerId), wsEnd))
+              ) {
+                didRejectStaleWatchActive = true;
+                return;
+              }
+              const prevStoppedEnd = Number(prevSeat.lastStoppedTargetEndTimestamp || 0);
+              const prevStoppedOrUpdatedAt = Math.max(
+                Number(prevSeat.updatedAt || 0),
+                Number(prevSeat.lastStoppedAt || 0)
+              );
+              const wsStartMs = wsEnd - targetSec * 1000;
+              if (
+                (prevStoppedEnd > 0 && Math.abs(prevStoppedEnd - wsEnd) <= 15000) ||
+                (prevStoppedOrUpdatedAt > 0 && wsStartMs <= prevStoppedOrUpdatedAt + 2000)
+              ) {
+                // クラウドやローカルで既に停止されたタイマーがWatch側に残っていた場合は復活させず、Watchへ停止同期を送り返す
+                stopAllCandidateAlarmsForSeat(prevSeat, wsId, false);
+                didRejectStaleWatchActive = true;
+                return;
+              }
               const chkSec = Math.round(Number(ws.checkTargetSeconds || 0));
               const chkEnd = Math.round(Number(ws.checkEndTimestamp || 0));
               const hasActiveChk = chkSec > 0 && chkEnd > cutoffMs;
-              const prevSeat = nextSeats[idx];
               nextSeats[idx] = {
                 ...prevSeat,
                 status: 'running',
@@ -2330,7 +2567,7 @@ export default function SalonWorkScreen() {
           nextSeats,
           userNameRef.current || userName,
           staffMembersRef.current || staffMembers,
-          { immediate: true, highPriorityWake: didApplyWatchStops }
+          { immediate: true, highPriorityWake: didApplyWatchStops || didRejectStaleWatchActive }
         );
         return nextSeats;
       });
@@ -2637,18 +2874,21 @@ export default function SalonWorkScreen() {
     };
 
     // ★ 遅れて届いた停止系操作か（Watch が操作した時に見ていた終了時刻 expectedEnd と照合）
-    //   iPhone アプリが動いていない間に予備ルートで待たされ、その間に再スタートした席を止めないようにする。
-    //   expectedEnd: 稼働中だった時はその終了時刻(ms)、停止中だった時は 0。古い Watch アプリ（値なし）は従来どおり反映。
+    //   iPhone アプリが動いていない間に予備ルートで待たされ、その間に新しく未来へ再スタートした席だけを止めないようにする。
+    //   タイムアップ超過中・過去時刻・expectedEnd=0・時計ズレの場合は絶対に弾かず確実に停止させる。
     const STOP_ACTIONS = ['STOP_TIMER', 'FINISH_MEASURE', 'ENTER_HELP', 'RESET_ZERO', 'STOP_ALARM'];
     const isStaleStop = (s) => {
       if (!STOP_ACTIONS.includes(action)) return false;
+      if (s.status !== 'running') return false; // すでに止まっている席はそのまま反映
       if (extra?.expectedEnd === undefined || extra?.expectedEnd === null) return false;
       const expected = Number(extra.expectedEnd);
-      if (!Number.isFinite(expected)) return false;
-      if (s.status !== 'running') return false; // すでに止まっている席はそのまま反映
-      if (expected <= 0) return true; // Watch では停止中だった席が、今は稼働中 → 後から再スタートされた
-      // Watch と iPhone の時計・通信のずれを考えて 15 秒まで同じ終了時刻とみなす（Watch側の15秒許容幅と完全統一）
-      return Math.abs((Number(s.targetEndTimestamp) || 0) - expected) > 15000;
+      if (!Number.isFinite(expected) || expected <= 0) return false;
+      const curEnd = Number(s.targetEndTimestamp) || 0;
+      // 現在の席がまだ未来に向かってカウントダウン中であり、かつ停止操作時の終了予定時刻よりも15秒以上未来の新しいタイマーである場合のみ無視する
+      if (curEnd > Date.now() + 5000 && curEnd > expected + 15000) {
+        return true;
+      }
+      return false;
     };
 
     setSeats((prevSeats) => {
@@ -2723,14 +2963,7 @@ export default function SalonWorkScreen() {
 
         switch (action) {
           case 'START_SHAMPOO': {
-            stopAlarm('salon', `${s.id}-main`);
-            stopAlarm('salon', `${s.id}-check`);
-            WatchConnectivity.notifyLocalStopOrReset(s.id, s.targetEndTimestamp || 0);
-            if (String(s.id) !== String(seatId)) {
-              stopAlarm('salon', `${seatId}-main`);
-              stopAlarm('salon', `${seatId}-check`);
-              WatchConnectivity.notifyLocalStopOrReset(seatId, s.targetEndTimestamp || 0);
-            }
+            stopAllCandidateAlarmsForSeat(s, seatId, false);
             if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[s.id] = false;
             if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
             if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[s.id] = false;
@@ -2797,14 +3030,7 @@ export default function SalonWorkScreen() {
             };
           }
           case 'ENTER_HELP': {
-            stopAlarm('salon', `${s.id}-main`);
-            stopAlarm('salon', `${s.id}-check`);
-            WatchConnectivity.notifyLocalStopOrReset(s.id, s.targetEndTimestamp || 0);
-            if (String(s.id) !== String(seatId)) {
-              stopAlarm('salon', `${seatId}-main`);
-              stopAlarm('salon', `${seatId}-check`);
-              WatchConnectivity.notifyLocalStopOrReset(seatId, s.targetEndTimestamp || 0);
-            }
+            stopAllCandidateAlarmsForSeat(s, seatId, false);
             if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[s.id] = false;
             if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
             if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[s.id] = false;
@@ -2929,10 +3155,7 @@ export default function SalonWorkScreen() {
             };
           }
           case 'COMPLETE_CHECK': {
-            stopAlarm('salon', `${s.id}-check`);
-            if (String(s.id) !== String(seatId)) {
-              stopAlarm('salon', `${seatId}-check`);
-            }
+            stopAllCandidateAlarmsForSeat(s, seatId, true);
             if (checkAlertedRef.current) {
               checkAlertedRef.current[s.id] = false;
             }
@@ -2961,10 +3184,7 @@ export default function SalonWorkScreen() {
             };
           }
           case 'CANCEL_CHECK': {
-            stopAlarm('salon', `${s.id}-check`);
-            if (String(s.id) !== String(seatId)) {
-              stopAlarm('salon', `${seatId}-check`);
-            }
+            stopAllCandidateAlarmsForSeat(s, seatId, true);
             if (checkAlertedRef.current) {
               checkAlertedRef.current[s.id] = false;
             }
@@ -3024,14 +3244,7 @@ export default function SalonWorkScreen() {
             };
           }
           case 'RESET_ZERO': {
-            stopAlarm('salon', `${s.id}-main`);
-            stopAlarm('salon', `${s.id}-check`);
-            WatchConnectivity.notifyLocalStopOrReset(s.id, s.targetEndTimestamp || 0);
-            if (String(s.id) !== String(seatId)) {
-              stopAlarm('salon', `${seatId}-main`);
-              stopAlarm('salon', `${seatId}-check`);
-              WatchConnectivity.notifyLocalStopOrReset(seatId, s.targetEndTimestamp || 0);
-            }
+            stopAllCandidateAlarmsForSeat(s, seatId, false);
             if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[s.id] = false;
             if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
             if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[s.id] = false;
@@ -3039,14 +3252,7 @@ export default function SalonWorkScreen() {
             return { ...stopSeat(s, 'タイマーを止める'), collapsedAtEnd: Date.now() };
           }
           case 'STOP_TIMER': {
-            stopAlarm('salon', `${s.id}-main`);
-            stopAlarm('salon', `${s.id}-check`);
-            WatchConnectivity.notifyLocalStopOrReset(s.id, s.targetEndTimestamp || 0);
-            if (String(s.id) !== String(seatId)) {
-              stopAlarm('salon', `${seatId}-main`);
-              stopAlarm('salon', `${seatId}-check`);
-              WatchConnectivity.notifyLocalStopOrReset(seatId, s.targetEndTimestamp || 0);
-            }
+            stopAllCandidateAlarmsForSeat(s, seatId, false);
             if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[s.id] = false;
             if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
             if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[s.id] = false;
@@ -3056,14 +3262,7 @@ export default function SalonWorkScreen() {
           case 'FINISH_MEASURE': {
             // ★ 以前は未対応だったため、Watch で計測終了しても次の同期で「超過」に戻っていた
             // ★ カードの収納は、停止している間だけ保つ（再スタートで自動的に解除）
-            stopAlarm('salon', `${s.id}-main`);
-            stopAlarm('salon', `${s.id}-check`);
-            WatchConnectivity.notifyLocalStopOrReset(s.id, s.targetEndTimestamp || 0);
-            if (String(s.id) !== String(seatId)) {
-              stopAlarm('salon', `${seatId}-main`);
-              stopAlarm('salon', `${seatId}-check`);
-              WatchConnectivity.notifyLocalStopOrReset(seatId, s.targetEndTimestamp || 0);
-            }
+            stopAllCandidateAlarmsForSeat(s, seatId, false);
             if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[s.id] = false;
             if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
             if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[s.id] = false;
@@ -3079,10 +3278,7 @@ export default function SalonWorkScreen() {
                 hasChanged = false;
                 return s;
               }
-              stopAlarm('salon', `${s.id}-check`);
-              if (String(s.id) !== String(seatId)) {
-                stopAlarm('salon', `${seatId}-check`);
-              }
+              stopAllCandidateAlarmsForSeat(s, seatId, true);
               if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
               if (s.checkStatus === 'completed') {
                 hasChanged = false;
@@ -3112,26 +3308,11 @@ export default function SalonWorkScreen() {
                 ],
               };
             }
-            // 終了時刻に達している（またはWatchとiPhoneの時計差15秒以内で稼働中の）席だけ止める（すでに新しく未来へ再入力済みならAlarmKit予約も含め消さない）
-            if (s.status !== 'running' || !s.targetEndTimestamp || Date.now() + 15000 < s.targetEndTimestamp) {
-              if (s.status !== 'running') {
-                stopAlarm('salon', `${s.id}-main`);
-                stopAlarm('salon', `${s.id}-check`);
-                if (String(s.id) !== String(seatId)) {
-                  stopAlarm('salon', `${seatId}-main`);
-                  stopAlarm('salon', `${seatId}-check`);
-                }
-              }
+            // isStaleStop(s) を通過した全体タイマーの STOP_ALARM は、時計差に関わらず確実に席を停止＆アラーム消火する
+            stopAllCandidateAlarmsForSeat(s, seatId, false);
+            if (s.status !== 'running') {
               hasChanged = false;
               return s;
-            }
-            stopAlarm('salon', `${s.id}-main`);
-            stopAlarm('salon', `${s.id}-check`);
-            WatchConnectivity.notifyLocalStopOrReset(s.id, s.targetEndTimestamp || 0);
-            if (String(s.id) !== String(seatId)) {
-              stopAlarm('salon', `${seatId}-main`);
-              stopAlarm('salon', `${seatId}-check`);
-              WatchConnectivity.notifyLocalStopOrReset(seatId, s.targetEndTimestamp || 0);
             }
             if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[s.id] = false;
             if (checkAlertedRef.current) checkAlertedRef.current[s.id] = false;
@@ -3395,6 +3576,14 @@ export default function SalonWorkScreen() {
       }
     });
 
+    // ★ 保留されていた Watch からの停止・開始アクションをすべて消化し終えた後の最新 seatsRef 状態を Watch へ初回プッシュ
+    syncSeatsToWatch(
+      seatsRef.current,
+      userNameRef.current || userName,
+      staffMembersRef.current || staffMembers,
+      { immediate: true }
+    );
+
     // ★ Watchと通信可能になった瞬間に、iPhone側からも最新の席データを即時送信（Watch側の要求が届かなくても同期させる保険）
     let wasReachable = false;
     const subStatus = WatchConnectivity.addStatusListener((status) => {
@@ -3456,6 +3645,9 @@ export default function SalonWorkScreen() {
           desired.push({ key: `${s.id}-check`, timestamp: Number(s.checkEndTimestamp), title: `${label} チェック時間` });
         }
       });
+    }
+    if (desired.length === 0) {
+      stopSalonTimeUpSounds();
     }
     setAlarms('salon', desired, { soundOn: true, stopPassedOnRemove: true });
   }, [seats, isDataLoaded, userName, myUserId, staffMembers]);
@@ -3595,21 +3787,17 @@ export default function SalonWorkScreen() {
 
             if (didTransitionFromRunningToStop || didTransitionPausedToReset || ct.isAbandonedRunningSeat) {
               didRemoteStopAnyGuestSeat = true;
-              stopAlarm('salon', `${ct.id}-main`);
-              stopAlarm('salon', `${ct.id}-check`);
+              stopAllCandidateAlarmsForSeat(prevMatch || ct, ct.id, false);
               if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[ct.id] = false;
               if (checkAlertedRef.current) checkAlertedRef.current[ct.id] = false;
               if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[ct.id] = false;
               if (escalatedAlertRef.current) escalatedAlertRef.current[ct.id] = false;
               if (prevMatch?.id && prevMatch.id !== ct.id) {
-                stopAlarm('salon', `${prevMatch.id}-main`);
-                stopAlarm('salon', `${prevMatch.id}-check`);
                 if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[prevMatch.id] = false;
                 if (checkAlertedRef.current) checkAlertedRef.current[prevMatch.id] = false;
                 if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[prevMatch.id] = false;
                 if (escalatedAlertRef.current) escalatedAlertRef.current[prevMatch.id] = false;
               }
-              WatchConnectivity.notifyLocalStopOrReset(ct.id, prevMatch?.targetEndTimestamp || 0);
               if (
                 !polledGuestStopNotification &&
                 didTransitionFromRunningToStop &&
@@ -3636,10 +3824,9 @@ export default function SalonWorkScreen() {
               }
             } else if (didTransitionCheckFromRunningToStop) {
               didRemoteStopAnyGuestSeat = true;
-              stopAlarm('salon', `${ct.id}-check`);
+              stopAllCandidateAlarmsForSeat(prevMatch || ct, ct.id, true);
               if (checkAlertedRef.current) checkAlertedRef.current[ct.id] = false;
               if (prevMatch?.id && prevMatch.id !== ct.id) {
-                stopAlarm('salon', `${prevMatch.id}-check`);
                 if (checkAlertedRef.current) checkAlertedRef.current[prevMatch.id] = false;
               }
             }
@@ -3835,12 +4022,13 @@ export default function SalonWorkScreen() {
                 !isCloudActivelyRunning &&
                 !isCloudProtectedPeerSeat &&
                 cloudNeedsZeroNormalize;
-              // ローカルで稼働中、直近のタイマー停止（isLocalStoppingCloudRunning）、3時間超放置正規化（ct.isAbandonedRunningSeat）、
-              // オフライン未同期編集（dirtySync）、またはアップデート直後の00:00正規化はローカル状態を優先保護してクラウドへ送信
+              // ローカルで新しく未来へ稼働中（isLocalRunningAhead）、直近のタイマー停止（isLocalStoppingCloudRunning）、
+              // オフライン未同期の非稼働編集（localMatch.status !== 'running' && dirtySync）、またはアップデート直後の00:00正規化はローカル状態を優先保護してクラウドへ送信
+              // （※ localMatch.status === 'running' の場合は必ず isLocalRunningAhead の条件を満たす時のみ優先し、既にクラウドで停止された席を復活させない）
               if (
                 isLocalRunningAhead ||
                 isLocalStoppingCloudRunning ||
-                (localMatch.dirtySync && !isCloudActivelyRunning && !isCloudProtectedPeerSeat) ||
+                (localMatch.status !== 'running' && localMatch.dirtySync && !isCloudActivelyRunning && !isCloudProtectedPeerSeat) ||
                 shouldPushBuildNormalizedZero
               ) {
                 const preserved = {
@@ -3884,21 +4072,17 @@ export default function SalonWorkScreen() {
 
               if (didTransitionFromRunningToStop || didTransitionPausedToReset || ct.isAbandonedRunningSeat) {
                 didRemoteStopAnyOwnerSeat = true;
-                stopAlarm('salon', `${ct.id}-main`);
-                stopAlarm('salon', `${ct.id}-check`);
+                stopAllCandidateAlarmsForSeat(localMatch || ct, ct.id, false);
                 if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[ct.id] = false;
                 if (checkAlertedRef.current) checkAlertedRef.current[ct.id] = false;
                 if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[ct.id] = false;
                 if (escalatedAlertRef.current) escalatedAlertRef.current[ct.id] = false;
                 if (localMatch.id && localMatch.id !== ct.id) {
-                  stopAlarm('salon', `${localMatch.id}-main`);
-                  stopAlarm('salon', `${localMatch.id}-check`);
                   if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[localMatch.id] = false;
                   if (checkAlertedRef.current) checkAlertedRef.current[localMatch.id] = false;
                   if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[localMatch.id] = false;
                   if (escalatedAlertRef.current) escalatedAlertRef.current[localMatch.id] = false;
                 }
-                WatchConnectivity.notifyLocalStopOrReset(ct.id, localMatch.targetEndTimestamp || 0);
                 if (
                   !polledOwnerStopNotification &&
                   didTransitionFromRunningToStop &&
@@ -3925,10 +4109,9 @@ export default function SalonWorkScreen() {
                 }
               } else if (didTransitionCheckFromRunningToStop) {
                 didRemoteStopAnyOwnerSeat = true;
-                stopAlarm('salon', `${ct.id}-check`);
+                stopAllCandidateAlarmsForSeat(localMatch || ct, ct.id, true);
                 if (checkAlertedRef.current) checkAlertedRef.current[ct.id] = false;
                 if (localMatch.id && localMatch.id !== ct.id) {
-                  stopAlarm('salon', `${localMatch.id}-check`);
                   if (checkAlertedRef.current) checkAlertedRef.current[localMatch.id] = false;
                 }
               }
@@ -4743,7 +4926,23 @@ export default function SalonWorkScreen() {
                   Number(prevItem.checkEndTimestamp) > 0 &&
                   (newSeat.isCheckCompleted || newSeat.checkStatus === 'completed' || newSeat.checkStatus === 'stopped' || !newSeat.checkEndTimestamp);
                 if (didStopRunningTimer || didResetPausedTimer) {
-                  WatchConnectivity.notifyLocalStopOrReset(newSeat.id || prevItem.id, prevItem.targetEndTimestamp || 0);
+                  stopAllCandidateAlarmsForSeat(prevItem, newSeat.id, false);
+                  if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[prevItem.id] = false;
+                  if (checkAlertedRef.current) checkAlertedRef.current[prevItem.id] = false;
+                  if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[prevItem.id] = false;
+                  if (escalatedAlertRef.current) escalatedAlertRef.current[prevItem.id] = false;
+                  if (newSeat.id && newSeat.id !== prevItem.id) {
+                    if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[newSeat.id] = false;
+                    if (checkAlertedRef.current) checkAlertedRef.current[newSeat.id] = false;
+                    if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[newSeat.id] = false;
+                    if (escalatedAlertRef.current) escalatedAlertRef.current[newSeat.id] = false;
+                  }
+                } else if (didStopRunningCheck) {
+                  stopAllCandidateAlarmsForSeat(prevItem, newSeat.id, true);
+                  if (checkAlertedRef.current) checkAlertedRef.current[prevItem.id] = false;
+                  if (newSeat.id && newSeat.id !== prevItem.id && checkAlertedRef.current) {
+                    checkAlertedRef.current[newSeat.id] = false;
+                  }
                 }
                 const targetCollapseSeatId = newSeat.id || prevItem.id;
                 if (targetCollapseSeatId && (didStopRunningTimer || didResetPausedTimer || newSeat.status === 'running')) {
@@ -5047,9 +5246,10 @@ export default function SalonWorkScreen() {
 
       const elapsed = nowMs - lastPollAt;
       const isForeground = (appStateRef.current || AppState.currentState || 'active') === 'active';
+      // 稼働中・超過鳴動中の席が1つでもある間は、シミュレーター等が背面ウィンドウにあっても常時2.5秒間隔でクラウド停止を監視する
       const shouldPoll =
         (hasNearTimeupSeat && elapsed >= 2500) ||
-        (hasAnyRunningSeat && elapsed >= 6000) ||
+        (hasAnyRunningSeat && elapsed >= 2500) ||
         (isForeground && elapsed >= 15000);
 
       if (shouldPoll) {
@@ -5122,24 +5322,12 @@ export default function SalonWorkScreen() {
             !cloudSeat.checkEndTimestamp);
 
         if (didStopMain) {
-          stopAlarm('salon', `${prevMatch.id}-main`);
-          stopAlarm('salon', `${prevMatch.id}-check`);
-          if (cloudSeat.id !== prevMatch.id) {
-            stopAlarm('salon', `${cloudSeat.id}-main`);
-            stopAlarm('salon', `${cloudSeat.id}-check`);
-          }
-          WatchConnectivity.notifyLocalStopOrReset(
-            cloudSeat.id || prevMatch.id,
-            prevMatch.targetEndTimestamp || 0
-          );
+          stopAllCandidateAlarmsForSeat(prevMatch, cloudSeat.id, false);
           setExpandedPausedSeatIds((prevExp) =>
             prevExp[cloudSeat.id] ? { ...prevExp, [cloudSeat.id]: false } : prevExp
           );
         } else if (didStopCheck) {
-          stopAlarm('salon', `${prevMatch.id}-check`);
-          if (cloudSeat.id !== prevMatch.id) {
-            stopAlarm('salon', `${cloudSeat.id}-check`);
-          }
+          stopAllCandidateAlarmsForSeat(prevMatch, cloudSeat.id, true);
         }
 
         return {
@@ -5327,6 +5515,32 @@ export default function SalonWorkScreen() {
       if (didSanitize) {
         persistSeatsForSalonId(foundSalon?.id, loadedSeats, foundIsOwner).catch(() => {});
       }
+      // ★ 起動中の非同期読み込み中に HomeScreen 側の applyWatchStoppedSeatsIntoCache / adoptWatchActiveSeatsIntoCache が
+      //   先行して _cachedCurrentSeats に Watch 停止・開始を反映していた場合は、古い loadedSeats で上書きしないようマージ
+      if (Array.isArray(_cachedCurrentSeats) && _cachedCurrentSeats.length > 0 && Array.isArray(loadedSeats)) {
+        loadedSeats = loadedSeats.map((ls) => {
+          if (!ls) return ls;
+          const cachedMatch = _cachedCurrentSeats.find(
+            (cs) =>
+              cs &&
+              ((cs.id && (cs.id === ls.id || cs.id === ls.cloudTimerId)) ||
+                (cs.cloudTimerId && (cs.cloudTimerId === ls.id || cs.cloudTimerId === ls.cloudTimerId)) ||
+                (Number(cs.seatNumber) > 0 && Number(cs.seatNumber) === Number(ls.seatNumber)))
+          );
+          if (!cachedMatch) return ls;
+          const cachedStopAt = Number(cachedMatch.lastStoppedAt || 0);
+          const lsStopAt = Number(ls.lastStoppedAt || 0);
+          if (cachedMatch.status !== 'running' && ls.status === 'running' && cachedStopAt > lsStopAt) {
+            return { ...ls, ...cachedMatch };
+          }
+          if (cachedMatch.status === 'running' && ls.status !== 'running' && Number(cachedMatch.targetEndTimestamp) > launchNow - 3 * 3600 * 1000) {
+            return { ...ls, ...cachedMatch };
+          }
+          return ls;
+        });
+      }
+      seatsRef.current = loadedSeats;
+      _cachedCurrentSeats = loadedSeats;
       setSeats(loadedSeats);
 
       // 3. スタッフメンバー一覧の読み込み（初期値は空 []）
@@ -5344,8 +5558,8 @@ export default function SalonWorkScreen() {
       }
       setStaffMembers(loadedMembers);
 
-      // ★ 初回ロード時にもWatchへ最新客席データ＆メンバーを即時プッシュ！
-      syncSeatsToWatch(loadedSeats, activeUserName, loadedMembers, { immediate: true });
+      // ★ 初回Watchプッシュは setIsDataLoaded(true) 後の subscribeActions で保留中の Watch 停止アクションを消化した直後に実行する
+      //   （ここでの即時プッシュで保留中の STOP_TIMER 適用前に古い running 状態を Watch へ送り返すのを防止）
 
       // ★ Bluetooth接続確立のタイムラグ（1〜2.5秒）をカバーする全自動バックアップ再送（常に最新のRef状態を送出し、クラウド同期後の席上書きを防止）
       if (Platform.OS === 'ios') {
@@ -6357,9 +6571,8 @@ export default function SalonWorkScreen() {
     const actionLabel = actionInfo ? actionInfo.label : null;
     const resolvedEndTs = Number(seat.targetEndTimestamp) || Number(snapshotSeat.targetEndTimestamp) || 0;
 
+    stopAllCandidateAlarmsForSeat(seat, snapshotSeat?.id, false);
     candidateIds.forEach((cid) => {
-      stopAlarm('salon', `${cid}-main`);
-      stopAlarm('salon', `${cid}-check`);
       WatchConnectivity.notifyLocalStopOrReset(cid, resolvedEndTs);
       if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[cid] = false;
       if (checkAlertedRef.current) checkAlertedRef.current[cid] = false;
@@ -6725,8 +6938,8 @@ export default function SalonWorkScreen() {
     const candidateIds = Array.from(
       new Set([snapshotId, snapshotCloudId, targetSeat?.id, targetSeat?.cloudTimerId].filter(Boolean))
     );
+    stopAllCandidateAlarmsForSeat(targetSeat, snapshotId, true);
     candidateIds.forEach((cid) => {
-      stopAlarm('salon', `${cid}-check`);
       if (checkAlertedRef.current) {
         checkAlertedRef.current[cid] = false;
       }
@@ -7477,9 +7690,7 @@ export default function SalonWorkScreen() {
 
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     if (isStopping) {
-      stopAlarm('salon', `${seatId}-main`);
-      stopAlarm('salon', `${seatId}-check`);
-      WatchConnectivity.notifyLocalStopOrReset(seatId, seat.targetEndTimestamp || 0);
+      stopAllCandidateAlarmsForSeat(seat, seatId, false);
       if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[seatId] = false;
       if (checkAlertedRef.current) checkAlertedRef.current[seatId] = false;
       if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[seatId] = false;
@@ -7596,9 +7807,11 @@ export default function SalonWorkScreen() {
   const handleExecuteResetSeatTimer = (seatId) => {
     const seat = seats.find((s) => s.id === seatId);
     if (!seat) return;
-    stopAlarm('salon', `${seatId}-main`);
-    stopAlarm('salon', `${seatId}-check`);
-    WatchConnectivity.notifyLocalStopOrReset(seatId, seat.targetEndTimestamp || 0);
+    stopAllCandidateAlarmsForSeat(seat, seatId, false);
+    if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[seatId] = false;
+    if (checkAlertedRef.current) checkAlertedRef.current[seatId] = false;
+    if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[seatId] = false;
+    if (escalatedAlertRef.current) escalatedAlertRef.current[seatId] = false;
 
     const currentUser = (userName || 'スタッフ').trim();
 

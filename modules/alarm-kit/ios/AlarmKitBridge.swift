@@ -175,7 +175,7 @@ enum AlarmKitBridge {
     saveRecords(records)
   }
 
-  /// アプリ起動時の初回同期で、過去の残留アラームや一覧に存在しない古い予約を確実に停止・消去する
+  /// アプリ起動時の初回同期や全停止時に、過去の残留アラームや一覧に存在しない古い予約を確実に停止・消去する
   static func cleanupOnSourceInit(source: String, keepKeys: [String]) -> Int {
     let keepSet = Set(keepKeys)
     let nowMs = Date().timeIntervalSince1970 * 1000.0
@@ -188,17 +188,43 @@ enum AlarmKitBridge {
       keysToCancel.insert("main-timer")
     }
     for (key, ts) in records {
-      if ts <= nowMs {
-        keysToCancel.insert(key)
-      } else if source == "main" && key == "main-timer" && !keepSet.contains(key) {
-        keysToCancel.insert(key)
-      } else if source == "salon" && key != "main-timer" && !keepSet.contains(key) {
+      if source == "main" {
+        if key == "main-timer" && (!keepSet.contains(key) || ts <= nowMs) {
+          keysToCancel.insert(key)
+        }
+      } else if source == "salon" {
+        if key != "main-timer" && (!keepSet.contains(key) || ts <= nowMs) {
+          keysToCancel.insert(key)
+        }
+      } else if !keepSet.contains(key) || ts <= nowMs {
         keysToCancel.insert(key)
       }
     }
     for key in keysToCancel {
       _ = cancel(key: key)
     }
+
+    // iOS 26+ AlarmManager.shared.alarms に残存している孤立・鳴動中アラームも直接走査して確実に停止・消去する
+    #if canImport(AlarmKit)
+    if #available(iOS 26.0, *) {
+      var protectedUUIDs = Set(keepSet.map { uuid(for: $0) })
+      if source == "salon" {
+        protectedUUIDs.insert(uuid(for: "main-timer"))
+      } else if source == "main" {
+        for key in records.keys where key != "main-timer" && !keysToCancel.contains(key) {
+          protectedUUIDs.insert(uuid(for: key))
+        }
+      }
+      let manager = AlarmManager.shared
+      if let activeAlarms = try? manager.alarms {
+        for alarm in activeAlarms where !protectedUUIDs.contains(alarm.id) {
+          _ = try? manager.stop(id: alarm.id)
+          _ = try? manager.cancel(id: alarm.id)
+        }
+      }
+    }
+    #endif
+
     return keysToCancel.count
   }
 
