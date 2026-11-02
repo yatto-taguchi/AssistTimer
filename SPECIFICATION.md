@@ -3872,7 +3872,7 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
 
 ---
 
-## 62. Apple Watch タイマー停止時の店舗シミュレーター／共有端末アラーム無限鳴動・停止未反映の全経路根絶仕様 (2026-11-02)
+## 62. Apple Watch タイマー停止時の店舗シミュレーター／共有端末アラーム無限鳴動・停止未反映の全経路根絶仕様 (Build 104 / 2026-11-02)
 
 ### 62.1 背景・課題（調査で判明した8つの根本原因）
 
@@ -3921,6 +3921,13 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
    - `WatchConnectivity`（`modules/watch-connectivity/index.js`）の `handleIncoming` で `expectedEnd` / `stoppedEndTime` をミリ秒正規化して全停止系アクション（`STOP_ALARM`, `ENTER_HELP`, `START_SHAMPOO` 含む）および `seat-${seatNumber}` を即時 `notifyLocalStopOrReset` 登録し、`deliverAction` で保留中の `REQUEST_SYNC` 更新時に `watchStoppedSeats` をマージする。
    - `saveSeatsToStorage` で `_cachedCurrentSeats` と `seatsRef.current` を `0ms` 即時更新し、`loadInitialData` では先行キャッシュの停止・開始状態をマージした上で、初回の `syncSeatsToWatch` を `WatchConnectivity.subscribeActions` による保留キュー消化直後に実行する。
    - Watch の `handleStopButtonInAlarmOverlay` で個人メインタイマー停止時は先に `handleResetMainTimer(playHapticFeedback: false)` を呼んでから `alarm.stop(sendToPhone: false, ...)` を呼び、正確な停止対象時刻で 1 回のみリセット送信を行う。
+
+### 62.3 本番ビルド・OTA 配信仕様 (Build 104)
+
+1. **本番ビルド（Build 104）と TestFlight 自動提出・OTA 配信**:
+   - `app.json` の `ios.buildNumber` を `104` にインクリメント。
+   - `targets/watch/alarm.swift`、`targets/watch/content.swift`、および `modules/alarm-kit/ios/AlarmKitBridge.swift` のネイティブ変更を含む iOS + watchOS バイナリを EAS Build（`--profile production --auto-submit`）で TestFlight へ自動提出し、併せて `production` ブランチへ OTA アップデートを配信。
+
 
 
 
