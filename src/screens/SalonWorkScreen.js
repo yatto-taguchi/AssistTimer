@@ -952,10 +952,10 @@ export const applyWatchStoppedSeatsIntoCache = async (payload) => {
       if (idx >= 0 && nextSeats[idx].status === 'running') {
         const targetSeat = nextSeats[idx];
         const curEnd = Number(targetSeat.targetEndTimestamp) || 0;
-        // 停止したタイマーより15秒以上未来の新しいタイマーが既に開始されている場合のみ保護し、それ以外はすべて停止反映
-        const isNewerFutureTimer =
-          wsStoppedEnd > 0 && curEnd > Date.now() + 2000 && curEnd > wsStoppedEnd + 15000;
-        if (!isNewerFutureTimer) {
+        // 停止したタイマーとは異なる未来のタイマーが既に開始されている場合（別Watchが同じ席番号で別タイマーを開始済みの状態）のみ保護し、それ以外はすべて停止反映
+        const isDifferentFutureTimer =
+          curEnd > Date.now() + 2000 && (wsStoppedEnd <= 0 || Math.abs(curEnd - wsStoppedEnd) > 15000);
+        if (!isDifferentFutureTimer) {
           stopAllCandidateAlarmsForSeat(targetSeat, wsId || (wsNum > 0 ? `seat-${wsNum}` : null), false);
           const stoppedSeatObj = {
             ...targetSeat,
@@ -1068,7 +1068,7 @@ export const adoptWatchActiveSeatsIntoCache = async (payload) => {
           return;
         }
         const prevStoppedEnd = Number(prevSeat.lastStoppedTargetEndTimestamp || 0);
-        if (prevStoppedEnd > 0 && Math.abs(prevStoppedEnd - wsEnd) <= 15000) {
+        if (prevStoppedEnd > 0 && Math.abs(prevStoppedEnd - wsEnd) <= 2500) {
           return;
         }
         const wsStartMs = wsEnd - targetSec * 1000;
@@ -1650,8 +1650,14 @@ export default function SalonWorkScreen() {
   const isSalonOwnerRef = useRef(isSalonOwner);
   isSalonOwnerRef.current = isSalonOwner;
   _cachedIsSalonOwner = isSalonOwner;
-  _cachedMyUserId = myUserId;
-  _cachedActiveSalonId = currentSalon?.id || 'workspace-free';
+  if (myUserId) {
+    _cachedMyUserId = myUserId;
+  }
+  if (isCloudUUID(currentSalon?.id)) {
+    _cachedActiveSalonId = currentSalon.id;
+  } else if (!isCloudUUID(_cachedActiveSalonId) && currentSalon?.id) {
+    _cachedActiveSalonId = currentSalon.id;
+  }
 
   const seatsRef = useRef(seats);
   seatsRef.current = seats;
@@ -2873,19 +2879,23 @@ export default function SalonWorkScreen() {
       return buildStoppedSeat(s, staff, `${staff} ${label}（Apple Watch）`);
     };
 
-    // ★ 遅れて届いた停止系操作か（Watch が操作した時に見ていた終了時刻 expectedEnd と照合）
-    //   iPhone アプリが動いていない間に予備ルートで待たされ、その間に新しく未来へ再スタートした席だけを止めないようにする。
-    //   タイムアップ超過中・過去時刻・expectedEnd=0・時計ズレの場合は絶対に弾かず確実に停止させる。
-    const STOP_ACTIONS = ['STOP_TIMER', 'FINISH_MEASURE', 'ENTER_HELP', 'RESET_ZERO', 'STOP_ALARM'];
+    // ★ 遅れて届いた停止系操作・古い画面からの別タイマー誤停止か（Watch が操作した時に見ていた終了時刻 expectedEnd と照合）
+    //   サブWatchが古いタイマー画面や非稼働画面を表示したまま「終了/止める」を押した際に、メインWatchが同じ席番号で開始した別の稼働中タイマーを止めないように保護する。
+    //   タイムアップ超過中（curEnd <= Date.now() + 2000）や同一タイマー（±15秒以内）の場合は確実に停止させる。
+    const STOP_ACTIONS = ['STOP_TIMER', 'FINISH_MEASURE', 'ENTER_HELP', 'RESET_ZERO', 'STOP_ALARM', 'START_SHAMPOO'];
     const isStaleStop = (s) => {
       if (!STOP_ACTIONS.includes(action)) return false;
+      if (action === 'STOP_ALARM' && String(extra?.kind || message?.kind || '').toLowerCase() === 'check') return false;
       if (s.status !== 'running') return false; // すでに止まっている席はそのまま反映
-      if (extra?.expectedEnd === undefined || extra?.expectedEnd === null) return false;
-      const expected = Number(extra.expectedEnd);
-      if (!Number.isFinite(expected) || expected <= 0) return false;
       const curEnd = Number(s.targetEndTimestamp) || 0;
-      // 現在の席がまだ未来に向かってカウントダウン中であり、かつ停止操作時の終了予定時刻よりも15秒以上未来の新しいタイマーである場合のみ無視する
-      if (curEnd > Date.now() + 5000 && curEnd > expected + 15000) {
+      if (curEnd <= Date.now() + 2000) return false; // 超過中・タイムアップ直前の席は確実に停止させる
+      const rawExpected = extra?.expectedEnd ?? message?.expectedEnd;
+      const expected = rawExpected !== undefined && rawExpected !== null ? Number(rawExpected) : 0;
+      // 非稼働画面（expected <= 0）からのリセット・終了操作や、終了予定時刻が15秒以上異なる別タイマーへの停止操作は弾く
+      if (!Number.isFinite(expected) || expected <= 0) {
+        return true;
+      }
+      if (Math.abs(curEnd - expected) > 15000) {
         return true;
       }
       return false;
@@ -2956,9 +2966,13 @@ export default function SalonWorkScreen() {
       }
 
       let hasChanged = false;
+      let wasBlockedByStaleStop = false;
       const updated = baseSeats.map((s, idx) => {
         if (idx !== matchedIdx) return s;
-        if (isStaleStop(s)) return s;
+        if (isStaleStop(s)) {
+          wasBlockedByStaleStop = true;
+          return s;
+        }
         hasChanged = true;
 
         switch (action) {
@@ -3513,8 +3527,16 @@ export default function SalonWorkScreen() {
         }
       });
 
-      // ★ 何も変わらなければ元の配列を返す（不要な保存・Watch への同期を起こさない）
-      if (!hasChanged) return prevSeats;
+      // ★ 何も変わらなければ元の配列を返す（ただし別タイマー保護で古い停止操作をブロックした場合は、Watch側の古い画面を最新稼働状態へ即時強制同期する）
+      if (!hasChanged) {
+        if (wasBlockedByStaleStop) {
+          syncSeatsToWatch(prevSeats, userNameRef.current || userName, staffMembersRef.current || staffMembers, {
+            immediate: true,
+            highPriorityWake: true,
+          });
+        }
+        return prevSeats;
+      }
       const changedSeat = updated[matchedIdx];
       if (
         changedSeat?.id &&
@@ -3747,8 +3769,9 @@ export default function SalonWorkScreen() {
               prevMatch.status !== 'running' &&
               !!prevMatch.dirtySync &&
               ((Number(prevMatch.lastStoppedTargetEndTimestamp) > 0 &&
-                Math.abs(Number(prevMatch.lastStoppedTargetEndTimestamp) - Number(ct.targetEndTimestamp || 0)) <= 15000) ||
-                Number(prevMatch.lastStoppedAt || 0) > Number(ct.updatedAt || 0));
+                Math.abs(Number(prevMatch.lastStoppedTargetEndTimestamp) - Number(ct.targetEndTimestamp || 0)) <= 2500 &&
+                Number(ct.updatedAt || 0) <= Number(prevMatch.lastStoppedAt || 0) + 1500) ||
+                Number(prevMatch.lastStoppedAt || 0) > Number(ct.updatedAt || 0) + 500);
 
             if (isLocalRunningAhead || isLocalStopOfCloudRunning) {
               const preservedGuestSeat = {
@@ -3767,6 +3790,14 @@ export default function SalonWorkScreen() {
               return preservedGuestSeat;
             }
 
+            const didTransitionFromStopToRunning =
+              ct.status === 'running' &&
+              (!prevMatch ||
+                prevMatch.status !== 'running' ||
+                Math.abs(Number(ct.targetEndTimestamp || 0) - Number(prevMatch.targetEndTimestamp || 0)) > 2500);
+            if (didTransitionFromStopToRunning) {
+              didRemoteStopAnyGuestSeat = true;
+            }
             const didTransitionFromRunningToStop =
               !!prevMatch && prevMatch.status === 'running' && ct.status !== 'running';
             const didTransitionPausedToReset =
@@ -4007,8 +4038,9 @@ export default function SalonWorkScreen() {
                 localMatch.status !== 'running' &&
                 !!localMatch.dirtySync &&
                 ((Number(localMatch.lastStoppedTargetEndTimestamp) > 0 &&
-                  Math.abs(Number(localMatch.lastStoppedTargetEndTimestamp) - Number(ct.targetEndTimestamp || 0)) <= 15000) ||
-                  Number(localMatch.lastStoppedAt || 0) > Number(ct.updatedAt || 0));
+                  Math.abs(Number(localMatch.lastStoppedTargetEndTimestamp) - Number(ct.targetEndTimestamp || 0)) <= 2500 &&
+                  Number(ct.updatedAt || 0) <= Number(localMatch.lastStoppedAt || 0) + 1500) ||
+                  Number(localMatch.lastStoppedAt || 0) > Number(ct.updatedAt || 0) + 500);
               const cloudNeedsZeroNormalize =
                 ct.status !== 'idle' ||
                 Number(ct.pausedRemainingSeconds) > 0 ||
@@ -4054,6 +4086,13 @@ export default function SalonWorkScreen() {
                 return preserved;
               }
 
+              const didTransitionFromStopToRunning =
+                ct.status === 'running' &&
+                (localMatch.status !== 'running' ||
+                  Math.abs(Number(ct.targetEndTimestamp || 0) - Number(localMatch.targetEndTimestamp || 0)) > 2500);
+              if (didTransitionFromStopToRunning) {
+                didRemoteStopAnyOwnerSeat = true;
+              }
               const didTransitionFromRunningToStop =
                 localMatch.status === 'running' && ct.status !== 'running';
               const didTransitionPausedToReset =

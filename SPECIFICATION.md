@@ -3928,6 +3928,42 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
    - `targets/watch/alarm.swift` における `extendedRuntimeSession(_:didInvalidateWith:error:)` クロージャ内の `self.pendingSystemDismissPhoneSyncWorkItem` 明示参照修正を反映し、`app.json` の `ios.buildNumber` を `105` にインクリメント。
    - `targets/watch/alarm.swift`、`targets/watch/content.swift`、および `modules/alarm-kit/ios/AlarmKitBridge.swift` のネイティブ変更を含む iOS + watchOS バイナリを EAS Build（`--profile production --auto-submit`）で TestFlight へ自動提出し、併せて `production` ブランチへ OTA アップデートを配信。
 
+---
+
+## 63. 複数 Apple Watch（メイン機・サブ機）間の開始・停止・画面同期の即時化と別タイマー誤停止防止仕様 (2026-11-03 改訂 / Build 106)
+
+### 63.1 調査により特定された根本原因
+
+1. **iPhone 初期レンダー時の `"workspace-free"` 送信による Watch 側 `cloudSalonId` の上書き消去 (`src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`)**:
+   - `SalonWorkScreen` の初期レンダー（`isDataLoaded` 完了前）で `_cachedActiveSalonId` が `'workspace-free'` に上書きされ、Watch 側 `processReceivedData` が UUID 検証なしで `self.cloudSalonId = "workspace-free"` を保存していたため、Watch 単独の直接 Supabase `PATCH`（`syncSeatActionDirectlyToCloud`）と直接クラウド補完ポーリング（`pollCloudTimersFromSupabaseIfNeeded`）が UUID チェックで無効化されるケースがあった。
+2. **停止済み終了時刻の判定許容幅（`±15秒`）による同分数タイマー再設定時の誤ブロック (`targets/watch/content.swift`, `modules/watch-connectivity/index.js`, `src/screens/SalonWorkScreen.js`)**:
+   - タイマーを停止してから 15 秒以内に同じ分数のタイマーを新規開始すると、新旧の `targetEndTimestamp` の差が 15 秒以内となるため、`localStops` / `isSeatTimerEndStopped` / `lastStoppedTargetEndTimestamp` が「停止済みタイマーの遅延パケット」と誤判定してサブ機への反映を遮断していた。
+3. **Watch 側 `localSeatMods` 保護およびポーリング周期（非稼働時 12 秒）によるサブ機反映ラグ (`targets/watch/content.swift`, `modules/watch-connectivity/index.js`)**:
+   - サブ機で席を操作した直後 3.5〜4.5 秒間は `localSeatMods` がリモート停止以外の受信（メイン機での新規タイマー開始・時間変更）を弾いていた。
+   - また、Watch 側の直接 Supabase ポーリング周期が非稼働時 `12.0秒`・稼働時 `4.0秒` と長く、さらに実機サブ Watch で手首を傾けた直後に `WCSession.isReachable == true` のまま `sendMessage` がハングした際、非緊急同期では 600ms タイムアウト＋`transferUserInfo` フォールバックが走っていなかった。
+4. **画面不一致時のモーダルシート残留と、同じ席番号での別タイマー誤停止 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - サブ機で `00:00` 入力画面や古い超過画面（`TimeActionSheet` / `ShampooActionSheet`）を開いている間にメイン機で新しいタイマーが開始されても、シート自動閉鎖（`handleRemoteModalSheetAutoCloseIfNeeded`）が「稼働中→停止」のみを対象としていたため、サブ機に古い画面が残り続けていた。
+   - その古い画面からサブ機で「タイマーを止める／シャンプーに入る」等を押すと、`expectedEnd` が `preSeat`（または上限のみの `lte` 条件）で評価され、メイン機が同じ席番号で開始した別の稼働中タイマーを誤って停止させていた。
+
+### 63.2 確定仕様・実装詳細
+
+1. **`cloudSalonId` / `cloudUserId` の有効 UUID 厳密保護 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - Watch 側 `processReceivedData` では `Self.isValidCloudUUID` を満たす場合のみ `cloudSalonId` / `cloudUserId` を更新し、`"workspace-free"` 等による上書きを完全遮断。
+   - iPhone 側でも `_cachedActiveSalonId` が既に有効なクラウド UUID を保持している場合は非 UUID 値で上書きしない。
+2. **停止履歴の同一タイマー判定を `±2.5秒` に厳密化＆新規開始時の停止履歴即時クリア (`targets/watch/content.swift`, `modules/watch-connectivity/index.js`, `src/screens/SalonWorkScreen.js`)**:
+   - `localStops`（Watch）、`isSeatTimerEndStopped` / `isMainTimerEndStopped`（`watch-connectivity`）、`adoptWatchActiveSeatsIntoCache`、`isLocalStopOfCloudRunning` / `isLocalStoppingCloudRunning`（`SalonWorkScreen`）の終了時刻一致判定を `15秒` から **`2.5秒`** に厳密化し、停止直後に同じ分数のタイマーを再設定しても即座に全端末へ反映させる。
+   - `START_TIMER` 送信・受信時は、未送信キューや `outstandingUserInfoTransfers` 内の同一席への古い停止命令をキャンセルし、停止履歴レコードを即時削除する。
+3. **全タイマー操作の 0ms デュアル送信・600ms 背景起床転送・Watch 直接ポーリング高速化 (`targets/watch/content.swift`, `modules/watch-connectivity/index.js`)**:
+   - Watch から送信する `START_TIMER` / `ADJUST_TIME` / `ASSIGN_HELP` / `RECRUIT_HELP` / `FINISH_SHAMPOO` 等もすべて `0ms` で `sendMessage` と `transferUserInfo` の両方へ同時投入し、さらに `syncSeatActionDirectlyToCloud` で全アクションにおいて `or=(id.eq.<uuid>,seat_label.in.("<base>","<base>席"))` を用いて Supabase へ直接 `PATCH` する。
+   - `TimeActionSheet.onReinputTime` でも `0ms` でアラーム予約・Widget・`sessionManager`・iPhone／クラウド送信を即完了させつつ、親 View の `@State timers` 更新は `deferSeatSheetCloseAction` でシート閉鎖後に実行する。
+   - `WatchConnectivity.syncData` では全ての `SYNC_SEATS` / `SYNC_MAIN_TIMER` 送信に対して 600ms タイムアウト＋`transferUserInfo` 即時フォールバックを適用し、`reconcileCloudTimers` でリモート開始・変更を検知した際も `highPriorityWake: true` でサブ Watch を即座に起床させる。
+   - Watch 単独の `pollCloudTimersFromSupabaseIfNeeded` の間隔を非稼働時 `2.2秒`・稼働時 `1.8秒`・タイムアップ直前 `1.2秒`・強制時 `0.35秒` に高速化し、`order=updated_at.desc` で最新行を取得して開始・停止・時間変更・ヘルプ・チェック・シャンプー完了の全フィールドを即時同期する。
+4. **リモート開始・変更時の古いシート自動閉鎖と、別タイマー誤停止の完全防止 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - `handleRemoteModalSheetAutoCloseIfNeeded` にて、シートを開いていた席がリモートで新規開始された場合（`!wasRunningWhenOpened && latest.isRunning`）や、稼働中タイマーの終了時刻が 5 秒以上変化した場合（`abs(latestEnd - cachedEnd) > 5.0`）も即座に `TimeActionSheet` / `ShampooActionSheet` を自動で閉じ、最新画面へ切り替える。
+   - 万一シート上で「止める／シャンプーに入る」をタップした瞬間に別端末で新しいタイマーが開始されていた場合（`isReplacedByNewRemoteTimer`）は、停止命令を送らずシートを閉じて最新状態へ更新する。
+   - Watch 直接クラウド `PATCH`（`appendStopExpectedEndFilter`）および iPhone 側 `isStaleStop` では、カウントダウン稼働中のタイマー停止は `expectedEnd ± 15秒` の範囲のみ対象とし、超過中タイマーの停止は `target_end_timestamp <= now + 5秒`、非稼働画面からのリセット等は `target_end_timestamp <= now + 2秒` に限定することで、別 Watch が同じ席番号で開始した未来の別タイマーを誤って停止することを完全に防止する。また iPhone 側で `isStaleStop` により古い停止をブロックした際は、即座に `syncSeatsToWatch(..., { immediate: true, highPriorityWake: true })` を送り返して Watch 側の画面ズレを解消する。
+
+
 
 
 

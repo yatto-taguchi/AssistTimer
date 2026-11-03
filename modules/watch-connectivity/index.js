@@ -177,7 +177,8 @@ const isMainTimerEndStopped = (endTs) => {
   const num = Number(endTs || 0);
   if (!num || num <= 0) return false;
   pruneStoppedRecords();
-  return stoppedMainTimerRecords.some((r) => r.endTs > 0 && Math.abs(r.endTs - num) < 15000);
+  // ★ 同一タイマーインスタンスの判定を 15秒 → 2.5秒 に厳密化（停止直後に同じ分数のタイマーを再スタートした際に誤って破棄されるのを防止）
+  return stoppedMainTimerRecords.some((r) => r.endTs > 0 && Math.abs(r.endTs - num) < 2500);
 };
 
 const isSeatTimerEndStopped = (seatId, endTs) => {
@@ -186,7 +187,7 @@ const isSeatTimerEndStopped = (seatId, endTs) => {
   pruneStoppedRecords();
   const list = stoppedSeatTimerRecords.get(String(seatId));
   if (!list) return false;
-  return list.some((r) => r.endTs > 0 && Math.abs(r.endTs - num) < 15000);
+  return list.some((r) => r.endTs > 0 && Math.abs(r.endTs - num) < 2500);
 };
 
 const notifyLocalStopOrReset = (seatId, stoppedEndTimestamp = 0) => {
@@ -337,6 +338,18 @@ const handleIncoming = (kind, body, seq = null) => {
       const lastSeatStop = lastLocalSeatStopAt.get(seatKey) || 0;
       if (ts > 0 && lastSeatStop > 0 && ts <= lastSeatStop + 500) {
         return;
+      }
+      // ★ 新しいタイマー開始が確定した場合は、該当席の古い停止履歴をクリアして後続同期での誤ブロックを防ぐ
+      if (actionStr === 'START_TIMER' || actionStr === 'RESTART_TIMER') {
+        stoppedSeatTimerRecords.delete(seatKey);
+        lastLocalSeatStopAt.delete(seatKey);
+        const seatNum = Number(body.seatNumber || body.extra?.seatNumber || 0);
+        if (seatNum > 0 && seatNum < 1000) {
+          stoppedSeatTimerRecords.delete(`seat-${seatNum}`);
+          stoppedSeatTimerRecords.delete(String(seatNum));
+          lastLocalSeatStopAt.delete(`seat-${seatNum}`);
+          lastLocalSeatStopAt.delete(String(seatNum));
+        }
       }
     }
 
@@ -634,10 +647,11 @@ export const WatchConnectivity = {
         }
       };
 
+      const isSyncPayload = cleanWireData?.type === 'SYNC_MAIN_TIMER' || cleanWireData?.type === 'SYNC_SEATS' || isHighPriorityWake;
       if (reachable) {
-        if (isHighPriorityWake) {
-          // ★ タイマー停止・一時停止・リセット等の緊急同期時:
-          //   手首を下げた直後は isReachable が古い true のまま sendMessage が約5秒ハングすることがあるため、
+        if (isSyncPayload) {
+          // ★ Watch への状態同期（開始・停止・変更）時:
+          //   実機サブWatch等で手首を下げた直後は isReachable が古い true のまま sendMessage が約5秒ハングすることがあるため、
           //   600ms以内に応答がなければタイムアウトを待たずに即座に transferUserInfo（背景優先起床）も併用発火させる
           let raceTimer = null;
           const sendPromise = Promise.resolve()
@@ -660,8 +674,6 @@ export const WatchConnectivity = {
           }
         } else {
           try {
-            // ★ リアルタイム送信（sendMessage）は渡された data をそのまま送る
-            //   （メインタイマー同期時は seats を含めないことで Watch 側の稼働中客席タイマーを絶対保護）
             await NativeModule.sendMessage(sendMessagePayload);
             messageResult = '即時OK';
           } catch (sendErr) {
@@ -674,8 +686,7 @@ export const WatchConnectivity = {
 
       // ★ Watchがバックグラウンド（文字盤表示中・消灯中）で即時通信（sendMessage）できなかった場合、
       //   updateApplicationContext だけでは Watch アプリがバックグラウンド起床せず文字盤モジュールやアラーム予約が更新されないため、
-      //   transferUserInfo（緊急停止時はコンプリケーション優先枠使用）も併用してバックグラウンドの Watch Extension を確実に起こす
-      const isSyncPayload = cleanWireData?.type === 'SYNC_MAIN_TIMER' || cleanWireData?.type === 'SYNC_SEATS' || isHighPriorityWake;
+      //   transferUserInfo（緊急開始・停止時はコンプリケーション優先枠使用）も併用してバックグラウンドの Watch Extension を確実に起こす
       const needUserInfoFallback = isSyncPayload && (!reachable || messageResult.startsWith('失敗'));
       if (needUserInfoFallback) {
         await sendUserInfoFallback();
