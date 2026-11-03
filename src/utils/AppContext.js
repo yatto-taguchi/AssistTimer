@@ -807,17 +807,21 @@ export const AppProvider = ({ children }) => {
     setMainTimerActionRequest({ action, payload, actionId, timestamp: Date.now() });
   };
 
-  // ★ サロン共有時の全タブ共通トースト通知（どのタブを表示中でも画面上部にトースト＋バイブレーションを表示）
-  const [globalPeerToast, setGlobalPeerToast] = useState(null);
+  // ★ サロン共有時の全タブ共通トースト通知（どのタブを表示中でも画面上部に確認制バナー＋バイブレーションを表示）
+  // ユーザーがタップして確認するまで消えないキュー方式（複数件発生時も上書きせず順番に確認可能）
+  const [peerToastQueue, setPeerToastQueue] = useState([]);
   const globalPeerToastTimerRef = useRef(null);
   const lastPeerToastKeyRef = useRef({ key: '', at: 0 });
+
+  const globalPeerToast = peerToastQueue.length > 0 ? peerToastQueue[0] : null;
+  const globalPeerToastCount = peerToastQueue.length;
 
   const hideGlobalPeerToast = useCallback(() => {
     if (globalPeerToastTimerRef.current) {
       clearTimeout(globalPeerToastTimerRef.current);
       globalPeerToastTimerRef.current = null;
     }
-    setGlobalPeerToast(null);
+    setPeerToastQueue((prev) => (prev.length > 0 ? prev.slice(1) : prev));
   }, []);
 
   const showGlobalPeerToast = useCallback((text, color = '#30D158', options = {}) => {
@@ -827,39 +831,60 @@ export const AppProvider = ({ children }) => {
     const dedupeKey = options.id || trimmed;
     if (
       lastPeerToastKeyRef.current.key === dedupeKey &&
-      nowMs - lastPeerToastKeyRef.current.at < 1500
+      nowMs - lastPeerToastKeyRef.current.at < 2500
     ) {
       return;
     }
     lastPeerToastKeyRef.current = { key: dedupeKey, at: nowMs };
 
-    if (globalPeerToastTimerRef.current) {
-      clearTimeout(globalPeerToastTimerRef.current);
-    }
-    const duration = Number(options.duration) > 0 ? Number(options.duration) : 4800;
-    setGlobalPeerToast({
-      id: options.id || `toast_${nowMs}`,
-      text: trimmed,
+    const nowDate = new Date(nowMs);
+    const defaultTimeStr = `${String(nowDate.getHours()).padStart(2, '0')}:${String(
+      nowDate.getMinutes()
+    ).padStart(2, '0')}`;
+    const timeMatch = trimmed.match(/^【(\d{1,2}:\d{2})】/);
+    const timeText = options.time || (timeMatch ? timeMatch[1] : defaultTimeStr);
+    const formattedText = timeMatch ? trimmed : `【${timeText}】${trimmed}`;
+    const isPersistent = options.persistent !== false;
+
+    const newItem = {
+      id: options.id || `toast_${nowMs}_${Math.random().toString(36).slice(2, 6)}`,
+      text: formattedText,
+      timeText,
       color: color || '#30D158',
       timestamp: nowMs,
+      persistent: isPersistent,
+      duration: Number(options.duration) > 0 ? Number(options.duration) : 4800,
+    };
+
+    setPeerToastQueue((prev) => {
+      if (prev.some((item) => item.id === newItem.id || (item.text === newItem.text && nowMs - item.timestamp < 2500))) {
+        return prev;
+      }
+      return [...prev.slice(-19), newItem];
     });
-    globalPeerToastTimerRef.current = setTimeout(() => {
-      setGlobalPeerToast(null);
-      globalPeerToastTimerRef.current = null;
-    }, duration);
 
     if (Platform.OS !== 'web' && options.vibrate !== false) {
-      Vibration.vibrate([0, 150, 80, 180]);
+      Vibration.vibrate([0, 180, 90, 220]);
     }
   }, []);
 
   useEffect(() => {
+    if (globalPeerToastTimerRef.current) {
+      clearTimeout(globalPeerToastTimerRef.current);
+      globalPeerToastTimerRef.current = null;
+    }
+    if (globalPeerToast && globalPeerToast.persistent === false) {
+      globalPeerToastTimerRef.current = setTimeout(() => {
+        setPeerToastQueue((prev) => (prev.length > 0 ? prev.slice(1) : prev));
+        globalPeerToastTimerRef.current = null;
+      }, globalPeerToast.duration || 4800);
+    }
     return () => {
       if (globalPeerToastTimerRef.current) {
         clearTimeout(globalPeerToastTimerRef.current);
       }
     };
-  }, []);
+  }, [globalPeerToast?.id]);
 
   return (
     <AppContext.Provider
@@ -869,6 +894,7 @@ export const AppProvider = ({ children }) => {
         mainTimerActionRequest,
         requestMainTimerAction,
         globalPeerToast,
+        globalPeerToastCount,
         showGlobalPeerToast,
         hideGlobalPeerToast,
         isEcoMode,

@@ -142,7 +142,7 @@ function MainTabs() {
 }
 
 function GlobalPeerToastOverlay() {
-  const { globalPeerToast, hideGlobalPeerToast, isEcoMode } = useContext(AppContext);
+  const { globalPeerToast, globalPeerToastCount, hideGlobalPeerToast, isEcoMode } = useContext(AppContext);
   const insets = useSafeAreaInsets();
   const translateY = useRef(new Animated.Value(-90)).current;
   const opacity = useRef(new Animated.Value(0)).current;
@@ -194,8 +194,8 @@ function GlobalPeerToastOverlay() {
           toastStyles.toastCard,
           {
             backgroundColor: isEcoMode ? '#1C1C1E' : accentColor,
-            borderColor: isEcoMode ? accentColor : 'rgba(255,255,255,0.28)',
-            borderWidth: isEcoMode ? 1.5 : 1,
+            borderColor: isEcoMode ? accentColor : 'rgba(255,255,255,0.45)',
+            borderWidth: isEcoMode ? 1.5 : 1.5,
             transform: [{ translateY }],
             opacity,
           },
@@ -213,21 +213,32 @@ function GlobalPeerToastOverlay() {
             ]}
           />
           <View style={toastStyles.textColumn}>
-            <Text style={toastStyles.toastTitle} numberOfLines={1}>
-              サロン共有通知{isOutsideSalonTab ? '（タップでサロンへ）' : ''}
-            </Text>
-            <Text style={toastStyles.toastBody} numberOfLines={2}>
+            <View style={toastStyles.headerRow}>
+              <Text style={toastStyles.toastTitle} numberOfLines={1}>
+                🕒 {globalPeerToast.timeText ? `${globalPeerToast.timeText} ` : ''}サロン共有通知（タップで確認）{isOutsideSalonTab ? '・サロンへ移動' : ''}
+              </Text>
+              {globalPeerToastCount > 1 && (
+                <View style={toastStyles.queueBadge}>
+                  <Text style={toastStyles.queueBadgeText}>未確認 {globalPeerToastCount}件</Text>
+                </View>
+              )}
+            </View>
+            <Text style={toastStyles.toastBody} numberOfLines={3}>
               {globalPeerToast.text}
             </Text>
           </View>
         </TouchableOpacity>
         <TouchableOpacity
-          activeOpacity={0.7}
+          activeOpacity={0.75}
           onPress={hideGlobalPeerToast}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          style={toastStyles.closeButton}
+          style={[
+            toastStyles.confirmButton,
+            { backgroundColor: isEcoMode ? accentColor : 'rgba(0,0,0,0.26)' },
+          ]}
         >
-          <Ionicons name="close-circle" size={20} color="rgba(255,255,255,0.88)" />
+          <Ionicons name="checkmark-circle" size={16} color="#FFFFFF" />
+          <Text style={toastStyles.confirmButtonText}>確認</Text>
         </TouchableOpacity>
       </Animated.View>
     </View>
@@ -254,7 +265,7 @@ const toastStyles = StyleSheet.create({
     alignItems: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.32,
+    shadowOpacity: 0.35,
     shadowRadius: 8,
     elevation: 10,
   },
@@ -272,11 +283,29 @@ const toastStyles = StyleSheet.create({
   textColumn: {
     flex: 1,
   },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 3,
+  },
   toastTitle: {
-    color: 'rgba(255,255,255,0.85)',
+    color: 'rgba(255,255,255,0.92)',
     fontSize: 10.5,
     fontWeight: '700',
-    marginBottom: 2,
+    flexShrink: 1,
+  },
+  queueBadge: {
+    backgroundColor: 'rgba(0,0,0,0.32)',
+    paddingHorizontal: 6,
+    paddingVertical: 1.5,
+    borderRadius: 8,
+    marginLeft: 6,
+  },
+  queueBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 9.5,
+    fontWeight: '800',
   },
   toastBody: {
     color: '#FFFFFF',
@@ -284,9 +313,19 @@ const toastStyles = StyleSheet.create({
     fontWeight: '800',
     lineHeight: 18,
   },
-  closeButton: {
+  confirmButton: {
     marginLeft: 8,
-    padding: 2,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  confirmButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '800',
+    marginLeft: 3,
   },
 });
 

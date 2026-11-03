@@ -3997,3 +3997,46 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
    - Watch 側の `onAssignHelp`、`onRecruitHelp`、`onSetNoHelp`、`onAssignCheckStaff`、`onRecruitCheckStaff`、`onAddLateCheck`、および各選択シート（`selectHelpWorkflowSheetView` / `selectCheckStaffSheetView` / `TimeActionSheet`）にて、他スタッフを指名した場合・全員募集した場合・ヘルプなしに設定した場合（またはメイン担当が未設定／デフォルト／自分の場合）は、操作者自身をメイン担当（`isCreatorMeExplicit = true`, `creatorName = currentUserName`）として `timers[idx]`・`liveItem`・`cachedSheetItems["timeAction"]` に保持し、`syncSeatActionDirectlyToCloud` でも `color_staff_name` と `created_by` を Supabase へ直接送信する。
    - iPhone 側の `handleWatchAction` では、ペアリングされた Watch の操作者名が iPhone 本人（または `'スタイリスト'` / `'自分'`）と一致する場合は常に iPhone 本人の `localPhoneUserId`（`myUserIdRef.current || myUserId || _cachedMyUserId`）を最優先で採用し、`ASSIGN_HELP` / `RECRUIT_HELP` / `SET_CHECK_TIMER` および iPhone UI 上の `handleAssignAssistant` / `handleAssignCheckStaff` でも操作者本人をメイン担当（`colorStaffName`, `createdBy`）として記録・維持する。
    - これにより、Watch から他スタッフ（Simulator 等）をシャンプー等のヘルプやチェックに任命した際、**任命されたスタッフの端末と設定者（自分）の Apple Watch の双方で `isRelevantToMe` が常に `true` となり、タイムアップ時に全員の端末で確実にアラームが鳴動する**。
+
+---
+
+## 65. Apple Watch 単独でのタイム開始後の数秒後自動停止・共有漏れ根絶、およびシート起動時の一覧弾き戻し（2回タップ問題）・ボタン反応性の完全改善仕様 (2026-11-03 改訂)
+
+### 65.1 調査により特定された根本原因
+
+1. **Apple Watch でタイム入力・開始したタイマーが約 2.5 秒後に停止し、相手 Watch に共有されない原因 (`targets/watch/content.swift`)**:
+   - **(1A) 直接クラウド `PATCH` 時の `updated_by` カラムによる `400 Bad Request` 失敗**:
+     `syncSeatActionDirectlyToCloud` で `body["updated_by"] = uid` を無条件に付与していたため、Supabase 側のスキーマ状態や型制約によって PostgREST が `400 Bad Request` を返した場合に直接 `PATCH` が失敗し、クラウドおよび相手 Watch へ反映されない経路があった。
+   - **(1B) 定期クラウドポーリング（1.2〜1.8秒周期）による古い停止行での上書き巻き戻し**:
+     Watch 開始直後の保護時間（`watchStartedSeatTimes`）が `reconcileTimersFromDirectCloudRows` 内で **2.5秒** しか設けられていなかったため、親 iPhone がスリープ等で中継に 2.5 秒以上要したり直接 `PATCH` が遅延した際、開始から約 2.6 秒後のクラウドポーリングが Supabase 上の反映前の停止行（`status != "running"`）を読み込み、カウントダウン中の Watch タイマーを `00:00` 停止へ強制巻き戻していた。
+   - **(1C) タイム再入力時の 2 重通信と `markLocalSeatMod` 未記録**:
+     `TimeActionSheet.applyReinputAndShowStandard` が `onUpdateSoundSettings` と `onReinputTime` を連続発火しており、かつ `onReinputTime` で `markLocalSeatMod` が呼ばれていなかったため、直後に返る iPhone の古いスナップショットに上書きされる隙があった。
+2. **タップが反応しない／ヘルプ指定画面を開いた直後に一覧画面へ弾き戻され 2 回目のタップで開く原因 (`targets/watch/content.swift`)**:
+   - **(2A) シート閉鎖直後の `ContentView.timers` と `sessionManager.timers` の差分による誤自動クローズ**:
+     モーダルシート表示中は SwiftUI のシート再構築フリーズ防止のため `ContentView.timers` の更新を保留していた。前のシートを閉じて一覧画面や客席マップから再度シート（ヘルプ指定画面等）を開いた際、古い `ContentView.timers` の要素が `cachedSheetItems["timeAction"]` にキャッシュされ、約 0.5 秒後に走る `handleRemoteModalSheetAutoCloseIfNeeded` が最新の `sessionManager.timers` と比較して「リモートでタイマー状態が切り替わった」と誤判定し、`timeActionTargetId = nil` にして一覧画面へ弾き戻していた（2 回目のタップ時には `self.timers` が追いついているため正常に開いていた）。
+   - **(2B) `TimeActionSheet` 内の `.onReceive` による過渡状態の自己 `dismiss()`**:
+     `TimeActionSheet` 内のクロック・タイマー監視において、ローカル開始・再入力直後の過渡状態でも一時的に `!latest.isRunning` と見なされた瞬間に `dismiss()` が発火する経路があった。
+   - **(2C) `.buttonStyle(.plain)` ボタン内の空白領域（`Spacer()`）のタップ抜けと長押しジェスチャー干渉**:
+     watchOS において `.buttonStyle(.plain)` を適用した `HStack` ボタンに `.contentShape(Rectangle())` が無い箇所では、文字とアイコンの間の空白部分をタップした際にイベントが透過して無反応となっていた。また一覧画面のサムネイルマップ起動用 `LongPressGesture(minimumDuration: 0.45)` がやや長めの通常タップを奪っていた。
+
+### 65.2 確定仕様・実装詳細 (`targets/watch/content.swift`)
+
+1. **直接クラウド `PATCH` の `updated_by` 400 自動フォールバックと `.inactive` ポーリング継続**:
+   - `syncSeatActionDirectlyToCloud` において、Supabase から HTTP `400` が返却された場合は即座に `updated_by` を除外して自動リトライ送信し、以降は `Self.updatedByColumnUnsupported = true` として初回から `updated_by` なしで高速送信する。
+   - `pollCloudTimersFromSupabaseIfNeeded` を `applicationState != .background`（手首下げ減光中の `.inactive` を含む）で動作可能とし、共有同期の即時性を向上させた。
+2. **クラウド `updated_at` タイムスタンプ照合と Watch 開始保護ウィンドウの最大 12 秒延長**:
+   - `WatchSessionManager.parseCloudISODate` を新設して Supabase 行の `updated_at` をパースし、`reconcileTimersFromDirectCloudRows` および `decodeTimersPayload` において、受信データやクラウド行の更新時刻が Watch での開始・操作時刻以前（`<= startedAt + 0.5s`）である場合は保護ウィンドウを **12.0秒**（`localSeatMods` は **8.0秒**）へ延長し、反映前の古い `paused` データによる `00:00` 巻き戻しを完全に遮断する。
+   - Watch で新規追加・開始した直後の客席が iPhone 側の古いスナップショットにまだ含まれていない場合でも、開始後 12 秒以内はローカルの稼働中シートを破棄せず維持する。
+   - `TimeActionSheet.applyReinputAndShowStandard` と `ContentView.onReinputTime` を統合し、サウンド設定（`watchSoundEnabled`, `phoneSoundEnabled`）を含むタイム開始を 1 回の `START_TIMER` アクションでアトミックに送信し、`markLocalSeatMod` と `watchStartedSeatTimes` の双方を確実に記録する。
+3. **シート起動直前の最新状態同期 `prepareSheetTarget` と誤自動クローズ防止**:
+   - 一覧画面・客席マップ・チェックシート等から各モーダルシート（`timeAction`, `selectHelpStaff`, `shampooAction`, `checkAction`, `selectCheckStaff`）を開く直前に `prepareSheetTarget(for:cacheKey:)` を呼び出し、必ず最新の `sessionManager.timers` と `self.timers` および `cachedSheetItems` を完全一致させてからシートを表示する。
+   - `isSeatProtectedByRecentLocalAction(seatId:seatNumber:within: 8.0)` を新設し、`handleRemoteModalSheetAutoCloseIfNeeded` および `TimeActionSheet` の `.onReceive` において、自 Watch での操作後 8 秒間はシートを自動クローズしないよう保護する。また、稼働中タイマーのヘルプ指定画面（`.standard` 等）を開いている間はシートを閉じず、`cachedSheetItems["timeAction"]` を最新状態にインプレース更新し続ける。
+   - `deferSeatSheetCloseAction` のフォールバック処理において、前のシート ID のクリア後に `executePendingSeatSheetAction()`（次シートのオープン）を実行するよう順序を是正し、遷移先のスタッフ選択シート等が消去される競合を根絶した。
+4. **全ボタンのタップ領域拡大（`.contentShape(Rectangle())`）と長押し閾値の最適化**:
+   - `SeatTimerCard`、`TimeActionSheet`、`SelectHelpWorkflowSheet`、`SeatThumbnailMapSheet` 内の `.buttonStyle(.plain)` ボタン全域に `.contentShape(Rectangle())` を付与し、ボタン行の空白部分（`Spacer()`）をタップしても 1 回目で確実に反応するように改善。
+   - 一覧画面の `LongPressGesture(minimumDuration:)` を `0.45秒` から `0.65秒` へ調整し、通常のボタンタップとの競合を解消した。
+5. **他スタッフ操作・指名時の確認制（手動消去型）共有通知バナーと重複通知音防止 (`App.js`, `src/utils/AppContext.js`, `src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`)**:
+   - **iPhone 側 (`peerToastQueue` / `GlobalPeerToastOverlay`)**: 共有相手によるタイマー停止・チェック完了・担当者指名等の通知を `【HH:mm】` 発生時刻付きのキュー方式（`peerToastQueue`）で保持し、ユーザーが「確認」ボタンまたはバナーをタップするまで消えない確認制バナーとして全タブ最上部に表示（未確認件数バッジ付き）。
+   - **Apple Watch 側 (`peerConfirmationAlerts` / `enqueuePeerConfirmationAlert`)**: Watch 側でも他端末からの共有アクション通知を `【HH:mm】` 時刻付きで確認制カード（`peerConfirmationBannerOverlay`）にキュー保持し、バナーの「確認 ✓」タップで順次消去する。また `enqueuePeerConfirmationAlert` の戻り値（新規追加成否）を判定してから `WatchAlarmCoordinator.shared.postPeerActionNotification` を呼ぶことで、WCSession 経由と直接クラウドポーリング経由の重複通知音を防止した。
+
+
