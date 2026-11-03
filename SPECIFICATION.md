@@ -3967,3 +3967,33 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
 
 
 
+---
+
+## 64. Watchから他スタッフをシャンプー等のヘルプ・チェック担当に任命した際、設定者（自分のWatch）でも確実にアラームが鳴動する仕様 (2026-11-03 改訂 / Build 107)
+
+### 64.1 調査により特定された根本原因
+
+1. **`TimeActionSheet` でのタイマー開始直後の `.standard` 画面遷移と `deferSeatSheetCloseAction` の競合による開始状態の巻き戻り (`targets/watch/content.swift`)**:
+   - `TimeActionSheet` の `applyReinputAndShowStandard()` で時間を設定して `.standard`（ヘルプスタッフ選択画面）へ遷移した際、`liveItem.creatorName` / `liveItem.isCreatorMeExplicit` が更新されていなかった。
+   - さらに `onReinputTime` 側が「シートを閉じた後の遅延更新（`deferSeatSheetCloseAction`）」を使っていたため、シートを閉じずに `.standard` へ遷移した直後にヘルプスタッフを任命すると、`self.timers[idx]` がまだ未稼働（`isRunning: false`, `creatorName: ""`）のまま `onAssignHelp` が走り、さらに 0.42 秒後のフォールバック実行でシートが強制閉鎖または状態競合を起こしていた。
+2. **Watch 単独の直接 Supabase ポーリング（`pollCloudTimersFromSupabaseIfNeeded` / `reconcileTimersFromDirectCloudRows`）における設定者（`isCreatorMe`）情報の欠落と上書き消去 (`targets/watch/content.swift`)**:
+   - 直接 Supabase `timers` テーブルをポーリングする際、`select` クエリに `created_by` が含まれておらず、`reconcileTimersFromDirectCloudRows` でも `updatedTimers[i].isCreatorMeExplicit` と `creatorName` を一切更新していなかったため、他のスタッフ（例: Simulator）をヘルプやチェックに任命した直後のクラウドポーリングで自分の設定者フラグが失われ、`isRelevantToMe(currentUserName)` が `false` となってタイムアップ時に自分の Watch が鳴動しなかった。
+3. **iPhone 側 `handleWatchAction` における `watchOperatorUserId` 解決時のデフォルト名（`'スタイリスト'`）重複ヒットによる別ユーザー ID 誤採用 (`src/screens/SalonWorkScreen.js`)**:
+   - `salonMembers` 内にデフォルト名 `'スタイリスト'` のメンバーが複数存在する場合、`salonMembers.find(...)` がペアリング先 iPhone 本人ではなく別メンバーの `user_id` を返してしまい、`createdBy` が別人の ID となって `syncSeatsToWatch` 送信時に `isCreatorMe: false` が送り返されていた。
+4. **他スタッフをヘルプ／チェック担当に任命した際のメイン担当（`creatorName` / `isCreatorMeExplicit` / `colorStaffName` / `createdBy`）の明示保持不足 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - 自分が Watch または iPhone から他スタッフをヘルプ担当（`ASSIGN_HELP`）やチェック担当（`SET_CHECK_TIMER`）に指名した際、メイン担当が空欄やデフォルト名（`"スタイリスト"`）のままだと、任命後に「他人のタイマー」と判定されて設定者自身の端末が鳴動対象から外れるケースがあった。
+
+### 64.2 確定仕様・実装詳細
+
+1. **`TimeActionSheet` 開始直後の即時状態反映と `isCreatorMeExplicit = true` の確立 (`targets/watch/content.swift`)**:
+   - `applyReinputAndShowStandard()` にて `liveItem.creatorName = currentUserName` および `liveItem.isCreatorMeExplicit = true` を即座にセット。
+   - `onReinputTime` では `deferSeatSheetCloseAction` を廃止し、`0ms` で `self.timers[idx]`、`cachedSheetItems["timeAction"]`（既存のシート `id` を維持）、および `self.sessionManager.timers` に `applyStartToSeat` を即時反映することで、シート強制閉鎖（0.42秒後）をなくし、直後のヘルプ任命操作でも確実に稼働中＆設定者＝自分の状態を維持する。
+   - `handleRemoteModalSheetAutoCloseIfNeeded` でも `self.timers` のローカル状態を参照し、自分の Watch で開始したばかりのタイマーをリモート開始と誤認してシートを閉じないよう保護。
+2. **Watch 直接クラウドポーリングおよび `processReceivedData` における設定者フラグ（`isCreatorMeExplicit`）の完全復元・維持 (`targets/watch/content.swift`)**:
+   - `pollCloudTimersFromSupabaseIfNeeded` の `select` クエリに `created_by` を追加。
+   - `reconcileTimersFromDirectCloudRows` にて、`row.created_by == cloudUserId`、`SeatTimerItem.isStaffMe(staffName: row.color_staff_name, currentUserName: currentUserName)`、および同一稼働中タイマー（`isSameRunningTimer`）での既存 `cur.isCreatorMeExplicit == true` から `resolvedIsCreatorMe` を算出し、`updatedTimers[i].isCreatorMeExplicit` と `creatorName` を確実に維持・復元する。
+   - `processReceivedData` でも、同一稼働中タイマー（`targetEndTime` の差が 5 秒以内）でローカルが既に `prev.isCreatorMeExplicit == true` を保持している場合は、WCSession 同期パケットで `isCreatorMeExplicit` が `false` に落ちないよう保護する。
+3. **ヘルプ／チェック担当任命時の設定者（メイン担当＝自分）の確実な記録とクラウド同期 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - Watch 側の `onAssignHelp`、`onRecruitHelp`、`onSetNoHelp`、`onAssignCheckStaff`、`onRecruitCheckStaff`、`onAddLateCheck`、および各選択シート（`selectHelpWorkflowSheetView` / `selectCheckStaffSheetView` / `TimeActionSheet`）にて、他スタッフを指名した場合・全員募集した場合・ヘルプなしに設定した場合（またはメイン担当が未設定／デフォルト／自分の場合）は、操作者自身をメイン担当（`isCreatorMeExplicit = true`, `creatorName = currentUserName`）として `timers[idx]`・`liveItem`・`cachedSheetItems["timeAction"]` に保持し、`syncSeatActionDirectlyToCloud` でも `color_staff_name` と `created_by` を Supabase へ直接送信する。
+   - iPhone 側の `handleWatchAction` では、ペアリングされた Watch の操作者名が iPhone 本人（または `'スタイリスト'` / `'自分'`）と一致する場合は常に iPhone 本人の `localPhoneUserId`（`myUserIdRef.current || myUserId || _cachedMyUserId`）を最優先で採用し、`ASSIGN_HELP` / `RECRUIT_HELP` / `SET_CHECK_TIMER` および iPhone UI 上の `handleAssignAssistant` / `handleAssignCheckStaff` でも操作者本人をメイン担当（`colorStaffName`, `createdBy`）として記録・維持する。
+   - これにより、Watch から他スタッフ（Simulator 等）をシャンプー等のヘルプやチェックに任命した際、**任命されたスタッフの端末と設定者（自分）の Apple Watch の双方で `isRelevantToMe` が常に `true` となり、タイムアップ時に全員の端末で確実にアラームが鳴動する**。

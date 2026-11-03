@@ -2967,6 +2967,28 @@ export default function SalonWorkScreen() {
 
       let hasChanged = false;
       let wasBlockedByStaleStop = false;
+      const localPhoneUserName = String(userNameRef.current || userName || 'スタイリスト').trim();
+      const localPhoneUserId = myUserIdRef.current || myUserId || _cachedMyUserId || null;
+      const watchOperatorName =
+        (watchUser && String(watchUser).trim()) || localPhoneUserName || 'スタイリスト';
+      const isOperatorPairedPhoneUser =
+        !watchOperatorName ||
+        watchOperatorName === 'スタイリスト' ||
+        watchOperatorName === '自分' ||
+        watchOperatorName === localPhoneUserName ||
+        checkIsStaffNameMe(watchOperatorName, localPhoneUserName, localPhoneUserId, staffMembersRef.current);
+      const matchedWatchMember =
+        !isOperatorPairedPhoneUser && Array.isArray(staffMembersRef.current)
+          ? staffMembersRef.current.find((m) => {
+              if (!m || typeof m !== 'object') return false;
+              const nick = String(m.customNickname || m.originalNickname || m.name || '').trim();
+              return nick && nick === watchOperatorName && m.user_id && !String(m.user_id).startsWith('mem_');
+            })
+          : null;
+      const watchOperatorUserId = isOperatorPairedPhoneUser
+        ? localPhoneUserId
+        : (matchedWatchMember?.user_id || localPhoneUserId || null);
+
       const updated = baseSeats.map((s, idx) => {
         if (idx !== matchedIdx) return s;
         if (isStaleStop(s)) {
@@ -3103,9 +3125,28 @@ export default function SalonWorkScreen() {
             const isSubCheckOnly = extra?.isSubCheck === true || (hasCheckStaff && !hasAssistantStaff);
             const rawStaff = hasCheckStaff ? extra.checkStaffName : (hasAssistantStaff ? extra.assistantStaffName : watchUser);
             const staff = (rawStaff !== undefined && rawStaff !== null) ? rawStaff : '';
+            const isAssigningOther =
+              !!staff &&
+              staff !== 'ヘルプなし' &&
+              staff !== 'none' &&
+              !checkIsStaffNameMe(staff, localPhoneUserName, localPhoneUserId, staffMembersRef.current);
+            const shouldSetOperatorAsMain =
+              isAssigningOther ||
+              !s.createdBy ||
+              !s.colorStaffName ||
+              s.colorStaffName === 'スタイリスト' ||
+              checkIsMainStaffOfSeat(s, localPhoneUserName, localPhoneUserId, staffMembersRef.current);
+            const mainOwnerPatch = shouldSetOperatorAsMain
+              ? {
+                  colorStaffName: watchOperatorName || s.colorStaffName || localPhoneUserName || 'スタイリスト',
+                  createdBy: watchOperatorUserId || s.createdBy || null,
+                }
+              : {};
             if (isSubCheckOnly) {
               return {
                 ...s,
+                ...mainOwnerPatch,
+                dirtySync: true,
                 checkStaffName: staff,
                 checkProcess: sanitizeCheckProcess(extra?.checkProcess || s.checkProcess),
               };
@@ -3114,6 +3155,9 @@ export default function SalonWorkScreen() {
             if (staff === 'ヘルプなし' || staff === 'none' || process === 'ヘルプなし') {
               return {
                 ...s,
+                colorStaffName: watchOperatorName || s.colorStaffName || localPhoneUserName || 'スタイリスト',
+                createdBy: watchOperatorUserId || s.createdBy || null,
+                dirtySync: true,
                 isRecruiting: false,
                 isNoHelpNeeded: true,
                 assistantStaffName: 'ヘルプなし',
@@ -3127,6 +3171,8 @@ export default function SalonWorkScreen() {
             const isCheck = canonicalStatus === 'check';
             return {
               ...s,
+              ...mainOwnerPatch,
+              dirtySync: true,
               isRecruiting: false,
               isNoHelpNeeded: false,
               helpProcess: process,
@@ -3137,9 +3183,22 @@ export default function SalonWorkScreen() {
             };
           }
           case 'RECRUIT_HELP': {
+            const shouldSetOperatorAsMain =
+              !s.createdBy ||
+              !s.colorStaffName ||
+              s.colorStaffName === 'スタイリスト' ||
+              checkIsMainStaffOfSeat(s, localPhoneUserName, localPhoneUserId, staffMembersRef.current);
+            const mainOwnerPatch = shouldSetOperatorAsMain
+              ? {
+                  colorStaffName: watchOperatorName || s.colorStaffName || localPhoneUserName || 'スタイリスト',
+                  createdBy: watchOperatorUserId || s.createdBy || null,
+                }
+              : {};
             if (extra?.isSubCheck === true) {
               return {
                 ...s,
+                ...mainOwnerPatch,
+                dirtySync: true,
                 checkStaffName: '募集中',
                 checkProcess: sanitizeCheckProcess(extra?.checkProcess || extra?.helpProcess || s.checkProcess),
               };
@@ -3150,6 +3209,8 @@ export default function SalonWorkScreen() {
             const isCheck = canonicalStatus === 'check';
             return {
               ...s,
+              ...mainOwnerPatch,
+              dirtySync: true,
               isRecruiting: true,
               isNoHelpNeeded: false,
               helpProcess: process,
@@ -3228,6 +3289,22 @@ export default function SalonWorkScreen() {
             const chkStaff = extra?.checkStaffName !== undefined && extra?.checkStaffName !== null
               ? String(extra.checkStaffName)
               : '';
+            const isAssigningOtherCheck =
+              !!chkStaff &&
+              chkStaff !== '募集中' &&
+              !checkIsStaffNameMe(chkStaff, localPhoneUserName, localPhoneUserId, staffMembersRef.current);
+            const shouldSetOperatorAsMain =
+              isAssigningOtherCheck ||
+              !s.createdBy ||
+              !s.colorStaffName ||
+              s.colorStaffName === 'スタイリスト' ||
+              checkIsMainStaffOfSeat(s, localPhoneUserName, localPhoneUserId, staffMembersRef.current);
+            const mainOwnerPatch = shouldSetOperatorAsMain
+              ? {
+                  colorStaffName: watchOperatorName || s.colorStaffName || localPhoneUserName || 'スタイリスト',
+                  createdBy: watchOperatorUserId || s.createdBy || null,
+                }
+              : {};
             const prevHist = s.history || [];
             const chkMins = Math.max(1, Math.round(rawCheckSec / 60));
             const staffNote = chkStaff ? ` (${chkStaff === '募集中' ? '全員募集' : `担当:${chkStaff}`})` : '';
@@ -3236,6 +3313,8 @@ export default function SalonWorkScreen() {
             }
             return {
               ...s,
+              ...mainOwnerPatch,
+              dirtySync: true,
               checkTargetSeconds: rawCheckSec,
               checkTotalSeconds: rawCheckSec,
               checkInitialMinutes: chkMins,
@@ -3358,16 +3437,6 @@ export default function SalonWorkScreen() {
             const historyText = checkSec
               ? `Apple Watchからタイマー${wasActivelyPlacing ? '変更' : '開始'} (${Math.round(targetSec / 60)}分 / チェック${Math.round(checkSec / 60)}分)`
               : `Apple Watchからタイマー${wasActivelyPlacing ? '変更' : '開始'} (${Math.round(targetSec / 60)}分)`;
-            const watchOperatorName =
-              (watchUser && String(watchUser).trim()) || userNameRef.current || userName || 'スタイリスト';
-            const matchedWatchMember = Array.isArray(staffMembersRef.current)
-              ? staffMembersRef.current.find((m) => {
-                  if (!m || typeof m !== 'object') return false;
-                  const nick = String(m.customNickname || m.originalNickname || m.name || '').trim();
-                  return nick && nick === watchOperatorName && m.user_id && !String(m.user_id).startsWith('mem_');
-                })
-              : null;
-            const watchOperatorUserId = matchedWatchMember?.user_id || myUserIdRef.current || myUserId || null;
             const newHistoryItem = {
               id: `h-${Date.now()}`,
               time: getCurrentTimeFormatted(),
@@ -7506,6 +7575,9 @@ export default function SalonWorkScreen() {
           if (s.id !== seat.id) return s;
           return {
             ...s,
+            colorStaffName: userName || s.colorStaffName || 'スタイリスト',
+            createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+            dirtySync: true,
             assistantStaffName: 'ヘルプなし',
             assistantStaffConfirmed: true,
             actionStatus: null,
@@ -7537,8 +7609,25 @@ export default function SalonWorkScreen() {
         const resolvedAction = chosenAction || s.actionStatus || null;
         const resolvedInfo = getActionStatusInfo(resolvedAction, resolvedAction === 'shampoo');
         const resolvedHelpLabel = resolvedInfo ? resolvedInfo.label : (s.helpProcess || '');
+        const isAssigningOther =
+          !!newHelp &&
+          newHelp !== '募集中' &&
+          !isStaffNameMe(newHelp, userName, myUserId, staffMembers);
+        const shouldSetMeAsMain =
+          isAssigningOther ||
+          !s.createdBy ||
+          !s.colorStaffName ||
+          s.colorStaffName === 'スタイリスト' ||
+          isMainStaffOfSeat(s, userName, myUserId, staffMembers);
         return {
           ...s,
+          ...(shouldSetMeAsMain
+            ? {
+                colorStaffName: userName || s.colorStaffName || 'スタイリスト',
+                createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+              }
+            : {}),
+          dirtySync: true,
           assistantStaffName: newHelp || null,
           actionStatus: resolvedAction,
           helpProcess: resolvedHelpLabel,
@@ -7622,8 +7711,25 @@ export default function SalonWorkScreen() {
     setSeats((prev) => {
       const updated = prev.map((s) => {
         if (s.id !== seatId) return s;
+        const isAssigningOther =
+          !!trimmed &&
+          trimmed !== '募集中' &&
+          !isStaffNameMe(trimmed, userName, myUserId, staffMembers);
+        const shouldSetMeAsMain =
+          isAssigningOther ||
+          !s.createdBy ||
+          !s.colorStaffName ||
+          s.colorStaffName === 'スタイリスト' ||
+          isMainStaffOfSeat(s, userName, myUserId, staffMembers);
         return {
           ...s,
+          ...(shouldSetMeAsMain
+            ? {
+                colorStaffName: userName || s.colorStaffName || 'スタイリスト',
+                createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+              }
+            : {}),
+          dirtySync: true,
           checkStaffName: trimmed || null,
           checkProcess: sanitizeCheckProcess(s.checkProcess),
         };

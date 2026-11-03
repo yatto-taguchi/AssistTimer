@@ -1864,6 +1864,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                            abs(prev.targetEndTime.timeIntervalSince(parsed[i].targetEndTime)) <= 2 {
                             parsed[i].targetEndTime = prev.targetEndTime
                         }
+                        if abs(prev.targetEndTime.timeIntervalSince(parsed[i].targetEndTime)) <= 5.0,
+                           prev.isCreatorMeExplicit == true {
+                            parsed[i].isCreatorMeExplicit = true
+                            if SeatTimerItem.isStaffMe(prev.creatorName, currentUserName: self.currentUserName) {
+                                parsed[i].creatorName = prev.creatorName
+                            }
+                        }
                         if prev.hasAlertedHelpUnassigned && parsed[i].remainingSeconds <= 180 {
                             parsed[i].hasAlertedHelpUnassigned = true
                         }
@@ -2472,14 +2479,30 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             body["check_target_end_timestamp"] = Int64(chkEndVal.rounded())
             body["check_process"] = rawChkProc.isEmpty ? "チェック" : rawChkProc
             body["check_staff_name"] = rawChkStaff.isEmpty ? NSNull() : rawChkStaff
+            let isAssigningOtherCheck = !rawChkStaff.isEmpty && !SeatTimerItem.isStaffMe(rawChkStaff, currentUserName: effectiveStaff)
+            let prevCreatorClean = (matchedSeat?.creatorName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if isAssigningOtherCheck || matchedSeat?.isCreatorMe(currentUserName: effectiveStaff) == true || prevCreatorClean.isEmpty || prevCreatorClean == "スタイリスト" {
+                body["color_staff_name"] = effectiveStaff
+                if Self.isValidCloudUUID(uid) {
+                    body["created_by"] = uid
+                }
+            }
 
         case "ASSIGN_HELP":
             let isSubCheck = (extra["isSubCheck"] as? NSNumber)?.boolValue ?? (extra["isSubCheck"] as? Bool) ?? false
+            let prevCreatorClean = (matchedSeat?.creatorName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if isSubCheck {
                 let rawChkStaff = ((extra["checkStaffName"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 let rawChkProc = ((extra["checkProcess"] as? String) ?? "チェック").trimmingCharacters(in: .whitespacesAndNewlines)
                 body["check_process"] = rawChkProc.isEmpty ? "チェック" : rawChkProc
                 body["check_staff_name"] = rawChkStaff.isEmpty ? NSNull() : rawChkStaff
+                let isAssigningOther = !rawChkStaff.isEmpty && !SeatTimerItem.isStaffMe(rawChkStaff, currentUserName: effectiveStaff)
+                if isAssigningOther || matchedSeat?.isCreatorMe(currentUserName: effectiveStaff) == true || prevCreatorClean.isEmpty || prevCreatorClean == "スタイリスト" {
+                    body["color_staff_name"] = effectiveStaff
+                    if Self.isValidCloudUUID(uid) {
+                        body["created_by"] = uid
+                    }
+                }
             } else {
                 let rawProc = ((extra["helpProcess"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 let rawAssist = ((extra["assistantStaffName"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2487,11 +2510,22 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     body["help_process"] = "ヘルプなし"
                     body["assistant_staff_name"] = "ヘルプなし"
                     body["is_shampooing"] = false
+                    body["color_staff_name"] = effectiveStaff
+                    if Self.isValidCloudUUID(uid) {
+                        body["created_by"] = uid
+                    }
                 } else {
                     body["help_process"] = rawProc.isEmpty ? NSNull() : rawProc
                     body["assistant_staff_name"] = rawAssist.isEmpty ? NSNull() : rawAssist
                     if rawProc == "チェック" && !rawAssist.isEmpty {
                         body["check_staff_name"] = rawAssist
+                    }
+                    let isAssigningOther = !rawAssist.isEmpty && !SeatTimerItem.isStaffMe(rawAssist, currentUserName: effectiveStaff)
+                    if isAssigningOther || matchedSeat?.isCreatorMe(currentUserName: effectiveStaff) == true || prevCreatorClean.isEmpty || prevCreatorClean == "スタイリスト" {
+                        body["color_staff_name"] = effectiveStaff
+                        if Self.isValidCloudUUID(uid) {
+                            body["created_by"] = uid
+                        }
                     }
                 }
             }
@@ -2505,6 +2539,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             } else {
                 body["help_process"] = rawProc.isEmpty ? "シャンプー" : rawProc
                 body["assistant_staff_name"] = "募集中"
+            }
+            let prevCreatorClean = (matchedSeat?.creatorName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if matchedSeat?.isCreatorMe(currentUserName: effectiveStaff) == true || prevCreatorClean.isEmpty || prevCreatorClean == "スタイリスト" {
+                body["color_staff_name"] = effectiveStaff
+                if Self.isValidCloudUUID(uid) {
+                    body["created_by"] = uid
+                }
             }
 
         case "CLEAR_STAFF":
@@ -2644,7 +2685,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
         comps.queryItems = [
             URLQueryItem(name: "salon_id", value: "eq.\(salonId)"),
-            URLQueryItem(name: "select", value: "id,seat_label,status,target_seconds,target_end_timestamp,paused_remaining_seconds,color_staff_name,assistant_staff_name,help_process,is_shampooing,check_target_end_timestamp,check_total_seconds,check_process,check_staff_name,sort_order,updated_at"),
+            URLQueryItem(name: "select", value: "id,seat_label,status,target_seconds,target_end_timestamp,paused_remaining_seconds,created_by,color_staff_name,assistant_staff_name,help_process,is_shampooing,check_target_end_timestamp,check_total_seconds,check_process,check_staff_name,sort_order,updated_at"),
             URLQueryItem(name: "order", value: "updated_at.desc")
         ]
         guard let url = comps.url else {
@@ -2706,6 +2747,30 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             let cloudIsShampooing = (row["is_shampooing"] as? NSNumber)?.boolValue ?? (row["is_shampooing"] as? Bool) ?? false
             let cloudHelpProc = ((row["help_process"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let cloudAssist = ((row["assistant_staff_name"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let cloudCreatedBy = ((row["created_by"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let cloudColorStaff = ((row["color_staff_name"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let myUid = self.cloudUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasValidMyUid = Self.isValidCloudUUID(myUid)
+            let hasValidCloudCreatorUid = Self.isValidCloudUUID(cloudCreatedBy)
+            let isSameRunningTimer = cur.isRunning && cloudStatus == "running" && abs(cloudTargetEndSec - cur.targetEndTime.timeIntervalSince1970) <= 2.5
+            let resolvedIsCreatorMe: Bool? = {
+                if hasValidMyUid && hasValidCloudCreatorUid && cloudCreatedBy.caseInsensitiveCompare(myUid) == .orderedSame {
+                    return true
+                }
+                if !cloudColorStaff.isEmpty && SeatTimerItem.isStaffMe(cloudColorStaff, currentUserName: self.currentUserName) && (!hasValidMyUid || !hasValidCloudCreatorUid || cloudColorStaff != "スタイリスト") {
+                    return true
+                }
+                if isSameRunningTimer && cur.isCreatorMeExplicit == true {
+                    return true
+                }
+                if hasValidMyUid && hasValidCloudCreatorUid {
+                    return false
+                }
+                if !cloudColorStaff.isEmpty {
+                    return SeatTimerItem.isStaffMe(cloudColorStaff, currentUserName: self.currentUserName)
+                }
+                return cur.isCreatorMeExplicit
+            }()
 
             if let modAt = self.localSeatMods[rowId] ?? self.localSeatMods[cur.id] ?? self.localSeatMods[prevKey] {
                 let isRemoteStartOrStopTransition = (cur.isRunning != (cloudStatus == "running" && cloudTargetEndMs > 0))
@@ -2822,9 +2887,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 updatedTimers[i].isRecruiting = isRecruit
                 updatedTimers[i].helpProcess = isNoHelp ? "" : cloudHelpProc
                 updatedTimers[i].shampooStaff = (cloudAssist.isEmpty || isRecruit || isNoHelp) ? nil : cloudAssist
-                if let cStaff = row["color_staff_name"] as? String, !cStaff.isEmpty {
-                    updatedTimers[i].creatorName = cStaff
+                if !cloudColorStaff.isEmpty {
+                    updatedTimers[i].creatorName = cloudColorStaff
                 }
+                updatedTimers[i].isCreatorMeExplicit = resolvedIsCreatorMe
                 updatedTimers[i].isCollapsed = false
                 self.collapseOverrides[rowId] = nil
                 self.collapseOverrides[cur.id] = nil
@@ -2863,11 +2929,21 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         updatedTimers[i].totalSeconds = cloudTargetSec
                         updatedTimers[i].pausedRemainingSeconds = cloudTargetSec
                     }
-                    if let cStaff = row["color_staff_name"] as? String, !cStaff.isEmpty {
-                        updatedTimers[i].creatorName = cStaff
+                    if !cloudColorStaff.isEmpty {
+                        updatedTimers[i].creatorName = cloudColorStaff
                     }
+                    updatedTimers[i].isCreatorMeExplicit = resolvedIsCreatorMe
                     updatedTimers[i].isCollapsed = false
                     didChange = true
+                } else {
+                    if !cloudColorStaff.isEmpty && updatedTimers[i].creatorName != cloudColorStaff {
+                        updatedTimers[i].creatorName = cloudColorStaff
+                        didChange = true
+                    }
+                    if updatedTimers[i].isCreatorMeExplicit != resolvedIsCreatorMe {
+                        updatedTimers[i].isCreatorMeExplicit = resolvedIsCreatorMe
+                        didChange = true
+                    }
                 }
                 let isNoHelp = (cloudAssist == "ヘルプなし" || cloudAssist == "none" || cloudHelpProc == "ヘルプなし")
                 let isRecruit = (cloudAssist == "募集中")
@@ -3378,14 +3454,21 @@ struct ContentView: View {
             if let targetId = timeActionTargetId {
                 let cached = pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"]
                 let latest = findMatchingReceivedSeat(targetId: targetId, cached: cached, in: receivedTimers)
-                let wasRunningWhenOpened = (cached?.isRunning == true) || timeActionInitialBranchMode
-                let wasPausedNonZeroWhenOpened = (cached != nil && cached?.isRunning == false && cached?.isZero == false)
+                let localCurrent = findMatchingReceivedSeat(targetId: targetId, cached: cached, in: self.timers)
+                let wasRunningWhenOpened = (cached?.isRunning == true) || (localCurrent?.isRunning == true) || timeActionInitialBranchMode
+                let wasPausedNonZeroWhenOpened = (cached != nil && cached?.isRunning == false && cached?.isZero == false && localCurrent?.isRunning != true)
                 let shouldCloseForMainStop =
                     (wasRunningWhenOpened && (latest == nil || latest?.isRunning == false)) ||
                     (wasPausedNonZeroWhenOpened && (latest == nil || latest?.isZero == true))
                 // ★ 別Watchで新しくタイマーが開始された場合（00:00入力画面を開いていた席が稼働開始した、または稼働中/超過中だった席が5秒以上異なる新しい終了時刻に切り替わった場合）も即座に古いシートを閉じて最新状態を反映する（別タイマー誤停止の防止）
+                //   ※自Watchの TimeActionSheet 内でタイマー開始して .standard へ遷移した場合は localCurrent に既に同一タイマーが反映済みのため閉じない
                 let shouldCloseForRemoteNewStartOrChange: Bool = {
                     guard let latest = latest else { return false }
+                    if let localCurrent = localCurrent,
+                       localCurrent.isRunning == latest.isRunning,
+                       (!latest.isRunning || abs(latest.targetEndTime.timeIntervalSince(localCurrent.targetEndTime)) <= 5.0) {
+                        return false
+                    }
                     if !wasRunningWhenOpened && latest.isRunning {
                         return true
                     }
@@ -5757,29 +5840,30 @@ struct ContentView: View {
                         seat.clearCheck()
                     }
                 }
-                deferSeatSheetCloseAction {
-                    self.triggerScroll(to: item.id)
-                    if let idx = self.findSeatIndex(for: item) {
-                        self.pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
-                        applyStartToSeat(&self.timers[idx])
-                        self.sessionManager.timers = self.timers
-                        self.syncSeatTimersState(forceWidgetReload: true)
-                        self.showNotification(
-                            text: "⏱️ \(item.displaySeatName): \(timeStr)に開始しました\(checkText)",
-                            color: Color(hex: "#FFD60A")
-                        )
-                    }
-                }
-                // ★ タップした0msの瞬間にアラーム予約・Widget・sessionManager・iPhone送信・Supabase直接PATCHまで即座に完了させる
+                // ★ TimeActionSheet.applyReinputAndShowStandard はシートを閉じずにそのまま .standard（ヘルプ指定画面）へ遷移するため、
+                //   deferSeatSheetCloseAction を使わず 0ms で即座に timers / cachedSheetItems / sessionManager / アラーム予約 / クラウド同期へ反映する
+                self.pendingMainTimerSheetActionBox.closeFallbackWorkItem?.cancel()
+                self.pendingMainTimerSheetActionBox.closeFallbackWorkItem = nil
+                self.pendingMainTimerSheetActionBox.seatSheetAction = nil
                 WatchAlarmCoordinator.shared.acknowledgeSeatTimer(seatId: actualSeatId, seatNumber: actualSeatNum, checkOnly: false, skipRefresh: true)
                 if item.id != actualSeatId {
                     WatchAlarmCoordinator.shared.acknowledgeSeatTimer(seatId: item.id, seatNumber: actualSeatNum, checkOnly: false, skipRefresh: true)
                 }
-                var updatedSessionTimers = self.sessionManager.timers.isEmpty ? self.timers : self.sessionManager.timers
+                if let idx = self.findSeatIndex(for: item) {
+                    self.pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
+                    applyStartToSeat(&self.timers[idx])
+                    if var cached = self.pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] {
+                        let preservedId = cached.id
+                        applyStartToSeat(&cached)
+                        cached.id = preservedId
+                        self.pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] = cached
+                    }
+                }
+                var updatedSessionTimers = self.timers
                 if let sIdx = updatedSessionTimers.firstIndex(where: { $0.id == actualSeatId || $0.id == item.id || $0.seatNumber == actualSeatNum }) {
                     applyStartToSeat(&updatedSessionTimers[sIdx])
-                    self.sessionManager.timers = updatedSessionTimers
                 }
+                self.sessionManager.timers = updatedSessionTimers
                 self.sessionManager.clearLocalStop(seatId: actualSeatId)
                 self.sessionManager.clearLocalCheckClear(seatId: actualSeatId)
                 self.sessionManager.setCollapseOverride(seatId: actualSeatId, collapsed: nil)
@@ -5812,10 +5896,16 @@ struct ContentView: View {
                     extraPayload["checkEndTimestamp"] = cEnd.timeIntervalSince1970 * 1000.0
                 }
                 self.sessionManager.sendActionToPhone(action: "START_TIMER", seatId: actualSeatId, extra: extraPayload)
+                self.showNotification(
+                    text: "⏱️ \(item.displaySeatName): \(timeStr)に開始しました\(checkText)",
+                    color: Color(hex: "#FFD60A")
+                )
             },
             onAssignHelp: { process, staff in
                 if let idx = findSeatIndex(for: item) {
                     let actualSeatId = timers[idx].id
+                    let isSelfStaff = SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName)
+                    let prevCreator = timers[idx].creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
                     pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
                     timers[idx].helpProcess = process
                     timers[idx].shampooStaff = staff
@@ -5824,6 +5914,18 @@ struct ContentView: View {
                     }
                     timers[idx].isRecruiting = false
                     timers[idx].isNoHelpNeeded = false
+                    if !isSelfStaff || timers[idx].isCreatorMeExplicit == true || prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                        timers[idx].isCreatorMeExplicit = true
+                        if prevCreator.isEmpty || prevCreator == "スタイリスト" || !isSelfStaff || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                            timers[idx].creatorName = currentUserName
+                        }
+                    }
+                    if var cached = pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] {
+                        let preservedId = cached.id
+                        cached = timers[idx]
+                        cached.id = preservedId
+                        pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] = cached
+                    }
                     sessionManager.timers = timers
                     sessionManager.markLocalSeatMod(seatId: actualSeatId)
                     if item.id != actualSeatId {
@@ -5831,7 +5933,6 @@ struct ContentView: View {
                     }
                     syncSeatTimersState(forceWidgetReload: true)
                     sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: actualSeatId, extra: ["helpProcess": process, "assistantStaffName": staff])
-                    let isSelfStaff = SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName)
                     showNotification(
                         text: isSelfStaff ? "📤 自分を【\(process)】に設定しました" : "📤 \(staff)さんに【\(process)】を指定しました",
                         color: Color(hex: "#0A84FF")
@@ -5841,11 +5942,22 @@ struct ContentView: View {
             onRecruitHelp: { process in
                 if let idx = findSeatIndex(for: item) {
                     let actualSeatId = timers[idx].id
+                    let prevCreator = timers[idx].creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
                     pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
                     timers[idx].helpProcess = process
                     timers[idx].shampooStaff = nil
                     timers[idx].isRecruiting = true
                     timers[idx].isNoHelpNeeded = false
+                    timers[idx].isCreatorMeExplicit = true
+                    if prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                        timers[idx].creatorName = currentUserName
+                    }
+                    if var cached = pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] {
+                        let preservedId = cached.id
+                        cached = timers[idx]
+                        cached.id = preservedId
+                        pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] = cached
+                    }
                     sessionManager.timers = timers
                     sessionManager.markLocalSeatMod(seatId: actualSeatId)
                     if item.id != actualSeatId {
@@ -5862,11 +5974,22 @@ struct ContentView: View {
             onSetNoHelp: {
                 if let idx = findSeatIndex(for: item) {
                     let actualSeatId = timers[idx].id
+                    let prevCreator = timers[idx].creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
                     pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
                     timers[idx].helpProcess = ""
                     timers[idx].shampooStaff = nil
                     timers[idx].isRecruiting = false
                     timers[idx].isNoHelpNeeded = true
+                    timers[idx].isCreatorMeExplicit = true
+                    if prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                        timers[idx].creatorName = currentUserName
+                    }
+                    if var cached = pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] {
+                        let preservedId = cached.id
+                        cached = timers[idx]
+                        cached.id = preservedId
+                        pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] = cached
+                    }
                     sessionManager.timers = timers
                     sessionManager.markLocalSeatMod(seatId: actualSeatId)
                     if item.id != actualSeatId {
@@ -5888,6 +6011,12 @@ struct ContentView: View {
                     timers[idx].shampooStaff = nil
                     timers[idx].isRecruiting = false
                     timers[idx].isNoHelpNeeded = false
+                    if var cached = pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] {
+                        let preservedId = cached.id
+                        cached = timers[idx]
+                        cached.id = preservedId
+                        pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] = cached
+                    }
                     sessionManager.timers = timers
                     sessionManager.markLocalSeatMod(seatId: actualSeatId)
                     if item.id != actualSeatId {
@@ -5904,9 +6033,23 @@ struct ContentView: View {
             onAssignCheckStaff: { checkProcess, staff in
                 if let idx = findSeatIndex(for: item) {
                     let actualSeatId = timers[idx].id
+                    let isSelfCheck = SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName)
+                    let prevCreator = timers[idx].creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
                     pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
                     timers[idx].checkProcess = checkProcess
                     timers[idx].checkStaff = staff
+                    if !isSelfCheck || timers[idx].isCreatorMeExplicit == true || prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                        timers[idx].isCreatorMeExplicit = true
+                        if prevCreator.isEmpty || prevCreator == "スタイリスト" || !isSelfCheck || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                            timers[idx].creatorName = currentUserName
+                        }
+                    }
+                    if var cached = pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] {
+                        let preservedId = cached.id
+                        cached = timers[idx]
+                        cached.id = preservedId
+                        pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] = cached
+                    }
                     sessionManager.timers = timers
                     sessionManager.markLocalSeatMod(seatId: actualSeatId)
                     if item.id != actualSeatId {
@@ -5914,7 +6057,6 @@ struct ContentView: View {
                     }
                     syncSeatTimersState(forceWidgetReload: true)
                     sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: actualSeatId, extra: ["checkStaffName": staff, "checkProcess": checkProcess, "isSubCheck": true])
-                    let isSelfCheck = SeatTimerItem.isStaffMe(staff, currentUserName: currentUserName)
                     showNotification(
                         text: isSelfCheck ? "📤 自分を【\(checkProcess)】担当に設定しました" : "📤 \(staff)さんを【\(checkProcess)】担当に指定しました",
                         color: Color(hex: "#30D158")
@@ -5924,9 +6066,20 @@ struct ContentView: View {
             onRecruitCheckStaff: { checkProcess in
                 if let idx = findSeatIndex(for: item) {
                     let actualSeatId = timers[idx].id
+                    let prevCreator = timers[idx].creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
                     pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
                     timers[idx].checkProcess = checkProcess
                     timers[idx].checkStaff = "募集中"
+                    timers[idx].isCreatorMeExplicit = true
+                    if prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                        timers[idx].creatorName = currentUserName
+                    }
+                    if var cached = pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] {
+                        let preservedId = cached.id
+                        cached = timers[idx]
+                        cached.id = preservedId
+                        pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] = cached
+                    }
                     sessionManager.timers = timers
                     sessionManager.markLocalSeatMod(seatId: actualSeatId)
                     if item.id != actualSeatId {
@@ -6041,12 +6194,26 @@ struct ContentView: View {
                         let checkEnd = Date().addingTimeInterval(Double(validSec))
                         let resolvedProc = SeatTimerItem.sanitizeCheckProcess(checkProcess)
                         let resolvedStaff: String? = (checkStaff?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? checkStaff : nil
+                        let isSelfCheck = (resolvedStaff != nil) && SeatTimerItem.isStaffMe(resolvedStaff!, currentUserName: self.currentUserName)
+                        let prevCreator = self.timers[idx].creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
                         self.pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
                         self.timers[idx].checkTotalSeconds = validSec
                         self.timers[idx].checkTargetEndTime = checkEnd
                         self.timers[idx].checkProcess = resolvedProc
                         self.timers[idx].checkStaff = resolvedStaff
                         self.timers[idx].isCheckCompleted = false
+                        if !isSelfCheck || self.timers[idx].isCreatorMeExplicit == true || prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: self.currentUserName) {
+                            self.timers[idx].isCreatorMeExplicit = true
+                            if prevCreator.isEmpty || prevCreator == "スタイリスト" || !isSelfCheck || SeatTimerItem.isStaffMe(prevCreator, currentUserName: self.currentUserName) {
+                                self.timers[idx].creatorName = self.currentUserName
+                            }
+                        }
+                        if var cached = self.pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] {
+                            let preservedId = cached.id
+                            cached = self.timers[idx]
+                            cached.id = preservedId
+                            self.pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"] = cached
+                        }
                         self.sessionManager.timers = self.timers
                         self.sessionManager.clearLocalCheckClear(seatId: actualSeatId)
                         self.sessionManager.markLocalSeatMod(seatId: actualSeatId)
@@ -6200,9 +6367,17 @@ struct ContentView: View {
                 deferSeatSheetCloseAction {
                     if let idx = self.findSeatIndex(for: item) {
                         let actualSeatId = self.timers[idx].id
+                        let isSelfCheck = SeatTimerItem.isStaffMe(staff, currentUserName: self.currentUserName)
+                        let prevCreator = self.timers[idx].creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
                         self.pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
                         self.timers[idx].checkProcess = cleanProc
                         self.timers[idx].checkStaff = staff
+                        if !isSelfCheck || self.timers[idx].isCreatorMeExplicit == true || prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: self.currentUserName) {
+                            self.timers[idx].isCreatorMeExplicit = true
+                            if prevCreator.isEmpty || prevCreator == "スタイリスト" || !isSelfCheck || SeatTimerItem.isStaffMe(prevCreator, currentUserName: self.currentUserName) {
+                                self.timers[idx].creatorName = self.currentUserName
+                            }
+                        }
                         self.sessionManager.timers = self.timers
                         self.sessionManager.markLocalSeatMod(seatId: actualSeatId)
                         if item.id != actualSeatId {
@@ -6210,7 +6385,6 @@ struct ContentView: View {
                         }
                         self.syncSeatTimersState(forceWidgetReload: true)
                         self.sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: actualSeatId, extra: ["checkStaffName": staff, "checkProcess": cleanProc, "isSubCheck": true])
-                        let isSelfCheck = SeatTimerItem.isStaffMe(staff, currentUserName: self.currentUserName)
                         self.showNotification(
                             text: isSelfCheck ? "📤 自分を【\(cleanProc)】担当に設定しました" : "📤 \(staff)さんを【\(cleanProc)】担当に指定しました",
                             color: Color(hex: "#30D158")
@@ -6223,9 +6397,14 @@ struct ContentView: View {
                 deferSeatSheetCloseAction {
                     if let idx = self.findSeatIndex(for: item) {
                         let actualSeatId = self.timers[idx].id
+                        let prevCreator = self.timers[idx].creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
                         self.pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
                         self.timers[idx].checkProcess = cleanProc
                         self.timers[idx].checkStaff = "募集中"
+                        self.timers[idx].isCreatorMeExplicit = true
+                        if prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: self.currentUserName) {
+                            self.timers[idx].creatorName = self.currentUserName
+                        }
                         self.sessionManager.timers = self.timers
                         self.sessionManager.markLocalSeatMod(seatId: actualSeatId)
                         if item.id != actualSeatId {
@@ -6568,6 +6747,8 @@ struct ContentView: View {
                 deferSeatSheetCloseAction {
                     if let idx = self.findSeatIndex(for: item) {
                         let actualSeatId = self.timers[idx].id
+                        let isSelfStaff = SeatTimerItem.isStaffMe(staff, currentUserName: self.currentUserName)
+                        let prevCreator = self.timers[idx].creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
                         self.pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
                         self.timers[idx].helpProcess = process
                         self.timers[idx].shampooStaff = staff
@@ -6576,6 +6757,12 @@ struct ContentView: View {
                         }
                         self.timers[idx].isRecruiting = false
                         self.timers[idx].isNoHelpNeeded = false
+                        if !isSelfStaff || self.timers[idx].isCreatorMeExplicit == true || prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: self.currentUserName) {
+                            self.timers[idx].isCreatorMeExplicit = true
+                            if prevCreator.isEmpty || prevCreator == "スタイリスト" || !isSelfStaff || SeatTimerItem.isStaffMe(prevCreator, currentUserName: self.currentUserName) {
+                                self.timers[idx].creatorName = self.currentUserName
+                            }
+                        }
                         self.sessionManager.timers = self.timers
                         self.sessionManager.markLocalSeatMod(seatId: actualSeatId)
                         if item.id != actualSeatId {
@@ -6583,7 +6770,6 @@ struct ContentView: View {
                         }
                         self.syncSeatTimersState(forceWidgetReload: true)
                         self.sessionManager.sendActionToPhone(action: "ASSIGN_HELP", seatId: actualSeatId, extra: ["helpProcess": process, "assistantStaffName": staff])
-                        let isSelfStaff = SeatTimerItem.isStaffMe(staff, currentUserName: self.currentUserName)
                         self.showNotification(
                             text: isSelfStaff ? "📤 自分を【\(process)】担当に設定しました" : "📤 \(staff)さんに【\(process)】を通知しました",
                             color: Color(hex: "#0A84FF")
@@ -6595,6 +6781,7 @@ struct ContentView: View {
                 deferSeatSheetCloseAction {
                     if let idx = self.findSeatIndex(for: item) {
                         let actualSeatId = self.timers[idx].id
+                        let prevCreator = self.timers[idx].creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
                         self.pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
                         self.timers[idx].helpProcess = process
                         self.timers[idx].shampooStaff = nil
@@ -6603,6 +6790,10 @@ struct ContentView: View {
                         }
                         self.timers[idx].isRecruiting = true
                         self.timers[idx].isNoHelpNeeded = false
+                        self.timers[idx].isCreatorMeExplicit = true
+                        if prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: self.currentUserName) {
+                            self.timers[idx].creatorName = self.currentUserName
+                        }
                         if self.timers[idx].remainingSeconds <= 180 {
                             self.timers[idx].hasAlertedHelpUnassigned = true
                         }
@@ -6625,11 +6816,16 @@ struct ContentView: View {
                 deferSeatSheetCloseAction {
                     if let idx = self.findSeatIndex(for: item) {
                         let actualSeatId = self.timers[idx].id
+                        let prevCreator = self.timers[idx].creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
                         self.pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
                         self.timers[idx].helpProcess = ""
                         self.timers[idx].shampooStaff = nil
                         self.timers[idx].isRecruiting = false
                         self.timers[idx].isNoHelpNeeded = true
+                        self.timers[idx].isCreatorMeExplicit = true
+                        if prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: self.currentUserName) {
+                            self.timers[idx].creatorName = self.currentUserName
+                        }
                         self.sessionManager.timers = self.timers
                         self.sessionManager.markLocalSeatMod(seatId: actualSeatId)
                         if item.id != actualSeatId {
@@ -9173,6 +9369,8 @@ struct TimeActionSheet: View {
         hasAutoMovedToMainOvertimeBranch = false
         hasAutoMovedToCheckOvertimeBranch = false
         
+        liveItem.creatorName = currentUserName
+        liveItem.isCreatorMeExplicit = true
         liveItem.totalSeconds = sec
         liveItem.targetEndTime = startBase.addingTimeInterval(Double(sec))
         liveItem.pausedRemainingSeconds = sec
@@ -11126,6 +11324,11 @@ struct TimeActionSheet: View {
                     liveItem.shampooStaff = nil
                     liveItem.isRecruiting = false
                     liveItem.isNoHelpNeeded = true
+                    liveItem.isCreatorMeExplicit = true
+                    let prevCreator = liveItem.creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                        liveItem.creatorName = currentUserName
+                    }
                     onSetNoHelp?()
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                         subMode = .standard
@@ -11219,6 +11422,11 @@ struct TimeActionSheet: View {
                     liveItem.shampooStaff = nil
                     liveItem.isRecruiting = true
                     liveItem.isNoHelpNeeded = false
+                    liveItem.isCreatorMeExplicit = true
+                    let prevCreator = liveItem.creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                        liveItem.creatorName = currentUserName
+                    }
                     onRecruitHelp?(selectedProcess)
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                         subMode = .standard
@@ -11320,6 +11528,13 @@ struct TimeActionSheet: View {
             liveItem.shampooStaff = staff
             liveItem.isRecruiting = false
             liveItem.isNoHelpNeeded = false
+            let prevCreator = liveItem.creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !isMe || liveItem.isCreatorMeExplicit == true || prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                liveItem.isCreatorMeExplicit = true
+                if prevCreator.isEmpty || prevCreator == "スタイリスト" || !isMe || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                    liveItem.creatorName = currentUserName
+                }
+            }
             onAssignHelp?(selectedProcess, staff)
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                 subMode = .standard
@@ -11530,6 +11745,11 @@ struct TimeActionSheet: View {
                     WKInterfaceDevice.current().play(.click)
                     liveItem.checkProcess = selectedCheckProcess
                     liveItem.checkStaff = "募集中"
+                    liveItem.isCreatorMeExplicit = true
+                    let prevCreator = liveItem.creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                        liveItem.creatorName = currentUserName
+                    }
                     onRecruitCheckStaff?(selectedCheckProcess)
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                         subMode = returnTarget
@@ -11668,6 +11888,13 @@ struct TimeActionSheet: View {
             WKInterfaceDevice.current().play(.click)
             liveItem.checkProcess = selectedCheckProcess
             liveItem.checkStaff = staff
+            let prevCreator = liveItem.creatorName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !isMe || liveItem.isCreatorMeExplicit == true || prevCreator.isEmpty || prevCreator == "スタイリスト" || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                liveItem.isCreatorMeExplicit = true
+                if prevCreator.isEmpty || prevCreator == "スタイリスト" || !isMe || SeatTimerItem.isStaffMe(prevCreator, currentUserName: currentUserName) {
+                    liveItem.creatorName = currentUserName
+                }
+            }
             onAssignCheckStaff?(selectedCheckProcess, staff)
             withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                 subMode = returnTarget
