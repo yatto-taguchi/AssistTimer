@@ -42,8 +42,6 @@ enum WidgetSync {
                 pendingWorkItem?.cancel()
                 pendingWorkItem = nil
                 pendingForceReload = false
-                trailingReloadWorkItem?.cancel()
-                trailingReloadWorkItem = nil
                 performSaveOnQueue(
                     timers: timersSnapshot,
                     mainTimer: mainSnapshot,
@@ -220,7 +218,15 @@ enum WidgetSync {
             payload["lastTouchedId"] = id
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
-        if !forceReload && data == lastPayload && !mainActiveChanged { return }
+        if data == lastPayload && !mainActiveChanged {
+            if forceReload, trailingReloadWorkItem != nil {
+                trailingReloadWorkItem?.cancel()
+                trailingReloadWorkItem = nil
+                lastReloadAt = Date()
+                WidgetCenter.shared.reloadAllTimelines()
+            }
+            return
+        }
         lastPayload = data
 
         defaults.set(data, forKey: snapshotKey)

@@ -155,13 +155,22 @@ Deno.serve(async (req: Request) => {
       members.map((m) => String(m.user_id || '').trim()).filter(Boolean)
     );
 
+    const normalizeStaffName = (name?: string | null): string =>
+      String(name || '')
+        .trim()
+        .replace(/[\s\u3000]+/g, '');
+
     const resolveUserIdsByName = (rawName?: string | null): string[] => {
       const target = String(rawName || '').trim();
-      if (!target || target === 'スタッフ' || target === '募集中' || target === '未定' || isNoHelp(target)) {
+      const normalizedTarget = normalizeStaffName(target);
+      if (!normalizedTarget || target === 'スタッフ' || target === '募集中' || target === '未定' || isNoHelp(target)) {
         return [];
       }
       return members
-        .filter((m) => String(m.display_name || '').trim() === target)
+        .filter((m) => {
+          const memberName = String(m.display_name || '').trim();
+          return memberName === target || normalizeStaffName(memberName) === normalizedTarget;
+        })
         .map((m) => String(m.user_id || '').trim())
         .filter(Boolean);
     };

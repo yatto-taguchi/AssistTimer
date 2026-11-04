@@ -1718,6 +1718,9 @@ export default function SalonWorkScreen() {
     const sub = AppState.addEventListener('change', (nextAppState) => {
       const prevAppState = appStateRef.current;
       appStateRef.current = nextAppState || 'active';
+      if (nextAppState === 'active') {
+        setNow(Date.now());
+      }
       if (
         prevAppState &&
         prevAppState !== 'active' &&
@@ -1956,11 +1959,24 @@ export default function SalonWorkScreen() {
     };
   };
 
-  // 500msごとの時計同期 & タイムアップ監視 & エスカレーションチェック
+  // ★ 待機中から席タイマーが稼働開始・更新された瞬間に、1秒の遅延なく最新の `now` で初回レンダーする
+  useEffect(() => {
+    if (Array.isArray(seats) && seats.some((s) => s && s.status === 'running')) {
+      setNow(Date.now());
+    }
+  }, [seats]);
+
+  // 1秒ごとの時計同期 & タイムアップ監視 & エスカレーションチェック（稼働席がない待機中は完全スキップして省電力化）
   useEffect(() => {
     const timer = setInterval(() => {
+      const currentSeats = Array.isArray(seatsRef.current) ? seatsRef.current : [];
+      if (!currentSeats.some((s) => s && s.status === 'running')) {
+        return;
+      }
       const currentNow = Date.now();
-      setNow(currentNow);
+      if ((appStateRef.current || AppState.currentState || 'active') === 'active') {
+        setNow(currentNow);
+      }
       const activeUser = userNameRef.current;
       const activeUserId = myUserIdRef.current;
       const activeMembers = staffMembersRef.current;
@@ -2167,7 +2183,7 @@ export default function SalonWorkScreen() {
         }
         return prevSeats;
       });
-    }, 500);
+    }, 1000);
 
     return () => clearInterval(timer);
   }, []);
@@ -4002,6 +4018,185 @@ export default function SalonWorkScreen() {
         }
       }
 
+      const detectPolledRunningPeerNotification = (
+        prevSeat,
+        cloudSeat,
+        { activeMyName, activeMyUid, activeMembers, nowMs }
+      ) => {
+        if (!cloudSeat || cloudSeat.status !== 'running') return null;
+        if (Number(cloudSeat.targetEndTimestamp || 0) <= nowMs - 3 * 3600 * 1000) return null;
+        if (Number(cloudSeat.updatedAt || 0) <= nowMs - 90000) return null;
+        if (
+          isSeatRecentlyModifiedLocally(cloudSeat.id, 10000) ||
+          (prevSeat?.id && isSeatRecentlyModifiedLocally(prevSeat.id, 10000))
+        ) {
+          return null;
+        }
+        if (
+          activeMyUid &&
+          cloudSeat.updatedBy &&
+          String(cloudSeat.updatedBy).toLowerCase() === String(activeMyUid).toLowerCase()
+        ) {
+          return null;
+        }
+        const actorName = resolvePeerActorName(cloudSeat, prevSeat, activeMembers);
+        if (actorName && checkIsStaffNameMe(actorName, activeMyName, activeMyUid, activeMembers)) {
+          return null;
+        }
+        const isCreatorMeOnSeat = checkIsMainStaffOfSeat(cloudSeat, activeMyName, activeMyUid, activeMembers);
+        const isRecruitTransitionOnSeat =
+          (!!cloudSeat.isRecruiting && !prevSeat?.isRecruiting) ||
+          ((cloudSeat.assistantStaffName || '').trim() === '募集中' && (prevSeat?.assistantStaffName || '').trim() !== '募集中') ||
+          ((cloudSeat.checkStaffName || '').trim() === '募集中' && (prevSeat?.checkStaffName || '').trim() !== '募集中');
+        if (
+          !cloudSeat.updatedBy &&
+          isCreatorMeOnSeat &&
+          (!prevSeat || prevSeat.status !== 'running' || isRecruitTransitionOnSeat)
+        ) {
+          return null;
+        }
+
+        const label = (cloudSeat.seatLabel || cloudSeat.name || prevSeat?.seatLabel || '席').trim();
+        const eventTimeStr = formatHistoryTimeHHMM(Number(cloudSeat.updatedAt) || nowMs);
+        const nextCheckActive =
+          Number(cloudSeat.checkTargetSeconds) > 0 &&
+          Number(cloudSeat.checkEndTimestamp) > 0 &&
+          !cloudSeat.isCheckCompleted &&
+          cloudSeat.checkStatus !== 'completed' &&
+          cloudSeat.checkStatus !== 'stopped';
+        const prevCheckActive =
+          !!prevSeat &&
+          prevSeat.status === 'running' &&
+          Number(prevSeat.checkTargetSeconds) > 0 &&
+          Number(prevSeat.checkEndTimestamp) > 0 &&
+          !prevSeat.isCheckCompleted &&
+          prevSeat.checkStatus !== 'completed' &&
+          prevSeat.checkStatus !== 'stopped';
+        const nextCheckStaff = (cloudSeat.checkStaffName || '').trim();
+        const prevCheckStaff = prevCheckActive ? (prevSeat.checkStaffName || '').trim() : '';
+        const chkProc = sanitizeCheckProcess(cloudSeat.checkProcess);
+        const chkMins = Math.max(1, Math.round(Number(cloudSeat.checkTargetSeconds || 300) / 60));
+
+        const isCheckAssignedToMe =
+          nextCheckActive &&
+          !!nextCheckStaff &&
+          nextCheckStaff !== '募集中' &&
+          checkIsStaffNameMe(nextCheckStaff, activeMyName, activeMyUid, activeMembers);
+        const wasCheckAssignedToMe =
+          prevCheckActive &&
+          !!prevCheckStaff &&
+          checkIsStaffNameMe(prevCheckStaff, activeMyName, activeMyUid, activeMembers) &&
+          sanitizeCheckProcess(prevSeat.checkProcess) === chkProc &&
+          Math.abs(Number(prevSeat.checkEndTimestamp || 0) - Number(cloudSeat.checkEndTimestamp || 0)) <= 2500;
+
+        const proc = (cloudSeat.helpProcess || 'シャンプー').trim() || 'シャンプー';
+        const prevProc = (prevSeat?.helpProcess || 'シャンプー').trim() || 'シャンプー';
+        const nextAssist =
+          !cloudSeat.isNoHelpNeeded && !cloudSeat.isRecruiting
+            ? (cloudSeat.assistantStaffName || '').trim()
+            : '';
+        const prevAssist =
+          prevSeat && prevSeat.status === 'running' && !prevSeat.isNoHelpNeeded && !prevSeat.isRecruiting
+            ? (prevSeat.assistantStaffName || '').trim()
+            : '';
+        const isAssistAssignedToMe =
+          !!nextAssist &&
+          nextAssist !== '募集中' &&
+          nextAssist !== 'ヘルプなし' &&
+          nextAssist !== 'none' &&
+          checkIsStaffNameMe(nextAssist, activeMyName, activeMyUid, activeMembers);
+        const wasAssistAssignedToMe =
+          !!prevAssist &&
+          checkIsStaffNameMe(prevAssist, activeMyName, activeMyUid, activeMembers) &&
+          prevProc === proc &&
+          Math.abs(Number(prevSeat?.targetEndTimestamp || 0) - Number(cloudSeat.targetEndTimestamp || 0)) <= 2500;
+
+        const isHelpRecruiting =
+          !cloudSeat.isNoHelpNeeded &&
+          (!!cloudSeat.isRecruiting || (cloudSeat.assistantStaffName || '').trim() === '募集中');
+        const wasHelpRecruiting =
+          !!prevSeat &&
+          prevSeat.status === 'running' &&
+          !prevSeat.isNoHelpNeeded &&
+          (!!prevSeat.isRecruiting || (prevSeat.assistantStaffName || '').trim() === '募集中') &&
+          prevProc === proc &&
+          Math.abs(Number(prevSeat.targetEndTimestamp || 0) - Number(cloudSeat.targetEndTimestamp || 0)) <= 2500;
+
+        const isCheckRecruiting = nextCheckActive && nextCheckStaff === '募集中';
+        const wasCheckRecruiting =
+          prevCheckActive &&
+          prevCheckStaff === '募集中' &&
+          sanitizeCheckProcess(prevSeat.checkProcess) === chkProc &&
+          Math.abs(Number(prevSeat.checkEndTimestamp || 0) - Number(cloudSeat.checkEndTimestamp || 0)) <= 2500;
+
+        const isNewOrRestartedTimer =
+          !prevSeat ||
+          prevSeat.status !== 'running' ||
+          Math.abs(Number(cloudSeat.targetEndTimestamp || 0) - Number(prevSeat.targetEndTimestamp || 0)) > 15000;
+        const isRelevantToMeForStart =
+          isCreatorMeOnSeat ||
+          shouldAlertMainTimerForUser(cloudSeat, activeMyName, activeMyUid, activeMembers) ||
+          shouldAlertCheckTimerForUser(cloudSeat, activeMyName, activeMyUid, activeMembers);
+
+        let eventType = '';
+        let notifId = '';
+        let text = '';
+        let color = '#0A84FF';
+
+        if (isCheckAssignedToMe && !wasCheckAssignedToMe) {
+          eventType = 'assign_check';
+          notifId = `poll_assign_check_${cloudSeat.id || 'seat'}_${Math.round(Number(cloudSeat.checkEndTimestamp || cloudSeat.updatedAt || nowMs) / 1000)}`;
+          text = actorName
+            ? `【${eventTimeStr}】🔍 ${actorName}さんがあなたを${label}の【${chkProc}（${chkMins}分）】担当に指定しました`
+            : `【${eventTimeStr}】🔍 ${label}の【${chkProc}（${chkMins}分）】担当に指定されました`;
+          color = '#30D158';
+        } else if (isAssistAssignedToMe && !wasAssistAssignedToMe) {
+          eventType = 'assign_assist';
+          notifId = `poll_assign_assist_${cloudSeat.id || 'seat'}_${Math.round(Number(cloudSeat.targetEndTimestamp || cloudSeat.updatedAt || nowMs) / 1000)}_${proc}`;
+          text = actorName
+            ? `【${eventTimeStr}】🤝 ${actorName}さんがあなたを${label}の【${proc}】担当に指定しました`
+            : `【${eventTimeStr}】🤝 ${label}の【${proc}】担当に指定されました`;
+          color = '#0A84FF';
+        } else if (isHelpRecruiting && !wasHelpRecruiting) {
+          eventType = 'recruit';
+          notifId = `poll_recruit_help_${cloudSeat.id || 'seat'}_${Math.round(Number(cloudSeat.targetEndTimestamp || cloudSeat.updatedAt || nowMs) / 1000)}_${proc}`;
+          text = actorName
+            ? `【${eventTimeStr}】📢 ${actorName}さんが${label}の【${proc}】を全員に募集中です！`
+            : `【${eventTimeStr}】📢 ${label}が【${proc}】のヘルプを募集中です！`;
+          color = '#FF9500';
+        } else if (isCheckRecruiting && !wasCheckRecruiting) {
+          eventType = 'recruit';
+          notifId = `poll_recruit_check_${cloudSeat.id || 'seat'}_${Math.round(Number(cloudSeat.checkEndTimestamp || cloudSeat.updatedAt || nowMs) / 1000)}_${chkProc}`;
+          text = actorName
+            ? `【${eventTimeStr}】📢 ${actorName}さんが${label}の【${chkProc}（${chkMins}分）】を募集中です！`
+            : `【${eventTimeStr}】📢 ${label}が【${chkProc}（${chkMins}分）】の担当を募集中です！`;
+          color = '#FF9500';
+        } else if (isNewOrRestartedTimer && isRelevantToMeForStart) {
+          const totalMins = Math.max(1, Math.round(Number(cloudSeat.targetSeconds || cloudSeat.totalSeconds || 600) / 60));
+          eventType = 'timer_start';
+          notifId = `poll_start_${cloudSeat.id || 'seat'}_${Math.round(Number(cloudSeat.targetEndTimestamp || cloudSeat.updatedAt || nowMs) / 1000)}`;
+          text = actorName
+            ? `【${eventTimeStr}】⏱️ ${actorName}さんが${label}のタイマー（${totalMins}分）を開始しました`
+            : `【${eventTimeStr}】⏱️ ${label}のタイマー（${totalMins}分）が開始されました`;
+          color = '#0A84FF';
+        }
+
+        if (!eventType || !notifId || !text) return null;
+        const semanticKey = buildPeerEventSemanticKey(cloudSeat.id || cloudSeat.seatLabel || '', eventType);
+        if (hasHandledPeerNotification({ notifId, semanticKey, channel: 'realtime' })) {
+          return null;
+        }
+        markPeerNotificationHandled({ notifId, semanticKey, channel: 'realtime' });
+        return {
+          id: notifId,
+          eventType,
+          time: eventTimeStr,
+          text,
+          color,
+          sourceUser: '__remote__',
+        };
+      };
+
       // 3. ゲスト（参加者）の場合: 招待元のクラウド席を唯一のマスターとして追従同期（自端末で直近に行った未同期操作のみ保護してクラウドへ送信）
       if (!isOwnerOfSalon) {
         isRemoteSyncRef.current = true;
@@ -4147,6 +4342,17 @@ export default function SalonWorkScreen() {
               if (checkAlertedRef.current) checkAlertedRef.current[ct.id] = false;
               if (prevMatch?.id && prevMatch.id !== ct.id) {
                 if (checkAlertedRef.current) checkAlertedRef.current[prevMatch.id] = false;
+              }
+            } else if (ct.status === 'running' && !polledGuestStopNotification) {
+              const runningPeerNotif = detectPolledRunningPeerNotification(prevMatch, ct, {
+                activeMyName,
+                activeMyUid,
+                activeMembers,
+                nowMs,
+              });
+              if (runningPeerNotif) {
+                polledGuestStopNotification = runningPeerNotif;
+                didRemoteStopAnyGuestSeat = true;
               }
             }
             if (ct.isAbandonedRunningSeat) {
@@ -4459,6 +4665,17 @@ export default function SalonWorkScreen() {
                 if (checkAlertedRef.current) checkAlertedRef.current[ct.id] = false;
                 if (localMatch.id && localMatch.id !== ct.id) {
                   if (checkAlertedRef.current) checkAlertedRef.current[localMatch.id] = false;
+                }
+              } else if (ct.status === 'running' && !polledOwnerStopNotification) {
+                const runningPeerNotif = detectPolledRunningPeerNotification(localMatch, ct, {
+                  activeMyName,
+                  activeMyUid,
+                  activeMembers,
+                  nowMs,
+                });
+                if (runningPeerNotif) {
+                  polledOwnerStopNotification = runningPeerNotif;
+                  didRemoteStopAnyOwnerSeat = true;
                 }
               }
 
@@ -5600,7 +5817,7 @@ export default function SalonWorkScreen() {
     };
   }, [currentSalon?.id, currentSalon?.inviteCode, isDataLoaded, myUserId]);
 
-  // ★ Realtime WebSocket瞬断・スリープ復帰・タイムアップ直前（残り6.5秒以内）の取りこぼしを完全補完する軽量クラウド自動ポーリング
+  // ★ Realtime WebSocket瞬断・スリープ復帰時の取りこぼしを補完する省電力バックアップクラウドポーリング
   useEffect(() => {
     if (!isDataLoaded || !myUserId) return undefined;
     let lastPollAt = 0;
@@ -5613,37 +5830,20 @@ export default function SalonWorkScreen() {
 
       const nowMs = Date.now();
       const currentSeats = Array.isArray(seatsRef.current) ? seatsRef.current : [];
-      let hasAnyRunningSeat = false;
-      let hasNearTimeupSeat = false;
-
-      for (const s of currentSeats) {
-        if (!s || s.status !== 'running') continue;
-        hasAnyRunningSeat = true;
-        const mainEnd = Number(s.targetEndTimestamp || 0);
-        if (mainEnd > 0 && mainEnd - nowMs <= 6500 && mainEnd - nowMs > -3000) {
-          hasNearTimeupSeat = true;
-          break;
-        }
-        const chkEnd = !s.isCheckCompleted ? Number(s.checkEndTimestamp || 0) : 0;
-        if (chkEnd > 0 && chkEnd - nowMs <= 6500 && chkEnd - nowMs > -3000) {
-          hasNearTimeupSeat = true;
-          break;
-        }
-      }
+      const hasAnyRunningSeat = currentSeats.some((s) => s && s.status === 'running');
 
       const elapsed = nowMs - lastPollAt;
       const isForeground = (appStateRef.current || AppState.currentState || 'active') === 'active';
-      // 稼働中・超過鳴動中の席が1つでもある間は、シミュレーター等が背面ウィンドウにあっても常時2.5秒間隔でクラウド停止を監視する
+      // 稼働中・超過鳴動中の席がある間は12秒間隔、全席停止中かつフォアグラウンド時は45秒間隔でクラウド整合を実行
       const shouldPoll =
-        (hasNearTimeupSeat && elapsed >= 2500) ||
-        (hasAnyRunningSeat && elapsed >= 2500) ||
-        (isForeground && elapsed >= 15000);
+        (hasAnyRunningSeat && elapsed >= 12000) ||
+        (!hasAnyRunningSeat && isForeground && elapsed >= 45000);
 
       if (shouldPoll) {
         lastPollAt = nowMs;
         reconcileCloudTimersRef.current(null, null, { onlySyncIfChanged: true }).catch(() => {});
       }
-    }, 2500);
+    }, 3000);
 
     return () => {
       clearInterval(pollInterval);

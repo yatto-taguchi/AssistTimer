@@ -1124,6 +1124,8 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 
 ### 6.2. 変更履歴 (Changelog)
 
+| 2026-11-04 | **【省電力化】同期速度・アラーム精度・手首下げ保護を100%維持したままApple Watch＆iPhoneのバッテリー消費を大幅削減する最適化 (Issue #11) (`targets/watch/content.swift`, `targets/watch/alarm.swift`, `targets/watch/widget_sync.swift`, `src/screens/SalonWorkScreen.js`, `SPECIFICATION.md`)** | ①**Apple Watch / iPhone クロック周期の適正化（0.5秒 ➜ 1.0秒）＆非稼働・モーダル展開中の不要な全体再描画（`@State now`）およびアイドル監視の完全停止（セクション69.1〜69.2）**: Watch `WatchRealtimeClock` および iPhone `SalonWorkScreen` のクロック周期をデジタル秒表示の最小単位である `1.0秒`（1Hz）に最適化。Watch の `ContentView.onReceive` では稼働中タイマーまたは鳴動中アラームが存在し、かつモーダルシート非表示の時のみ `now` を更新して背面カードの毎秒再描画を停止（タイマー開始・変更・同期受信・モーダル閉鎖・操作実行の各瞬間に `self.now = Date()` を即時更新する鮮度保証ガード付き）。`alarm.tick()` の二重呼び出しを解消し、`WatchAlarmCoordinator.tick()` でも予約・鳴動・セッションが全て空のアイドル時は即 return。iPhone 側も稼働中席が 0 件の間は毎秒ループを即 return し、バックグラウンド中はタイムアップ判定のみ実行して `setNow` 再レンダーをスキップ。<br>②**Watch / iPhone のクラウド HTTP ポーリングのイベント駆動・状態連動ダイナミックスロットリング化（セクション69.2）**: Watch の `pollCloudTimersFromSupabaseIfNeeded` を `WatchRealtimeClock` 毎秒ループから切り離し、`WCSession.isReachable`（親 iPhone 到達性）・`WKApplication.shared().applicationState`（手首上げ `.active` / 手首下げ `.inactive`）・稼働中タイマー有無に応じた動的間隔（4秒〜30秒、手首上げ瞬間・リモート Push 受信時・世代不一致リトライ時は `force: true` で `0.35秒` 即時取得）へ最適化。また `syncSeatActionDirectlyToCloud` の直接 `PATCH` が HTTP 200〜299 で成功しかつ有効 UUID 席 ID を持つ場合は 0.35秒後の確認 `GET` を省略。iPhone 側のバックアップ HTTP ポーリングも Realtime WebSocket 稼働を前提に稼働中席あり時 `12秒`・全席停止フォアグラウンド時 `45秒`・全席停止バックグラウンド時休止へ最適化し、`detectPolledRunningPeerNotification` の `updatedAt` 許容窓を `90秒` に拡大。<br>③**Watch ➔ iPhone デュアル送信時の不要な `transferUserInfo` 即時キャンセルと `WidgetSync` タイムラインリロードの重複排除（セクション69.2）**: `WatchSessionManager.deliver` で `sendMessage` と同時投入した `WCSessionUserInfoTransfer` を保持し、`sendMessage` の `replyHandler` 即時成功時に `pendingTransfer.cancel()` を呼んで二重処理・無線消費を削減。`WidgetSync` では `executeImmediateSave` での先行 `trailingReloadWorkItem.cancel()` によるリロード消失バグを修正しつつ、ペイロード未変化時の不要な `WidgetCenter.shared.reloadAllTimelines()` 呼び出しを排除。 |
+| 2026-11-04 | **Apple Watch でのタイム設定・ヘルプ担当選択中の画面勝手クローズ＆ `00:00` 巻き戻り完全根絶、および相手 Watch への開始・募集・担当任命通知 100% 到達保証仕様 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`, `SPECIFICATION.md`)** | ①**`TimeActionSheet` の勝手クローズ＆ `00:00` 巻き戻りの多層完全防御（セクション68.1〜68.2）**: シート展開中は `cachedSheetItems["timeAction"]` を書き換えず初期スナップショットを不変保持（SwiftUI `.sheet(item:)` の再構築・強制クローズを完全遮断）し、シート内状態は `@State liveItem` で追従。`localActionGeneration` によりローカル操作中にインフライトだった古い直接クラウドポーリング応答を破棄して 0.8秒後に再ポーリングし、さらに初回 `SYNC_SEATS` で `localSeatMods`（12秒）・`watchStartedSeatTimes`（15秒）を早期クリアせず保護期間満了まで維持。対話サブモード中およびローカル操作後 15秒間（`recordLocalSheetInteraction`）の自動クローズ抑止とモーダル起動時の親バナー消去タイマーキャンセルを実装。<br>②**相手側 Apple Watch への開始・全員募集・ヘルプ任命・チェック任命通知の 100% 到達保証＆重複マージ（セクション68.1〜68.2）**: 相手 iPhone がロック／サスペンド中でも相手 Watch の直接 Supabase ポーリング（`reconcileTimersFromDirectCloudRows`）で `assign_check`・`assign_assist`・`recruit`・`timer_start` を即時検知して触覚振動＋確認制バナーを発火（`notifiedDirectCloudEventKeys` 永続リングバッファ＋募集・指名解除時のキー解放 `releaseDirectCloudEventKey` により再募集・再指名にも対応）。iPhone 側 HTTP ポーリング（`reconcileCloudTimers` の `detectPolledRunningPeerNotification`）でも同4イベントを補完中継し、Watch 側 `enqueuePeerConfirmationAlert` / `handleIncomingPeerNotificationIfNeeded`（`didAdd` ガード＋`recentEnqueuedPeerBodies` による確認消去後20秒デデュープ）により直接ポーリング通知と iPhone 中継通知を重複鳴動なしで操作者名付き文面へインプレース統合。 |
 | 2026-11-04 | **4つの専門サブエージェント（現場UX批評・仕様整合性監査・実装・最終QA検証）による相互チェック＆ブラッシュアップ開発フローの常設ルール化 (Issue #10) (`AGENTS.md`, `.agents/rules/multi-agent-review-workflow.md`, `.agents/skills/salon-multi-agent-dev/SKILL.md`, `SPECIFICATION.md`)** | ①**プロジェクト常設ルール（`AGENTS.md` / `.agents/rules/multi-agent-review-workflow.md`）の配備（セクション67.2）**: `trigger: always_on` として、新しいチャットや任意の作業環境でも自動的に「①現場フロー・UX批評（`ux-flow-critic`）➜ ②仕様書＆3層整合性監査（`spec-auditor`）➜ ③実装（`implementer`）➜ ④最終品質・意地悪テスト検証（`qa-verifier`、NG時は差し戻し）」の4エージェント相互チェック体制で進行する常設ルールを確立。<br>②**再利用スキル（`.agents/skills/salon-multi-agent-dev/SKILL.md`）の作成（セクション67.2）**: `define_subagent` / `invoke_subagent` による4専門サブエージェントのシステムプロンプト、起動手順、および8項目の意地悪テスト境界条件チェックリストを標準化。 |
 | 2026-11-04 | **他スタッフによる停止・シャンプー移行時の即時「タップ確認制通知」＆自端末アラーム・超過継続、およびアラーム・通知対象の施術担当者（関係者）限定仕様 (Issue #9 / Build 110) (`src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`, `supabase/functions/notify-salon-event/index.ts`, `app.json`, `SPECIFICATION.md`)** | ①**他スタッフによる「停止／シャンプー移行（ヘルプに入る）」時の自端末タイマー・アラーム・超過継続と即時確認制通知（セクション66.1〜66.2）**: 自分自身（またはペアリングされた自端末）が停止・シャンプー移行を押した場合は即座にアラーム停止＆`00:00` リセット（カード収納）。一方、他スタッフが停止・シャンプー移行を押した際、自分がその席の施術担当者（主担当・明示指定されたヘルプ担当・明示指定されたチェック担当：`isUserStakeholderForSeat` / `SeatTimerItem.isStakeholder`）である場合は、押された瞬間に「誰が停止／シャンプーに入ったか」の消えないタップ確認制通知バナー（iPhone `GlobalPeerToastOverlay` ＆ Apple Watch `peerConfirmationAlerts`）を即時表示しつつ、自端末のタイマーカウントダウン・アラーム予約・鳴動中アラーム・超過カウントアップ（`+00:xx`）は一切停止せず、自分が自ら止めるまで継続。また Watch の `peerStoppedSeatEnds` 永続化により確認バナー消去後の再ポーリング時8秒無限再通知ループおよび `SYNC_SEATS` 上書き消火を防止し、さらに設定者が遅れて自分の残りアラームを止めた際（`wasAlreadyPeerStopped`）は先行スタッフの「💧 シャンプー中」ステータスやクラウド行を上書き消去しないよう保護。<br>②**アラーム鳴動および確認通知の対象を「施術に関わる担当者（関係者）」のみに厳格限定・未定時全員フォールバック撤廃（セクション66.2）**: `shouldAlertMainTimerForUser` / `shouldAlertCheckTimerForUser` / `isUserStakeholderForSeat`（iPhone）、`SeatTimerItem.isStakeholder` / `isRelated` / `shouldAlertMainTimer` / `shouldAlertCheckTimer`（Watch）、および Edge Function `collectMainTimerAlertCandidates` / `collectCheckTimerAlertCandidates` において、ヘルプ担当やチェック担当が「未定（空欄）」のときにサロンメンバー全員を対象にするフォールバックを完全撤廃。タイマーを入れた主担当（`createdBy` / `colorStaffName` / `isCreatorMe`）と明示的に指名されたヘルプ担当（`assistantStaffName` / `shampooStaff`）・チェック担当（`checkStaffName` / `checkStaff`）のみにアラーム・確認通知を限定し、無関係なスタッフの端末が誤って鳴動・通知される現象を根絶。残り1分のヘルプ未定アラートにはワンタップで全員へ発信できる `'サロン全員に募集する'`（`handleRecruitAssistantDirectly`）導線を新設。 |
 | 2026-10-30 | **招待コードの端末別ランダム一意発行・例文分離、ゲスト参加時の初期客席同期（`fetchSalonTimers`）スタック解消、メンバー削除・退出のクラウド連動（`deleteSalonMember`）＆人数リアルタイム反映、および iPhone/Watch シミュレータービルド基盤構築 (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`, `eas.json`)** | ①**サロン招待コードのランダム一意発行・衝突遮断・入力例プレースホルダー非実在コード分離（セクション53）**: サロン参加・コード変更・メンバー連携の全入力欄プレースホルダーを実在不能な `例: 000-000` に統一し、ダミー例（`000-000`, `123-456`, 全桁ゾロ目等）での参加・保存をブロック。`crypto.getRandomValues` による `100〜999-100〜999` ランダム生成を導入し、過去露出コード（`358-220`, `738-921`, `888-999`, `FREE-01`）を新規発行から除外。`syncOrCreateSalonInCloud` での他ユーザーサロンとのコード衝突時は絶対に合流せず未使用ランダムコードを再発行し、オーナー端末の過去露出コードも客席・メンバーを維持したまま自動ローテーション。<br>②**ゲスト参加時の初期客席一覧取得（`fetchSalonTimers`）カラム不整合修正 ＆ 重複席レコード自動統合（セクション54）**: `salon_timers` テーブルに存在しない `created_at` ソートによる PostgreSQL `42703` エラー（「招待元の客席データを同期中 / 全0席」のまま進まない不具合）を解消し、実在カラム `sort_order` + `updated_at` ソートへ適正化。さらに同一席名（「1番」と「1番席」表記ゆれ含む）の重複レコードを `running` ＞ 最新 `updatedAt` ＞ `sortOrder > 0` 優先で正規の1席へ自動統合。<br>③**サロンメンバー削除・退出の Supabase `salon_members` 連動 ＆ 参加人数リアルタイム同期（セクション55）**: `deleteSalonMember` を新設し、`handleRemoveStaffMember` 実行時にクラウドの `salon_members` から確実に `DELETE`（オーナー行 `role === 'owner'` は削除アイコン非表示で保護）。解除されたゲスト端末はリアルタイム監視（`subscribeSalonMembers`）および次回起動時（`syncOrCreateSalonInCloud` での勝手な再UPSERT抑止＋`detachFromRemovedGuestSalon`）に自動で個人無料ワークスペースへ切り離し。ヘッダーの `X名参加中 (クラウド同期中)` 表示も `staffMembers.length` にリアルタイム連動。<br>④**iPhone ⇄ Apple Watch ペアシミュレーター検証プロファイル追加（セクション56）**: `eas.json` に `"simulator"` プロファイル（`"ios": { "simulator": true }, "channel": "simulator"`）を追加し、Expo Go では動作しないネイティブモジュール（`ExpoWatchConnectivity`, `ExpoAlarmKit`, `AssistTimerWatch.app`）を含むシミュレーター用ネイティブビルドと `eas update --branch simulator` による即時OTA検証フローを確立。 |
@@ -3919,7 +3921,7 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
 5. **停止済みタイマーの復活防止・常時 2.5 秒ポーリング・起動／キャッシュ同期順序の完全整合 (`src/screens/SalonWorkScreen.js`, `modules/watch-connectivity/index.js`, `targets/watch/content.swift`)**:
    - クラウドやローカルで停止された席に `lastStoppedAt` と `lastStoppedTargetEndTimestamp` を記録し、`REQUEST_SYNC` の `watchActiveSeats` が停止済みタイマー（`±15秒` 以内または停止時刻以前に開始されたタイマー）を指している場合は採用を拒否して `highPriorityWake: true` で Watch へ `00:00` 停止状態を送り返す。
    - オーナー側 `reconcileCloudTimers` の `dirtySync` 優先条件に `localMatch.status !== 'running'` を追加し、クラウド停止後のローカル `running` 復活を封鎖。
-   - 稼働中・超過鳴動中の席が 1 つでもある間は、シミュレーター等が背面ウィンドウにあっても常時 **2.5 秒間隔** で `reconcileCloudTimers` ポーリングを実行する。
+   - 稼働中・超過鳴動中の席が 1 つでもある間は、シミュレーター等が背面ウィンドウにあっても `reconcileCloudTimers` バックアップポーリングを実行する（※セクション69（Issue #11）にて、Realtime WebSocket 常時接続を主系としつつ、稼働中席あり時は 12 秒間隔、全席停止かつフォアグラウンド時は 45 秒間隔、全席停止かつバックグラウンド時は休止するダイナミックスロットリングへ最適化）。
    - `applyWatchStoppedSeatsIntoCache` / `adoptWatchActiveSeatsIntoCache` でもクラウドサロン参加中は即座に `upsertCloudTimer` を呼び出す。
    - `WatchConnectivity`（`modules/watch-connectivity/index.js`）の `handleIncoming` で `expectedEnd` / `stoppedEndTime` をミリ秒正規化して全停止系アクション（`STOP_ALARM`, `ENTER_HELP`, `START_SHAMPOO` 含む）および `seat-${seatNumber}` を即時 `notifyLocalStopOrReset` 登録し、`deliverAction` で保留中の `REQUEST_SYNC` 更新時に `watchStoppedSeats` をマージする。
    - `saveSeatsToStorage` で `_cachedCurrentSeats` と `seatsRef.current` を `0ms` 即時更新し、`loadInitialData` では先行キャッシュの停止・開始状態をマージした上で、初回の `syncSeatsToWatch` を `WatchConnectivity.subscribeActions` による保留キュー消化直後に実行する。
@@ -3960,7 +3962,7 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
    - Watch から送信する `START_TIMER` / `ADJUST_TIME` / `ASSIGN_HELP` / `RECRUIT_HELP` / `FINISH_SHAMPOO` 等もすべて `0ms` で `sendMessage` と `transferUserInfo` の両方へ同時投入し、さらに `syncSeatActionDirectlyToCloud` で全アクションにおいて `or=(id.eq.<uuid>,seat_label.in.("<base>","<base>席"))` を用いて Supabase へ直接 `PATCH` する。
    - `TimeActionSheet.onReinputTime` でも `0ms` でアラーム予約・Widget・`sessionManager`・iPhone／クラウド送信を即完了させつつ、親 View の `@State timers` 更新は `deferSeatSheetCloseAction` でシート閉鎖後に実行する。
    - `WatchConnectivity.syncData` では全ての `SYNC_SEATS` / `SYNC_MAIN_TIMER` 送信に対して 600ms タイムアウト＋`transferUserInfo` 即時フォールバックを適用し、`reconcileCloudTimers` でリモート開始・変更を検知した際も `highPriorityWake: true` でサブ Watch を即座に起床させる。
-   - Watch 単独の `pollCloudTimersFromSupabaseIfNeeded` の間隔を非稼働時 `2.2秒`・稼働時 `1.8秒`・タイムアップ直前 `1.2秒`・強制時 `0.35秒` に高速化し、`order=updated_at.desc` で最新行を取得して開始・停止・時間変更・ヘルプ・チェック・シャンプー完了の全フィールドを即時同期する。
+   - Watch 単独の `pollCloudTimersFromSupabaseIfNeeded` は、`order=updated_at.desc` で最新行を取得して開始・停止・時間変更・ヘルプ・チェック・シャンプー完了の全フィールドを同期する（※セクション69（Issue #11）にて、手首上げ瞬間・リモートPush受信時・世代不一致リトライ時は `force: true`（`0.35秒`）の即時取得を維持しつつ、定常ポーリング間隔は親 iPhone 到達性 `isReachable`・画面状態 `applicationState`・稼働タイマー有無に応じた 4.0〜30.0 秒のダイナミックスロットリングへ最適化。また直接 `PATCH` が HTTP 200〜299 で成功しかつ有効 UUID 席 ID を持つ場合は 0.35 秒後の確認 GET を省略し、さらに `sendMessage` 即時成功時は同時投入した `transferUserInfo` をキャンセルする）。
 4. **リモート開始・変更時の古いシート自動閉鎖と、別タイマー誤停止の完全防止 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
    - `handleRemoteModalSheetAutoCloseIfNeeded` にて、シートを開いていた席がリモートで新規開始された場合（`!wasRunningWhenOpened && latest.isRunning`）や、稼働中タイマーの終了時刻が 5 秒以上変化した場合（`abs(latestEnd - cachedEnd) > 5.0`）も即座に `TimeActionSheet` / `ShampooActionSheet` を自動で閉じ、最新画面へ切り替える。
    - 万一シート上で「止める／シャンプーに入る」をタップした瞬間に別端末で新しいタイマーが開始されていた場合（`isReplacedByNewRemoteTimer`）は、停止命令を送らずシートを閉じて最新状態へ更新する。
@@ -3990,14 +3992,14 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
 
 1. **`TimeActionSheet` 開始直後の即時状態反映と `isCreatorMeExplicit = true` の確立 (`targets/watch/content.swift`)**:
    - `applyReinputAndShowStandard()` にて `liveItem.creatorName = currentUserName` および `liveItem.isCreatorMeExplicit = true` を即座にセット。
-   - `onReinputTime` では `deferSeatSheetCloseAction` を廃止し、`0ms` で `self.timers[idx]`、`cachedSheetItems["timeAction"]`（既存のシート `id` を維持）、および `self.sessionManager.timers` に `applyStartToSeat` を即時反映することで、シート強制閉鎖（0.42秒後）をなくし、直後のヘルプ任命操作でも確実に稼働中＆設定者＝自分の状態を維持する。
-   - `handleRemoteModalSheetAutoCloseIfNeeded` でも `self.timers` のローカル状態を参照し、自分の Watch で開始したばかりのタイマーをリモート開始と誤認してシートを閉じないよう保護。
+   - `onReinputTime` では `deferSeatSheetCloseAction` を廃止し、`0ms` で `self.timers[idx]` および `self.sessionManager.timers` に `applyStartToSeat` を即時反映（シート展開中は SwiftUI のシート再評価・強制閉鎖を防ぐため `cachedSheetItems["timeAction"]` は書き換えず `TimeActionSheet` 内の `@State liveItem` で保持）することで、シート強制閉鎖をなくし、直後のヘルプ任命操作でも確実に稼働中＆設定者＝自分の状態を維持する。
+   - `handleRemoteModalSheetAutoCloseIfNeeded` でも `self.timers` のローカル状態および `isSeatProtectedByRecentLocalAction(within: 15.0)` を参照し、自分の Watch で開始・操作したばかりのタイマーをリモート変更と誤認してシートを閉じないよう保護。
 2. **Watch 直接クラウドポーリングおよび `processReceivedData` における設定者フラグ（`isCreatorMeExplicit`）の完全復元・維持 (`targets/watch/content.swift`)**:
    - `pollCloudTimersFromSupabaseIfNeeded` の `select` クエリに `created_by` を追加。
    - `reconcileTimersFromDirectCloudRows` にて、`row.created_by == cloudUserId`、`SeatTimerItem.isStaffMe(staffName: row.color_staff_name, currentUserName: currentUserName)`、および同一稼働中タイマー（`isSameRunningTimer`）での既存 `cur.isCreatorMeExplicit == true` から `resolvedIsCreatorMe` を算出し、`updatedTimers[i].isCreatorMeExplicit` と `creatorName` を確実に維持・復元する。
    - `processReceivedData` でも、同一稼働中タイマー（`targetEndTime` の差が 5 秒以内）でローカルが既に `prev.isCreatorMeExplicit == true` を保持している場合は、WCSession 同期パケットで `isCreatorMeExplicit` が `false` に落ちないよう保護する。
 3. **ヘルプ／チェック担当任命時の設定者（メイン担当＝自分）の確実な記録とクラウド同期 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
-   - Watch 側の `onAssignHelp`、`onRecruitHelp`、`onSetNoHelp`、`onAssignCheckStaff`、`onRecruitCheckStaff`、`onAddLateCheck`、および各選択シート（`selectHelpWorkflowSheetView` / `selectCheckStaffSheetView` / `TimeActionSheet`）にて、他スタッフを指名した場合・全員募集した場合・ヘルプなしに設定した場合（またはメイン担当が未設定／デフォルト／自分の場合）は、操作者自身をメイン担当（`isCreatorMeExplicit = true`, `creatorName = currentUserName`）として `timers[idx]`・`liveItem`・`cachedSheetItems["timeAction"]` に保持し、`syncSeatActionDirectlyToCloud` でも `color_staff_name` と `created_by` を Supabase へ直接送信する。
+   - Watch 側の `onAssignHelp`、`onRecruitHelp`、`onSetNoHelp`、`onAssignCheckStaff`、`onRecruitCheckStaff`、`onAddLateCheck`、および各選択シート（`selectHelpWorkflowSheetView` / `selectCheckStaffSheetView` / `TimeActionSheet`）にて、他スタッフを指名した場合・全員募集した場合・ヘルプなしに設定した場合（またはメイン担当が未設定／デフォルト／自分の場合）は、操作者自身をメイン担当（`isCreatorMeExplicit = true`, `creatorName = currentUserName`）として `timers[idx]`・`liveItem` に保持し、`syncSeatActionDirectlyToCloud` でも `color_staff_name` と `created_by` を Supabase へ直接送信する。
    - iPhone 側の `handleWatchAction` では、ペアリングされた Watch の操作者名が iPhone 本人（または `'スタイリスト'` / `'自分'`）と一致する場合は常に iPhone 本人の `localPhoneUserId`（`myUserIdRef.current || myUserId || _cachedMyUserId`）を最優先で採用し、`ASSIGN_HELP` / `RECRUIT_HELP` / `SET_CHECK_TIMER` および iPhone UI 上の `handleAssignAssistant` / `handleAssignCheckStaff` でも操作者本人をメイン担当（`colorStaffName`, `createdBy`）として記録・維持する。
    - これにより、Watch から他スタッフ（Simulator 等）をシャンプー等のヘルプやチェックに任命した際、**任命されたスタッフの端末と設定者（自分）の Apple Watch の双方で `isRelevantToMe` が常に `true` となり、タイムアップ時に全員の端末で確実にアラームが鳴動する**。
 
@@ -4027,13 +4029,13 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
 1. **直接クラウド `PATCH` の `updated_by` 400 自動フォールバックと `.inactive` ポーリング継続**:
    - `syncSeatActionDirectlyToCloud` において、Supabase から HTTP `400` が返却された場合は即座に `updated_by` を除外して自動リトライ送信し、以降は `Self.updatedByColumnUnsupported = true` として初回から `updated_by` なしで高速送信する。
    - `pollCloudTimersFromSupabaseIfNeeded` を `applicationState != .background`（手首下げ減光中の `.inactive` を含む）で動作可能とし、共有同期の即時性を向上させた。
-2. **クラウド `updated_at` タイムスタンプ照合と Watch 開始保護ウィンドウの最大 12 秒延長**:
-   - `WatchSessionManager.parseCloudISODate` を新設して Supabase 行の `updated_at` をパースし、`reconcileTimersFromDirectCloudRows` および `decodeTimersPayload` において、受信データやクラウド行の更新時刻が Watch での開始・操作時刻以前（`<= startedAt + 0.5s`）である場合は保護ウィンドウを **12.0秒**（`localSeatMods` は **8.0秒**）へ延長し、反映前の古い `paused` データによる `00:00` 巻き戻しを完全に遮断する。
+2. **クラウド `updated_at` タイムスタンプ照合と Watch 開始保護ウィンドウの最大 15 秒延長**:
+   - `WatchSessionManager.parseCloudISODate` を新設して Supabase 行の `updated_at` をパースし、`reconcileTimersFromDirectCloudRows` および `decodeTimersPayload` において、受信データやクラウド行の更新時刻が Watch での開始・操作時刻以前（`<= startedAt + 0.5s`）である場合は保護ウィンドウを **12.0〜15.0秒**（`localSeatModHoldSeconds = 12.0`、`watchStartedSeatTimes` は最大 15.0秒継続保持）へ延長し、初回 `SYNC_SEATS` で保護フラグを即消去せず保持期間満了まで維持することで、反映前の古い `paused` データや遅延ポーリングによる `00:00` 巻き戻しを完全に遮断する。
    - Watch で新規追加・開始した直後の客席が iPhone 側の古いスナップショットにまだ含まれていない場合でも、開始後 12 秒以内はローカルの稼働中シートを破棄せず維持する。
-   - `TimeActionSheet.applyReinputAndShowStandard` と `ContentView.onReinputTime` を統合し、サウンド設定（`watchSoundEnabled`, `phoneSoundEnabled`）を含むタイム開始を 1 回の `START_TIMER` アクションでアトミックに送信し、`markLocalSeatMod` と `watchStartedSeatTimes` の双方を確実に記録する。
+   - `TimeActionSheet.applyReinputAndShowStandard` と `ContentView.onReinputTime` を統合し、サウンド設定（`watchSoundEnabled`, `phoneSoundEnabled`）を含むタイム開始を 1 回の `START_TIMER` アクションでアトミックに送信し、`markLocalSeatMod` と `watchStartedSeatTimes`（UUIDキー＋`"seat-\(seatNumber)"` 両登録）および `localActionGeneration` インクリメントを確実に記録する。
 3. **シート起動直前の最新状態同期 `prepareSheetTarget` と誤自動クローズ防止**:
    - 一覧画面・客席マップ・チェックシート等から各モーダルシート（`timeAction`, `selectHelpStaff`, `shampooAction`, `checkAction`, `selectCheckStaff`）を開く直前に `prepareSheetTarget(for:cacheKey:)` を呼び出し、必ず最新の `sessionManager.timers` と `self.timers` および `cachedSheetItems` を完全一致させてからシートを表示する。
-   - `isSeatProtectedByRecentLocalAction(seatId:seatNumber:within: 8.0)` を新設し、`handleRemoteModalSheetAutoCloseIfNeeded` および `TimeActionSheet` の `.onReceive` において、自 Watch での操作後 8 秒間はシートを自動クローズしないよう保護する。また、稼働中タイマーのヘルプ指定画面（`.standard` 等）を開いている間はシートを閉じず、`cachedSheetItems["timeAction"]` を最新状態にインプレース更新し続ける。
+   - `isSeatProtectedByRecentLocalAction(seatId:seatNumber:within: 15.0)` を設け、`handleRemoteModalSheetAutoCloseIfNeeded` および `TimeActionSheet` の `.onReceive` において、自 Watch での操作後 15 秒間および対話サブモード（`.reinput`, `.selectHelpProcess`, `.selectHelpStaff`, `.selectCheckProcess`, `.selectCheckStaff`, `.addLateCheck`）操作中はシートを自動クローズしないよう保護する。また、シート展開中は `cachedSheetItems["timeAction"]` を書き換えず初期スナップショットを固定し（SwiftUI の `.sheet(item:)` 再構築による勝手な閉鎖を防止）、シート内の最新状態は `@State liveItem` で追従する。
    - `deferSeatSheetCloseAction` のフォールバック処理において、前のシート ID のクリア後に `executePendingSeatSheetAction()`（次シートのオープン）を実行するよう順序を是正し、遷移先のスタッフ選択シート等が消去される競合を根絶した。
 4. **全ボタンのタップ領域拡大（`.contentShape(Rectangle())`）と長押し閾値の最適化**:
    - `SeatTimerCard`、`TimeActionSheet`、`SelectHelpWorkflowSheet`、`SeatThumbnailMapSheet` 内の `.buttonStyle(.plain)` ボタン全域に `.contentShape(Rectangle())` を付与し、ボタン行の空白部分（`Spacer()`）をタップしても 1 回目で確実に反応するように改善。
@@ -4105,6 +4107,129 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
      - `trigger: always_on`（常時自動適用ルール）として、修正・実装タスク実行時に必ず「①現場UX批評 ➜ ②仕様整合性監査 ➜ ③実装 ➜ ④最終QA検証（NG時は差し戻し）」のフローを自動適用する規約を定義。
    - **`.agents/skills/salon-multi-agent-dev/SKILL.md`**:
      - `define_subagent` / `invoke_subagent` を用いて上記4つのサブエージェントを起動する具体的なシステムプロンプト、進行フローチャート、および意地悪テスト検証チェックリストを定義。
+
+---
+
+## 68. Apple Watch でのタイム設定・ヘルプ担当選択中の画面勝手クローズ＆ `00:00` 巻き戻り完全根絶、および相手 Watch への開始・募集・担当任命通知 100% 到達保証仕様 (2026-11-04)
+
+### 68.1 調査により特定された根本原因
+
+1. **Apple Watch でタイムを設定して開始した数秒後・またはヘルプ担当を選択中に画面（`TimeActionSheet`）が勝手に閉じて一覧へ戻る／タイマーが `00:00` に戻る原因 (`targets/watch/content.swift`)**:
+   - **(1A) シート展開中の `cachedSheetItems["timeAction"]` 書き換えによる SwiftUI `.sheet(item:)` 再構築・強制クローズ**:
+     `ContentView.bindingTimeAction` はシート展開中（`timeActionTargetId != nil`）に `pendingMainTimerSheetActionBox.cachedSheetItems["timeAction"]` を返却していたが、`onReinputTime`・`onAssignHelp`・`onRecruitHelp`・`handleRemoteModalSheetAutoCloseIfNeeded` がシート展開中にこのキャッシュを稼働後の `SeatTimerItem`（`isZero: false`）で上書きしていたため、`TimeActionSheet` の引数 `item` および `initialReinputMode` が途中で変化し、watchOS SwiftUI がモーダルシートを再評価・強制閉鎖していた。
+   - **(1B) 初回 `SYNC_SEATS` 受信時の `localSeatMods` / `watchStartedSeatTimes` 早期クリアと遅延クラウドポーリングによる `00:00` 上書き**:
+     Watch でタイマーを開始した直後、ペアリング先 iPhone から最初の折り返し `SYNC_SEATS`（`isRunning: true`）が返った瞬間に `localSeatMods[item.id] = nil` と `watchStartedSeatTimes[item.id] = nil` を即消去していた。その直後（開始から 1〜3 秒後）に、開始前に発射されていたインフライトの直接 Supabase ポーリング（`pollCloudTimersFromSupabaseIfNeeded`）の古い応答や iPhone 側のクラウド未反映スナップショット（`status: "paused"`, `00:00`）が到着すると、保護フラグが既に消えているため稼働中タイマーが `00:00 (停止)` に上書きされ、`TimeActionSheet` の `.onReceive` が「リモート停止された」と誤認して `dismiss()` を発火していた。
+   - **(1C) モーダル展開時の背面バナー消去タイマー発火および対話サブモード中の自動クローズ**:
+     モーダルシート展開中に親 `ContentView` の `notificationDismissWorkItem` が発火して `notificationBannerText = nil` になると親 View 再描画が走り、また `TimeActionSheet` 内でヘルプ内容・ヘルプ担当・チェック担当を選択中（`.selectHelpProcess`, `.selectHelpStaff`, `.selectCheckProcess`, `.selectCheckStaff`, `.addLateCheck`）でも `.onReceive` の自動クローズ判定が有効のままになっていた。
+2. **Watch からタイマー開始・全員募集・ヘルプ担当任命・チェック担当任命を行った際、相手側 Apple Watch（特に相手 iPhone がロック／バックグラウンド中）に通知が届かない原因 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - **(2A) Watch 直接 Supabase ポーリング（`reconcileTimersFromDirectCloudRows`）における開始・募集・担当任命の通知未実装**:
+     相手側の iPhone がロック・サスペンド中は WebSocket（`subscribeSalonTimers`）が停止し、相手側 Apple Watch は自身の直接 Supabase ポーリング（`pollCloudTimersFromSupabaseIfNeeded` → `reconcileTimersFromDirectCloudRows`）によって 1〜2 秒以内に最新状態を受け取っていた。しかし `reconcileTimersFromDirectCloudRows` は「稼働中→停止／シャンプー移行」と「チェック完了」しか通知を発火しておらず、「新規タイマー開始」「ヘルプ・チェック全員募集（`募集中`）」「自分をヘルプ担当／チェック担当に任命」を検知しても無音で盤面だけ更新していた。
+   - **(2B) iPhone 側 HTTP ポーリング（`reconcileCloudTimers`）における稼働中席の担当任命・募集遷移の通知未生成**:
+     iPhone 側でも Realtime WebSocket が瞬断し `reconcileCloudTimers`（2.5 秒周期 HTTP ポーリング）で差分を検知した際、停止遷移（`didTransitionFromRunningToStop`）しか Watch 通知（`polledStopNotification`）を生成しておらず、稼働中席でのヘルプ／チェック担当任命や全員募集が Watch へ通知中継されていなかった。
+
+### 68.2 確定仕様・実装詳細 (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)
+
+1. **`TimeActionSheet` の勝手クローズ＆ `00:00` 巻き戻りの多層完全防御 (`targets/watch/content.swift`)**:
+   - **シート展開中の初期スナップショット不変保持**:
+     - `prepareSheetTarget(for:cacheKey: "timeAction")` でシートを開いた後は、シートが閉じるまで `cachedSheetItems["timeAction"]` を一切書き換えない（`onReinputTime` / `onAssignHelp` / `onRecruitHelp` / `onSetNoHelp` / `onClearHelp` / `onAssignCheckStaff` / `onRecruitCheckStaff` / `onAddLateCheck` / `handleRemoteModalSheetAutoCloseIfNeeded` でのキャッシュ上書きを全廃）。
+     - シート内の最新表示状態は `TimeActionSheet` 内の `@State private var liveItem: SeatTimerItem` で即時更新し、同シート内でそのまま停止・ヘルプ移行・チェック完了を押した際は `let referenceSeat = preSeat.isRunning ? preSeat : item` を参照することで、開始直後の稼働中タイマーも確実に処理する。
+   - **インフライト直接クラウドポーリングの世代検証（`localActionGeneration`）**:
+     - `WatchSessionManager` に `localActionGeneration: Int` を導入し、ローカル操作（`markLocalSeatMod`, `markLocalStop`, `markLocalCheckClear`, `sendActionToPhone`）のたびにインクリメントする。
+     - `pollCloudTimersFromSupabaseIfNeeded` は HTTP リクエスト送信前の `requestGeneration` を記録し、レスポンス受信時に `self.localActionGeneration != requestGeneration` であればインフライト中にローカル操作が行われた古い応答として破棄し、0.8 秒後に再ポーリングをスケジュールする。
+   - **`localSeatMods`（12秒）および `watchStartedSeatTimes`（15秒）の継続保持と UUID／`"seat-N"` 両キー登録**:
+     - `applyPayload`（`SYNC_SEATS`）において、最初の折り返し `SYNC_SEATS` が届いても `localSeatMods` と `watchStartedSeatTimes` を `nil` に消去せず、12〜15 秒の保護期間が満了するまで（または権威的なリモート停止タイムスタンプが届くまで）維持する。
+     - `allSeatKeys(for:seatNumber:)` により、席 ID が `"seat-1"` とクラウド UUID の間で遷移しても常に両方のキーでローカル保護が機能するよう統一。
+   - **対話サブモード中・ローカル操作後 15 秒間のシート自動クローズ完全抑止**:
+     - `TimeActionSheet` に `@State private var lastLocalSheetMutationAt: Date?` と `recordLocalSheetInteraction()` を追加し、タイム決定（`applyReinputAndShowStandard`）およびヘルプ／チェック選択サブモード遷移時に記録。
+     - `.onReceive(WatchRealtimeClock)`・`.onReceive(WatchSessionManager.$timers)`・`handleRemoteModalSheetAutoCloseIfNeeded` において、ローカル操作から 15 秒以内（`isProtectedByLocalAction`）または対話サブモード中（`.reinput`, `.selectHelpProcess`, `.selectHelpStaff`, `.selectCheckProcess`, `.selectCheckStaff`, `.addLateCheck`）は自動クローズおよび `liveItem` の強制巻き戻しを行わない。
+     - また `isAnyModalSheetPresented` が `true` になった瞬間に親 `ContentView` の `notificationDismissWorkItem` をキャンセルし、シート操作中の背面バナー消去による再描画干渉を遮断する。
+2. **相手側 Apple Watch への開始・全員募集・ヘルプ任命・チェック任命の確実な通知到達と重複マージ (`targets/watch/content.swift`, `src/screens/SalonWorkScreen.js`)**:
+   - **Watch 直接 Supabase ポーリングでのリモート開始・募集・担当任命検知 (`reconcileTimersFromDirectCloudRows`)**:
+     - `!isSelfCloudMod`（他端末による更新）の際、停止・チェック完了に加えて以下の4つのリモート遷移を検知し、手首の触覚振動（`WatchAlarmCoordinator.shared.postPeerActionNotification`）＋タップ確認制バナー（`enqueuePeerConfirmationAlert`）＋上部バナーを即時発火する：
+       1. **チェック担当への自分指名 (`assign_check`)**: `remoteCheckStaff` が自分になり（またはチェックタイマーが新規・変更され）、自分がチェック担当である場合 → `🔍 ◯番席の<チェック内容>担当に指定されました`
+       2. **ヘルプ担当への自分指名 (`assign_assist`)**: `remoteAssist` が自分以外の状態から自分に変更された場合 → `💧 ◯番席の<工程>担当に指定されました`
+       3. **全員募集の開始 (`recruit`)**: ヘルプ担当またはチェック担当が `'募集中'` に変更された場合 → `📢 ◯番席の<工程>ヘルプが募集されています！` / `📢 ◯番席の<内容>チェック担当が募集されています！`
+       4. **新規タイマー開始・時間再設定 (`timer_start`)**: 非稼働から稼働開始（または終了時刻が 15 秒以上変更）され、自分が関係者（`isRelevantToMe`）である場合 → `⏱ ◯番席のタイマーが開始されました（担当: 自分）` 等
+     - `notifiedDirectCloudEventKeys`（`UserDefaults` 永続化・最大 120 件リングバッファ保持）により、直接ポーリングで同じイベントが重複鳴動することを防止し、同一タイマー稼働中に指名や募集が解除された場合（`!isCheckAssignedToMeNow` / `!isAssistAssignedToMeNow` / `!isHelpRecruitingNow` / `!isCheckRecruitingNow`）のみ `releaseDirectCloudEventKey` で該当キーを解放して再指名・再募集時の再通知を保証する。
+   - **iPhone HTTP ポーリング経路での稼働中ピア通知補完 (`SalonWorkScreen.js` `detectPolledRunningPeerNotification`)**:
+     - `reconcileCloudTimers`（オーナー・ゲスト双方）に `detectPolledRunningPeerNotification` を実装し、Realtime WebSocket が切断されていた場合でも、稼働中席のチェック担当指名（`assign_check`）・ヘルプ担当指名（`assign_assist`）・全員募集（`recruit`）・新規開始／時間再設定（`timer_start`、クラウド `updatedAt` が直近 90 秒以内のもの）を HTTP ポーリングで検知して iPhone 確認バナー表示および `syncSeatsToWatch(..., { immediate: true, highPriorityWake: true, notification })` による Watch への即時通知中継を行う。
+   - **Watch 直接ポーリング通知と iPhone 中継通知の 25 秒以内インプレース統合・確認消去後デデュープ (`extractPeerAlertSeatAndKind` / `enqueuePeerConfirmationAlert` / `handleIncomingPeerNotificationIfNeeded`)**:
+     - `extractPeerAlertSeatAndKind` を拡張し、`stop` / `shampoo` / `combing` / `check` / `check_done` に加えて `recruit` / `assign_check` / `assign_assist` / `timer_start` を席番号＋種別で正規化識別する。
+     - Watch 直接ポーリングで先行表示された通知バナーに対し、25 秒以内に iPhone 経由で操作者名付きの同一席・同一種別通知が到着した場合は、`handleIncomingPeerNotificationIfNeeded` の `if didAdd` ガードにより 2 枚目の重複バナーや 2 回目の振動・上部バナーを出さず、既存バナーの文言を操作者名付きのより詳細なテキストへインプレース更新する。また、ユーザーが既に「確認 ✓」を押してバナーを消去した直後（20 秒以内）に別チャネルから同一席・同一種別の遅延通知が届いた場合も `recentEnqueuedPeerBodies` により再通知を抑止する。
+
+---
+
+## 69. 同期速度・アラーム精度・手首下げ保護を 100% 維持したまま Apple Watch ＆ iPhone のバッテリー消費を大幅削減する省電力最適化仕様 (Issue #11 / 2026-11-04)
+
+### 69.1 背景・ボトルネック分析
+
+サロン営業中（1日 8〜12 時間）に Apple Watch と iPhone の双方で常時快適に使用できるよう、以下の 5 つの電力消費ボトルネックを特定し、**「リアルタイム同期の即時性（0ms〜1秒未満）」「アラーム・触覚通知の確実性」「手首下げ（`.inactive`）時の同期継続」を 100% 維持したまま** 無駄な CPU 起床・SwiftUI/React 再描画・無線通信（HTTPS / Bluetooth / WCSession）・Widget タイムライン再構築を排除する最適化を実施した。
+
+1. **Apple Watch の `0.5秒` 周期クロック（`WatchRealtimeClock`）と毎ティックの二重処理・無条件再描画**:
+   - 秒単位表示（`MM:SS`）に対して 0.5 秒周期（2Hz）で全 View が再計算されており、`WatchAlarmCoordinator.shared.tick()` が `WatchAlarmCoordinator.init` と `ContentView.onReceive` の 2 箇所から毎秒計 4 回重複呼び出しされていた。
+   - また、タイマーが 1 つも動いていない待機中や、モーダルシート（`TimeActionSheet` 等）を前面に開いている最中にも背面 `ContentView` の `@State now` が毎ティック更新され、全客席カードの再描画と `checkUnassignedHelpAlerts()` ループが回り続けていた。
+2. **Apple Watch 単独の直接 Supabase HTTP ポーリング（従来 1.2〜2.2秒固定）の過剰通信**:
+   - `WatchRealtimeClock` と `WatchAlarmCoordinator.tick()` の双方から毎ティック `pollCloudTimersFromSupabaseIfNeeded()` が呼ばれ、親 iPhone が近くにあって Realtime WebSocket ＋ `WCSession` が正常稼働している状態や、全席停止中・手首下げ減光中（`.inactive`）でも 1.2〜2.2 秒ごとに HTTPS 通信を繰り返していた。
+   - また、Watch からの直接 `PATCH`（`syncSeatActionDirectlyToCloud`）が HTTP 200 で成功した直後にも、毎回無条件で 0.35 秒後に確認用 `GET` ポーリングを発火していた。
+3. **iPhone 側の `500ms` 周期 `setInterval` と `2.5秒` 固定バックアップ HTTP ポーリング**:
+   - `SalonWorkScreen.js` で全席停止中やバックグラウンド中にも 500ms ごとに `setNow(Date.now())` による React 再レンダリングが走り、さらに Supabase Realtime WebSocket が接続されていても 2.5 秒ごとに `reconcileCloudTimers()` の HTTP GET が実行されていた。
+4. **Watch ➔ iPhone アクション送信時の `sendMessage` ＋ `transferUserInfo` 無条件二重配送**:
+   - 即時到達用の `sendMessage` が数ミリ秒で成功して `replyHandler` が返った後も、同時投入した `transferUserInfo` がキャンセルされずにバックグラウンド転送キューに残り、二重受信処理と Bluetooth 電力を消費していた。
+5. **`WidgetSync` におけるタイムラインリロードの重複とデバウンス消失**:
+   - `executeImmediateSave` が `performSaveOnQueue` の前に `trailingReloadWorkItem?.cancel()` を呼んでいたため、デバウンス期間中の最新データに対するリロードが消失するケースがある一方、`forceReload: true` 時はペイロードが 1 バイトも変わっていなくても毎回 `WidgetCenter.shared.reloadAllTimelines()` を発火していた。
+
+### 69.2 確定仕様・実装詳細 (`targets/watch/content.swift`, `targets/watch/alarm.swift`, `targets/watch/widget_sync.swift`, `src/screens/SalonWorkScreen.js`)
+
+1. **Apple Watch クロック周期の `1.0秒` 化・二重 `tick()` 解消・条件付き View 再描画 (`targets/watch/content.swift`, `targets/watch/alarm.swift`)**:
+   - **`WatchRealtimeClock` の `1.0秒`（1Hz）化**:
+     - `Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true)` に変更し、デジタル秒表示の精度を一切落とさずに CPU ウェイクアップと SwiftUI 再評価回数を半減（50% 削減）。`TimeActionSheet` 等のシート内クロックも自動的に 1.0 秒周期で連動する。
+   - **`WatchAlarmCoordinator.tick()` の一元化とアイドル時早期リターン**:
+     - `ContentView.onReceive(WatchRealtimeClock.shared.publisher)` 内の重複 `alarm.tick()` および `pollCloudTimersFromSupabaseIfNeeded()` 呼び出しを削除し、`WatchAlarmCoordinator` 自身の Publisher 購読（1 箇所のみ）に一元化。
+     - `WatchAlarmCoordinator.tick()` の冒頭で、予約イベント・鳴動中アラーム・拡張ランタイムセッション・バックグラウンド引き継ぎセッションがすべて空（`events.isEmpty && ringing.isEmpty && session == nil && backgroundAdoptedSessions.isEmpty && notifiedSessions.isEmpty`）の場合は即座に `return` し、非稼働時の日時計算やディスパッチ負荷をゼロにする。
+   - **非稼働時およびモーダルシート展開中の背面 `ContentView.now` 更新停止と鮮度保証ガード**:
+     - `ContentView.onReceive(WatchRealtimeClock.shared.publisher)` では、`(!isAnyModalSheetPresented && hasActiveTimer) || !alarm.ringing.isEmpty` を満たす時のみ `now = input` を更新し、`checkUnassignedHelpAlerts()` も `hasActiveTimer` が `true` の時のみ実行する。
+     - **【監査ガード】`@State now` の鮮度保証**: 非稼働中やシート展開中に `now` の定期更新を止めても、タイマー開始・時間変更・シート閉鎖の瞬間に古い `now` が参照されて残り時間表示の初期フレームズレや計算誤差が起きないよう、以下の全経路で即座に `self.now = Date()`（またはローカル定数 `let currentNow = Date(); self.now = currentNow`）を更新する：
+       - `.onChange(of: timers)` / `.onReceive(sessionManager.$timers)` / `.onReceive(sessionManager.$mainTimer)` で稼働中タイマーを検知した瞬間
+       - `.onChange(of: isAnyModalSheetPresented)` でモーダルシートが閉じた（`!isPresented`）瞬間
+       - `handleToggleMainTimer` / `handleStartMainTimer` / `handleSetMainTimerTime` / `handleAdjustMainTimer` / `addSeatSheetView` / `onReinputTime` の各操作実行瞬間
+
+2. **Watch 単独の直接 Supabase ポーリングのダイナミックスロットリングと確認 GET 最適化 (`targets/watch/content.swift`)**:
+   - **状況別の動的ポーリング間隔 (`pollCloudTimersFromSupabaseIfNeeded`)**:
+     - `hasNearTimeupSeat`（残り90秒判定）を撤廃（タイムアップはローカル `Date` と `WatchAlarmCoordinator` でミリ秒単位に自己完結発火するためネットワークポーリングは不要）。
+     - `WCSession.default.isReachable`（親 iPhone 到達性）、`WKApplication.shared().applicationState`（`.active` 手首上げ中 / `.inactive` 手首下げ減光中）、および `hasRunningSeat`（稼働中タイマー有無）に応じて以下の通り動的に間隔を切り替える：
+       - **`force == true`（手首を上げて `.active` になった瞬間・バックグラウンド Push 受信時・世代不一致リトライ時等）**: **`0.35秒`**（即時取得）
+       - **画面点灯・操作中（`.active`）かつ稼働中タイマーあり**: iPhone 接続中 **`6.0秒`** ／ iPhone 非接続（Watch 単独） **`4.0秒`**
+       - **画面点灯・操作中（`.active`）かつ全席停止中**: iPhone 接続中 **`12.0秒`** ／ iPhone 非接続（Watch 単独） **`8.0秒`**
+       - **手首下げ減光中（`.inactive`）かつ稼働中タイマーあり**: iPhone 接続中 **`15.0秒`** ／ iPhone 非接続（Watch 単独） **`8.0秒`**
+       - **手首下げ減光中（`.inactive`）かつ全席停止中**: iPhone 接続中 **`30.0秒`** ／ iPhone 非接続（Watch 単独） **`15.0秒`**
+   - **【監査ガード】`localActionGeneration` 不一致時の 0.8 秒リトライ確実実行**:
+     - インフライト中にローカル操作が発生して `self.localActionGeneration != requestGeneration` となり古い応答を破棄した際は、0.8 秒後の `pollCloudTimersFromSupabaseIfNeeded(force: true)` が `0.35秒` ガードにすら弾かれないよう、リトライ予約直前に `self.lastDirectCloudPollAt = .distantPast` にリセットする。
+   - **直接 `PATCH` 成功時の不要な 0.35 秒後確認 GET ポーリングの省略 (`syncSeatActionDirectlyToCloud`)**:
+     - `syncSeatActionDirectlyToCloud` で初回 `PATCH` または `updated_by` 除外フォールバック `PATCH` の HTTP ステータスが `200...299` で成功し、かつ対象席が既に有効なクラウド UUID（`hasUUIDSeatId`）を持っている場合は、0.35 秒後の `pollCloudTimersFromSupabaseIfNeeded(force: true)` を省略する。ローカル仮 ID（`"seat-1"` 等）からクラウド UUID への昇格が必要な場合（`!hasUUIDSeatId`）または通信失敗時（`!patchSucceeded`）のみ 0.35 秒後の強制ポーリングを実行する。
+
+3. **Watch ➔ iPhone デュアル送信時の不要な `transferUserInfo` 即時キャンセル (`targets/watch/content.swift`)**:
+   - `WatchSessionManager.deliver(_ payload:session:)` にて、即時デュアル送信アクション（`isImmediateDualRouteAction`）で `session.transferUserInfo(payload)` を投入した際、その戻り値 `WCSessionUserInfoTransfer` を `var pendingTransfer` に保持する。
+   - 同時に発射した `session.sendMessage(payload, replyHandler:)` が即座に成功して `replyHandler` が呼ばれた時点で `pendingTransfer?.cancel()` を実行し、既にリアルタイム到達したアクションの重複バックグラウンド転送と iPhone 側の二重デデュープ負荷をカットする（`sendMessage` がエラーまたは 0.6 秒タイムアウトした場合はキャンセルせず `transferUserInfo` が確実に配送を完遂する）。
+
+4. **`WidgetSync` のタイムラインリロード最適化とデバウンス整合性修正 (`targets/watch/widget_sync.swift`)**:
+   - `executeImmediateSave` 冒頭で行っていた先行 `trailingReloadWorkItem?.cancel()` を廃止し、`performSaveOnQueue` 内のペイロード比較後に一元制御する。
+   - `performSaveOnQueue` において `data == lastPayload && !mainActiveChanged`（保存データに変化なし）の場合：
+     - 保留中のデバウンスリロード（`trailingReloadWorkItem != nil`）があり、かつ `forceReload == true` で呼ばれた場合は、保留ワークアイテムをキャンセルして即座に `WidgetCenter.shared.reloadAllTimelines()` をフラッシュ実行し、直前の未反映変更が消失しないことを保証する。
+     - それ以外の場合は `WidgetCenter.shared.reloadAllTimelines()` を呼ばずに即 `return` し、変化がない状態での無駄な Widget タイムライン再生成を排除する。
+
+5. **iPhone 側のクロック省電力化とバックアップ HTTP ポーリングの間隔最適化 (`src/screens/SalonWorkScreen.js`)**:
+   - **クロック & タイムアップ監視ループの `1000ms` 化と非稼働時・バックグラウンド時の負荷削減**:
+     - `setInterval` 周期を `500ms` から `1000ms`（1秒）に変更。
+     - `currentSeats.some((s) => s && s.status === 'running')` が `false`（稼働中席が 0 件）の場合はループ先頭で即 `return` し、待機中の CPU 消費と再レンダリングをゼロにする。
+     - バックグラウンド／非アクティブ時（`appState !== 'active'`）は、タイムアップ・チェック到達・残り1分アラートの判定処理のみを実行し、`setNow(currentNow)` による React コンポーネントツリー全体の再レンダリングをスキップする。
+     - **【監査ガード】iPhone 側 `now` 鮮度保証**: `AppState` が `'active'` に復帰した瞬間、および `seats` 配列が変化して `status === 'running'` の席が存在する瞬間（`useEffect([seats])`）に即座に `setNow(Date.now())` を実行し、フォアグラウンド復帰時や新規タイマー開始時の表示ラグをゼロにする。
+   - **クラウドバックアップ HTTP ポーリングのダイナミックスロットリング**:
+     - メインの同期経路である Supabase Realtime WebSocket（`subscribeSalonTimers`）は常時維持したまま、WebSocket 瞬断時のフェイルセーフである定期 HTTP ポーリング（`reconcileCloudTimers`）の間隔を以下の通り最適化する：
+       - **稼働中の席が 1 つでもある場合 (`hasAnyRunningSeat`)**: **`12,000ms`（12秒）間隔**
+       - **全席停止中かつアプリがフォアグラウンド (`!hasAnyRunningSeat && isForeground`)**: **`45,000ms`（45秒）間隔**
+       - **全席停止中かつバックグラウンド**: **ポーリング休止**
+     - **【監査ガード】`detectPolledRunningPeerNotification` の `updatedAt` 許容窓の拡大**: バックアップポーリング間隔を最大 12 秒（全席停止時は 45 秒）へ拡大したことに伴い、WebSocket 瞬断中に開始されたタイマーの `timer_start` 通知がポーリング検知時に取りこぼされないよう、`detectPolledRunningPeerNotification` における `nextSeat.updatedAt` の鮮度許容窓を従来の `60,000ms`（60秒）から **`90,000ms`（90秒）** へ拡大する。
+
 
 
 

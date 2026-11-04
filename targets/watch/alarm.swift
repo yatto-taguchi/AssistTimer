@@ -998,6 +998,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
 
     /// アプリ表示中に1秒ごとに呼ぶ
     func tick() {
+        if events.isEmpty && ringing.isEmpty && session == nil && backgroundAdoptedSessions.isEmpty && notifiedSessions.isEmpty {
+            return
+        }
         refresh()
     }
 
