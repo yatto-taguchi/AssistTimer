@@ -3260,7 +3260,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     if cur.id != rowId {
                         self.markPeerStoppedSeat(seatId: cur.id, seatNumber: cur.seatNumber, endTimeEpoch: stoppedEndEpoch)
                     }
-                    let nextStatus: SeatStatus = {
+                    let nextStatus: TreatmentStatus = {
                         if cloudIsShampooing || cloudHelpProc == "シャンプー" { return .shampoo }
                         if cloudHelpProc == "コーミング" { return .combing }
                         if cloudHelpProc == "チェック" { return .check }

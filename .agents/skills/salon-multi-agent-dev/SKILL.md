@@ -117,6 +117,7 @@ flowchart TD
 ```bash
 node --check src/screens/SalonWorkScreen.js
 swiftc -parse targets/watch/content.swift targets/watch/alarm.swift targets/watch/widget_sync.swift
+xcodebuild -project ios/AssistTimer.xcodeproj -scheme AssistTimerWatch -configuration Debug -sdk watchsimulator -derivedDataPath /tmp/assisttimer-watch-dd CODE_SIGNING_ALLOWED=NO build
 ```
 
 ### 3. 最終意地悪QA検証と差し戻しループ（Phase 3）
