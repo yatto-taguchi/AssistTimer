@@ -199,27 +199,16 @@ Deno.serve(async (req: Request) => {
       return out;
     };
 
+    // ★ 仕様変更（Issue #9）: アラーム・確認通知の対象を「その客席の施術担当（作成者/主担当 ＋ 明示的に指名されたヘルプ担当・チェック担当）」のみに厳密限定。
+    //   ヘルプやチェックが「未定（空文字）」の場合にサロン全員へ通知を拡散するフォールバックを完全廃止し、無関係なスタッフの端末・Watchは鳴らさない。
     const collectMainTimerAlertCandidates = (rec?: SalonTimerRecord | null): Set<string> => {
       if (!rec) return new Set<string>();
-      const assigned = collectAssignedStakeholders(rec);
-      const assist = String(rec.assistant_staff_name || '').trim();
-      if (isNoHelp(assist)) {
-        return assigned;
-      }
-      if (!assist || assist === '募集中' || assist === '未定') {
-        return mergeSets(assigned, allMemberUserIds);
-      }
-      return assigned;
+      return collectAssignedStakeholders(rec);
     };
 
     const collectCheckTimerAlertCandidates = (rec?: SalonTimerRecord | null): Set<string> => {
       if (!rec) return new Set<string>();
-      const assigned = collectAssignedStakeholders(rec);
-      const chk = String(rec.check_staff_name || '').trim();
-      if (!chk || chk === '募集中' || chk === '未定') {
-        return mergeSets(assigned, allMemberUserIds);
-      }
-      return assigned;
+      return collectAssignedStakeholders(rec);
     };
 
     const prevAssist = String(prev?.assistant_staff_name || '').trim();

@@ -1117,12 +1117,15 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 1. 修正・機能改修を行う前に、**必ず本仕様書を精読**して設計の整合性を確認すること。
 2. 修正や仕様変更が発生した場合は、**Antigravityが責任を持って本仕様書を最新の状態に更新**すること。
 3. コードの勝手な修正・実装は行わず、原因・対策・改善点・質問事項を整理してユーザーの合意を得てから実装すること。
-4. 修正を行うたびに、以下の形式で変更履歴に追記すること。
+4. すべての機能追加・仕様変更・バグ修正タスクにおいては、[`AGENTS.md`](AGENTS.md)・[`.agents/rules/multi-agent-review-workflow.md`](.agents/rules/multi-agent-review-workflow.md)・[`.agents/skills/salon-multi-agent-dev/SKILL.md`](.agents/skills/salon-multi-agent-dev/SKILL.md)（および本仕様書セクション67）に定める**「4つの専門サブエージェント（①現場UX批評 `ux-flow-critic` ➜ ②仕様書＆3層整合性監査 `spec-auditor` ➜ ③実装 `implementer` ➜ ④最終品質・意地悪テスト検証 `qa-verifier`）による相互チェック＆ブラッシュアップ開発フロー」**を常時自動適用し、④の意地悪テスト検証が全項目 PASS するまで完了としないこと。
+5. 修正を行うたびに、以下の形式で変更履歴に追記すること。
 
 ---
 
 ### 6.2. 変更履歴 (Changelog)
 
+| 2026-11-04 | **4つの専門サブエージェント（現場UX批評・仕様整合性監査・実装・最終QA検証）による相互チェック＆ブラッシュアップ開発フローの常設ルール化 (Issue #10) (`AGENTS.md`, `.agents/rules/multi-agent-review-workflow.md`, `.agents/skills/salon-multi-agent-dev/SKILL.md`, `SPECIFICATION.md`)** | ①**プロジェクト常設ルール（`AGENTS.md` / `.agents/rules/multi-agent-review-workflow.md`）の配備（セクション67.2）**: `trigger: always_on` として、新しいチャットや任意の作業環境でも自動的に「①現場フロー・UX批評（`ux-flow-critic`）➜ ②仕様書＆3層整合性監査（`spec-auditor`）➜ ③実装（`implementer`）➜ ④最終品質・意地悪テスト検証（`qa-verifier`、NG時は差し戻し）」の4エージェント相互チェック体制で進行する常設ルールを確立。<br>②**再利用スキル（`.agents/skills/salon-multi-agent-dev/SKILL.md`）の作成（セクション67.2）**: `define_subagent` / `invoke_subagent` による4専門サブエージェントのシステムプロンプト、起動手順、および8項目の意地悪テスト境界条件チェックリストを標準化。 |
+| 2026-11-04 | **他スタッフによる停止・シャンプー移行時の即時「タップ確認制通知」＆自端末アラーム・超過継続、およびアラーム・通知対象の施術担当者（関係者）限定仕様 (Issue #9) (`src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`, `supabase/functions/notify-salon-event/index.ts`, `SPECIFICATION.md`)** | ①**他スタッフによる「停止／シャンプー移行（ヘルプに入る）」時の自端末タイマー・アラーム・超過継続と即時確認制通知（セクション66.1〜66.2）**: 自分自身（またはペアリングされた自端末）が停止・シャンプー移行を押した場合は即座にアラーム停止＆`00:00` リセット（カード収納）。一方、他スタッフが停止・シャンプー移行を押した際、自分がその席の施術担当者（主担当・明示指定されたヘルプ担当・明示指定されたチェック担当：`isUserStakeholderForSeat` / `SeatTimerItem.isStakeholder`）である場合は、押された瞬間に「誰が停止／シャンプーに入ったか」の消えないタップ確認制通知バナー（iPhone `GlobalPeerToastOverlay` ＆ Apple Watch `peerConfirmationAlerts`）を即時表示しつつ、自端末のタイマーカウントダウン・アラーム予約・鳴動中アラーム・超過カウントアップ（`+00:xx`）は一切停止せず、自分が自ら止めるまで継続。また Watch の `peerStoppedSeatEnds` 永続化により確認バナー消去後の再ポーリング時8秒無限再通知ループおよび `SYNC_SEATS` 上書き消火を防止し、さらに設定者が遅れて自分の残りアラームを止めた際（`wasAlreadyPeerStopped`）は先行スタッフの「💧 シャンプー中」ステータスやクラウド行を上書き消去しないよう保護。<br>②**アラーム鳴動および確認通知の対象を「施術に関わる担当者（関係者）」のみに厳格限定・未定時全員フォールバック撤廃（セクション66.2）**: `shouldAlertMainTimerForUser` / `shouldAlertCheckTimerForUser` / `isUserStakeholderForSeat`（iPhone）、`SeatTimerItem.isStakeholder` / `isRelated` / `shouldAlertMainTimer` / `shouldAlertCheckTimer`（Watch）、および Edge Function `collectMainTimerAlertCandidates` / `collectCheckTimerAlertCandidates` において、ヘルプ担当やチェック担当が「未定（空欄）」のときにサロンメンバー全員を対象にするフォールバックを完全撤廃。タイマーを入れた主担当（`createdBy` / `colorStaffName` / `isCreatorMe`）と明示的に指名されたヘルプ担当（`assistantStaffName` / `shampooStaff`）・チェック担当（`checkStaffName` / `checkStaff`）のみにアラーム・確認通知を限定し、無関係なスタッフの端末が誤って鳴動・通知される現象を根絶。残り1分のヘルプ未定アラートにはワンタップで全員へ発信できる `'サロン全員に募集する'`（`handleRecruitAssistantDirectly`）導線を新設。 |
 | 2026-10-30 | **招待コードの端末別ランダム一意発行・例文分離、ゲスト参加時の初期客席同期（`fetchSalonTimers`）スタック解消、メンバー削除・退出のクラウド連動（`deleteSalonMember`）＆人数リアルタイム反映、および iPhone/Watch シミュレータービルド基盤構築 (`src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`, `eas.json`)** | ①**サロン招待コードのランダム一意発行・衝突遮断・入力例プレースホルダー非実在コード分離（セクション53）**: サロン参加・コード変更・メンバー連携の全入力欄プレースホルダーを実在不能な `例: 000-000` に統一し、ダミー例（`000-000`, `123-456`, 全桁ゾロ目等）での参加・保存をブロック。`crypto.getRandomValues` による `100〜999-100〜999` ランダム生成を導入し、過去露出コード（`358-220`, `738-921`, `888-999`, `FREE-01`）を新規発行から除外。`syncOrCreateSalonInCloud` での他ユーザーサロンとのコード衝突時は絶対に合流せず未使用ランダムコードを再発行し、オーナー端末の過去露出コードも客席・メンバーを維持したまま自動ローテーション。<br>②**ゲスト参加時の初期客席一覧取得（`fetchSalonTimers`）カラム不整合修正 ＆ 重複席レコード自動統合（セクション54）**: `salon_timers` テーブルに存在しない `created_at` ソートによる PostgreSQL `42703` エラー（「招待元の客席データを同期中 / 全0席」のまま進まない不具合）を解消し、実在カラム `sort_order` + `updated_at` ソートへ適正化。さらに同一席名（「1番」と「1番席」表記ゆれ含む）の重複レコードを `running` ＞ 最新 `updatedAt` ＞ `sortOrder > 0` 優先で正規の1席へ自動統合。<br>③**サロンメンバー削除・退出の Supabase `salon_members` 連動 ＆ 参加人数リアルタイム同期（セクション55）**: `deleteSalonMember` を新設し、`handleRemoveStaffMember` 実行時にクラウドの `salon_members` から確実に `DELETE`（オーナー行 `role === 'owner'` は削除アイコン非表示で保護）。解除されたゲスト端末はリアルタイム監視（`subscribeSalonMembers`）および次回起動時（`syncOrCreateSalonInCloud` での勝手な再UPSERT抑止＋`detachFromRemovedGuestSalon`）に自動で個人無料ワークスペースへ切り離し。ヘッダーの `X名参加中 (クラウド同期中)` 表示も `staffMembers.length` にリアルタイム連動。<br>④**iPhone ⇄ Apple Watch ペアシミュレーター検証プロファイル追加（セクション56）**: `eas.json` に `"simulator"` プロファイル（`"ios": { "simulator": true }, "channel": "simulator"`）を追加し、Expo Go では動作しないネイティブモジュール（`ExpoWatchConnectivity`, `ExpoAlarmKit`, `AssistTimerWatch.app`）を含むシミュレーター用ネイティブビルドと `eas update --branch simulator` による即時OTA検証フローを確立。 |
 | 2026-10-28 | **Supabase クラウドバックエンド完全連携、端末固有UUID発行、招待コードによるサロン参加・メンバーおよび客席タイマーリアルタイム双方向同期（Realtime WebSocket）実装 (Build 88) (`src/utils/supabase.js`, `src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`)** | ①**Supabase クラウド基盤の公式本番接続 (`src/utils/supabase.js`)**: 専用の新規プロジェクト「AssistTimer」を開設し、`salons`、`salon_members`、`salon_timers` の3テーブル構成および `supabase_realtime` リアルタイム発行を設定。`@supabase/supabase-js` を導入し、AsyncStorageセッション永続化と環境変数フォールバック接続を確立。<br>②**端末固有UUID自動発行 ＆ サロン自動確保 (`src/utils/salonCloudService.js`)**: 端末ごとに一意のUUID（`getOrCreateUserId()`）を生成・保存。サロン起動・作成・招待コード共有時にSupabaseクラウドへサロン情報を自動登録し、作成者をオーナー（`role: 'owner'`）として登録。<br>③**招待コードによるサロン参加 ＆ メンバー自動登録 (`handleJoinByCode`)**: 参加スタッフが招待コードを入力すると、Supabaseクラウドから該当サロンを検索し、`salon_members` へ自動参加登録（`joinSalonByInviteCode`）。参加完了時に即座にサロン切替、メンバー一覧の取得・永続化、および手元Apple Watchへの即時プッシュ同期を実行。<br>④**サロンメンバーの Realtime WebSocket 双方向リアルタイム同期 (`subscribeSalonMembers`)**: 所属サロンのメンバーテーブル変更をリアルタイム監視し、別端末からスタッフが参加または表示名変更を行った瞬間に、全員の画面のメンバー一覧およびヘッダーバッジ（`メンバー (X)`）がリロード不要で即時自動更新。<br>⑤**客席タイマー（salon_timers）の差分検出リアルタイム双方向同期 (`subscribeSalonTimers`, `syncChangedSeatsToCloud`)**: タイマー開始・延長（+1分/+3分/+5分/秒微調整）・一時停止・再開・リセット停止・施術終了・ヘルプ担当指定・チェックタイマー追加/完了・席名変更・席追加/削除のあらゆる操作において、シグネチャ差分検知により状態変化の瞬間のみSupabaseクラウドへ即座にUPSERT/DELETEを送信。他端末の操作イベントを受信した際もリモートフラグガードによりエコー・無限ループを遮断し、手元のApple Watchまで含めて全員のタイマー盤面が1秒未満で完全一致連動。 |
 | 2026-10-27 | **超過・操作分岐画面へのタイマー名バッジ表示（メインタイマー／◯番席／チェック）およびヘルプ未設定アラート（残り3分以下）の0.5秒周期連続発火・ちらつきバグ完全根絶 (Build 87) (`targets/watch/content.swift`)** | ①**超過・操作分岐画面のタイマー名バッジ明示 (`MainTimerActionSheet`, `TimeActionSheet`)**: タイム超過時に自動表示される画面や操作分岐画面でどのタイマーか一目で判別できるよう、デジタル数字の直上にメインタイマーは `⏱️ メインタイマー`、客席タイマーは `⏲️ 1番席`（設定した席名）、チェックタイマーは `🔍 1番席（チェック）` の高視認性ピルバッジを常時表示。<br>②**ヘルプ未設定アラート（`checkUnassignedHelpAlerts` / `showNotification`）の連続発火・ちらつき完全解消**: `checkUnassignedHelpAlerts()` が `ContentView.timers` のみ `hasAlertedHelpUnassigned = true` に更新して `sessionManager.timers` を更新していなかったため、次の0.5秒周期 `WatchRealtimeClock` ティックの `self.timers != sessionManager.timers` 判定で `false` に巻き戻り、0.5秒ごとに通知バナー再生成と過去 `asyncAfter` による消去が衝突して激しくちらついていた不具合を抜本修正。発火時に `sessionManager.timers` も同期更新し、`SeatTimerItem` の辞書シリアライズ（`init?(dictionary:)` / `toDictionary()`）と `processReceivedData` でも `hasAlertedHelpUnassigned` を保持。さらに `showNotification` に `DispatchWorkItem` キャンセル制御と同一バナー重複アニメーション抑止を導入し、1回のタイマー稼働につき確実に1度だけスムーズに表示されるよう修正。 |
@@ -3162,14 +3165,14 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
   7. **モジュラー文字盤4行目（チェックタイマー行）におけるチェック担当者と全体ヘルプ（シャンプー等）担当者の完全分離 (`targets/watch/widget_sync.swift`, `targets/watch-widget/widget.swift`)**:
      - モジュラー文字盤の1行目（`staffFlow`: 作成者 → 全体ヘルプ担当 `shampooStaff`）と4行目（`checkTimerRow`）において、従来4行目が `seat.helpProcess` と `seat.shampooStaff` を参照していたため、シャンプー担当とチェック担当が別々の人でも同じ人（シャンプー担当）が表示されてしまうバグを修正。
      - `widget_sync.swift` で `checkProcess` を送信し、`widget.swift` の `checkTimerRow` では `seat.checkProcess` と `seat.checkStaff` のみを独立して参照（自分なら `"自分"`、他人ならその名前、募集なら `"募集中"`、未設定なら `"未定"`）するよう修正。
-  8. **その席の関係者（＋ヘルプに入る可能性がある人）限定の時間経過アラーム＆共有相手リアルタイム操作通知 (`src/screens/SalonWorkScreen.js`, `src/utils/salonCloudService.js`, `targets/watch/content.swift`, `targets/watch/alarm.swift`)**:
-     - **背景・目的**: サロン全体で共有使用している際、無関係な他人の席のタイマーで全員のスマホやApple Watchが鳴ると業務の邪魔になる一方、自分が関わっている席（主担当・全体ヘルプ担当・チェック担当、または担当未定/募集中で自分がヘルプに入る可能性がある席）では、相手がチェックタイマーを止めたりタイマーを操作したときにリアルタイムで通知が届く必要がある。
-     - **時間経過アラームの関係者フィルタリング**:
-       - **全体タイマー（`shouldAlertMainTimer` / `shouldAlertMainTimerForUser`）**: 自分が主担当（`creatorName` / `colorStaffName` / `createdBy`）、または自分が全体ヘルプ担当（`shampooStaff` / `assistantStaffName`）、または「ヘルプなし」以外で全体ヘルプが「未定」もしくは「募集中」の場合のみ、Watch振動・ローカル通知・iPhoneアラーム（AlarmKit / 500ms監視アラート）を鳴動させる。
-       - **中間チェックタイマー（`shouldAlertCheckTimer` / `shouldAlertCheckTimerForUser`）**: 自分が主担当、または自分がチェック担当（`checkStaff` / `checkStaffName`）、またはチェック担当が「未定」もしくは「募集中」の場合のみ、Watch振動・ローカル通知・iPhoneアラームを鳴動させる。
-     - **共有相手の操作による関係者限定リアルタイム通知**:
-       - `salonCloudService.js` で自端末からの直近送信シグネチャ（`isSelfEcho`）を識別して自己通知エコーバックを防止。
-       - `SalonWorkScreen.js` の `subscribeSalonTimers` にて、他端末からの更新（チェックタイマー完了・全体タイマー停止/リセット・ヘルプ/チェック全員募集・ヘルプ/チェック担当指名・関係席の新規開始/チェック追加/時間変更）を検知した際、自分がその席の関係者（または未定/募集で入る可能性がある人）である場合のみ、iPhone上部の通知バナー＆触覚振動（`showPeerActionBanner`）を表示するとともに、Apple Watchへ `notification`（`sourceUser: '__remote__'`）を即時プッシュし、Watch画面バナー＋触覚振動＋TimeSensitiveローカル通知（`postPeerActionNotification`）で手首へ即座に知らせる。また、他端末で停止・完了されたタイマーのAlarmKit予約も即座に `stopAlarm` で消火する。
+  8. **その席の施術担当者（関係者）限定の時間経過アラーム＆共有相手リアルタイム操作通知 (`src/screens/SalonWorkScreen.js`, `src/utils/salonCloudService.js`, `targets/watch/content.swift`, `targets/watch/alarm.swift` — ※Issue #9 にて未定時の全員フォールバックを撤廃し厳格化、詳細は第66節参照)**:
+     - **背景・目的**: サロン全体で共有使用している際、無関係な他人の席のタイマーで全員のスマホやApple Watchが鳴ると業務の邪魔になる一方、自分が施術に関わっている席（主担当・明示指定された全体ヘルプ担当・明示指定されたチェック担当）では、相手がチェックタイマーを止めたりタイマーを操作したときにリアルタイムで確認制通知が届く必要がある。
+     - **時間経過アラームの関係者フィルタリング（Issue #9 確定仕様）**:
+       - **全体タイマー（`shouldAlertMainTimer` / `shouldAlertMainTimerForUser`）**: 自分が主担当（`creatorName` / `colorStaffName` / `createdBy` / `isCreatorMe`）、または自分が全体ヘルプ担当として明示指定されている（`shampooStaff` / `assistantStaffName`）場合のみ、Watch振動・ローカル通知・iPhoneアラーム（AlarmKit / 500ms監視アラート）を鳴動させる（ヘルプ未定・空欄時は主担当のみが鳴動し、無関係なスタッフは鳴動しない）。
+       - **中間チェックタイマー（`shouldAlertCheckTimer` / `shouldAlertCheckTimerForUser`）**: 自分が主担当、または自分がチェック担当として明示指定されている（`checkStaff` / `checkStaffName`）場合のみ、Watch振動・ローカル通知・iPhoneアラームを鳴動させる（チェック未定・空欄時は主担当のみが鳴動）。
+     - **共有相手の操作による関係者限定リアルタイム通知＆他者停止時の自端末タイマー継続（Issue #9 確定仕様）**:
+       - `salonCloudService.js` で自端末からの直近送信シグネチャ（`isSelfEcho` / `isRecentLocalActorEcho`）を識別して自己通知エコーバックを防止。
+       - 他端末で全体タイマーの「停止」または「シャンプー／コーミング等（ヘルプに入る）」が押された際、自分がその席の施術担当者である場合は、押された瞬間に消えないタップ確認制通知（`showPeerActionBanner` ＆ Watch `peerConfirmationAlerts`）を即時表示しつつ、自端末のタイマーカウントダウン・アラーム予約・鳴動中アラーム・超過カウントアップは一切止めず、自分が自ら止めるまで継続させる（無関係な他スタッフの席は背景で静かに `00:00` 停止へ同期）。
 
 ---
 
@@ -4038,5 +4041,71 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
 5. **他スタッフ操作・指名時の確認制（手動消去型）共有通知バナーと重複通知音防止 (`App.js`, `src/utils/AppContext.js`, `src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`)**:
    - **iPhone 側 (`peerToastQueue` / `GlobalPeerToastOverlay`)**: 共有相手によるタイマー停止・チェック完了・担当者指名等の通知を `【HH:mm】` 発生時刻付きのキュー方式（`peerToastQueue`）で保持し、ユーザーが「確認」ボタンまたはバナーをタップするまで消えない確認制バナーとして全タブ最上部に表示（未確認件数バッジ付き）。
    - **Apple Watch 側 (`peerConfirmationAlerts` / `enqueuePeerConfirmationAlert`)**: Watch 側でも他端末からの共有アクション通知を `【HH:mm】` 時刻付きで確認制カード（`peerConfirmationBannerOverlay`）にキュー保持し、バナーの「確認 ✓」タップで順次消去する。また `enqueuePeerConfirmationAlert` の戻り値（新規追加成否）を判定してから `WatchAlarmCoordinator.shared.postPeerActionNotification` を呼ぶことで、WCSession 経由と直接クラウドポーリング経由の重複通知音を防止した。
+
+---
+
+## 66. 他スタッフによる停止・シャンプー移行時の即時「タップ確認制通知」＆自端末アラーム・超過継続、およびアラーム・通知対象の施術担当者（関係者）限定仕様 (Issue #9 / 2026-11-04)
+
+### 66.1 背景・目的
+
+1. **他スタッフが「停止」や「シャンプー（ヘルプに入る）」を押した際の現場課題**:
+   - 従来、他のスタッフが共有タイマーの「タイマーを止める」や「シャンプーに入る」を押すと、主担当（タイマー設定者）やヘルプ担当の端末でも自動的にアラームが消火されタイマーが `00:00` にリセットされていた。
+   - しかし実際のサロン施術現場では、自分が気づかないうちに他のスタッフがタイマーを止めた結果、自分の端末のアラームも消えてしまい、タイムアップや経過状況を自分自身で把握・確認できなくなるリスクがあった。
+2. **「未定」時の全員フォールバックによる無関係スタッフへの誤鳴動・誤通知**:
+   - 従来、ヘルプ担当やチェック担当が「未定（空欄）」の場合にサロンメンバー全員を関係者扱い（フォールバック）していたため、その席の施術に一切関わっていないスタッフの iPhone や Apple Watch までアラームや通知が鳴り響く問題があった。
+
+### 66.2 確定仕様・実装詳細 (`src/screens/SalonWorkScreen.js`, `targets/watch/content.swift`, `supabase/functions/notify-salon-event/index.ts`)
+
+1. **他スタッフが「停止」または「シャンプー／コーミング等（ヘルプに入る）」を押した時の挙動分離**:
+   - **① 自分自身（自端末または自分のペアリング端末）が操作した場合**:
+     - 従来通り、自分の iPhone および Apple Watch のアラームを即座に停止し、タイマーを `00:00` にリセット（席カードを折りたたみ収納）する。
+   - **② 他のスタッフが操作し、かつ自分がその席の施術担当者（`shouldAlertMainTimerForUser` / `shouldAlertMainTimer` が `true`）である場合**:
+     1. **押された瞬間に消えない「タップ確認制通知」を即時表示**:
+        - カウントダウン途中での停止・シャンプー移行であっても、タイムアップ（超過）後の停止・シャンプー移行であっても、他スタッフが押した瞬間に iPhone（`showPeerActionBanner` / `GlobalPeerToastOverlay`）および Apple Watch（`enqueuePeerConfirmationAlert` / `peerConfirmationBannerOverlay` ＋ `postPeerActionNotification`）へ、`【HH:mm】 💧 ◯番席: ◯◯さんがシャンプーに入りました` ／ `⏹ ◯番席: ◯◯さんがタイマーを停止しました` の手動確認制通知バナーを即座に表示する。
+     2. **自端末のタイマー・アラーム・超過カウントアップは止めずに継続**:
+        - `shouldKeepLocalRunningOnCloudStop` および `mergeSeatPreservingLocalRunning`（iPhone）、ならびに `processReceivedData` / `reconcileTimersFromDirectCloudRows` のローカル稼働維持ロジック（Apple Watch）により、他スタッフが停止しても自端末の `status: 'running'`・`targetEndTimestamp`・`checkEndTimestamp`・`isCheckRunning`・アラーム予約（`AlarmKit` / `WatchAlarmCoordinator`）・鳴動中アラーム・超過カウントアップ（`+00:xx`）を一切停止しない（ただし相手が入った工程ステータス `actionStatus` / `helpProcess` / `assistantStaffName` / `stoppedBy` 等の表示メタデータは即時反映）。
+        - `peerStoppedTargetEndTimestamp`（iPhone）および `peerStoppedSeatEnds`（Apple Watch `UserDefaults` 永続化）に該当稼働サイクルの終了タイムスタンプを記録することで、定期クラウドポーリング（`reconcileCloudTimers` / `pollCloudTimersFromSupabaseIfNeeded`）での確認バナー消去後の無限再通知ループや後続 `SYNC_SEATS` パケットによる上書き消火を防ぎつつ、`syncChangedSeatsToCloud` がローカル維持中の `running` 状態を Supabase クラウドへ逆流再アップロードしないよう完全ブロックする。
+        - また Apple Watch の直接 Supabase ポーリング（`pollCloudTimersFromSupabaseIfNeeded`）の `select` クエリに `updated_by` を追加（未サポート環境での HTTP 400 自動フォールバック付き）し、すでにヘルプ担当が指名されている席で別の第3スタッフが停止・シャンプーに入った場合でも、確実に実際の操作者（`updated_by`）を特定して通知する。
+        - その後、自分自身の iPhone または Apple Watch で「タイマーを止める」「アラーム停止」等の停止操作を行った時点で自分のアラームが停止するが、すでに他スタッフがシャンプー等に移行していた席（`wasAlreadyPeerStopped`）では、先行スタッフの `"💧 シャンプー中"`（`isShampooing` / `actionStatus` / `helpProcess` / `assistantStaffName`）ステータスを `"00:00"`（待機）へ上書き消去せず、クラウドへの `paused` 上書き送信もスキップ（`skipCloudSyncOnce` / `status=eq.running` ガード）する。
+   - **③ 自分が無関係な席で他のスタッフが操作した場合**:
+     - 通知やアラームは一切鳴らさず、盤面の状態のみ静かに `00:00` 停止へ同期する。
+2. **アラーム・確認通知の対象を「その席の施術に関わる担当者（関係者）」のみに厳格限定**:
+   - **関係者（施術担当）の定義（`isUserStakeholderForSeat` / `SeatTimerItem.isStakeholder`）**:
+     1. **タイマーを入れたスタッフ（主担当／設定者）**: `createdBy` / `colorStaffName` / `creatorName` / `isCreatorMe`
+     2. **明示的に指名・設定されたヘルプ担当（シャンプー・コーミング等）**: `assistantStaffName` / `shampooStaff`（※ `'未定'`, `'募集中'`, `'ヘルプなし'`, `'none'`, 空文字を除く）
+     3. **明示的に指名・設定されたチェック担当**: `checkStaffName` / `checkStaff`（※ `'未定'`, `'募集中'`, `'なし'`, `'none'`, 空文字を除く）
+   - **「未定」時の全員フォールバック完全撤廃とワンタップ全員募集導線**:
+     - iPhone（`shouldAlertMainTimerForUser`, `shouldAlertCheckTimerForUser`, `isUserStakeholderForSeat`）、Apple Watch（`SeatTimerItem.isStakeholder(for:)`, `isRelated(to:)`, `shouldAlertMainTimer(for:)`, `shouldAlertCheckTimer(for:)`, `checkUnassignedHelpAlerts`）、および Supabase Edge Function（`collectMainTimerAlertCandidates`, `collectCheckTimerAlertCandidates`）のすべてにおいて、ヘルプ担当やチェック担当が未定（空欄・`'未定'`・`'募集中'`）のときにサロン全員を対象にするフォールバックを削除。
+     - ヘルプやチェックが未設定（未定）の席では **タイマーを入れた主担当本人のみ** がアラーム・確認通知の対象となり、無関係な他スタッフの iPhone や Apple Watch が勝手に鳴動・通知されることを 100% 防止する。
+     - 主担当本人に表示される残り1分のヘルプ未定アラート（`⚠️【残り1分・ヘルプ未定】`）には、従来の `'ヘルプ担当を指定する'` に加えてワンタップで全員へプッシュ発信できる `'サロン全員に募集する'`（`handleRecruitAssistantDirectly`）ボタンを併設し、必要な時だけ明示的にサロン全員へヘルプ募集通知を送れる設計とした。
+
+---
+
+## 67. 4つの専門サブエージェント（現場UX批評・仕様整合性監査・実装・最終QA検証）による相互チェック＆ブラッシュアップ開発体制仕様 (Issue #10 / 2026-11-04)
+
+### 67.1 背景・目的
+
+サロン共有機能（複数スタッフ × iPhone × Apple Watch × Supabase クラウド同期 × バックグラウンド Push 通知 × アラーム制御）は状態遷移と境界条件が極めて多く、単一視点での実装では「1箇所を直すと別経路で競合・逆流・通知漏れが起きる」「現場の実際の動きと仕様書にズレが生じる」といった問題が発生しやすい。
+そのため、今後の修正・機能開発においては、**役割の異なる4つの専門サブエージェントが相互にチェック・批評・ブラッシュアップしながら開発を進めるマルチエージェント体制**を標準開発フローとして採用し、どのウィンドウやPC環境で作業しても毎回自動的にこのフローが適用されるよう常設ルール化する。
+
+### 67.2 確定仕様・実装詳細 (`AGENTS.md`, `.agents/rules/multi-agent-review-workflow.md`, `.agents/skills/salon-multi-agent-dev/SKILL.md`)
+
+1. **4つの専門サブエージェントの役割定義**:
+   - **① 現場フロー・UX批評担当 (`ux-flow-critic`)**:
+     - 美容室のリアルな営業現場（施術中で両手が塞がっている、手首やスマホを見られない状況、スタイリスト・アシスタント・他スタッフそれぞれの立場）の視点から、仕様や操作フローの妥当性を批判的に検証し、実装前にブラッシュアップ案を提示する。
+   - **② 仕様書＆整合性監査担当 (`spec-auditor`)**:
+     - `SPECIFICATION.md` および過去の GitHub Issues（#5〜#10 等）との整合性を監査し、iPhone（`SalonWorkScreen.js` / `salonCloudService.js` / `HomeScreen.js`）・Apple Watch（`content.swift` / `alarm.swift` / `widget_sync.swift`）・クラウド（`supabase/functions/notify-salon-event/index.ts`）の3層間で判定ロジックに食い違いやデグレがないかを検証する。
+   - **③ 実装担当 (`implementer`)**:
+     - ①・②の検証を通過した確定仕様に基づき、iPhone / Apple Watch / Supabase / `SPECIFICATION.md` の実装を正確に行い、④からの差し戻し指摘があった場合は根本原因から修正する。
+   - **④ 最終品質・意地悪テスト検証担当 (`qa-verifier`)**:
+     - ③が実装したコード変更（`git diff`）を「意地悪なテスト視点（Adversarial QA）」で徹底的に検証する。
+     - 「iPhoneロック／バックグラウンド中」「Watch手首下げスリープ中」「モーダルシート展開中」「カウントダウン終了直前・超過中に別スタッフが操作」「他スタッフがシャンプー移行後に設定者が遅れてアラーム停止」「確認バナー消去後の再ポーリング」「同名スタッフ存在時」「通信瞬断後のポーリング復帰時」等の全境界条件でバグが起きないかをコードトレースおよび構文チェック（`node --check`, `swiftc -parse`）で証明し、全項目クリアまで完了を承認しない。
+2. **リポジトリ常設ファイル構成**:
+   - **`AGENTS.md` および `.agents/rules/multi-agent-review-workflow.md`**:
+     - `trigger: always_on`（常時自動適用ルール）として、修正・実装タスク実行時に必ず「①現場UX批評 ➜ ②仕様整合性監査 ➜ ③実装 ➜ ④最終QA検証（NG時は差し戻し）」のフローを自動適用する規約を定義。
+   - **`.agents/skills/salon-multi-agent-dev/SKILL.md`**:
+     - `define_subagent` / `invoke_subagent` を用いて上記4つのサブエージェントを起動する具体的なシステムプロンプト、進行フローチャート、および意地悪テスト検証チェックリストを定義。
+
+
 
 
