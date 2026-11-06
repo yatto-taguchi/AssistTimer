@@ -31,6 +31,7 @@ interface SalonTimerRecord {
   check_total_seconds?: number | null;
   check_process?: string | null;
   check_staff_name?: string | null;
+  comment?: string | null;
   updated_at?: string | null;
 }
 
@@ -77,7 +78,7 @@ const isNoHelp = (name?: string | null): boolean => {
 
 const resolveActionMeta = (rec?: SalonTimerRecord | null) => {
   if (!rec) return null;
-  if (rec.is_shampooing || rec.help_process === 'シャンプー') {
+  if (rec.is_shampooing || (rec.status === 'running' && rec.help_process === 'シャンプー')) {
     return { id: 'shampoo', emoji: '💧', label: 'シャンプー', color: '#AF52DE' };
   }
   switch (String(rec.help_process || '').trim()) {
@@ -163,7 +164,15 @@ Deno.serve(async (req: Request) => {
     const resolveUserIdsByName = (rawName?: string | null): string[] => {
       const target = String(rawName || '').trim();
       const normalizedTarget = normalizeStaffName(target);
-      if (!normalizedTarget || target === 'スタッフ' || target === '募集中' || target === '未定' || isNoHelp(target)) {
+      if (
+        !normalizedTarget ||
+        target === 'スタッフ' ||
+        target === 'スタイリスト' ||
+        normalizedTarget === 'スタイリスト' ||
+        target === '募集中' ||
+        target === '未定' ||
+        isNoHelp(target)
+      ) {
         return [];
       }
       return members
@@ -220,6 +229,8 @@ Deno.serve(async (req: Request) => {
       return collectAssignedStakeholders(rec);
     };
 
+    const prevColor = String(prev?.color_staff_name || '').trim();
+    const currColor = String(curr.color_staff_name || '').trim();
     const prevAssist = String(prev?.assistant_staff_name || '').trim();
     const currAssist = String(curr.assistant_staff_name || '').trim();
     const prevCheck = String(prev?.check_staff_name || '').trim();
@@ -232,8 +243,50 @@ Deno.serve(async (req: Request) => {
     const checkProcLabel = String(curr.check_process || prev?.check_process || 'チェック').trim();
     const prevHadActiveCheck = hasActiveCheckTimer(prev);
     const currHasActiveCheck = hasActiveCheckTimer(curr);
-    const wasPausedActive = Boolean(prev && prev.status === 'paused' && !isSeatResetOrIdle(prev));
+    const wasPausedActive = Boolean(prev && prev.status === 'paused' && !prevMeta && !isSeatResetOrIdle(prev));
     const didResetOrFinishPaused = Boolean(wasPausedActive && isSeatResetOrIdle(curr));
+
+    const prevUpdatedBy = String(prev?.updated_by || '').trim();
+    const prevUpdatedAtMs = prev?.updated_at ? Date.parse(String(prev.updated_at)) : 0;
+    const currUpdatedAtMs = curr.updated_at ? Date.parse(String(curr.updated_at)) : Date.now();
+    const isRecentPrevStopperWindow =
+      Boolean(prevUpdatedBy) &&
+      (prevUpdatedAtMs <= 0 ||
+        !Number.isFinite(prevUpdatedAtMs) ||
+        !Number.isFinite(currUpdatedAtMs) ||
+        Math.abs(currUpdatedAtMs - prevUpdatedAtMs) <= 30 * 60 * 1000);
+
+    const resolveActorDisplayName = (uid?: string | null): string => {
+      const targetUid = String(uid || '').trim();
+      if (!targetUid) return '';
+      const found = members.find((m) => String(m.user_id || '').trim() === targetUid);
+      return String(found?.display_name || '').trim();
+    };
+
+    // ★ Issue #12: 1人目が先に「タイマー停止」または「シャンプー等の工程移行」を行った後、
+    //   2人目が遅れて「タイマー停止」を押した場合（二次停止: paused -> paused で工程・担当者・コメント変化なし、かつ updated_by が別スタッフへ更新）
+    const isSecondaryStopTimer = Boolean(
+      prev &&
+        prev.status === 'paused' &&
+        curr.status === 'paused' &&
+        !didResetOrFinishPaused &&
+        Number(curr.target_seconds || 0) <= 0 &&
+        Number(curr.paused_remaining_seconds || 0) <= 0 &&
+        Number(curr.target_end_timestamp || 0) <= 0 &&
+        !prevHadActiveCheck &&
+        !currHasActiveCheck &&
+        prevActionId === currActionId &&
+        Boolean(prev.is_shampooing) === Boolean(curr.is_shampooing) &&
+        prevColor === currColor &&
+        prevAssist === currAssist &&
+        prevCheck === currCheck &&
+        cleanSeatLabel(prev.seat_label) === cleanSeatLabel(curr.seat_label) &&
+        String(prev.comment || '').trim() === String(curr.comment || '').trim() &&
+        actorUserId &&
+        prevUpdatedBy &&
+        actorUserId !== prevUpdatedBy &&
+        isRecentPrevStopperWindow
+    );
 
     const plans: NotificationPlan[] = [];
 
@@ -255,24 +308,39 @@ Deno.serve(async (req: Request) => {
         color: isCompleted ? '#30D158' : '#8E8E93',
       });
     }
-    // ② 稼働中・超過中・一時停止中タイマーの停止・リセット・施術工程移行（シャンプー・コーミング・呼び出し等）
-    else if ((prev?.status === 'running' && curr.status !== 'running') || didResetOrFinishPaused) {
+    // ② 稼働中・超過中・一時停止中タイマーの停止・リセット・施術工程移行（シャンプー・コーミング・呼び出し等）・または2人目による後追い停止
+    else if (
+      (prev?.status === 'running' && curr.status !== 'running') ||
+      didResetOrFinishPaused ||
+      isSecondaryStopTimer
+    ) {
+      const prevStopperSet =
+        isRecentPrevStopperWindow && prevUpdatedBy ? new Set<string>([prevUpdatedBy]) : new Set<string>();
       const targets =
-        currActionId === 'call'
-          ? mergeSets(allMemberUserIds, collectAssignedStakeholders(prev), collectAssignedStakeholders(curr))
+        currActionId === 'call' && !isSecondaryStopTimer
+          ? mergeSets(
+              allMemberUserIds,
+              collectAssignedStakeholders(prev),
+              collectAssignedStakeholders(curr),
+              prevStopperSet
+            )
           : mergeSets(
               collectAssignedStakeholders(prev),
               collectAssignedStakeholders(curr),
-              collectMainTimerAlertCandidates(prev)
+              collectMainTimerAlertCandidates(prev),
+              prevStopperSet
             );
 
-      const namedActor = isNamedAssistant(currAssist) ? currAssist : '';
+      const stopperDisplayName = resolveActorDisplayName(actorUserId);
+      const namedActor = stopperDisplayName || (isNamedAssistant(currAssist) ? currAssist : '');
       let body = didResetOrFinishPaused
         ? `⏹ ${label}のタイマーがリセットされました`
+        : isSecondaryStopTimer && namedActor
+        ? `⏹ ${label}のタイマーを ${namedActor} さんが止めました`
         : `⏹ ${label}のタイマーが停止されました`;
       let color = '#FF9500';
 
-      if (currMeta) {
+      if (currMeta && !isSecondaryStopTimer) {
         color = currMeta.color;
         if (currMeta.id === 'call') {
           body = `🔔 ${label}から呼び出しがあります${namedActor ? `（${namedActor}）` : ''}`;
@@ -365,9 +433,9 @@ Deno.serve(async (req: Request) => {
     }
     // ⑤ 稼働中・停止中における担当者指名・途中チェック追加・施術ステータス変更・残り時間変更
     else {
-      const prevColor = String(prev?.color_staff_name || '').trim();
-      const currColor = String(curr.color_staff_name || '').trim();
       const isAddingCheck = !prevHadActiveCheck && currHasActiveCheck && prev?.status === 'running' && curr.status === 'running';
+      const prevStopperSet =
+        isRecentPrevStopperWindow && prevUpdatedBy ? new Set<string>([prevUpdatedBy]) : new Set<string>();
 
       // 5-1. 本人への担当指名通知を最優先でプラン登録（sentTokens により本人へ確実に「担当に指定されました」が届く）
       if ((prevCheck !== currCheck || isAddingCheck) && isNamedCheckStaff(currCheck)) {
@@ -386,6 +454,7 @@ Deno.serve(async (req: Request) => {
       }
 
       if (
+        (curr.status === 'running' || !currMeta || currActionId === 'call') &&
         (prevAssist !== currAssist || (prevActionId !== currActionId && Boolean(currActionId))) &&
         isNamedAssistant(currAssist)
       ) {
@@ -403,7 +472,7 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      if (prevColor !== currColor && currColor && currColor !== 'スタッフ') {
+      if (prevColor !== currColor && currColor && currColor !== 'スタッフ' && currColor !== 'スタイリスト') {
         const assignedMainIds = new Set(resolveUserIdsByName(currColor));
         if (assignedMainIds.size > 0) {
           const mins = Math.max(1, Math.round(Number(curr.target_seconds || 600) / 60));
@@ -432,7 +501,7 @@ Deno.serve(async (req: Request) => {
         });
       }
 
-      // 5-3. タイマー停止を伴わない施術ステータス（呼び出し・コーミング・シャンプー等）の変更
+      // 5-3. タイマー停止を伴わない施術ステータス（呼び出し・コーミング・シャンプー等）の変更（1人目が停止後に2人目がシャンプー等に入った場合を含む）
       if (
         currAssist !== '募集中' &&
         (prevActionId !== currActionId || Boolean(prev?.is_shampooing) !== Boolean(curr.is_shampooing)) &&
@@ -440,13 +509,19 @@ Deno.serve(async (req: Request) => {
       ) {
         const targets =
           currActionId === 'call'
-            ? mergeSets(allMemberUserIds, collectAssignedStakeholders(prev), collectAssignedStakeholders(curr))
+            ? mergeSets(
+                allMemberUserIds,
+                collectAssignedStakeholders(prev),
+                collectAssignedStakeholders(curr),
+                prevStopperSet
+              )
             : mergeSets(
                 collectAssignedStakeholders(prev),
                 collectAssignedStakeholders(curr),
-                collectMainTimerAlertCandidates(prev)
+                collectMainTimerAlertCandidates(prev),
+                prevStopperSet
               );
-        const namedActor = isNamedAssistant(currAssist) ? currAssist : '';
+        const namedActor = resolveActorDisplayName(actorUserId) || (isNamedAssistant(currAssist) ? currAssist : '');
 
         if (currMeta) {
           let body = `${currMeta.emoji} ${label}が${currMeta.label}に入りました`;
@@ -463,7 +538,7 @@ Deno.serve(async (req: Request) => {
             body,
             color: currMeta.color,
           });
-        } else if (prevMeta && prev?.status !== 'running' && curr.status !== 'running' && !isSeatResetOrIdle(curr)) {
+        } else if (prevMeta && prev?.status !== 'running' && curr.status !== 'running') {
           plans.push({
             userIds: targets,
             eventType: 'status_change',
@@ -473,9 +548,13 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      // 5-4. ヘルプ担当・チェック担当への参戦／指名共有（主担当・既存関係者へ通知）
+      // 5-4. ヘルプ担当・チェック担当への参戦／指名共有（主担当・既存関係者・直近停止者へ通知）
       if (prevAssist !== currAssist && isNamedAssistant(currAssist)) {
-        const stakeholderIds = mergeSets(collectMainStaffIds(curr), collectAssignedStakeholders(prev));
+        const stakeholderIds = mergeSets(
+          collectMainStaffIds(curr),
+          collectAssignedStakeholders(prev),
+          prevStopperSet
+        );
         for (const uid of resolveUserIdsByName(currAssist)) stakeholderIds.delete(uid);
         if (stakeholderIds.size > 0) {
           plans.push({
@@ -506,11 +585,13 @@ Deno.serve(async (req: Request) => {
         curr.status === 'running' &&
         Math.abs(Number(curr.target_end_timestamp || 0) - Number(prev.target_end_timestamp || 0)) >= 25000
       ) {
+        const remSec = Math.max(0, Math.round((Number(curr.target_end_timestamp || 0) - Date.now()) / 1000));
+        const remMins = Math.max(1, Math.round(remSec / 60));
         const targets = mergeSets(collectMainTimerAlertCandidates(curr), collectAssignedStakeholders(curr));
         plans.push({
           userIds: targets,
           eventType: 'time_adjust',
-          body: `⏱ ${label}の残り時間が変更されました`,
+          body: `⏱ ${label}の残り時間が変更されました（残り約${remMins}分）`,
           color: '#0A84FF',
         });
       }

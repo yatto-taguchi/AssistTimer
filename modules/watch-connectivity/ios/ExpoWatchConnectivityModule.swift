@@ -6,7 +6,12 @@ import UIKit
 public class ExpoWatchConnectivityModule: Module {
   private var sessionDelegate: SessionDelegate?
   private var notificationDelegate: PeerNotificationCenterDelegate?
-  private var bgTaskId: UIBackgroundTaskIdentifier = .invalid
+  private let bgTaskLock = NSLock()
+  private var realtimeBgTaskId: UIBackgroundTaskIdentifier = .invalid
+  private var realtimeBgWorkItem: DispatchWorkItem?
+  private var watchActionBgTaskId: UIBackgroundTaskIdentifier = .invalid
+  private var watchActionBgWorkItem: DispatchWorkItem?
+  private let transferLock = NSLock()
   private var bgObserverTokens: [NSObjectProtocol] = []
   private var pendingApplicationContext: [String: Any]?
   private var pendingUserInfo: [String: Any]?
@@ -65,6 +70,7 @@ public class ExpoWatchConnectivityModule: Module {
         }
         self.bgObserverTokens.removeAll()
         self.endRealtimeBackgroundTask()
+        self.endWatchActionBackgroundTask()
       }
     }
 
@@ -289,8 +295,10 @@ public class ExpoWatchConnectivityModule: Module {
       var wireUserInfo = cleanUserInfo
       wireUserInfo.removeValue(forKey: "highPriorityWake")
 
+      self.transferLock.lock()
       if let msgType = wireUserInfo["type"] as? String {
-        for transfer in session.outstandingUserInfoTransfers where transfer.isTransferring {
+        let existingTransfers = Array(session.outstandingUserInfoTransfers)
+        for transfer in existingTransfers where transfer.isTransferring {
           if let existingType = transfer.userInfo["type"] as? String,
              existingType == msgType,
              transfer.userInfo["notification"] == nil {
@@ -312,10 +320,12 @@ public class ExpoWatchConnectivityModule: Module {
       } else {
         transfer = session.transferUserInfo(wireUserInfo)
       }
+      let isTransferring = transfer.isTransferring
+      self.transferLock.unlock()
       self.eventLock.lock()
       self.pendingUserInfo = nil
       self.eventLock.unlock()
-      promise.resolve(transfer.isTransferring)
+      promise.resolve(isTransferring)
     }
   }
 
@@ -378,6 +388,17 @@ public class ExpoWatchConnectivityModule: Module {
       pending["notification"] != nil
     var wirePending = pending
     wirePending.removeValue(forKey: "highPriorityWake")
+    self.transferLock.lock()
+    if let msgType = wirePending["type"] as? String {
+      let existingTransfers = Array(session.outstandingUserInfoTransfers)
+      for transfer in existingTransfers where transfer.isTransferring {
+        if let existingType = transfer.userInfo["type"] as? String,
+           existingType == msgType,
+           transfer.userInfo["notification"] == nil {
+          transfer.cancel()
+        }
+      }
+    }
     let canUseComplicationTransfer =
       session.isComplicationEnabled &&
       session.remainingComplicationUserInfoTransfers > 0 &&
@@ -387,6 +408,7 @@ public class ExpoWatchConnectivityModule: Module {
     } else {
       session.transferUserInfo(wirePending)
     }
+    self.transferLock.unlock()
   }
 
   fileprivate func dispatchEvent(_ name: String, _ body: [String: Any]) {
@@ -482,48 +504,113 @@ public class ExpoWatchConnectivityModule: Module {
       queue: .main
     ) { [weak self] _ in
       self?.endRealtimeBackgroundTask()
+      self?.endWatchActionBackgroundTask()
     }
     bgObserverTokens = [enterBg, enterFg]
   }
 
   private func beginRealtimeBackgroundTask() {
     endRealtimeBackgroundTask()
-    bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerRealtimePeerSync") { [weak self] in
+    var expiredSynchronously = false
+    var isCreating = true
+    bgTaskLock.lock()
+    let startedId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerRealtimePeerSync") { [weak self] in
+      if isCreating {
+        expiredSynchronously = true
+      } else {
+        self?.endRealtimeBackgroundTask()
+      }
+    }
+    isCreating = false
+    if startedId == .invalid {
+      bgTaskLock.unlock()
+      return
+    }
+    if expiredSynchronously {
+      bgTaskLock.unlock()
+      UIApplication.shared.endBackgroundTask(startedId)
+      return
+    }
+    realtimeBgTaskId = startedId
+    let workItem = DispatchWorkItem { [weak self] in
       self?.endRealtimeBackgroundTask()
     }
+    realtimeBgWorkItem = workItem
+    bgTaskLock.unlock()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 15.0, execute: workItem)
   }
 
   fileprivate func endRealtimeBackgroundTask() {
-    guard bgTaskId != .invalid else { return }
-    let taskToEnd = bgTaskId
-    bgTaskId = .invalid
-    UIApplication.shared.endBackgroundTask(taskToEnd)
+    bgTaskLock.lock()
+    realtimeBgWorkItem?.cancel()
+    realtimeBgWorkItem = nil
+    let taskToEnd = realtimeBgTaskId
+    realtimeBgTaskId = .invalid
+    bgTaskLock.unlock()
+    if taskToEnd != .invalid {
+      UIApplication.shared.endBackgroundTask(taskToEnd)
+    }
   }
 
   // ★ Watchからバックグラウンド中のiPhoneへ操作（STOP_TIMER等）が届いた際、
   //   WCSessionデリゲートスレッド上で即座（同期）にバックグラウンド実行タスクを確保し、
   //   replyHandler返却直後にiOSがプロセスを即サスペンドしてSupabaseへのクラウド同期（upsertCloudTimer）が中断されるのを防止する
   fileprivate func beginWatchActionBackgroundTask() {
-    var actionTaskId: UIBackgroundTaskIdentifier = .invalid
-    let taskLock = NSLock()
-    let endTaskSafely = {
-      taskLock.lock()
-      let taskToEnd = actionTaskId
-      actionTaskId = .invalid
-      taskLock.unlock()
-      if taskToEnd != .invalid {
-        UIApplication.shared.endBackgroundTask(taskToEnd)
+    var expiredSynchronously = false
+    var isCreating = true
+    bgTaskLock.lock()
+    watchActionBgWorkItem?.cancel()
+    watchActionBgWorkItem = nil
+    let oldTaskId = watchActionBgTaskId
+    watchActionBgTaskId = .invalid
+
+    let startedId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerWatchActionCloudSync") { [weak self] in
+      if isCreating {
+        expiredSynchronously = true
+      } else {
+        self?.endWatchActionBackgroundTask()
       }
     }
-    let startedId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerWatchActionCloudSync") {
-      endTaskSafely()
+    isCreating = false
+
+    if startedId == .invalid {
+      bgTaskLock.unlock()
+      if oldTaskId != .invalid {
+        UIApplication.shared.endBackgroundTask(oldTaskId)
+      }
+      return
     }
-    guard startedId != .invalid else { return }
-    taskLock.lock()
-    actionTaskId = startedId
-    taskLock.unlock()
-    DispatchQueue.main.asyncAfter(deadline: .now() + 25.0) {
-      endTaskSafely()
+    if expiredSynchronously {
+      bgTaskLock.unlock()
+      if oldTaskId != .invalid {
+        UIApplication.shared.endBackgroundTask(oldTaskId)
+      }
+      UIApplication.shared.endBackgroundTask(startedId)
+      return
+    }
+
+    watchActionBgTaskId = startedId
+    let workItem = DispatchWorkItem { [weak self] in
+      self?.endWatchActionBackgroundTask()
+    }
+    watchActionBgWorkItem = workItem
+    bgTaskLock.unlock()
+
+    if oldTaskId != .invalid {
+      UIApplication.shared.endBackgroundTask(oldTaskId)
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 12.0, execute: workItem)
+  }
+
+  fileprivate func endWatchActionBackgroundTask() {
+    bgTaskLock.lock()
+    watchActionBgWorkItem?.cancel()
+    watchActionBgWorkItem = nil
+    let taskToEnd = watchActionBgTaskId
+    watchActionBgTaskId = .invalid
+    bgTaskLock.unlock()
+    if taskToEnd != .invalid {
+      UIApplication.shared.endBackgroundTask(taskToEnd)
     }
   }
 }
@@ -542,37 +629,39 @@ private class PeerNotificationCenterDelegate: NSObject, UNUserNotificationCenter
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
-    let reqId = notification.request.identifier
-    if reqId.hasPrefix("assisttimer.peer.") {
+    let handleOnMain = { [weak self] in
+      let reqId = notification.request.identifier
+      if reqId.hasPrefix("assisttimer.peer.") {
+        if #available(iOS 14.0, *) {
+          completionHandler([.banner, .list, .sound])
+        } else {
+          completionHandler([.alert, .sound])
+        }
+        return
+      }
+      if notification.request.trigger is UNPushNotificationTrigger {
+        if UIApplication.shared.applicationState == .active {
+          // アプリがフォアグラウンド（active）の時はRealtimeのアプリ内トースト＋Watch直接通知のみとし、OSリモートプッシュバナーの二重表示を抑止
+          completionHandler([])
+          return
+        }
+      }
+      if let prev = self?.previousDelegate,
+         prev.responds(to: #selector(UNUserNotificationCenterDelegate.userNotificationCenter(_:willPresent:withCompletionHandler:))) {
+        prev.userNotificationCenter?(center, willPresent: notification, withCompletionHandler: completionHandler)
+        return
+      }
       if #available(iOS 14.0, *) {
         completionHandler([.banner, .list, .sound])
       } else {
         completionHandler([.alert, .sound])
       }
-      return
     }
-    if notification.request.trigger is UNPushNotificationTrigger {
-      let isForeground: Bool
-      if Thread.isMainThread {
-        isForeground = (UIApplication.shared.applicationState == .active)
-      } else {
-        isForeground = DispatchQueue.main.sync { UIApplication.shared.applicationState == .active }
-      }
-      if isForeground {
-        // アプリがフォアグラウンド（active）の時はRealtimeのアプリ内トースト＋Watch直接通知のみとし、OSリモートプッシュバナーの二重表示を抑止
-        completionHandler([])
-        return
-      }
-    }
-    if let prev = previousDelegate,
-       prev.responds(to: #selector(UNUserNotificationCenterDelegate.userNotificationCenter(_:willPresent:withCompletionHandler:))) {
-      prev.userNotificationCenter?(center, willPresent: notification, withCompletionHandler: completionHandler)
-      return
-    }
-    if #available(iOS 14.0, *) {
-      completionHandler([.banner, .list, .sound])
+
+    if Thread.isMainThread {
+      handleOnMain()
     } else {
-      completionHandler([.alert, .sound])
+      DispatchQueue.main.async(execute: handleOnMain)
     }
   }
 

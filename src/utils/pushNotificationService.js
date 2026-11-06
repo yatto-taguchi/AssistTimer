@@ -122,12 +122,16 @@ const pruneMapByTtl = (map, ttlMs, maxEntries) => {
 
 /**
  * 同一席・同一種別のイベント重複判定用セマンティックキーを生成
+ * ※ 第3引数 extraKey（操作者や遷移先アクション等）を渡すことで、
+ *   「1人目が停止した数秒後に2人目がシャンプーに入った／後追いで停止した」等の別イベントが
+ *   6.5秒〜12秒の重複抑止ウィンドウで誤って握り潰されるのを防ぐ。
  */
-export const buildPeerEventSemanticKey = (timerIdOrLabel, eventType) => {
+export const buildPeerEventSemanticKey = (timerIdOrLabel, eventType, extraKey = '') => {
   const target = String(timerIdOrLabel || '').trim();
   const ev = String(eventType || '').trim();
+  const extra = String(extraKey || '').trim();
   if (!target || !ev) return '';
-  return `${target}|${ev}`;
+  return extra ? `${target}|${ev}|${extra}` : `${target}|${ev}`;
 };
 
 /**

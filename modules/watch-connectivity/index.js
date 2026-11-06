@@ -412,7 +412,8 @@ const EVENT_BODY_KEYS = {
   onUserInfoReceived: ['userInfo', 'userInfo'],
 };
 
-const drainPendingNativeEvents = () => {
+const drainPendingNativeEvents = (force = false) => {
+  if (!force && AppState.currentState && AppState.currentState !== 'active') return;
   if (!NativeModule || typeof NativeModule.takePendingEvents !== 'function') return;
   try {
     const pending = NativeModule.takePendingEvents() || [];
@@ -438,13 +439,13 @@ const setupGlobalListeners = () => {
       handleIncoming(kind, event && event[key], seq);
     });
   });
-  // ネイティブ側で保留していた受信を即時回収＋1秒周期およびフォアグラウンド復帰時に取りこぼしを定期回収
-  drainPendingNativeEvents();
-  setInterval(drainPendingNativeEvents, 1000);
+  // ネイティブ側で保留していた受信を即時回収＋フォアグラウンド時の1秒周期およびフォアグラウンド復帰時に取りこぼしを回収
+  drainPendingNativeEvents(true);
+  setInterval(() => drainPendingNativeEvents(false), 1000);
   try {
     AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
-        drainPendingNativeEvents();
+        drainPendingNativeEvents(true);
       }
     });
   } catch {}

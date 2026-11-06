@@ -19,6 +19,7 @@ const enqueue = (fn) => {
 };
 
 const notify = () => {
+  if (subscribers.size === 0) return;
   const snapshot = getAlarmDiagnostics();
   subscribers.forEach((cb) => { try { cb(snapshot); } catch {} });
 };
@@ -69,6 +70,7 @@ const applyAlarms = async (source, desired, options) => {
   });
 
   let dirty = false;
+  const hadPreviousAlarms = current.size > 0;
   // 初回同期時: 前回セッション（アプリ再起動やTestFlight更新前）の残留アラームや過去時刻の予約を確実に消火
   if (!initializedSources.has(source)) {
     initializedSources.add(source);
@@ -92,7 +94,7 @@ const applyAlarms = async (source, desired, options) => {
   });
 
   // サロン席で鳴らすべき予定が0件になった時は、ローカルID（seat-1等）からクラウドUUIDへの昇格やリロードを跨いで残留したネイティブ予約も一括消火
-  if (stopPassedOnRemove && desiredMap.size === 0) {
+  if (stopPassedOnRemove && desiredMap.size === 0 && hadPreviousAlarms) {
     AlarmKit.cleanupOnSourceInit(source, []);
     if (source === 'salon') {
       for (let i = 1; i <= 12; i += 1) {
@@ -177,9 +179,13 @@ const USER_STOP_POLL_MS = 3000;
 const stopSubscribers = new Set();
 let stopPollTimer = null;
 let appStateSub = null;
+let hasCheckedInitialStoppedAlarms = false;
 
 const pollUserStoppedAlarms = () => enqueue(() => {
-  if (stopSubscribers.size === 0) return;
+  if (stopSubscribers.size === 0 || AppState.currentState !== 'active') return;
+  const hasAnyScheduled = Object.values(scheduledBySource).some((m) => m && m.size > 0);
+  if (!hasAnyScheduled && hasCheckedInitialStoppedAlarms) return;
+  hasCheckedInitialStoppedAlarms = true;
   const stopped = AlarmKit.takeUserStoppedAlarms();
   if (!Array.isArray(stopped) || stopped.length === 0) return;
   // 止められた予約はもう鳴らないので、こちらの予約記録からも外す（二重鳴動防止の判定を正しく保つ）
@@ -217,6 +223,7 @@ export const subscribeUserStoppedAlarms = (cb) => {
   if (!appStateSub) {
     appStateSub = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
+        hasCheckedInitialStoppedAlarms = false;
         pollUserStoppedAlarms();
         startStopPolling();
       } else {

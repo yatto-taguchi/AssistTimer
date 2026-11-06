@@ -675,7 +675,11 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
   const assistantStaffName = isRecruiting ? '' : rawAssist;
   const helpProcess = cloudTimer.help_process || '';
   const isShampooing = !!cloudTimer.is_shampooing;
-  const actionStatus = isShampooing ? 'shampoo' : (LABEL_TO_ACTION_ID[helpProcess] || null);
+  const actionStatus = isShampooing
+    ? 'shampoo'
+    : status !== 'running' && helpProcess === 'シャンプー'
+    ? null
+    : (LABEL_TO_ACTION_ID[helpProcess] || null);
   const rawComment = String(cloudTimer.comment || '').trim();
   const nowMs = Date.now();
   const abandonedCutoffMs = nowMs - 3 * 3600 * 1000;
@@ -707,6 +711,16 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
   const effectiveHasActiveCheck = !shouldForceIdleZero && hasActiveCheck;
   const effectiveIsCheckCompleted = !shouldForceIdleZero && isCheckCompleted;
   const isOver = normalizedStatus === 'running' && targetEndTs > 0 && targetEndTs <= nowMs;
+  const elapsedOverSec = isOver ? Math.floor((nowMs - targetEndTs) / 1000) : 0;
+  const initialEscalationLevel = !isOver
+    ? 0
+    : elapsedOverSec >= 195
+    ? 3
+    : elapsedOverSec >= 75
+    ? 2
+    : elapsedOverSec >= 45
+    ? 1
+    : 0;
   const checkPausedRemainingSeconds =
     normalizedStatus === 'paused' && effectiveHasActiveCheck
       ? Math.max(0, Math.round((effectiveCheckEndTs - nowMs) / 1000))
@@ -729,7 +743,7 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
     isAbandonedRunningSeat: isAbandonedRunningSeat,
     isOver: isOver,
     timeUpTimestamp: isOver ? targetEndTs : null,
-    escalationLevel: 0,
+    escalationLevel: initialEscalationLevel,
     colorStaffName:
       normalizedStatus === 'idle' && isReset && !cloudTimer.color_staff_name
         ? ''

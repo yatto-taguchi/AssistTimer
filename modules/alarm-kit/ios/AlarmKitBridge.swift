@@ -35,25 +35,44 @@ enum AlarmKitBridge {
     return true
   }
 
+  private static let authStatusLock = NSLock()
+  private static var cachedFallbackAuthStatus: String = "notDetermined"
+
+  private static func setCachedFallbackAuthStatus(_ mapped: String) {
+    authStatusLock.lock()
+    cachedFallbackAuthStatus = mapped
+    authStatusLock.unlock()
+  }
+
+  private static func getCachedFallbackAuthStatus() -> String {
+    authStatusLock.lock()
+    let current = cachedFallbackAuthStatus
+    authStatusLock.unlock()
+    return current
+  }
+
+  private static func updateCachedFallbackAuthStatus(_ status: UNAuthorizationStatus) -> String {
+    let mapped: String
+    switch status {
+    case .authorized, .provisional, .ephemeral: mapped = "authorized"
+    case .denied: mapped = "denied"
+    case .notDetermined: mapped = "notDetermined"
+    @unknown default: mapped = "unknown"
+    }
+    setCachedFallbackAuthStatus(mapped)
+    return mapped
+  }
+
   static func authorizationStatus() -> String {
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) {
       return statusText(AlarmManager.shared.authorizationState)
     }
     #endif
-    let sema = DispatchSemaphore(value: 0)
-    var result = "notDetermined"
     UNUserNotificationCenter.current().getNotificationSettings { settings in
-      switch settings.authorizationStatus {
-      case .authorized, .provisional, .ephemeral: result = "authorized"
-      case .denied: result = "denied"
-      case .notDetermined: result = "notDetermined"
-      @unknown default: result = "unknown"
-      }
-      sema.signal()
+      _ = updateCachedFallbackAuthStatus(settings.authorizationStatus)
     }
-    _ = sema.wait(timeout: .now() + 2.0)
-    return result
+    return getCachedFallbackAuthStatus()
   }
 
   static func requestAuthorization() async -> String {
@@ -69,7 +88,9 @@ enum AlarmKitBridge {
     #endif
     do {
       let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
-      return granted ? "authorized" : "denied"
+      let mapped = granted ? "authorized" : "denied"
+      setCachedFallbackAuthStatus(mapped)
+      return mapped
     } catch {
       return "error: \(error.localizedDescription)"
     }
@@ -88,7 +109,10 @@ enum AlarmKitBridge {
   // 予約の取り消し＋鳴っている最中なら停止
   static func cancel(key: String) -> Bool {
     // こちらから取り消した予約は「ユーザーが止めた」と判定しないよう、記録から先に消す
-    removeRecord(key: key)
+    let hadRecord = removeRecord(key: key)
+    if !hadRecord && key != "main-timer" {
+      return false
+    }
     let notifId = "assisttimer.fallback.\(key)"
     UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [notifId])
     UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notifId])
@@ -108,10 +132,12 @@ enum AlarmKitBridge {
   private static func scheduleNotificationFallback(key: String, timestampMs: Double, title: String, soundOn: Bool) async -> String {
     let center = UNUserNotificationCenter.current()
     let settings = await center.notificationSettings()
+    _ = updateCachedFallbackAuthStatus(settings.authorizationStatus)
     if settings.authorizationStatus == .notDetermined {
       _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
     }
     let updatedSettings = await center.notificationSettings()
+    _ = updateCachedFallbackAuthStatus(updatedSettings.authorizationStatus)
     guard updatedSettings.authorizationStatus == .authorized ||
           updatedSettings.authorizationStatus == .provisional ||
           updatedSettings.authorizationStatus == .ephemeral else {
@@ -119,6 +145,7 @@ enum AlarmKitBridge {
     }
 
     let notifId = "assisttimer.fallback.\(key)"
+    removeRecord(key: key)
     center.removePendingNotificationRequests(withIdentifiers: [notifId])
     center.removeDeliveredNotifications(withIdentifiers: [notifId])
 
@@ -140,6 +167,7 @@ enum AlarmKitBridge {
     let request = UNNotificationRequest(identifier: notifId, content: content, trigger: trigger)
     do {
       try await center.add(request)
+      addRecord(key: key, timestampMs: timestampMs)
       return "ok"
     } catch {
       return "error: \(error.localizedDescription)"
@@ -167,12 +195,14 @@ enum AlarmKitBridge {
     saveRecords(records)
   }
 
-  static func removeRecord(key: String) {
+  @discardableResult
+  static func removeRecord(key: String) -> Bool {
     recordLock.lock(); defer { recordLock.unlock() }
     var records = loadRecords()
-    guard records[key] != nil else { return }
+    guard records[key] != nil else { return false }
     records[key] = nil
     saveRecords(records)
+    return true
   }
 
   /// アプリ起動時の初回同期や全停止時に、過去の残留アラームや一覧に存在しない古い予約を確実に停止・消去する
