@@ -6499,10 +6499,12 @@ export default function SalonWorkScreen() {
 
       const elapsed = nowMs - lastPollAt;
       const isForeground = (appStateRef.current || AppState.currentState || 'active') === 'active';
-      // 稼働中・超過鳴動中の席がある間は12秒間隔、全席停止中かつフォアグラウンド時は45秒間隔でクラウド整合を実行
+      // バックグラウンド中は定期HTTPポーリングを完全休止（Push通知・Watch直接通信・フォアグラウンド復帰時即時整合で処理）
+      if (!isForeground) return;
+      // フォアグラウンド時のみ、稼働中の席がある間は12秒間隔、全席停止中は45秒間隔でクラウド整合を実行
       const shouldPoll =
         (hasAnyRunningSeat && elapsed >= 12000) ||
-        (!hasAnyRunningSeat && isForeground && elapsed >= 45000);
+        (!hasAnyRunningSeat && elapsed >= 45000);
 
       if (shouldPoll) {
         lastPollAt = nowMs;

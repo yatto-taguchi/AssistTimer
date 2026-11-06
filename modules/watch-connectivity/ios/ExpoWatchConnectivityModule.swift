@@ -510,34 +510,54 @@ public class ExpoWatchConnectivityModule: Module {
   }
 
   private func beginRealtimeBackgroundTask() {
-    endRealtimeBackgroundTask()
-    var expiredSynchronously = false
+    var expiredBeforeStore = false
     var isCreating = true
-    bgTaskLock.lock()
     let startedId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerRealtimePeerSync") { [weak self] in
+      guard let self = self else { return }
+      self.bgTaskLock.lock()
       if isCreating {
-        expiredSynchronously = true
-      } else {
+        expiredBeforeStore = true
+        self.bgTaskLock.unlock()
+        return
+      }
+      self.bgTaskLock.unlock()
+      self.endRealtimeBackgroundTask()
+    }
+    if startedId == .invalid {
+      return
+    }
+
+    var taskToEndImmediately: UIBackgroundTaskIdentifier = .invalid
+    var oldTaskId: UIBackgroundTaskIdentifier = .invalid
+    var scheduledWorkItem: DispatchWorkItem?
+
+    bgTaskLock.lock()
+    isCreating = false
+    if expiredBeforeStore {
+      taskToEndImmediately = startedId
+    } else {
+      realtimeBgWorkItem?.cancel()
+      realtimeBgWorkItem = nil
+      oldTaskId = realtimeBgTaskId
+      realtimeBgTaskId = startedId
+      let workItem = DispatchWorkItem { [weak self] in
         self?.endRealtimeBackgroundTask()
       }
+      realtimeBgWorkItem = workItem
+      scheduledWorkItem = workItem
     }
-    isCreating = false
-    if startedId == .invalid {
-      bgTaskLock.unlock()
-      return
-    }
-    if expiredSynchronously {
-      bgTaskLock.unlock()
-      UIApplication.shared.endBackgroundTask(startedId)
-      return
-    }
-    realtimeBgTaskId = startedId
-    let workItem = DispatchWorkItem { [weak self] in
-      self?.endRealtimeBackgroundTask()
-    }
-    realtimeBgWorkItem = workItem
     bgTaskLock.unlock()
-    DispatchQueue.main.asyncAfter(deadline: .now() + 15.0, execute: workItem)
+
+    if oldTaskId != .invalid {
+      UIApplication.shared.endBackgroundTask(oldTaskId)
+    }
+    if taskToEndImmediately != .invalid {
+      UIApplication.shared.endBackgroundTask(taskToEndImmediately)
+      return
+    }
+    if let workItem = scheduledWorkItem {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 15.0, execute: workItem)
+    }
   }
 
   fileprivate func endRealtimeBackgroundTask() {
@@ -556,50 +576,54 @@ public class ExpoWatchConnectivityModule: Module {
   //   WCSessionデリゲートスレッド上で即座（同期）にバックグラウンド実行タスクを確保し、
   //   replyHandler返却直後にiOSがプロセスを即サスペンドしてSupabaseへのクラウド同期（upsertCloudTimer）が中断されるのを防止する
   fileprivate func beginWatchActionBackgroundTask() {
-    var expiredSynchronously = false
+    var expiredBeforeStore = false
     var isCreating = true
-    bgTaskLock.lock()
-    watchActionBgWorkItem?.cancel()
-    watchActionBgWorkItem = nil
-    let oldTaskId = watchActionBgTaskId
-    watchActionBgTaskId = .invalid
-
     let startedId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerWatchActionCloudSync") { [weak self] in
+      guard let self = self else { return }
+      self.bgTaskLock.lock()
       if isCreating {
-        expiredSynchronously = true
-      } else {
+        expiredBeforeStore = true
+        self.bgTaskLock.unlock()
+        return
+      }
+      self.bgTaskLock.unlock()
+      self.endWatchActionBackgroundTask()
+    }
+    if startedId == .invalid {
+      return
+    }
+
+    var taskToEndImmediately: UIBackgroundTaskIdentifier = .invalid
+    var oldTaskId: UIBackgroundTaskIdentifier = .invalid
+    var scheduledWorkItem: DispatchWorkItem?
+
+    bgTaskLock.lock()
+    isCreating = false
+    if expiredBeforeStore {
+      taskToEndImmediately = startedId
+    } else {
+      watchActionBgWorkItem?.cancel()
+      watchActionBgWorkItem = nil
+      oldTaskId = watchActionBgTaskId
+      watchActionBgTaskId = startedId
+      let workItem = DispatchWorkItem { [weak self] in
         self?.endWatchActionBackgroundTask()
       }
+      watchActionBgWorkItem = workItem
+      scheduledWorkItem = workItem
     }
-    isCreating = false
-
-    if startedId == .invalid {
-      bgTaskLock.unlock()
-      if oldTaskId != .invalid {
-        UIApplication.shared.endBackgroundTask(oldTaskId)
-      }
-      return
-    }
-    if expiredSynchronously {
-      bgTaskLock.unlock()
-      if oldTaskId != .invalid {
-        UIApplication.shared.endBackgroundTask(oldTaskId)
-      }
-      UIApplication.shared.endBackgroundTask(startedId)
-      return
-    }
-
-    watchActionBgTaskId = startedId
-    let workItem = DispatchWorkItem { [weak self] in
-      self?.endWatchActionBackgroundTask()
-    }
-    watchActionBgWorkItem = workItem
     bgTaskLock.unlock()
 
     if oldTaskId != .invalid {
       UIApplication.shared.endBackgroundTask(oldTaskId)
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 12.0, execute: workItem)
+    if taskToEndImmediately != .invalid {
+      UIApplication.shared.endBackgroundTask(taskToEndImmediately)
+      return
+    }
+    if let workItem = scheduledWorkItem {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 12.0, execute: workItem)
+    }
   }
 
   fileprivate func endWatchActionBackgroundTask() {

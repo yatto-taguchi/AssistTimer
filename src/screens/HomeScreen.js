@@ -290,6 +290,7 @@ export default function HomeScreen({ navigation }) {
   // バイブレーション制御ヘルパー（強度およびタイミング個別設定対応）
   // ※ タイム終了時（type === 'finish'）のバイブレーションは仕様（Section 40.1）により常時ON（スマホのアラーム音OFF時でも本体振動で作動）
   const triggerVibration = (type) => {
+    if (AppState.currentState && AppState.currentState !== 'active') return;
     if (type !== 'finish' && !isVibrationEnabled) return;
     try {
       if (type === 'finish') {
@@ -372,39 +373,10 @@ export default function HomeScreen({ navigation }) {
   const shouldPlaySilentAudioRef = useRef(false);
   const isLoadingSilentAudioRef = useRef(false);
 
-  // バックグラウンドでのJSサスペンド防止用無音オーディオ再生（レースコンディション防止＆バックグラウンド不正起動ガード付き）
+  // バックグラウンドでの無音オーディオ常時ループは iOS バックグラウンドCPU枯渇・クラッシュ要因となるため廃止（AlarmKit / Push通知へ移行済み）
   const startSilentBackgroundAudio = async () => {
-    shouldPlaySilentAudioRef.current = true;
-    if (silentSoundRef.current || isLoadingSilentAudioRef.current) return;
-    if (AppState.currentState && AppState.currentState !== 'active' && isWatchMutedRef.current) {
-      return;
-    }
-    isLoadingSilentAudioRef.current = true;
-    try {
-      await Audio.setAudioModeAsync({
-        playsInSilentModeIOS: playsInSilentMode,
-        staysActiveInBackground: true,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: false,
-      });
-      const { sound: s } = await Audio.Sound.createAsync(
-        SILENT_LOOP_SOUND,
-        { isLooping: true, volume: 0.001 }
-      );
-      // ロード中に一時停止やリセットが押されていた場合は即アンロード
-      if (!shouldPlaySilentAudioRef.current) {
-        await s.stopAsync().catch(() => {});
-        await s.unloadAsync().catch(() => {});
-        silentSoundRef.current = null;
-      } else {
-        silentSoundRef.current = s;
-        await s.playAsync();
-      }
-    } catch (err) {
-      console.log('startSilentBackgroundAudio error', err);
-    } finally {
-      isLoadingSilentAudioRef.current = false;
-    }
+    shouldPlaySilentAudioRef.current = false;
+    return;
   };
 
   const stopSilentBackgroundAudio = async () => {
@@ -439,6 +411,7 @@ export default function HomeScreen({ navigation }) {
 
   // 初回起動時のサウンドロード等と再生用関数
   const playAlarm = async () => {
+    if (AppState.currentState && AppState.currentState !== 'active') return;
     triggerVibration('finish');
     if (isWatchMutedRef.current) {
       console.log('[HomeScreen] Alarm sound suppressed (Watch muted)');
@@ -458,7 +431,7 @@ export default function HomeScreen({ navigation }) {
       }
       await Audio.setAudioModeAsync({
         playsInSilentModeIOS: playsInSilentMode,
-        staysActiveInBackground: true,
+        staysActiveInBackground: false,
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: false,
       });
@@ -479,6 +452,7 @@ export default function HomeScreen({ navigation }) {
   };
 
   const playVoice = async (key) => {
+    if (AppState.currentState && AppState.currentState !== 'active') return;
     if (isWatchMutedRef.current) {
       console.log('[HomeScreen] Voice announcement suppressed (Watch muted)');
       return;
@@ -496,7 +470,7 @@ export default function HomeScreen({ navigation }) {
       }
       await Audio.setAudioModeAsync({
         playsInSilentModeIOS: playsInSilentMode,
-        staysActiveInBackground: true,
+        staysActiveInBackground: false,
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: false,
       });
@@ -628,6 +602,9 @@ export default function HomeScreen({ navigation }) {
           const nextPrep = Math.max(0, Math.ceil(diffMs / 1000));
           preCountdownTimeRef.current = nextPrep;
           setPreCountdownTime(nextPrep);
+          [900, 600, 300, 240, 180, 120, 60, 30, 10, 5].forEach((sec) => {
+            if (nextPrep <= sec) triggeredPrepVoicesRef.current.add(sec);
+          });
 
           if (diffMs <= 0) {
             const endedPrepAt = prepEndTimeRef.current;
@@ -650,6 +627,9 @@ export default function HomeScreen({ navigation }) {
           if (!isCountUpRef.current && targetEndTimeRef.current) {
             const diffMs = targetEndTimeRef.current - now;
             const nextTime = Math.max(0, Math.ceil(diffMs / 1000));
+            [300, 180, 60, 30, 10, 5].forEach((sec) => {
+              if (nextTime <= sec) triggeredVoicesRef.current.add(sec);
+            });
 
             if (diffMs <= 0) {
               if (!triggeredVoicesRef.current.has('alarm')) {
@@ -658,12 +638,17 @@ export default function HomeScreen({ navigation }) {
                   playAlarm();
                 }
               }
-              if (isCountUpEnabled) {
+              const allowCountUp = isCountUpEnabledRef.current ?? isCountUpEnabled;
+              if (allowCountUp) {
                 isCountUpRef.current = true;
                 setIsCountUp(true);
                 overStartTimeRef.current = targetEndTimeRef.current;
                 triggeredOverVoicesRef.current.clear();
                 const overTime = Math.max(0, Math.floor((now - targetEndTimeRef.current) / 1000));
+                if (overTime >= 3) triggeredOverVoicesRef.current.add('start');
+                [60, 180, 300, 600, 900].forEach((sec) => {
+                  if (overTime >= sec + 2) triggeredOverVoicesRef.current.add(sec);
+                });
                 remainingTimeRef.current = overTime;
                 setRemainingTime(overTime);
               } else {
@@ -685,18 +670,38 @@ export default function HomeScreen({ navigation }) {
               setRemainingTime(nextTime);
             }
           } else if (isCountUpRef.current && overStartTimeRef.current) {
+            triggeredVoicesRef.current.add('alarm');
             const overTime = Math.max(0, Math.floor((now - overStartTimeRef.current) / 1000));
+            if (overTime >= 3) triggeredOverVoicesRef.current.add('start');
+            [60, 180, 300, 600, 900].forEach((sec) => {
+              if (overTime >= sec + 2) triggeredOverVoicesRef.current.add(sec);
+            });
             remainingTimeRef.current = overTime;
             setRemainingTime(overTime);
           }
         }
+        // フォアグラウンド復帰時に AlarmKit 予約状態を1回即時同期
+        const soundOn = isAlarmSoundEnabled && !isWatchMutedRef.current;
+        let desiredTs = null;
+        if (isPreCountingDownRef.current && prepEndTimeRef.current) {
+          desiredTs = prepEndTimeRef.current + (targetTimeRef.current || targetTime || 600) * 1000;
+        } else if (isRunningRef.current && !isCountUpRef.current && targetEndTimeRef.current) {
+          desiredTs = targetEndTimeRef.current;
+        } else if (isRunningRef.current && isCountUpRef.current && overStartTimeRef.current) {
+          desiredTs = overStartTimeRef.current;
+        }
+        setAlarms(
+          'main',
+          desiredTs ? [{ key: MAIN_ALARM_KEY, timestamp: desiredTs, title: '⏰ タイマー終了' }] : [],
+          { soundOn, stopPassedOnRemove: false }
+        );
       }
     });
 
     return () => {
       subscription.remove();
     };
-  }, [targetTime, isCountUpEnabled]);
+  }, [targetTime, isCountUpEnabled, isAlarmSoundEnabled]);
 
   // 準備カウントダウン進行のロジック（タイムスタンプ基準）
   useEffect(() => {
@@ -706,6 +711,7 @@ export default function HomeScreen({ navigation }) {
         prepEndTimeRef.current = Date.now() + preCountdownTimeRef.current * 1000;
       }
       interval = setInterval(() => {
+        if (AppState.currentState && AppState.currentState !== 'active') return;
         const now = Date.now();
         const diffMs = prepEndTimeRef.current - now;
         const nextTime = Math.max(0, Math.ceil(diffMs / 1000));
@@ -812,6 +818,7 @@ export default function HomeScreen({ navigation }) {
       }
 
       timerRef.current = setInterval(() => {
+        if (AppState.currentState && AppState.currentState !== 'active') return;
         const now = Date.now();
 
         if (!isCountUpRef.current) {
@@ -1011,7 +1018,10 @@ export default function HomeScreen({ navigation }) {
     const apply = () => setAlarms('main', buildDesired(), { soundOn, stopPassedOnRemove: false });
     apply();
     if (!isRunning && !isPreCountingDown) return undefined;
-    const id = setInterval(apply, 1000);
+    const id = setInterval(() => {
+      if (AppState.currentState && AppState.currentState !== 'active') return;
+      apply();
+    }, 1000);
     return () => clearInterval(id);
   }, [isRunning, isCountUp, isPreCountingDown, isAlarmSoundEnabled, targetTime, isWatchMuted]);
 
@@ -1276,7 +1286,7 @@ export default function HomeScreen({ navigation }) {
           }
         } else {
           // 一時停止（超過中または残り0秒以下で停止した場合は設定時間へ戻し、Watch側の00:00折りたたみを防止）
-          const wasOverOrZero = currentIsCountUp || currentRemaining <= 0;
+          const wasOverOrZero = currentIsCountUp || currentRemaining <= 0 || Boolean(targetEndTimeRef.current && targetEndTimeRef.current <= Date.now());
           const stoppedEndMs =
             targetEndTimeRef.current ||
             overStartTimeRef.current ||
@@ -1648,7 +1658,7 @@ export default function HomeScreen({ navigation }) {
       };
       // Watch側で設定されたtotalSecondsまたはsecondsが同梱されていれば開始前に同期反映
       const incomingTotal = Number(payload?.totalSeconds || payload?.seconds || payload?.extra?.totalSeconds || payload?.extra?.seconds || 0);
-      const isFromOvertime = isCountUpRef.current || isCountUp || remainingTimeRef.current <= 0;
+      const isFromOvertime = isCountUpRef.current || isCountUp || remainingTimeRef.current <= 0 || Boolean(targetEndTimeRef.current && targetEndTimeRef.current <= Date.now());
       if (!isRunningRef.current && !isPreCountingDownRef.current && incomingTotal > 0) {
         const isAtInitial = remainingTimeRef.current === targetTimeRef.current || isFromOvertime;
         if (isAtInitial && incomingTotal !== targetTimeRef.current) {
@@ -1710,7 +1720,7 @@ export default function HomeScreen({ navigation }) {
         }
       }
     } else if (cleanAction === 'pause') {
-      const wasOvertime = isCountUpRef.current || remainingTimeRef.current <= 0;
+      const wasOvertime = isCountUpRef.current || remainingTimeRef.current <= 0 || Boolean(targetEndTimeRef.current && targetEndTimeRef.current <= Date.now());
       const incomingStopEnd = Number(payload?.targetEndTimestamp || payload?.extra?.targetEndTimestamp || payload?.expectedEnd || payload?.extra?.expectedEnd || 0);
       const currentEndMs =
         incomingStopEnd ||
@@ -1768,7 +1778,8 @@ export default function HomeScreen({ navigation }) {
       }
     } else if (cleanAction === 'toggle') {
       const isFromPhone = payload?.fromPhone === true;
-      if (isCountUpRef.current || lastAutoFinishedAtRef.current > 0 || (isRunningRef.current && remainingTimeRef.current <= 0)) {
+      const isTargetEndPassed = Boolean(targetEndTimeRef.current && targetEndTimeRef.current <= Date.now());
+      if (isCountUpRef.current || lastAutoFinishedAtRef.current > 0 || (isRunningRef.current && (remainingTimeRef.current <= 0 || isTargetEndPassed))) {
         if (resetTimerRef.current) {
           resetTimerRef.current(true);
         }
@@ -1918,8 +1929,9 @@ export default function HomeScreen({ navigation }) {
           incomingEndMs > Date.now() || lastAutoFinishedAtRef.current > 0
         );
         if (isRunningRef.current || shouldResumeFromWatchOvertime) {
-          const wasOverOrRinging = isCountUpRef.current || triggeredVoicesRef.current.has('alarm') || shouldResumeFromWatchOvertime;
-          const baseEnd = (isRunningRef.current && !isCountUpRef.current && targetEndTimeRef.current) ? targetEndTimeRef.current : Date.now();
+          const isTargetEndPassed = Boolean(targetEndTimeRef.current && targetEndTimeRef.current <= Date.now());
+          const wasOverOrRinging = isCountUpRef.current || isTargetEndPassed || triggeredVoicesRef.current.has('alarm') || shouldResumeFromWatchOvertime;
+          const baseEnd = (isRunningRef.current && !isCountUpRef.current && !isTargetEndPassed && targetEndTimeRef.current) ? targetEndTimeRef.current : Date.now();
           const computedEnd = Math.max(Date.now() + 5000, baseEnd + delta * 1000);
           targetEndTimeRef.current = (incomingEndMs > Date.now() && Math.abs(incomingEndMs - computedEnd) <= 15000)
             ? incomingEndMs
