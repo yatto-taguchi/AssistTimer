@@ -8738,7 +8738,7 @@ struct SeatTimerCard: View {
                 if item.status != .normal {
                     let staffDisp = (item.shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         ? ""
-                        : ":\(SeatTimerItem.displayStaffName(item.shampooStaff, currentUserName: currentUserName))"
+                        : ":\(SeatTimerItem.displayStaffName(item.shampooStaff ?? "", currentUserName: currentUserName))"
                     let statusBadgeText: String = {
                         switch item.status {
                         case .shampoo:
