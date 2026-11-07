@@ -119,6 +119,7 @@ enum ComplicationData {
               let data = defaults.data(forKey: snapshotKey),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let seats = obj["seats"] as? [[String: Any]] else { return ComplicationSnapshot() }
+        let now = Date()
         let currentUserName = obj["userName"] as? String
         let parsed: [ComplicationSeat] = seats.compactMap { d in
             guard let end = (d["endEpoch"] as? NSNumber)?.doubleValue else { return nil }
@@ -148,14 +149,18 @@ enum ComplicationData {
             let isNoHelp = (d["isNoHelpNeeded"] as? NSNumber)?.boolValue ?? (d["isNoHelpNeeded"] as? Bool) ?? false
 
             let isCountUpEnabled = true
+            let rawRunning = (d["isRunning"] as? NSNumber)?.boolValue ?? (d["isRunning"] as? Bool) ?? false
+            let endDate = Date(timeIntervalSince1970: end)
+            // ★ 終了時刻が未設定(<=0)または3時間(10800秒)以上経過した放置データは強制的に非稼働扱いとし、永遠のカウントアップ表示を防止
+            let isValidRunning = rawRunning && end > 0 && endDate > now.addingTimeInterval(-10800)
             
             return ComplicationSeat(
                 id: id,
                 seatNumber: num,
                 seatLabel: label,
                 isMainTimer: isMain,
-                endDate: Date(timeIntervalSince1970: end),
-                isRunning: (d["isRunning"] as? NSNumber)?.boolValue ?? false,
+                endDate: endDate,
+                isRunning: isValidRunning,
                 pausedRemaining: (d["pausedRemaining"] as? NSNumber)?.intValue ?? 0,
                 related: (d["related"] as? NSNumber)?.boolValue ?? false,
                 totalSeconds: (d["totalSeconds"] as? NSNumber)?.intValue ?? (d["totalSeconds"] as? Int) ?? 600,
@@ -184,7 +189,13 @@ enum ComplicationData {
     /// ※ 以前は終了が一番近い席を選んでいたため、放置された超過席がずっと表示されていた
     static func pick(from snapshot: ComplicationSnapshot, at date: Date) -> ComplicationSeat? {
         // カウントアップOFFのメインタイマーは終了時刻（endDate）に到達した時点で稼働終了とみなす
-        let running = snapshot.seats.filter { $0.isRunning && ($0.isCountUpEnabled || $0.endDate > date) }
+        // また endDate が不正(<=0)または3時間以上前のデータも非稼働として除外する
+        let running = snapshot.seats.filter {
+            $0.isRunning &&
+            $0.endDate.timeIntervalSince1970 > 0 &&
+            $0.endDate > date.addingTimeInterval(-10800) &&
+            ($0.isCountUpEnabled || $0.endDate > date)
+        }
         let hasRelatedRunning = running.contains(where: { $0.related })
         if let id = snapshot.lastTouchedId,
            let touched = running.first(where: { $0.id == id }),
@@ -206,7 +217,12 @@ enum ComplicationData {
     }
 
     static func entry(at date: Date, snapshot: ComplicationSnapshot) -> ComplicationEntry {
-        let activeCount = snapshot.seats.filter { $0.isRunning && ($0.isCountUpEnabled || $0.endDate > date) }.count
+        let activeCount = snapshot.seats.filter {
+            $0.isRunning &&
+            $0.endDate.timeIntervalSince1970 > 0 &&
+            $0.endDate > date.addingTimeInterval(-10800) &&
+            ($0.isCountUpEnabled || $0.endDate > date)
+        }.count
         return ComplicationEntry(
             date: date,
             seat: pick(from: snapshot, at: date),
@@ -286,9 +302,11 @@ struct ComplicationProvider: TimelineProvider {
                 if t10 > now { entryDates.insert(t10) }
             }
             if seat.isCountUpEnabled {
-                // 超過バー満タン（終了＋180秒）
+                // 超過バー満タン（終了＋180秒）および3時間上限（終了＋10800秒）
                 let tOverMax = end.addingTimeInterval(180)
                 if tOverMax > now { entryDates.insert(tOverMax) }
+                let tAutoExpire = end.addingTimeInterval(10800)
+                if tAutoExpire > now { entryDates.insert(tAutoExpire) }
             }
             
             // ★ チェックタイマーのエントリー（終了時刻 ＆ 残り1分前で赤切り替え）
@@ -305,8 +323,10 @@ struct ComplicationProvider: TimelineProvider {
         
         let sortedDates = entryDates.sorted()
         let entries = sortedDates.prefix(40).map { ComplicationData.entry(at: $0, snapshot: snapshot) }
-        // 席の追加・変更時は Watch アプリ側から reloadAllTimelines() される
-        completion(Timeline(entries: entries, policy: .never))
+        // 席の追加・変更時は Watch アプリ側から reloadAllTimelines() されるが、
+        // バックグラウンドサスペンド等で reload 通知が遅延した場合でも最長3分以内に最新 App Group スナップショットを再読込する
+        let hasAnyRunning = seats.contains(where: { $0.isRunning && $0.endDate.timeIntervalSince1970 > 0 })
+        completion(Timeline(entries: entries, policy: hasAnyRunning ? .after(now.addingTimeInterval(180)) : .never))
     }
 }
 
@@ -316,7 +336,10 @@ struct ComplicationView: View {
     let entry: ComplicationEntry
 
     private var activeSeat: ComplicationSeat? {
-        guard let seat = entry.seat else { return nil }
+        guard let seat = entry.seat,
+              seat.isRunning,
+              seat.endDate.timeIntervalSince1970 > 0,
+              seat.endDate > entry.date.addingTimeInterval(-10800) else { return nil }
         if !seat.isCountUpEnabled && seat.endDate <= entry.date {
             return nil
         }

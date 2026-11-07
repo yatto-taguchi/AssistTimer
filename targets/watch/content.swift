@@ -852,7 +852,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         let runSec = m.pausedRemainingSeconds > 0 ? m.pausedRemainingSeconds : m.totalSeconds
         m.targetEndTime = prepEnd.addingTimeInterval(TimeInterval(runSec))
         self.mainTimer = m
-        WidgetSync.save(timers: self.timers, mainTimer: m, userName: self.currentUserName)
+        WidgetSync.save(timers: self.timers, mainTimer: m, userName: self.currentUserName, forceReload: true)
         WatchAlarmCoordinator.shared.update(
             timers: self.timers,
             mainTimer: m,
@@ -2260,7 +2260,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         currentUserName: self.currentUserName,
                         isStaleContextSnapshot: isStaleContextForAlarm
                     )
-                    WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer, userName: self.currentUserName)
+                    WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer, userName: self.currentUserName, forceReload: true)
                 }
             } else {
                 // ★ Watch で止めたのに、まだ「止める前と同じ終了時刻で稼働中」のデータが届いた場合は、
@@ -2468,6 +2468,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                 parsed[i].pausedRemainingSeconds = prev.pausedRemainingSeconds
                                 parsed[i].isCollapsed = false
                             } else {
+                                self.clearPeerStoppedSeat(seatId: id, seatNumber: parsed[i].seatNumber)
+                                if prevKey != id {
+                                    self.clearPeerStoppedSeat(seatId: prevKey, seatNumber: parsed[i].seatNumber)
+                                }
                                 if parsed[i].isZero {
                                     markLocalStop(seatId: id, endTime: prev.targetEndTime)
                                     if prevKey != id {
@@ -2482,6 +2486,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                 )
                             }
                         } else if matchesStoppedSeatEnd || (!hasExplicitPeerNotification && WatchAlarmCoordinator.shared.isSeatRingingOrDue(seatId: id, seatNumber: parsed[i].seatNumber)) {
+                            self.clearPeerStoppedSeat(seatId: id, seatNumber: parsed[i].seatNumber)
+                            if prevKey != id {
+                                self.clearPeerStoppedSeat(seatId: prevKey, seatNumber: parsed[i].seatNumber)
+                            }
                             if parsed[i].isZero, lastStoppedEndSec > 0 {
                                 let stoppedDate = Date(timeIntervalSince1970: lastStoppedEndSec)
                                 markLocalStop(seatId: id, endTime: stoppedDate)
@@ -2578,8 +2586,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     currentUserName: self.currentUserName,
                     isStaleContextSnapshot: isStaleContextForAlarm
                 )
-                // ★ 文字盤コンプリケーションへ共有
-                WidgetSync.save(timers: parsed, mainTimer: self.mainTimer, userName: self.currentUserName)
+                // ★ 文字盤コンプリケーションへ共有（即時リロード強制）
+                WidgetSync.save(timers: parsed, mainTimer: self.mainTimer, userName: self.currentUserName, forceReload: true)
             }
         } else if data["mainTimer"] != nil || didUpdateMain {
             // ★ メインタイマーのみの更新時（seatsキーなし）も文字盤・アラームを同期
@@ -2590,7 +2598,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 currentUserName: self.currentUserName,
                 isStaleContextSnapshot: isStaleContextForAlarm
             )
-            WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer, userName: self.currentUserName)
+            WidgetSync.save(timers: self.timers, mainTimer: self.mainTimer, userName: self.currentUserName, forceReload: true)
         }
     }
     
@@ -3561,12 +3569,24 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     cloudColorStaff: cloudColorStaff
                 )
                 let wasAssistAlreadyMe = SeatTimerItem.isStaffMe(cur.shampooStaff ?? "", currentUserName: self.currentUserName)
+                let isKnownOtherUid = hasValidMyUid && Self.isValidCloudUUID(cloudUpdatedBy) && cloudUpdatedBy.caseInsensitiveCompare(myUid) != .orderedSame
+                let isKnownOtherActorName = !actorName.isEmpty && !SeatTimerItem.isStaffMe(actorName, currentUserName: self.currentUserName)
+                let curAssistClean = (cur.shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let curCheckClean = (cur.checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let hasOtherAssignedStaffOnSeat = (!curAssistClean.isEmpty && curAssistClean != "ヘルプなし" && curAssistClean != "none" && !SeatTimerItem.isStaffMe(curAssistClean, currentUserName: self.currentUserName))
+                    || (!curCheckClean.isEmpty && !SeatTimerItem.isStaffMe(curCheckClean, currentUserName: self.currentUserName))
+                    || (!cloudAssist.isEmpty && cloudAssist != "ヘルプなし" && cloudAssist != "none" && !SeatTimerItem.isStaffMe(cloudAssist, currentUserName: self.currentUserName))
+                    || cur.isRecruiting
+                let isSoloCreatorSeat = (resolvedIsCreatorMe == true || cur.isCreatorMe(currentUserName: self.currentUserName)) && !hasOtherAssignedStaffOnSeat
                 let isSelfAction: Bool = {
                     if wasStoppedLocallyBeforePoll { return true }
                     if hasValidMyUid && Self.isValidCloudUUID(cloudUpdatedBy) {
                         return cloudUpdatedBy.caseInsensitiveCompare(myUid) == .orderedSame
                     }
-                    if !actorName.isEmpty && SeatTimerItem.isStaffMe(actorName, currentUserName: self.currentUserName) && !wasAssistAlreadyMe {
+                    if !actorName.isEmpty && SeatTimerItem.isStaffMe(actorName, currentUserName: self.currentUserName) && (!wasAssistAlreadyMe || cur.isCreatorMe(currentUserName: self.currentUserName)) {
+                        return true
+                    }
+                    if isSoloCreatorSeat && !isKnownOtherUid && !isKnownOtherActorName {
                         return true
                     }
                     return false
@@ -4899,7 +4919,7 @@ struct ContentView: View {
                         return
                     }
                     alarm.update(timers: newTimers, mainTimer: sessionManager.mainTimer, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
-                    WidgetSync.save(timers: newTimers, mainTimer: sessionManager.mainTimer, userName: currentUserName)
+                    WidgetSync.save(timers: newTimers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
                 }
                 .onChange(of: alarm.ringing) { _, newRinging in
                     if !newRinging.isEmpty {
@@ -5003,7 +5023,7 @@ struct ContentView: View {
                     self.timers = sessionManager.timers
                 }
                 if !didExecutePending {
-                    WidgetSync.save(timers: self.timers, mainTimer: sessionManager.mainTimer ?? self.mainTimer, userName: currentUserName, forceReload: true)
+                    WidgetSync.save(timers: sessionManager.timers.isEmpty ? self.timers : sessionManager.timers, mainTimer: sessionManager.mainTimer ?? self.mainTimer, userName: currentUserName, forceReload: true)
                 }
                 if let targetId = scrollToSeatId {
                     triggerScroll(to: targetId)
@@ -5023,7 +5043,7 @@ struct ContentView: View {
                     self.timers = sessionManager.timers
                 }
                 if !didExecutePending {
-                    WidgetSync.save(timers: self.timers, mainTimer: sessionManager.mainTimer ?? self.mainTimer, userName: currentUserName, forceReload: true)
+                    WidgetSync.save(timers: sessionManager.timers.isEmpty ? self.timers : sessionManager.timers, mainTimer: sessionManager.mainTimer ?? self.mainTimer, userName: currentUserName, forceReload: true)
                 }
                 mapCrownFocusTrigger += 1
             }) { item in
@@ -5040,7 +5060,7 @@ struct ContentView: View {
                     self.timers = sessionManager.timers
                 }
                 if !didExecutePending {
-                    WidgetSync.save(timers: self.timers, mainTimer: sessionManager.mainTimer, userName: currentUserName, forceReload: true)
+                    WidgetSync.save(timers: sessionManager.timers.isEmpty ? self.timers : sessionManager.timers, mainTimer: sessionManager.mainTimer ?? self.mainTimer, userName: currentUserName, forceReload: true)
                 }
                 mapCrownFocusTrigger += 1
             }) { item in
@@ -5119,7 +5139,7 @@ struct ContentView: View {
                     self.now = input
                     self.mainTimer = m
                     sessionManager.mainTimer = m
-                    WidgetSync.save(timers: sessionManager.timers, mainTimer: m, userName: currentUserName)
+                    WidgetSync.save(timers: sessionManager.timers, mainTimer: m, userName: currentUserName, forceReload: true)
                     alarm.update(timers: sessionManager.timers, mainTimer: m, soundOn: sessionManager.alarmSoundEnabled, currentUserName: currentUserName)
                 }
                 if hasActiveTimer {
@@ -5167,9 +5187,10 @@ struct ContentView: View {
                         currentUserName: receivedName
                     )
                     WidgetSync.save(
-                        timers: self.timers,
+                        timers: sessionManager.timers.isEmpty ? self.timers : sessionManager.timers,
                         mainTimer: sessionManager.mainTimer ?? self.mainTimer,
-                        userName: receivedName
+                        userName: receivedName,
+                        forceReload: true
                     )
                 }
             }

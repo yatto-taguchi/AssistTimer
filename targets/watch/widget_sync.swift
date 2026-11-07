@@ -1,4 +1,5 @@
 import Foundation
+import WatchKit
 import WidgetKit
 
 // MARK: - 文字盤コンプリケーション（targets/watch-widget）へのデータ共有
@@ -34,11 +35,24 @@ enum WidgetSync {
         let mainSnapshot = mainTimer
         let userSnapshot = userName
 
-        if forceReload {
-            // ★ タイマースタート・時間決定・停止・scenePhase遷移などの明示的操作（forceReload: true）時は、
+        // ★ Watch アプリが非アクティブ／バックグラウンド（手首下げ減光中・バックグラウンド通信受信中）のとき、
+        //   または呼び出し元がバックグラウンドスレッドのときは、0.06秒の非同期デバウンスでプロセスがサスペンドされて
+        //   WidgetCenter.reloadAllTimelines() が発火し損ねるのを防ぐため、自動的に同期実行（syncQueue.sync）へ昇格する
+        let isCallerBackgroundThread = !Thread.isMainThread
+        let isAppNotActive: Bool = {
+            if Thread.isMainThread {
+                return WKApplication.shared().applicationState != .active
+            }
+            return true
+        }()
+        let shouldExecuteSynchronously = forceReload || isCallerBackgroundThread || isAppNotActive
+
+        if shouldExecuteSynchronously {
+            // ★ タイマースタート・時間決定・停止・scenePhase遷移などの明示的操作（forceReload: true）や非アクティブ時は、
             //   直後にデジタルクラウンで文字盤へ戻ってアプリがサスペンドしても100%即座に文字盤へ反映されるよう、
             //   0.06秒デバウンスおよび0.25秒スロットリングを一切挟まず同期的に保存＆タイムラインリロードを完了させる！
             let executeImmediateSave = {
+                let effectiveForce = forceReload || pendingForceReload || isAppNotActive
                 pendingWorkItem?.cancel()
                 pendingWorkItem = nil
                 pendingForceReload = false
@@ -46,7 +60,7 @@ enum WidgetSync {
                     timers: timersSnapshot,
                     mainTimer: mainSnapshot,
                     userName: userSnapshot,
-                    forceReload: true
+                    forceReload: effectiveForce
                 )
             }
             if DispatchQueue.getSpecific(key: queueKey) == true {
@@ -95,7 +109,9 @@ enum WidgetSync {
                 let checkEnd = (!t.isCheckCompleted ? (t.checkTargetEndTime?.timeIntervalSince1970.rounded() ?? 0) : 0)
                 let isRel = (t.id == "main-timer") || t.isRelated(to: userName)
                 var didChange = false
-                if let p = prev[t.id], p.count >= 2 {
+                let seatKey = "seat-\(t.seatNumber)"
+                let prevEntry = prev[t.id] ?? (t.seatNumber > 0 ? prev[seatKey] : nil)
+                if let p = prevEntry, p.count >= 2 {
                     let wasRunning = p[0] > 0.5
                     let prevCheckEnd = p.count >= 3 ? p[2] : 0
                     if !wasRunning || abs(p[1] - end) >= endChangeThreshold || (checkEnd > 0 && abs(prevCheckEnd - checkEnd) >= endChangeThreshold) {
@@ -121,21 +137,68 @@ enum WidgetSync {
         }
         // 削除された席、または停止した席の ID は忘れる（また、自分の関係席が稼働中なのに無関係な席が lastTouchedId になっている場合もリセット）
         if let id = lastTouchedId {
-            let matchedActive = allItems.first(where: { $0.id == id && ($0.isRunning || $0.isPreCountingDown) })
-            if matchedActive == nil && !allItems.isEmpty {
-                lastTouchedId = nil
-            } else if let m = matchedActive, hasAnyRelatedActive, !(m.id == "main-timer" || m.isRelated(to: userName)) {
+            let matchedActive = allItems.first(where: { ($0.id == id || ($0.seatNumber > 0 && "seat-\($0.seatNumber)" == id)) && ($0.isRunning || $0.isPreCountingDown) })
+            if let m = matchedActive {
+                if hasAnyRelatedActive && !(m.id == "main-timer" || m.isRelated(to: userName)) {
+                    lastTouchedId = nil
+                } else {
+                    lastTouchedId = m.id
+                }
+            } else if !allItems.isEmpty {
                 lastTouchedId = nil
             }
         }
+
+        // ★ メインタイマー・全客席タイマー・チェックタイマーの稼働/停止遷移および稼働中席の削除を完全検知（anyActiveStateChanged）
         let prevMainActive = (prevStates?["main-timer"]?.first ?? 0) > 0.5
         let curMainActive = (mainTimer?.isRunning == true || mainTimer?.isPreCountingDown == true)
         let mainActiveChanged = (prevMainActive != curMainActive)
+
+        var seatOrCheckActiveChanged = false
+        var currentAllKeys = Set<String>(["main-timer"])
+        for t in timers {
+            currentAllKeys.insert(t.id)
+            let seatKey = "seat-\(t.seatNumber)"
+            if t.seatNumber > 0 {
+                currentAllKeys.insert(seatKey)
+            }
+            if let prev = prevStates {
+                let prevEntry = prev[t.id] ?? (t.seatNumber > 0 ? prev[seatKey] : nil)
+                let wasRunning = (prevEntry?.first ?? 0) > 0.5
+                if wasRunning != t.isRunning {
+                    seatOrCheckActiveChanged = true
+                } else if t.isRunning, let p = prevEntry, p.count >= 2 {
+                    let curEnd = t.targetEndTime.timeIntervalSince1970.rounded()
+                    if abs(p[1] - curEnd) >= endChangeThreshold {
+                        seatOrCheckActiveChanged = true
+                    }
+                }
+                let prevCheckEnd = (prevEntry?.count ?? 0) >= 3 ? (prevEntry?[2] ?? 0) : 0
+                let checkEnd = (!t.isCheckCompleted ? (t.checkTargetEndTime?.timeIntervalSince1970.rounded() ?? 0) : 0)
+                if (prevCheckEnd > 0 && checkEnd == 0) || (prevCheckEnd == 0 && checkEnd > 0) || (checkEnd > 0 && abs(prevCheckEnd - checkEnd) >= endChangeThreshold) {
+                    seatOrCheckActiveChanged = true
+                }
+            }
+        }
+        if !seatOrCheckActiveChanged, let prev = prevStates {
+            for (k, v) in prev where k != "main-timer" {
+                if (v.first ?? 0) > 0.5 && !currentAllKeys.contains(k) {
+                    seatOrCheckActiveChanged = true
+                    break
+                }
+            }
+        }
+        let anyActiveStateChanged = mainActiveChanged || seatOrCheckActiveChanged
+
         var newStates: [String: [Double]] = [:]
         for t in allItems {
             let active = t.isRunning || t.isPreCountingDown
             let checkEnd = (!t.isCheckCompleted ? (t.checkTargetEndTime?.timeIntervalSince1970.rounded() ?? 0) : 0)
-            newStates[t.id] = [active ? 1 : 0, t.targetEndTime.timeIntervalSince1970.rounded(), checkEnd]
+            let entry: [Double] = [active ? 1 : 0, active ? t.targetEndTime.timeIntervalSince1970.rounded() : 0, checkEnd]
+            newStates[t.id] = entry
+            if t.id != "main-timer" && t.seatNumber > 0 {
+                newStates["seat-\(t.seatNumber)"] = entry
+            }
         }
         defaults.set(newStates, forKey: prevStatesKey)
         if let id = lastTouchedId {
@@ -206,7 +269,7 @@ enum WidgetSync {
             if let staff = t.checkStaff, !staff.isEmpty {
                 d["checkStaff"] = staff
             }
-            if let checkEnd = t.checkTargetEndTime, let checkTot = t.checkTotalSeconds {
+            if !t.isCheckCompleted, let checkEnd = t.checkTargetEndTime, let checkTot = t.checkTotalSeconds {
                 d["checkEndEpoch"] = checkEnd.timeIntervalSince1970.rounded()
                 d["checkTotalSeconds"] = checkTot
             }
@@ -218,8 +281,16 @@ enum WidgetSync {
             payload["lastTouchedId"] = id
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
-        if data == lastPayload && !mainActiveChanged {
-            if forceReload, trailingReloadWorkItem != nil {
+        if data == lastPayload && !anyActiveStateChanged {
+            if forceReload {
+                trailingReloadWorkItem?.cancel()
+                trailingReloadWorkItem = nil
+                let now = Date()
+                if now.timeIntervalSince(lastReloadAt) >= 0.1 {
+                    lastReloadAt = now
+                    WidgetCenter.shared.reloadAllTimelines()
+                }
+            } else if trailingReloadWorkItem != nil {
                 trailingReloadWorkItem?.cancel()
                 trailingReloadWorkItem = nil
                 lastReloadAt = Date()
@@ -230,7 +301,7 @@ enum WidgetSync {
         lastPayload = data
 
         defaults.set(data, forKey: snapshotKey)
-        if forceReload {
+        if forceReload || anyActiveStateChanged {
             trailingReloadWorkItem?.cancel()
             trailingReloadWorkItem = nil
             lastReloadAt = Date()
