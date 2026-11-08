@@ -28,6 +28,7 @@ import {
   updateCachedMainTimerState,
   ensureSalonSeatsCached,
   adoptWatchActiveSeatsIntoCache,
+  detectSalonBuildUpdateOnce,
 } from './SalonWorkScreen';
 
 const MAIN_ALARM_KEY = 'main-timer';
@@ -2172,7 +2173,10 @@ export default function HomeScreen({ navigation }) {
     }
     restoreActiveMainTimerPromiseRef.current = (async () => {
       try {
-        const raw = await AsyncStorage.getItem(ACTIVE_MAIN_TIMER_STORAGE_KEY);
+        const [raw, isAppBuildUpdate] = await Promise.all([
+          AsyncStorage.getItem(ACTIVE_MAIN_TIMER_STORAGE_KEY),
+          detectSalonBuildUpdateOnce(),
+        ]);
         if (!raw) return;
         const saved = JSON.parse(raw);
         if (!saved || typeof saved !== 'object') return;
@@ -2235,7 +2239,7 @@ export default function HomeScreen({ navigation }) {
             ? (savedEnd > 0 ? savedEnd : savedPrepEnd + savedTarget * 1000)
             : savedEnd;
 
-        if (resolvedEndTs <= abandonedCutoff) {
+        if (resolvedEndTs <= abandonedCutoff || (isAppBuildUpdate && resolvedEndTs <= now)) {
           await AsyncStorage.removeItem(ACTIVE_MAIN_TIMER_STORAGE_KEY).catch(() => {});
           lastPersistedMainTimerJsonRef.current = '';
           return;

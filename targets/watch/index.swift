@@ -28,15 +28,15 @@ struct watchEntry: App {
         WindowGroup {
             ContentView()
         }
-        // ★ バックグラウンドで iPhone からデータが届いた時、受信処理が終わるまで起動を維持
-        //   （席データを受け取ったらアラーム予定・通知を更新するため）
+        // ★ バックグラウンドで iPhone からデータが届いた時、受信処理が終わるまで最小限の待機のみ維持
+        //   （長時間のスリープ保持による Watchdog 0x8badf00d クラッシュを防ぐため最大 0.45 秒で即時解放）
         .backgroundTask(.watchConnectivity) {
             await MainActor.run {
                 _ = WatchSessionManager.shared
             }
-            for _ in 0..<20 {
-                if !WCSession.default.hasContentPending { break }
-                try? await Task.sleep(nanoseconds: 500_000_000)
+            for _ in 0..<3 {
+                if !WCSession.isSupported() || !WCSession.default.hasContentPending { break }
+                try? await Task.sleep(nanoseconds: 150_000_000)
             }
         }
     }

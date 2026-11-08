@@ -37,20 +37,18 @@ enum WidgetSync {
         let mainSnapshot = mainTimer
         let userSnapshot = userName
 
-        // ★ Watch アプリが非アクティブ／バックグラウンド（手首下げ減光中・バックグラウンド通信受信中）のとき、
-        //   または呼び出し元がバックグラウンドスレッドのときは、0.06秒の非同期デバウンスでプロセスがサスペンドされて
-        //   WidgetCenter.reloadAllTimelines() が発火し損ねるのを防ぐため、自動的に同期実行（syncQueue.sync）へ昇格する
-        let isCallerBackgroundThread = !Thread.isMainThread
+        // ★ メインスレッドの Watchdog タイムアウト（0x8badf00d: cfprefsd / chronod IPC 待ちデッドロック）を
+        //   100%防止するため、メインスレッドからの `syncQueue.sync` は絶対に行わず、常に `syncQueue.async` で直列実行する。
+        //   forceReload == true または非アクティブ時は 0.06秒デバウンスをスキップして syncQueue 上で即時実行する。
         let isAppActive: Bool = Thread.isMainThread ? (WKApplication.shared().applicationState == .active) : false
-        let isAppNotActive = !isAppActive
-        let shouldExecuteSynchronously = forceReload || isCallerBackgroundThread || isAppNotActive
+        let shouldExecuteImmediatelyOnQueue = forceReload || !isAppActive
 
-        if shouldExecuteSynchronously {
-            // ★ タイマースタート・時間決定・停止・scenePhase遷移などの明示的操作（forceReload: true）や非アクティブ時は、
-            //   直後にデジタルクラウンで文字盤へ戻ってアプリがサスペンドしても100%即座に文字盤へ反映されるよう、
-            //   0.06秒デバウンスおよび0.25秒スロットリングを一切挟まず同期的に保存＆タイムラインリロードを完了させる！
-            let executeImmediateSave = {
-                let effectiveForce = forceReload || pendingForceReload || isAppNotActive
+        syncQueue.async {
+            if forceReload {
+                pendingForceReload = true
+            }
+            if shouldExecuteImmediatelyOnQueue {
+                let effectiveForce = forceReload || pendingForceReload || !isAppActive
                 pendingWorkItem?.cancel()
                 pendingWorkItem = nil
                 pendingForceReload = false
@@ -61,16 +59,9 @@ enum WidgetSync {
                     forceReload: effectiveForce,
                     isAppActive: isAppActive
                 )
+                return
             }
-            if DispatchQueue.getSpecific(key: queueKey) == true {
-                executeImmediateSave()
-            } else {
-                syncQueue.sync(execute: executeImmediateSave)
-            }
-            return
-        }
 
-        syncQueue.async {
             pendingWorkItem?.cancel()
             let work = DispatchWorkItem {
                 let shouldForce = pendingForceReload
@@ -307,6 +298,7 @@ enum WidgetSync {
             payload["lastTouchedId"] = id
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
+        let shouldReloadImmediate = anyActiveStateChanged || !isAppActive
         if data == lastPayload && !anyActiveStateChanged {
             let now = Date()
             let hasPendingTrailing = (trailingReloadWorkItem != nil)
@@ -315,57 +307,49 @@ enum WidgetSync {
             let isPeriodicForceEnsure = (forceReload && now.timeIntervalSince(lastReloadAt) >= 15.0)
             let needsForceEnsureReload = hasPendingTrailing || (forceReload && (neverReloadedThisPayload || becameActiveAfterBackgroundReload || isPeriodicForceEnsure))
             if needsForceEnsureReload {
-                defaults.synchronize()
-                if now.timeIntervalSince(lastReloadAt) >= 0.12 || !isAppActive {
-                    trailingReloadWorkItem?.cancel()
-                    trailingReloadWorkItem = nil
-                    lastReloadAt = now
-                    lastReloadedPayload = data
-                    lastReloadedWhileActive = isAppActive
-                    WidgetCenter.shared.reloadAllTimelines()
-                } else {
-                    scheduleTimelineReloadOnQueue(for: data, isAppActive: isAppActive)
+                if !isAppActive || forceReload {
+                    defaults.synchronize()
                 }
+                scheduleTimelineReloadOnQueue(for: data, isAppActive: isAppActive, immediate: !isAppActive)
             }
             return
         }
         lastPayload = data
 
         defaults.set(data, forKey: snapshotKey)
-        defaults.synchronize()
-        if forceReload || anyActiveStateChanged || !isAppActive {
-            trailingReloadWorkItem?.cancel()
-            trailingReloadWorkItem = nil
-            let now = Date()
-            let elapsedSincePrevReload = now.timeIntervalSince(lastReloadAt)
-            lastReloadAt = now
-            lastReloadedPayload = data
-            lastReloadedWhileActive = isAppActive
-            WidgetCenter.shared.reloadAllTimelines()
-            if elapsedSincePrevReload < 0.15 && isAppActive {
-                scheduleTimelineReloadOnQueue(for: data, isAppActive: isAppActive)
-            }
-        } else {
-            scheduleTimelineReloadOnQueue(for: data, isAppActive: isAppActive)
+        if shouldReloadImmediate || forceReload {
+            defaults.synchronize()
         }
+        scheduleTimelineReloadOnQueue(for: data, isAppActive: isAppActive, immediate: shouldReloadImmediate)
     }
 
-    private static func scheduleTimelineReloadOnQueue(for data: Data, isAppActive: Bool) {
+    private static func scheduleTimelineReloadOnQueue(for data: Data, isAppActive: Bool, immediate: Bool = false) {
         trailingReloadWorkItem?.cancel()
         let now = Date()
         let elapsed = now.timeIntervalSince(lastReloadAt)
-        if elapsed >= 0.25 {
+        if immediate || elapsed >= 0.25 {
             trailingReloadWorkItem = nil
-            UserDefaults(suiteName: appGroup)?.synchronize()
             lastReloadAt = now
             lastReloadedPayload = data
             lastReloadedWhileActive = isAppActive
             WidgetCenter.shared.reloadAllTimelines()
+            if immediate && elapsed < 0.25 && isAppActive {
+                let delay = max(0.08, 0.25 - elapsed)
+                let work = DispatchWorkItem {
+                    trailingReloadWorkItem = nil
+                    lastReloadAt = Date()
+                    lastReloadedPayload = data
+                    let currentActive = Thread.isMainThread ? (WKApplication.shared().applicationState == .active) : isAppActive
+                    lastReloadedWhileActive = currentActive
+                    WidgetCenter.shared.reloadAllTimelines()
+                }
+                trailingReloadWorkItem = work
+                syncQueue.asyncAfter(deadline: .now() + delay, execute: work)
+            }
         } else {
-            let delay = max(0.15, 0.25 - elapsed)
+            let delay = max(0.05, 0.25 - elapsed)
             let work = DispatchWorkItem {
                 trailingReloadWorkItem = nil
-                UserDefaults(suiteName: appGroup)?.synchronize()
                 lastReloadAt = Date()
                 lastReloadedPayload = data
                 let currentActive = Thread.isMainThread ? (WKApplication.shared().applicationState == .active) : isAppActive

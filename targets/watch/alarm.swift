@@ -205,14 +205,21 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
 
         // ★ アプリ起動時（TestFlight更新後や再起動時）に、すでに終了時刻から15分（900秒）以上過ぎている古い予約が残っていれば
         //   すべて消火済み（acknowledged）として扱い、アプリを開いた瞬間に過去のバイブレーションが暴発するのを防ぐ。
-        //   ※watchOSのスマートアラームバックグラウンド起床（adopt）が数十秒〜数分遅延した場合でも対象アラームを誤って消火しないよう、
-        //     直近15分以内の予定および現在予約中の sessionKey（30分以内）は確実に保護する！
+        //   さらに、ビルド更新初回起動時（watch_alarm_sanitized_build_v1 != "117"）は、過去ビルドから残留した
+        //   すでに期限切れ（ts <= nowEpoch）のアラーム予定をすべて即座に acknowledged にして残留シート表示・誤鳴動を完全リセットする。
         let nowEpoch = Date().timeIntervalSince1970
-        let launchCutoff = nowEpoch - 900
+        let alarmSanitizeBuildKey = "watch_alarm_sanitized_build_v1"
+        let currentAlarmBuild = "117"
+        let isNewAlarmBuild = (UserDefaults.standard.string(forKey: alarmSanitizeBuildKey) != currentAlarmBuild)
+        if isNewAlarmBuild {
+            UserDefaults.standard.set(currentAlarmBuild, forKey: alarmSanitizeBuildKey)
+            pendingOpenedAlarmEvent = nil
+        }
+        let launchCutoff = isNewAlarmBuild ? nowEpoch : (nowEpoch - 900)
         let activeSessionPrefix = sessionKey?.components(separatedBy: "@").first
         var staleKeys: [String] = []
         for (key, ts) in armed where ts <= launchCutoff && acknowledged[key] == nil {
-            if ts > nowEpoch - 1800 {
+            if !isNewAlarmBuild && ts > nowEpoch - 1800 {
                 if key == sessionKey { continue }
                 if let p = activeSessionPrefix, !p.isEmpty, key.hasPrefix("\(p)@") { continue }
             }

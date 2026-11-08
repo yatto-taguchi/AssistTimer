@@ -222,11 +222,13 @@ const SALON_PENDING_CLOUD_BUILD_NORMALIZE_KEY = '@assist_timer_pending_cloud_bui
 let _salonBuildUpdateCheckPromise = null;
 let _wasSalonBuildUpdatedThisLaunch = false;
 let _hasPendingCloudBuildNormalize = false;
+let _salonBuildUpdateCutoffMs = Date.now();
 
 export const detectSalonBuildUpdateOnce = () => {
   if (_salonBuildUpdateCheckPromise) return _salonBuildUpdateCheckPromise;
   _salonBuildUpdateCheckPromise = (async () => {
     try {
+      const launchNowMs = Date.now();
       let currentBuild = '';
       if (Platform.OS === 'ios' && WatchConnectivity && typeof WatchConnectivity.getAppBuildVersion === 'function') {
         currentBuild = WatchConnectivity.getAppBuildVersion();
@@ -235,6 +237,7 @@ export const detectSalonBuildUpdateOnce = () => {
         const appCfg = require('../../app.json')?.expo;
         currentBuild = `${appCfg?.version || '1.0.0'} (${appCfg?.ios?.buildNumber || appCfg?.android?.versionCode || '0'})`;
       }
+      currentBuild = `${currentBuild}-v117`;
       const [prevBuild, pendingCloudFlag] = await Promise.all([
         AsyncStorage.getItem(SALON_LAST_BUILD_VERSION_KEY),
         AsyncStorage.getItem(SALON_PENDING_CLOUD_BUILD_NORMALIZE_KEY),
@@ -242,14 +245,18 @@ export const detectSalonBuildUpdateOnce = () => {
       if (prevBuild !== currentBuild) {
         _wasSalonBuildUpdatedThisLaunch = true;
         _hasPendingCloudBuildNormalize = true;
+        _salonBuildUpdateCutoffMs = launchNowMs;
         await Promise.all([
           AsyncStorage.setItem(SALON_LAST_BUILD_VERSION_KEY, currentBuild),
-          AsyncStorage.setItem(SALON_PENDING_CLOUD_BUILD_NORMALIZE_KEY, '1'),
+          AsyncStorage.setItem(SALON_PENDING_CLOUD_BUILD_NORMALIZE_KEY, String(launchNowMs)),
         ]);
         return true;
       }
-      if (pendingCloudFlag === '1') {
+      if (pendingCloudFlag) {
         _hasPendingCloudBuildNormalize = true;
+        const parsedCutoff = Number(pendingCloudFlag);
+        _salonBuildUpdateCutoffMs =
+          Number.isFinite(parsedCutoff) && parsedCutoff > 1000000000000 ? parsedCutoff : launchNowMs;
       }
       return false;
     } catch (e) {
@@ -370,8 +377,14 @@ export const reconcileRealtimeSeatHistory = (prevItem, newSeat, nowStr = formatH
 //   3. 非稼働席（停止中・待機中）またはシャンプー中の席に残っていた過去の施術履歴はクリアし、カード肥大化を防止する
 export const sanitizeLoadedSeats = (seatsList, options = {}) => {
   if (!Array.isArray(seatsList)) return { seats: [], didSanitize: false };
-  const { isAppBuildUpdate = false } = options || {};
+  const {
+    isAppBuildUpdate = false,
+    activeUserName = _cachedUserName,
+    activeUserId = _cachedMyUserId,
+    activeMembers = _cachedStaffMembers,
+  } = options || {};
   const now = Date.now();
+  const buildCutoffMs = _salonBuildUpdateCutoffMs || now;
   const abandonedCutoff = now - 3 * 3600 * 1000; // 3時間以内の稼働・超過カウントアップは完全維持
   let didSanitize = false;
   const seats = seatsList.map(( rawSeat, index ) => {
@@ -389,8 +402,12 @@ export const sanitizeLoadedSeats = (seatsList, options = {}) => {
     }
     if (seat.status === 'running') {
       const endTs = Number(seat.targetEndTimestamp) || 0;
-      // 終了時刻が無効、または3時間以上前の古い放置タイマーのみ00:00待機状態へ正規化（稼働中・超過カウントアップ中は完全保護）
-      if (endTs <= 0 || endTs <= abandonedCutoff) {
+      const shouldNormalizeOnBuildUpdate =
+        isAppBuildUpdate &&
+        endTs <= buildCutoffMs &&
+        canNormalizeExpiredSeatOnBuildUpdate(seat, buildCutoffMs, activeUserName, activeUserId, activeMembers);
+      // 終了時刻が無効、3時間以上前の古い放置タイマー、またはビルド更新初回起動時に整理対象（15分以上超過放置、または自分の単独超過席）の残留超過タイマーは 00:00 待機状態へ正規化
+      if (endTs <= 0 || endTs <= abandonedCutoff || shouldNormalizeOnBuildUpdate) {
         didSanitize = true;
         return {
           ...seat,
@@ -420,19 +437,41 @@ export const sanitizeLoadedSeats = (seatsList, options = {}) => {
           isCheckCompleted: false,
           collapsedAtEnd: null,
           history: [],
+          lastStoppedAt: now,
+          lastStoppedTargetEndTimestamp: endTs > 0 ? endTs : Number(seat.lastStoppedTargetEndTimestamp || 0),
           abandonedSanitized: true,
+          buildUpdateNormalized: shouldNormalizeOnBuildUpdate ? true : !!seat.buildUpdateNormalized,
         };
       }
       if (seat.isShampooing && Array.isArray(seat.history) && seat.history.length > 0) {
         didSanitize = true;
         seat = { ...seat, history: [] };
       }
-      // 途中チェックタイマーも3時間以内の稼働・超過カウントアップは維持し、3時間以上前の古い放置データのみ完了扱いに正規化
-      if (seat.checkStatus === 'running' && seat.checkEndTimestamp && Number(seat.checkEndTimestamp) <= abandonedCutoff) {
+      // 途中チェックタイマーも3時間以内の稼働・超過カウントアップは維持し、3時間以上前またはビルド更新初回起動時に期限切れ（15分以上超過、または他スタッフ未関与）の古い放置データのみ完了扱いに正規化
+      const chkEndTs = Number(seat.checkEndTimestamp || 0);
+      const rawCheckStaff = String(seat.checkStaffName || '').trim();
+      const hasOtherCheckStaff =
+        !!rawCheckStaff &&
+        rawCheckStaff !== '未定' &&
+        rawCheckStaff !== '募集中' &&
+        !checkIsStaffNameMe(rawCheckStaff, activeUserName, activeUserId, activeMembers);
+      const isMineMainForCheck = checkIsMainStaffOfSeat(seat, activeUserName, activeUserId, activeMembers);
+      const shouldNormalizeCheckOnBuildUpdate =
+        isAppBuildUpdate &&
+        chkEndTs > 0 &&
+        (chkEndTs <= buildCutoffMs - 15 * 60 * 1000 ||
+          (chkEndTs <= buildCutoffMs && isMineMainForCheck && !hasOtherCheckStaff));
+      if (
+        seat.checkStatus === 'running' &&
+        seat.checkEndTimestamp &&
+        (chkEndTs <= abandonedCutoff || shouldNormalizeCheckOnBuildUpdate)
+      ) {
         didSanitize = true;
         return {
           ...seat,
           checkStatus: 'completed',
+          checkEndTimestamp: null,
+          isCheckCompleted: true,
         };
       }
       return seat;
@@ -626,6 +665,42 @@ export const checkIsMainStaffOfSeat = (
   const creator = (seat.colorStaffName || '').trim();
   if (!creator) return false;
   return checkIsStaffNameMe(creator, currentUserName, currentMyUserId, currentStaffMembers);
+};
+
+// ★ ビルド更新時の超過タイマー整理可否判定（3層共通ルール）:
+//   - 15分（900秒）以上超過放置されているタイマーは全員分無条件で 00:00 へ正規化
+//   - 直近15分以内の超過カウントアップ中タイマーは、自分が単独主担当（他スタッフのヘルプ・チェック指定なし）の場合のみ 00:00 へ正規化し、他スタッフが関わる進行中席は保護する
+export const canNormalizeExpiredSeatOnBuildUpdate = (
+  seat,
+  buildCutoffMs = Date.now(),
+  activeUserName = _cachedUserName,
+  activeUserId = _cachedMyUserId,
+  activeMembers = _cachedStaffMembers
+) => {
+  if (!seat || seat.status !== 'running') return true;
+  const endTs = Number(seat.targetEndTimestamp || 0);
+  if (endTs <= 0) return true;
+  if (endTs <= buildCutoffMs - 15 * 60 * 1000) return true;
+  if (endTs > buildCutoffMs) return false;
+  const isMineMain = checkIsMainStaffOfSeat(seat, activeUserName, activeUserId, activeMembers);
+  const rawAssist = String(seat.assistantStaffName || '').trim();
+  const hasOtherAssistant =
+    !!rawAssist &&
+    !seat.isNoHelpNeeded &&
+    rawAssist !== 'ヘルプなし' &&
+    rawAssist !== 'none' &&
+    rawAssist !== '未定' &&
+    rawAssist !== '募集中' &&
+    !checkIsStaffNameMe(rawAssist, activeUserName, activeUserId, activeMembers);
+  const rawCheck = String(seat.checkStaffName || '').trim();
+  const hasOtherChecker =
+    !!rawCheck &&
+    !seat.isCheckCompleted &&
+    seat.checkStatus !== 'completed' &&
+    rawCheck !== '未定' &&
+    rawCheck !== '募集中' &&
+    !checkIsStaffNameMe(rawCheck, activeUserName, activeUserId, activeMembers);
+  return isMineMain && !hasOtherAssistant && !hasOtherChecker;
 };
 
 export const checkIsSalonOwner = (salon, uid = _cachedMyUserId) => {
@@ -4653,6 +4728,8 @@ export default function SalonWorkScreen() {
       if (!isOwnerOfSalon) {
         isRemoteSyncRef.current = true;
         let didDispatchGuestPushBack = false;
+        const shouldNormalizeCloudOnBuildUpdate =
+          _wasSalonBuildUpdatedThisLaunch || _hasPendingCloudBuildNormalize;
         setSeats((prevLocalSeats) => {
           const guestSeatsToPushBack = [];
           const nowMs = Date.now();
@@ -4671,6 +4748,53 @@ export default function SalonWorkScreen() {
                     return !!ctCleanLabel && lsClean === ctCleanLabel;
                   }))
               : null;
+
+            const buildCutoffMs = _salonBuildUpdateCutoffMs || nowMs;
+            const canNormalizeGuestExpiredOnBuild = canNormalizeExpiredSeatOnBuildUpdate(
+              ct,
+              buildCutoffMs,
+              activeMyName,
+              activeMyUid,
+              activeMembers
+            );
+            const isExpiredRunningOnBuildUpdate =
+              (shouldNormalizeCloudOnBuildUpdate || !!prevMatch?.buildUpdateNormalized) &&
+              ct.status === 'running' &&
+              Number(ct.targetEndTimestamp || 0) <= buildCutoffMs &&
+              canNormalizeGuestExpiredOnBuild;
+            if (isExpiredRunningOnBuildUpdate) {
+              const normalizedGuestSeat = {
+                ...ct,
+                status: 'idle',
+                pausedRemainingSeconds: 0,
+                targetSeconds: 0,
+                targetTime: 0,
+                initialMinutes: 0,
+                targetEndTimestamp: null,
+                isReset: true,
+                isOver: false,
+                actionStatus: null,
+                isShampooing: false,
+                assistantStaffName: '',
+                helpProcess: '',
+                isRecruiting: false,
+                isNoHelpNeeded: false,
+                checkTargetSeconds: null,
+                checkTotalSeconds: null,
+                checkEndTimestamp: null,
+                checkPausedRemainingSeconds: null,
+                checkStatus: 'stopped',
+                isCheckCompleted: false,
+                history: [],
+                lastStoppedAt: nowMs,
+                lastStoppedTargetEndTimestamp: Number(ct.targetEndTimestamp || 0),
+                dirtySync: false,
+                buildUpdateNormalized: false,
+              };
+              guestSeatsToPushBack.push(normalizedGuestSeat);
+              lastSyncedSeatsStateRef.current[normalizedGuestSeat.id] = getSeatCloudSignature(normalizedGuestSeat);
+              return normalizedGuestSeat;
+            }
 
             const prevStartMs = prevMatch
               ? Number(prevMatch.targetEndTimestamp || 0) - Number(prevMatch.targetSeconds || 600) * 1000
@@ -4948,17 +5072,33 @@ export default function SalonWorkScreen() {
               );
             }, 0);
           }
-          if (!didDispatchGuestPushBack && guestSeatsToPushBack.length > 0) {
+          if (!didDispatchGuestPushBack) {
             didDispatchGuestPushBack = true;
-            guestSeatsToPushBack.forEach((seatToSync) => {
-              upsertCloudTimer(targetSalonId, seatToSync)
-                .then((saved) => {
-                  if (saved?.id) {
-                    lastSyncedSeatsStateRef.current[saved.id] = getSeatCloudSignature(saved);
-                  }
-                })
-                .catch(() => {});
-            });
+            if (guestSeatsToPushBack.length > 0) {
+              Promise.all(
+                guestSeatsToPushBack.map((seatToSync) =>
+                  upsertCloudTimer(targetSalonId, seatToSync)
+                    .then((saved) => {
+                      if (saved?.id) {
+                        lastSyncedSeatsStateRef.current[saved.id] = getSeatCloudSignature(saved);
+                        return true;
+                      }
+                      return false;
+                    })
+                    .catch(() => false)
+                )
+              ).then((results) => {
+                if (shouldNormalizeCloudOnBuildUpdate && results.every(Boolean)) {
+                  _wasSalonBuildUpdatedThisLaunch = false;
+                  _hasPendingCloudBuildNormalize = false;
+                  AsyncStorage.removeItem(SALON_PENDING_CLOUD_BUILD_NORMALIZE_KEY).catch(() => {});
+                }
+              });
+            } else if (shouldNormalizeCloudOnBuildUpdate) {
+              _wasSalonBuildUpdatedThisLaunch = false;
+              _hasPendingCloudBuildNormalize = false;
+              AsyncStorage.removeItem(SALON_PENDING_CLOUD_BUILD_NORMALIZE_KEY).catch(() => {});
+            }
           }
           return syncedGuestSeats;
         });
@@ -4992,9 +5132,20 @@ export default function SalonWorkScreen() {
 
           const merged = activeCloudTimers.map((ct) => {
             const ctCleanLabel = String(ct.seatLabel || ct.name || '').replace(/席$/, '').trim();
+            const buildCutoffMs = _salonBuildUpdateCutoffMs || nowMs;
+            const canNormalizeOwnerExpiredOnBuild = canNormalizeExpiredSeatOnBuildUpdate(
+              ct,
+              buildCutoffMs,
+              activeMyName,
+              activeMyUid,
+              activeMembers
+            );
             const isCloudActivelyRunning =
               ct.status === 'running' &&
-              Number(ct.targetEndTimestamp) > nowMs - 3 * 3600 * 1000;
+              (Number(ct.targetEndTimestamp) > (shouldNormalizeCloudOnBuildUpdate ? buildCutoffMs : nowMs - 3 * 3600 * 1000) ||
+                (shouldNormalizeCloudOnBuildUpdate &&
+                  Number(ct.targetEndTimestamp) > nowMs - 3 * 3600 * 1000 &&
+                  !canNormalizeOwnerExpiredOnBuild));
             const isUpdatedWithin3h =
               Number(ct.updatedAt || 0) > nowMs - 3 * 3600 * 1000;
             const isPeerCreator = !checkIsMainStaffOfSeat(ct, activeMyName, activeMyUid, activeMembers);
@@ -5009,8 +5160,9 @@ export default function SalonWorkScreen() {
               !!ct.isShampooing || (!!ct.actionStatus && ct.actionStatus !== 'normal');
             // ★ 複数スタッフ共有時のアップデート保護（Q3 案A）:
             //   稼働中（isCloudActivelyRunning）に加え、他スタッフが直近（3時間以内）に「一時停止中」または「💧シャンプー中・施術ステータス中」にしている席も保護し、
-            //   旧20:00サンプル席や古い停止残り・自分の非稼働停止席のみ 00:00（status: 'idle'）へ揃える
+            //   旧20:00サンプル席や古い停止残り・自分の非稼働停止席・ビルド更新時の期限切れ超過残留席のみ 00:00（status: 'idle'）へ揃える
             const isCloudProtectedPeerSeat =
+              ct.status !== 'running' &&
               !ct.isLegacySampleSeat &&
               !ct.isAbandonedRunningSeat &&
               isUpdatedWithin3h &&
@@ -5060,10 +5212,17 @@ export default function SalonWorkScreen() {
                 !ct.isReset ||
                 !!ct.isShampooing ||
                 !!ct.actionStatus;
+              const isExpiredCloudForLocalBuildNormalize =
+                !!localMatch.buildUpdateNormalized &&
+                ct.status === 'running' &&
+                Number(ct.targetEndTimestamp || 0) <= buildCutoffMs &&
+                canNormalizeOwnerExpiredOnBuild;
+              const effectiveCloudActivelyRunning =
+                isCloudActivelyRunning && !isExpiredCloudForLocalBuildNormalize;
               const shouldPushBuildNormalizedZero =
                 (!!localMatch.buildUpdateNormalized ||
                   (shouldNormalizeCloudOnBuildUpdate && localMatch.status === 'idle' && localMatch.isReset)) &&
-                !isCloudActivelyRunning &&
+                !effectiveCloudActivelyRunning &&
                 !isCloudProtectedPeerSeat &&
                 cloudNeedsZeroNormalize;
               // ローカルで新しく未来へ稼働中（isLocalRunningAhead）、直近のタイマー停止（isLocalStoppingCloudRunning）、
@@ -5072,7 +5231,7 @@ export default function SalonWorkScreen() {
               if (
                 isLocalRunningAhead ||
                 isLocalStoppingCloudRunning ||
-                (localMatch.status !== 'running' && localMatch.dirtySync && !isCloudActivelyRunning && !isCloudProtectedPeerSeat) ||
+                (localMatch.status !== 'running' && localMatch.dirtySync && !effectiveCloudActivelyRunning && !isCloudProtectedPeerSeat) ||
                 shouldPushBuildNormalizedZero
               ) {
                 const preserved = {
@@ -5283,12 +5442,11 @@ export default function SalonWorkScreen() {
               seatsToPushBack.push(ct);
             }
 
-            // TestFlightアップデート初回同期時: ローカル未存在の非稼働クラウド席（他スタッフの一時停止・シャンプー保護対象外）も 00:00（status: 'idle'）へ正規化して同期
+            // TestFlightアップデート初回同期時: ローカル未存在の非稼働クラウド席または期限切れ超過クラウド席（他スタッフの一時停止・シャンプー保護対象外）も 00:00（status: 'idle'）へ正規化して同期
             if (
               shouldNormalizeCloudOnBuildUpdate &&
               !isCloudActivelyRunning &&
               !isCloudProtectedPeerSeat &&
-              ct.status !== 'running' &&
               (ct.status !== 'idle' || Number(ct.pausedRemainingSeconds) > 0 || Number(ct.targetSeconds) > 0 || !ct.isReset || !!ct.isShampooing || !!ct.actionStatus)
             ) {
               const normalizedCloudSeat = {
@@ -6731,7 +6889,23 @@ export default function SalonWorkScreen() {
       // オフライン削除待ちキューを復元
       pendingDeletedSeatsRef.current = await readPendingDeletedSeats(foundSalon?.id);
 
-      // 2. 席データの読み込み・初期化（オーナーはサロン別保存席または初期1番席、ゲストはサンプル席を作らずクラウド同期）
+      // 2. スタッフメンバー一覧の先行読み込み（ビルド更新サニタイズ時の自他スタッフ判定で最新メンバーリストを参照できるよう席サニタイズ前に復元）
+      const savedMembersJson = await AsyncStorage.getItem('@salon_staff_members');
+      let loadedMembers = [];
+      if (savedMembersJson) {
+        try {
+          const parsed = JSON.parse(savedMembersJson);
+          if (Array.isArray(parsed)) {
+            loadedMembers = normalizeStaffMembers(parsed, activeUserId);
+          }
+        } catch (e) {
+          console.warn('Failed to parse saved staff members', e);
+        }
+      }
+      _cachedStaffMembers = loadedMembers;
+      setStaffMembers(loadedMembers);
+
+      // 3. 席データの読み込み・初期化（オーナーはサロン別保存席または初期1番席、ゲストはサンプル席を作らずクラウド同期）
       let loadedSeats = await readSeatsForSalonFromStorage(
         foundSalon,
         activeUserName,
@@ -6743,7 +6917,12 @@ export default function SalonWorkScreen() {
       }
       // ★ アプリ起動時（TestFlight更新後・再起動時）に稼働中タイマーはそのまま継続させ、新規更新時の非稼働席・旧20分サンプル・過去放置席のみ00:00へ正規化
       const isAppBuildUpdate = await detectSalonBuildUpdateOnce();
-      const { seats: sanitizedSeats, didSanitize } = sanitizeLoadedSeats(loadedSeats, { isAppBuildUpdate });
+      const { seats: sanitizedSeats, didSanitize } = sanitizeLoadedSeats(loadedSeats, {
+        isAppBuildUpdate,
+        activeUserName,
+        activeUserId,
+        activeMembers: loadedMembers,
+      });
       loadedSeats = sanitizedSeats;
       const launchNow = Date.now();
       loadedSeats.forEach((s) => {
@@ -6806,21 +6985,6 @@ export default function SalonWorkScreen() {
       seatsRef.current = loadedSeats;
       _cachedCurrentSeats = loadedSeats;
       setSeats(loadedSeats);
-
-      // 3. スタッフメンバー一覧の読み込み（初期値は空 []）
-      const savedMembersJson = await AsyncStorage.getItem('@salon_staff_members');
-      let loadedMembers = [];
-      if (savedMembersJson) {
-        try {
-          const parsed = JSON.parse(savedMembersJson);
-          if (Array.isArray(parsed)) {
-            loadedMembers = normalizeStaffMembers(parsed, activeUserId);
-          }
-        } catch (e) {
-          console.warn('Failed to parse saved staff members', e);
-        }
-      }
-      setStaffMembers(loadedMembers);
 
       // ★ 初回Watchプッシュは setIsDataLoaded(true) 後の subscribeActions で保留中の Watch 停止アクションを消化した直後に実行する
       //   （ここでの即時プッシュで保留中の STOP_TIMER 適用前に古い running 状態を Watch へ送り返すのを防止）
