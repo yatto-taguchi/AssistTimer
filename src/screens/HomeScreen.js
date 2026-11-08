@@ -394,18 +394,24 @@ export default function HomeScreen({ navigation }) {
     }
   };
 
+  const keepAwakeActiveRef = useRef(false);
+
   // タイマー進行中のみ画面スリープ防止（常時点灯）およびバックグラウンド音声維持を完全連動（準備→本番の無瞬断化）
   useEffect(() => {
     const isTimerActive = isPreCountingDown || isRunning;
     if (isTimerActive) {
       if (!AppState.currentState || AppState.currentState === 'active') {
-        activateKeepAwakeAsync().catch(() => {});
+        keepAwakeActiveRef.current = true;
+        Promise.resolve(activateKeepAwakeAsync()).catch(() => {});
       }
       startSilentBackgroundAudio();
     } else {
-      try {
-        deactivateKeepAwake();
-      } catch {}
+      if (keepAwakeActiveRef.current) {
+        keepAwakeActiveRef.current = false;
+        try {
+          Promise.resolve(deactivateKeepAwake()).catch(() => {});
+        } catch {}
+      }
       stopSilentBackgroundAudio();
     }
   }, [isPreCountingDown, isRunning, playsInSilentMode]);
@@ -501,12 +507,19 @@ export default function HomeScreen({ navigation }) {
   }, [voiceSound]);
 
   useEffect(() => {
-    cancelVibration();
-    return () => {
+    if (!AppState.currentState || AppState.currentState === 'active') {
       cancelVibration();
-      try {
-        deactivateKeepAwake();
-      } catch {}
+    }
+    return () => {
+      if (!AppState.currentState || AppState.currentState === 'active') {
+        cancelVibration();
+      }
+      if (keepAwakeActiveRef.current) {
+        keepAwakeActiveRef.current = false;
+        try {
+          Promise.resolve(deactivateKeepAwake()).catch(() => {});
+        } catch {}
+      }
       stopSilentBackgroundAudio();
     };
   }, []);

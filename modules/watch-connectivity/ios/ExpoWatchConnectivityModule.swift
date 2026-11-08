@@ -296,17 +296,7 @@ public class ExpoWatchConnectivityModule: Module {
       wireUserInfo.removeValue(forKey: "highPriorityWake")
 
       self.transferLock.lock()
-      if let msgType = wireUserInfo["type"] as? String {
-        let existingTransfers = Array(session.outstandingUserInfoTransfers)
-        for transfer in existingTransfers where transfer.isTransferring {
-          if let existingType = transfer.userInfo["type"] as? String,
-             existingType == msgType,
-             transfer.userInfo["notification"] == nil {
-            transfer.cancel()
-          }
-        }
-      }
-
+      // ★ WCSession.outstandingUserInfoTransfers のイテレーションと .cancel() は wcd IPC競合クラッシュを引き起こすため行わない
       // ★ 1日50回の transferCurrentComplicationUserInfo 優先起床枠のうち最後の15回は、
       //   タイマー停止・一時停止・リセットおよび共有通知（isHighPriorityWake）専用に温存し、通常同期による枯渇を防止する
       let canUseComplicationTransfer =
@@ -389,16 +379,6 @@ public class ExpoWatchConnectivityModule: Module {
     var wirePending = pending
     wirePending.removeValue(forKey: "highPriorityWake")
     self.transferLock.lock()
-    if let msgType = wirePending["type"] as? String {
-      let existingTransfers = Array(session.outstandingUserInfoTransfers)
-      for transfer in existingTransfers where transfer.isTransferring {
-        if let existingType = transfer.userInfo["type"] as? String,
-           existingType == msgType,
-           transfer.userInfo["notification"] == nil {
-          transfer.cancel()
-        }
-      }
-    }
     let canUseComplicationTransfer =
       session.isComplicationEnabled &&
       session.remainingComplicationUserInfoTransfers > 0 &&
@@ -467,6 +447,10 @@ public class ExpoWatchConnectivityModule: Module {
   }
 
   fileprivate func emitStatus() {
+    self.eventLock.lock()
+    let ready = self.jsReady
+    self.eventLock.unlock()
+    guard ready else { return }
     sendEvent("onStatusChanged", buildStatus())
   }
 
@@ -510,6 +494,12 @@ public class ExpoWatchConnectivityModule: Module {
   }
 
   private func beginRealtimeBackgroundTask() {
+    if !Thread.isMainThread {
+      DispatchQueue.main.async { [weak self] in
+        self?.beginRealtimeBackgroundTask()
+      }
+      return
+    }
     var expiredBeforeStore = false
     var isCreating = true
     let startedId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerRealtimePeerSync") { [weak self] in
@@ -556,11 +546,17 @@ public class ExpoWatchConnectivityModule: Module {
       return
     }
     if let workItem = scheduledWorkItem {
-      DispatchQueue.main.asyncAfter(deadline: .now() + 15.0, execute: workItem)
+      DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: workItem)
     }
   }
 
   fileprivate func endRealtimeBackgroundTask() {
+    if !Thread.isMainThread {
+      DispatchQueue.main.async { [weak self] in
+        self?.endRealtimeBackgroundTask()
+      }
+      return
+    }
     bgTaskLock.lock()
     realtimeBgWorkItem?.cancel()
     realtimeBgWorkItem = nil
@@ -573,9 +569,15 @@ public class ExpoWatchConnectivityModule: Module {
   }
 
   // ★ Watchからバックグラウンド中のiPhoneへ操作（STOP_TIMER等）が届いた際、
-  //   WCSessionデリゲートスレッド上で即座（同期）にバックグラウンド実行タスクを確保し、
+  //   メインスレッド上で安全にバックグラウンド実行タスク（3.5秒上限）を確保し、
   //   replyHandler返却直後にiOSがプロセスを即サスペンドしてSupabaseへのクラウド同期（upsertCloudTimer）が中断されるのを防止する
   fileprivate func beginWatchActionBackgroundTask() {
+    if !Thread.isMainThread {
+      DispatchQueue.main.async { [weak self] in
+        self?.beginWatchActionBackgroundTask()
+      }
+      return
+    }
     var expiredBeforeStore = false
     var isCreating = true
     let startedId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerWatchActionCloudSync") { [weak self] in
@@ -622,11 +624,17 @@ public class ExpoWatchConnectivityModule: Module {
       return
     }
     if let workItem = scheduledWorkItem {
-      DispatchQueue.main.asyncAfter(deadline: .now() + 12.0, execute: workItem)
+      DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: workItem)
     }
   }
 
   fileprivate func endWatchActionBackgroundTask() {
+    if !Thread.isMainThread {
+      DispatchQueue.main.async { [weak self] in
+        self?.endWatchActionBackgroundTask()
+      }
+      return
+    }
     bgTaskLock.lock()
     watchActionBgWorkItem?.cancel()
     watchActionBgWorkItem = nil
@@ -746,22 +754,22 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
   }
 
   func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
-    self.module?.beginWatchActionBackgroundTask()
     DispatchQueue.main.async {
+      self.module?.beginWatchActionBackgroundTask()
       self.module?.recordReceived(kind: "message", body: message)
       self.module?.dispatchEvent("onMessageReceived", ["message": message])
     }
   }
 
   func session(_ session: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
-    self.module?.beginWatchActionBackgroundTask()
     DispatchQueue.main.async {
+      self.module?.beginWatchActionBackgroundTask()
       self.module?.recordReceived(kind: "message", body: message)
       self.module?.dispatchEvent("onMessageReceived", ["message": message])
       if UIApplication.shared.applicationState != .active {
-        // バックグラウンド起床時はJSスレッドが handleWatchAction -> upsertCloudTimer (fetch開始) まで走り切れるよう
-        // WCSessionのIPC起床アサーションを0.45秒保持してから replyHandler を返す
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+        // バックグラウンド起床時はすでに beginWatchActionBackgroundTask()（3.5秒保護）を開始しているため、
+        // Watch側 0.85s タイムアウトより十分に早くACKが返るよう 0.10秒で replyHandler を返す
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
           replyHandler(["status": "acknowledged"])
         }
       } else {
@@ -771,8 +779,8 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
   }
 
   func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
-    self.module?.beginWatchActionBackgroundTask()
     DispatchQueue.main.async {
+      self.module?.beginWatchActionBackgroundTask()
       self.module?.recordReceived(kind: "context", body: applicationContext)
       self.module?.dispatchEvent("onApplicationContextReceived", ["context": applicationContext])
     }
@@ -780,8 +788,8 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
 
   // ★ 予備ルート（transferUserInfo）で届いた操作は onUserInfoReceived のみで通知し、二重処理を防止
   func session(_ session: WCSession, didReceiveUserInfo userInfo: [String : Any] = [:]) {
-    self.module?.beginWatchActionBackgroundTask()
     DispatchQueue.main.async {
+      self.module?.beginWatchActionBackgroundTask()
       self.module?.recordReceived(kind: "userInfo", body: userInfo)
       self.module?.dispatchEvent("onUserInfoReceived", ["userInfo": userInfo])
     }

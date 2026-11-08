@@ -55,6 +55,7 @@ import {
 const _activeSalonTimeUpSounds = new Set();
 
 export const stopSalonTimeUpSounds = () => {
+  const hadActiveSounds = _activeSalonTimeUpSounds.size > 0;
   _activeSalonTimeUpSounds.forEach((snd) => {
     try {
       snd.stopAsync().catch(() => {});
@@ -62,14 +63,19 @@ export const stopSalonTimeUpSounds = () => {
     } catch {}
   });
   _activeSalonTimeUpSounds.clear();
-  if (Platform.OS !== 'web') {
+  if (Platform.OS !== 'web' && (hadActiveSounds || AppState.currentState === 'active')) {
     try {
       Vibration.cancel();
     } catch {}
   }
 };
 
-export const stopAllCandidateAlarmsForSeat = (seatObj, extraSeatId = null, checkOnly = false) => {
+export const stopAllCandidateAlarmsForSeat = (
+  seatObj,
+  extraSeatId = null,
+  checkOnly = false,
+  recordStop = true
+) => {
   const candidateIds = new Set();
   if (seatObj?.id) candidateIds.add(String(seatObj.id));
   if (seatObj?.cloudTimerId) candidateIds.add(String(seatObj.cloudTimerId));
@@ -104,7 +110,7 @@ export const stopAllCandidateAlarmsForSeat = (seatObj, extraSeatId = null, check
     stopAlarm('salon', `${cid}-check`);
     if (!checkOnly) {
       stopAlarm('salon', `${cid}-main`);
-      if (WatchConnectivity?.notifyLocalStopOrReset) {
+      if (recordStop && WatchConnectivity?.notifyLocalStopOrReset) {
         WatchConnectivity.notifyLocalStopOrReset(cid, endTs);
       }
     }
@@ -611,8 +617,79 @@ let _cachedActiveSalonId = 'workspace-free';
 let _cachedMainTimerState = null;
 let _syncDebounceTimer = null;
 let _pendingWatchPayload = null;
+let _lastSyncedWatchSignature = '';
+let _lastSyncedWatchAt = 0;
 // Watch 側アラーム音の設定（設定画面の値を SYNC_SEATS に含めて Watch へ届ける）
 let _watchAlarmSound = false;
+
+const buildWatchPayloadSignature = (payload) => {
+  if (!payload || typeof payload !== 'object') return '';
+  try {
+    const seatsSig = Array.isArray(payload.seats)
+      ? payload.seats.map((s) => ({
+          id: s.id,
+          n: s.seatNumber,
+          l: s.seatLabel,
+          c: s.creatorName,
+          ts: s.totalSeconds,
+          te: s.targetEndTimestamp,
+          r: s.isRunning,
+          pr: s.isRunning ? 0 : s.pausedRemainingSeconds,
+          hp: s.helpProcess,
+          ss: s.shampooStaff,
+          rec: s.isRecruiting,
+          nh: s.isNoHelpNeeded,
+          st: s.status,
+          cts: s.checkTargetSeconds,
+          cte: s.checkEndTimestamp,
+          cp: s.checkProcess,
+          cs: s.checkStaffName,
+          cc: s.isCheckCompleted,
+          wa: s.watchAlarmSoundEnabled,
+          pa: s.alarmSoundEnabled,
+          col: s.isCollapsed,
+          me: s.isCreatorMe,
+          lsa: s.lastStoppedAt,
+          lse: s.lastStoppedTargetEndTimestamp,
+          pse: s.peerStoppedTargetEndTimestamp,
+        }))
+      : null;
+    const m = payload.mainTimer;
+    const mainSig = m
+      ? {
+          ts: m.totalSeconds,
+          te: m.targetEndTimestamp,
+          lre: m.lastResetTargetEndTimestamp,
+          lra: m.lastResetAt,
+          r: m.isRunning,
+          pr: m.isRunning ? 0 : m.pausedRemainingSeconds,
+          cu: m.isCountUp,
+          cue: m.isCountUpEnabled,
+          af: m.isAutoFinished,
+          er: m.isExplicitReset,
+          es: m.explicitStop,
+          g: m.genre,
+          pc: m.isPreCountingDown,
+          pe: m.prepEndTimestamp,
+          p: m.isPaused,
+        }
+      : null;
+    return JSON.stringify({
+      sid: payload.salonId,
+      uid: payload.userId,
+      un: payload.userName,
+      mem: payload.members,
+      mmap: payload.memberIdMap,
+      own: payload.isSalonOwner,
+      was: payload.watchAlarmSound,
+      clr: !!payload.clearAllSeats,
+      seats: seatsSig,
+      main: mainSig,
+    });
+  } catch {
+    return '';
+  }
+};
 
 export const updateCachedMainTimerState = (state) => {
   _cachedMainTimerState = state;
@@ -1558,12 +1635,32 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
       }
     }
 
+    const canDedupe = !options.notification && !options.forceEmpty && !options.forceSync && !options.highPriorityWake;
+    const payloadSig = buildWatchPayloadSignature(watchPayload);
+    if (
+      canDedupe &&
+      payloadSig &&
+      payloadSig === _lastSyncedWatchSignature &&
+      Date.now() - _lastSyncedWatchAt < 1500
+    ) {
+      if (_syncDebounceTimer) {
+        clearTimeout(_syncDebounceTimer);
+        _syncDebounceTimer = null;
+      }
+      _pendingWatchPayload = null;
+      return;
+    }
+
     if (options.immediate || options.notification || options.highPriorityWake) {
       if (_syncDebounceTimer) {
         clearTimeout(_syncDebounceTimer);
         _syncDebounceTimer = null;
       }
       _pendingWatchPayload = null;
+      if (payloadSig) {
+        _lastSyncedWatchSignature = payloadSig;
+        _lastSyncedWatchAt = Date.now();
+      }
       WatchConnectivity.syncData(watchPayload).catch(() => {});
       return;
     }
@@ -1574,8 +1671,24 @@ export const syncSeatsToWatch = async (currentSeats = null, currentName = null, 
     }
     _syncDebounceTimer = setTimeout(() => {
       if (_pendingWatchPayload) {
-        WatchConnectivity.syncData(_pendingWatchPayload).catch(() => {});
+        const toSend = _pendingWatchPayload;
         _pendingWatchPayload = null;
+        const debouncedSig = buildWatchPayloadSignature(toSend);
+        if (
+          !toSend.notification &&
+          !toSend.clearAllSeats &&
+          !toSend.highPriorityWake &&
+          debouncedSig &&
+          debouncedSig === _lastSyncedWatchSignature &&
+          Date.now() - _lastSyncedWatchAt < 1500
+        ) {
+          return;
+        }
+        if (debouncedSig) {
+          _lastSyncedWatchSignature = debouncedSig;
+          _lastSyncedWatchAt = Date.now();
+        }
+        WatchConnectivity.syncData(toSend).catch(() => {});
       }
     }, 150);
   } catch (e) {
@@ -1942,7 +2055,27 @@ export default function SalonWorkScreen() {
   useEffect(() => {
     if (Platform.OS !== 'ios') return undefined;
     // スマホ閉鎖時（Watch未連動時）のOS標準バナー通知用に通知権限を確認・リクエスト
-    WatchConnectivity.requestNotificationPermission().catch(() => {});
+    // ※ バックグラウンドコールド起動時はシステム権限ダイアログ呼び出しを避け、フォアグラウンド時に1回のみ実行する
+    let appStateSub = null;
+    let didRequestPerm = false;
+    const requestPermIfNeeded = () => {
+      if (didRequestPerm) return;
+      didRequestPerm = true;
+      WatchConnectivity.requestNotificationPermission().catch(() => {});
+    };
+    if (!AppState.currentState || AppState.currentState === 'active') {
+      requestPermIfNeeded();
+    } else {
+      appStateSub = AppState.addEventListener('change', (nextState) => {
+        if (nextState === 'active') {
+          requestPermIfNeeded();
+          if (appStateSub?.remove) {
+            appStateSub.remove();
+            appStateSub = null;
+          }
+        }
+      });
+    }
     const apply = (st) => {
       if (st && typeof st === 'object' && !st.error) {
         const linked = !!(st.isPaired && st.isWatchAppInstalled);
@@ -1952,7 +2085,10 @@ export default function SalonWorkScreen() {
     };
     apply(WatchConnectivity.getStatus());
     const sub = WatchConnectivity.addStatusListener(apply);
-    return () => { if (sub?.remove) sub.remove(); };
+    return () => {
+      if (sub?.remove) sub.remove();
+      if (appStateSub?.remove) appStateSub.remove();
+    };
   }, []);
 
   // ★ サロン席のタイムアップを iPhone でも鳴らすか
@@ -2178,8 +2314,11 @@ export default function SalonWorkScreen() {
     };
   };
 
-  // ★ 待機中から席タイマーが稼働開始・更新された瞬間に、1秒の遅延なく最新の `now` で初回レンダーする
+  // ★ 待機中から席タイマーが稼働開始・更新された瞬間に、1秒の遅延なく最新の `now` で初回レンダーする（バックグラウンド中はスキップ）
   useEffect(() => {
+    if ((appStateRef.current || AppState.currentState || 'active') !== 'active') {
+      return;
+    }
     if (Array.isArray(seats) && seats.some((s) => s && s.status === 'running')) {
       setNow(Date.now());
     }
@@ -2656,7 +2795,7 @@ export default function SalonWorkScreen() {
           .then((savedCloudSeat) => {
             if (savedCloudSeat?.id) {
               lastSyncedSeatsStateRef.current[savedCloudSeat.id] = sig;
-              if (seat.id !== savedCloudSeat.id || seat.dirtySync) {
+              if (seat.id !== savedCloudSeat.id) {
                 setSeats((curr) => {
                   const next = curr.map((item) =>
                     item.id === seat.id
@@ -2666,6 +2805,19 @@ export default function SalonWorkScreen() {
                   persistSeatsForSalonId(targetSalonId, next, isSalonOwnerRef.current).catch(() => {});
                   return next;
                 });
+              } else if (seat.dirtySync || seat.cloudTimerId !== savedCloudSeat.id) {
+                seat.dirtySync = false;
+                seat.cloudTimerId = savedCloudSeat.id;
+                if (Array.isArray(seatsRef.current)) {
+                  const next = seatsRef.current.map((item) =>
+                    item && item.id === seat.id
+                      ? { ...item, cloudTimerId: savedCloudSeat.id, dirtySync: false }
+                      : item
+                  );
+                  seatsRef.current = next;
+                  _cachedCurrentSeats = next;
+                  persistSeatsForSalonId(targetSalonId, next, isSalonOwnerRef.current).catch(() => {});
+                }
               }
             } else if (lastSyncedSeatsStateRef.current[seat.id] === sig) {
               // オフライン等で送信失敗した場合はシグネチャを戻し、次回再送を保証
@@ -3086,7 +3238,7 @@ export default function SalonWorkScreen() {
           nextSeats,
           userNameRef.current || userName,
           staffMembersRef.current || staffMembers,
-          { immediate: true, highPriorityWake: didApplyWatchStops || didRejectStaleWatchActive }
+          { immediate: true, forceSync: true, highPriorityWake: didApplyWatchStops || didRejectStaleWatchActive }
         );
         return nextSeats;
       });
@@ -3950,7 +4102,7 @@ export default function SalonWorkScreen() {
             return { ...stopSeat(s, 'アラーム停止'), collapsedAtEnd: Date.now() };
           }
           case 'START_TIMER': {
-            stopAllCandidateAlarmsForSeat(s, seatId, false);
+            stopAllCandidateAlarmsForSeat(s, seatId, false, false);
             if (mainTimeupAlertedRef.current) {
               mainTimeupAlertedRef.current[s.id] = false;
               if (seatId) mainTimeupAlertedRef.current[seatId] = false;
@@ -4113,7 +4265,7 @@ export default function SalonWorkScreen() {
               Math.round(Number(extra?.totalSeconds || ((s.targetSeconds || 0) + secondsToAdd)))
             );
             if (newEnd > Date.now()) {
-              stopAllCandidateAlarmsForSeat(s, seatId, false);
+              stopAllCandidateAlarmsForSeat(s, seatId, false, false);
               if (mainTimeupAlertedRef.current) {
                 mainTimeupAlertedRef.current[s.id] = false;
                 if (seatId) mainTimeupAlertedRef.current[seatId] = false;
@@ -8612,7 +8764,7 @@ export default function SalonWorkScreen() {
     setSeats((prev) => {
       const updated = prev.map((s) => {
         if (s.id !== targetSeatId) return s;
-        stopAllCandidateAlarmsForSeat(s, targetSeatId, false);
+        stopAllCandidateAlarmsForSeat(s, targetSeatId, false, false);
 
         // ① 新しく測る時（新しく測る時は新しく・履歴リセット）
         if (timerSetupMode === 'new') {
@@ -9554,7 +9706,7 @@ export default function SalonWorkScreen() {
     setSeats((prev) => {
       const updated = prev.map((s) => {
         if (s.id !== seatId) return s;
-        stopAllCandidateAlarmsForSeat(s, seatId, false);
+        stopAllCandidateAlarmsForSeat(s, seatId, false, false);
         const historyItem = {
           id: `h-${Date.now()}`,
           time: nowStr,
@@ -9714,7 +9866,7 @@ export default function SalonWorkScreen() {
         }
 
         if (newStatus === 'running' && newTargetEnd && newTargetEnd > now) {
-          stopAllCandidateAlarmsForSeat(s, seatId, false);
+          stopAllCandidateAlarmsForSeat(s, seatId, false, false);
           if (mainTimeupAlertedRef.current) mainTimeupAlertedRef.current[s.id] = false;
           if (oneMinuteHelpAlertRef.current) oneMinuteHelpAlertRef.current[s.id] = false;
           if (escalatedAlertRef.current) escalatedAlertRef.current[s.id] = false;

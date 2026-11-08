@@ -2770,7 +2770,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                         explicitTarget: ev,
                         deferPhoneSend: true
                     )
+                    let dismissSema = DispatchSemaphore(value: 0)
                     let work = DispatchWorkItem { [weak self] in
+                        defer { dismissSema.signal() }
                         guard let self = self else { return }
                         self.pendingSystemDismissPhoneSyncWorkItem = nil
                         guard let currentSnap = self.lastSystemDismissedSnapshot,
@@ -2783,8 +2785,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     self.pendingSystemDismissPhoneSyncWorkItem = work
                     ProcessInfo.processInfo.performExpiringActivity(withReason: "watchAlarmSystemDismissSync") { [weak self] expired in
                         if !expired {
-                            Thread.sleep(forTimeInterval: 1.0)
+                            _ = dismissSema.wait(timeout: .now() + 0.45)
                         } else {
+                            dismissSema.signal()
                             DispatchQueue.main.async {
                                 guard let self = self,
                                       let pendingWork = self.pendingSystemDismissPhoneSyncWorkItem,
@@ -3088,12 +3091,16 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             // ★ バックグラウンドの通知アクション（STOP_ACTION: options: []）で呼ばれた際、
             //   WCSession の iPhone 送信および 0.25秒後のチェック後本タイマー再予約が完遂する前に
             //   watchOS にプロセスをサスペンドされるのを防ぐため、短時間アクティビティ保護をかけてから完了を返す
+            let stopSema = DispatchSemaphore(value: 0)
             ProcessInfo.processInfo.performExpiringActivity(withReason: "AssistTimerNotificationStop") { expired in
-                if !expired {
-                    Thread.sleep(forTimeInterval: 0.35)
+                if expired {
+                    stopSema.signal()
+                    return
                 }
+                _ = stopSema.wait(timeout: .now() + 0.35)
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                stopSema.signal()
                 completionHandler()
             }
         }

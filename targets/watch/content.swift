@@ -3130,6 +3130,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
     
+    private final class DeliveryFallbackState {
+        let lock = NSLock()
+        var acked = false
+        var fallbackSent = false
+        var superseded = false
+        var ackSema: DispatchSemaphore?
+    }
+    private let activeDeliveriesLock = NSLock()
+    private var activeDeliveriesByTarget: [String: DeliveryFallbackState] = [:]
+
     // ★ 有効化完了時に保留していた操作を順に送信（メインスレッドで呼ぶこと）
     private func flushPendingPayloads(_ session: WCSession) {
         guard !pendingPayloads.isEmpty else { return }
@@ -3144,24 +3154,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     private func deliver(_ payload: [String: Any], session: WCSession) {
         let action = (payload["action"] as? String) ?? ""
         let targetSid = (payload["seatId"] as? String) ?? ""
-        let isMainTimerAction = action.hasPrefix("MAIN_TIMER_")
         let isMainStopOrReset = (action == "MAIN_TIMER_RESET" || action == "MAIN_TIMER_PAUSE")
         if isMainStopOrReset {
-            // ★ メインタイマーの停止・リセット送信時は、未送信キューやOS転送待ちに残っている古い開始命令をキャンセルして順序逆転による再稼働を防止
+            // ★ メインタイマーの停止・リセット送信時は、未送信キューに残っている古い開始命令をクリアして順序逆転による再稼働を防止
+            //   （※ WCSession.outstandingUserInfoTransfers のイテレーションと .cancel() は wcd IPC競合クラッシュを引き起こすため一切行わない）
             pendingPayloads.removeAll { item in
                 let a = (item["action"] as? String) ?? ""
                 return a == "MAIN_TIMER_START" || a == "MAIN_TIMER_SET_TIME"
-            }
-            let existingMainTransfers = Array(session.outstandingUserInfoTransfers)
-            for transfer in existingMainTransfers {
-                let info = transfer.userInfo
-                let a = (info["action"] as? String) ?? ""
-                let sid = (info["seatId"] as? String) ?? ""
-                if sid == "main-timer" && (a == "MAIN_TIMER_START" || a == "MAIN_TIMER_SET_TIME") {
-                    if transfer.isTransferring {
-                        transfer.cancel()
-                    }
-                }
             }
         }
         let isSeatStopOrReset = (
@@ -3174,7 +3173,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         )
         let targetSeatNum = (payload["seatNumber"] as? NSNumber)?.intValue ?? (payload["seatNumber"] as? Int) ?? 0
         if isSeatStopOrReset && (!targetSid.isEmpty || targetSeatNum > 0) {
-            // ★ 客席タイマー停止時も、同一席の未送信 START_TIMER がキューに残っていればキャンセルして順序逆転による再稼働を防止
+            // ★ 客席タイマー停止時も、同一席の未送信 START_TIMER がローカル保留キューに残っていればクリアして順序逆転による再稼働を防止
             pendingPayloads.removeAll { item in
                 let a = (item["action"] as? String) ?? ""
                 let sid = (item["seatId"] as? String) ?? ""
@@ -3182,21 +3181,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 let sameSeat = (!targetSid.isEmpty && sid == targetSid) || (targetSeatNum > 0 && sNum == targetSeatNum)
                 return sameSeat && a == "START_TIMER"
             }
-            let existingStopTransfers = Array(session.outstandingUserInfoTransfers)
-            for transfer in existingStopTransfers {
-                let info = transfer.userInfo
-                let a = (info["action"] as? String) ?? ""
-                let sid = (info["seatId"] as? String) ?? ""
-                let sNum = (info["seatNumber"] as? NSNumber)?.intValue ?? (info["seatNumber"] as? Int) ?? 0
-                let sameSeat = (!targetSid.isEmpty && sid == targetSid) || (targetSeatNum > 0 && sNum == targetSeatNum)
-                if sameSeat && a == "START_TIMER" {
-                    if transfer.isTransferring {
-                        transfer.cancel()
-                    }
-                }
-            }
         } else if action == "START_TIMER" && (!targetSid.isEmpty || targetSeatNum > 0) {
-            // ★ 客席タイマー開始時も、同一席の古い停止命令（STOP_TIMER / ENTER_HELP 等）がキューに残っていればキャンセルして開始直後の誤停止を防止
+            // ★ 客席タイマー開始時も、同一席の古い停止命令（STOP_TIMER / ENTER_HELP 等）がローカル保留キューに残っていればクリア
             let stopActionSet: Set<String> = ["STOP_TIMER", "RESET_ZERO", "FINISH_MEASURE", "ENTER_HELP", "START_SHAMPOO", "STOP_ALARM"]
             pendingPayloads.removeAll { item in
                 let a = (item["action"] as? String) ?? ""
@@ -3205,85 +3191,124 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 let sameSeat = (!targetSid.isEmpty && sid == targetSid) || (targetSeatNum > 0 && sNum == targetSeatNum)
                 return sameSeat && stopActionSet.contains(a)
             }
-            let existingStartTransfers = Array(session.outstandingUserInfoTransfers)
-            for transfer in existingStartTransfers {
-                let info = transfer.userInfo
-                let a = (info["action"] as? String) ?? ""
-                let sid = (info["seatId"] as? String) ?? ""
-                let sNum = (info["seatNumber"] as? NSNumber)?.intValue ?? (info["seatNumber"] as? Int) ?? 0
-                let sameSeat = (!targetSid.isEmpty && sid == targetSid) || (targetSeatNum > 0 && sNum == targetSeatNum)
-                if sameSeat && stopActionSet.contains(a) {
-                    if transfer.isTransferring {
-                        transfer.cancel()
-                    }
+        }
+
+        let targetKeys: [String] = {
+            guard action != "REQUEST_SYNC" else { return [] }
+            if action.hasPrefix("MAIN_TIMER_") || targetSid == "main-timer" {
+                return ["main-timer"]
+            }
+            if !targetSid.isEmpty || targetSeatNum > 0 {
+                let keys = allSeatKeys(for: targetSid, seatNumber: targetSeatNum)
+                return keys.isEmpty ? (targetSid.isEmpty ? [] : [targetSid]) : keys
+            }
+            return []
+        }()
+
+        let state = DeliveryFallbackState()
+        let ackSema = DispatchSemaphore(value: 0)
+        state.ackSema = ackSema
+
+        if !targetKeys.isEmpty {
+            var semasToSignal: [DispatchSemaphore] = []
+            activeDeliveriesLock.lock()
+            var visitedPrev: [ObjectIdentifier: DeliveryFallbackState] = [:]
+            for key in targetKeys {
+                if let prev = activeDeliveriesByTarget[key] {
+                    visitedPrev[ObjectIdentifier(prev)] = prev
                 }
+                if session.isReachable {
+                    activeDeliveriesByTarget[key] = state
+                } else {
+                    activeDeliveriesByTarget.removeValue(forKey: key)
+                }
+            }
+            activeDeliveriesLock.unlock()
+
+            for prev in visitedPrev.values {
+                prev.lock.lock()
+                prev.superseded = true
+                if let prevSema = prev.ackSema {
+                    prev.ackSema = nil
+                    semasToSignal.append(prevSema)
+                }
+                prev.lock.unlock()
+            }
+            for s in semasToSignal {
+                s.signal()
             }
         }
-        let isImmediateDualRouteAction = (
-            action == "START_TIMER" ||
-            action == "ADJUST_TIME" ||
-            action == "STOP_ALARM" ||
-            action == "STOP_TIMER" ||
-            action == "COMPLETE_CHECK" ||
-            action == "CANCEL_CHECK" ||
-            action == "SET_CHECK_TIMER" ||
-            action == "ASSIGN_HELP" ||
-            action == "RECRUIT_HELP" ||
-            action == "CLEAR_STAFF" ||
-            action == "CLAIM_CHECK" ||
-            action == "FINISH_SHAMPOO" ||
-            action == "UPDATE_STATUS" ||
-            action == "MAIN_TIMER_RESET" ||
-            action == "MAIN_TIMER_PAUSE" ||
-            action == "MAIN_TIMER_START" ||
-            action == "MAIN_TIMER_SET_TIME" ||
-            action == "ENTER_HELP" ||
-            action == "START_SHAMPOO" ||
-            action == "RESET_ZERO" ||
-            action == "FINISH_MEASURE"
-        )
+
         if session.isReachable {
             lastSendResult = "即時送信中…"
-            var acked = false
-            var fallbackSent = false
-            var pendingTransfer: WCSessionUserInfoTransfer? = nil
-            // ★ 開始・停止・リセット・時間変更・工程移行などの全タイマー操作は、タップ直後（0.2〜0.5秒以内）に手首を下ろしてwatchOSがアプリをサスペンドしても
-            //   絶対にロストしないよう、アクティブ状態を問わず0msで即時送信(sendMessage)と同時にOS保証キュー(transferUserInfo)へも投入する（iPhone側で重複排除済み）
-            if isImmediateDualRouteAction {
-                fallbackSent = true
-                pendingTransfer = session.transferUserInfo(payload)
-            } else if isMainTimerAction {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    guard !acked && !fallbackSent else { return }
-                    if (action == "MAIN_TIMER_START" || action == "MAIN_TIMER_SET_TIME"),
-                       let latestType = self?.lastMainTimerLocalActionType,
-                       (latestType == "RESET" || latestType == "PAUSE") {
-                        return
+            let clearActiveDeliveryIfCurrent: () -> Void = { [weak self] in
+                guard let self = self, !targetKeys.isEmpty else { return }
+                self.activeDeliveriesLock.lock()
+                for key in targetKeys {
+                    if self.activeDeliveriesByTarget[key] === state {
+                        self.activeDeliveriesByTarget.removeValue(forKey: key)
                     }
-                    fallbackSent = true
-                    session.transferUserInfo(payload)
-                    self?.recordSend("即時待機→予備ルート併用送信")
+                }
+                self.activeDeliveriesLock.unlock()
+            }
+            let triggerFallbackIfNeeded: (String) -> Void = { [weak self] reason in
+                guard action != "REQUEST_SYNC" else { return }
+                state.lock.lock()
+                if state.acked || state.fallbackSent || state.superseded {
+                    state.lock.unlock()
+                    return
+                }
+                state.fallbackSent = true
+                state.ackSema = nil
+                state.lock.unlock()
+                clearActiveDeliveryIfCurrent()
+                session.transferUserInfo(payload)
+                DispatchQueue.main.async {
+                    self?.recordSend(reason)
                 }
             }
-            session.sendMessage(payload, replyHandler: { [weak self] _ in
-                DispatchQueue.main.async {
-                    acked = true
-                    if let pt = pendingTransfer, pt.isTransferring {
-                        pt.cancel()
+
+            if action != "REQUEST_SYNC" {
+                ProcessInfo.processInfo.performExpiringActivity(withReason: "WatchSendMessage-\(action)") { expired in
+                    if expired {
+                        triggerFallbackIfNeeded("スリープ移行→予備ルート併用送信")
+                        ackSema.signal()
+                        return
                     }
-                    pendingTransfer = nil
-                    self?.recordSend("iPhone受信OK")
+                    _ = ackSema.wait(timeout: .now() + 0.85)
+                    triggerFallbackIfNeeded("即時待機(0.85s)→予備ルート併用送信")
                 }
-            }, errorHandler: { [weak self] error in
-                print("[WatchSession] sendMessage error: \(error.localizedDescription)")
-                DispatchQueue.main.async {
-                    if action != "REQUEST_SYNC" && !fallbackSent {
-                        fallbackSent = true
-                        session.transferUserInfo(payload)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) {
+                    triggerFallbackIfNeeded("即時待機(0.85s)→予備ルート併用送信")
+                    ackSema.signal()
+                }
+                session.sendMessage(payload, replyHandler: { [weak self] _ in
+                    state.lock.lock()
+                    state.acked = true
+                    state.ackSema = nil
+                    state.lock.unlock()
+                    clearActiveDeliveryIfCurrent()
+                    ackSema.signal()
+                    DispatchQueue.main.async {
+                        self?.recordSend("iPhone受信OK")
                     }
-                    self?.recordSend("即時失敗→予備ルート: \(error.localizedDescription)")
-                }
-            })
+                }, errorHandler: { error in
+                    print("[WatchSession] sendMessage error: \(error.localizedDescription)")
+                    triggerFallbackIfNeeded("即時失敗→予備ルート: \(error.localizedDescription)")
+                    ackSema.signal()
+                })
+            } else {
+                session.sendMessage(payload, replyHandler: { [weak self] _ in
+                    DispatchQueue.main.async {
+                        self?.recordSend("iPhone受信OK")
+                    }
+                }, errorHandler: { [weak self] error in
+                    print("[WatchSession] sendMessage error: \(error.localizedDescription)")
+                    DispatchQueue.main.async {
+                        self?.recordSend("即時失敗: \(error.localizedDescription)")
+                    }
+                })
+            }
         } else {
             if action != "REQUEST_SYNC" {
                 session.transferUserInfo(payload)
@@ -3678,12 +3703,40 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
         request.httpBody = jsonData
 
+        final class DirectCloudExpiringState {
+            let lock = NSLock()
+            var isExpired = false
+            var currentTask: URLSessionDataTask?
+            var currentSema: DispatchSemaphore?
+        }
+        let expState = DirectCloudExpiringState()
+
         // ★ タップ直後に手首を下ろして画面が消灯してもwatchOSがHTTPS送信完了までネットワークを保持するよう expiringActivity で保護
-        ProcessInfo.processInfo.performExpiringActivity(withReason: "assisttimer.watch.directCloudPatch.\(action)") { [weak self] expired in
-            if expired { return }
+        //   （万一OSから expired == true が通知された場合は即座に通信タスクを cancel しセマフォを解放して 0xbada5e47 強制終了を100%防止）
+        ProcessInfo.processInfo.performExpiringActivity(withReason: "SalonDirectCloudSync-\(action)") { [weak self] expired in
+            if expired {
+                expState.lock.lock()
+                expState.isExpired = true
+                let taskToCancel = expState.currentTask
+                let semaToSignal = expState.currentSema
+                expState.currentTask = nil
+                expState.currentSema = nil
+                expState.lock.unlock()
+                taskToCancel?.cancel()
+                semaToSignal?.signal()
+                return
+            }
+            expState.lock.lock()
+            if expState.isExpired {
+                expState.lock.unlock()
+                return
+            }
+            let sema = DispatchSemaphore(value: 0)
+            expState.currentSema = sema
+            expState.lock.unlock()
+
             var shouldRetryWithoutUpdatedBy = false
             var patchSucceeded = false
-            let sema = DispatchSemaphore(value: 0)
             let task = URLSession.shared.dataTask(with: request) { _, response, error in
                 if let error = error {
                     print("[WatchCloudSync] Direct PATCH \(action) error: \(error.localizedDescription)")
@@ -3699,8 +3752,28 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
                 sema.signal()
             }
+            expState.lock.lock()
+            if expState.isExpired {
+                expState.currentSema = nil
+                expState.lock.unlock()
+                task.cancel()
+                return
+            }
+            expState.currentTask = task
+            expState.lock.unlock()
+
             task.resume()
-            _ = sema.wait(timeout: .now() + 4.5)
+            _ = sema.wait(timeout: .now() + 3.8)
+
+            expState.lock.lock()
+            let expiredAfterFirst = expState.isExpired
+            expState.currentTask = nil
+            expState.currentSema = nil
+            expState.lock.unlock()
+            if expiredAfterFirst {
+                task.cancel()
+                return
+            }
 
             // ★ Supabase 側に updated_by カラムが存在しない環境で 400 Bad Request となった場合は即座に updated_by を外して再送信する
             if shouldRetryWithoutUpdatedBy {
@@ -3723,8 +3796,28 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         }
                         retrySema.signal()
                     }
+                    expState.lock.lock()
+                    if expState.isExpired {
+                        expState.lock.unlock()
+                        retryTask.cancel()
+                        return
+                    }
+                    expState.currentTask = retryTask
+                    expState.currentSema = retrySema
+                    expState.lock.unlock()
+
                     retryTask.resume()
-                    _ = retrySema.wait(timeout: .now() + 4.5)
+                    _ = retrySema.wait(timeout: .now() + 3.8)
+
+                    expState.lock.lock()
+                    let expiredAfterRetry = expState.isExpired
+                    expState.currentTask = nil
+                    expState.currentSema = nil
+                    expState.lock.unlock()
+                    if expiredAfterRetry {
+                        retryTask.cancel()
+                        return
+                    }
                 }
             }
 

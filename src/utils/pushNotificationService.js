@@ -207,7 +207,7 @@ export const getOrFetchExpoPushToken = async () => {
 
       const existingPerm = await Notifications.getPermissionsAsync();
       let finalStatus = existingPerm?.status;
-      if (finalStatus !== 'granted') {
+      if (finalStatus !== 'granted' && (!AppState.currentState || AppState.currentState === 'active')) {
         const requestedPerm = await Notifications.requestPermissionsAsync({
           ios: {
             allowAlert: true,

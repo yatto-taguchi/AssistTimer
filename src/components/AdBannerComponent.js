@@ -1,5 +1,5 @@
-import React, { useContext } from 'react';
-import { View, StyleSheet, Platform, Text } from 'react-native';
+import React, { useContext, useState, useEffect } from 'react';
+import { View, StyleSheet, Platform, Text, AppState } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppContext } from '../utils/AppContext';
 
@@ -32,6 +32,9 @@ const AD_UNIT_ID = __DEV__
 
 export default function AdBannerComponent({ style }) {
   const { isProMode, isEcoMode } = useContext(AppContext);
+  const [hasEnteredForeground, setHasEnteredForeground] = useState(
+    () => !AppState.currentState || AppState.currentState === 'active'
+  );
   let insets = { bottom: 0 };
   try {
     insets = useSafeAreaInsets();
@@ -39,12 +42,43 @@ export default function AdBannerComponent({ style }) {
     // Provider外等の安全フォールバック
   }
 
+  useEffect(() => {
+    if (hasEnteredForeground) return undefined;
+    if (!AppState.currentState || AppState.currentState === 'active') {
+      setHasEnteredForeground(true);
+      return undefined;
+    }
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        setHasEnteredForeground(true);
+        sub.remove();
+      }
+    });
+    return () => {
+      sub.remove();
+    };
+  }, [hasEnteredForeground]);
+
   // ホームバー（セーフエリア下部）との干渉・誤タップを防ぐクリアランス
   const bottomPadding = Math.max(insets.bottom, 4);
 
   // Proモード加入中は広告を一切レンダリングしない
   if (isProMode) {
     return null;
+  }
+
+  // バックグラウンドでのコールド起動中（iPhoneロック中にWCSession等で裏側起床し、まだ一度も画面が開かれていない状態）は
+  // WKWebView / GPU 初期化によるクラッシュを防ぐため BannerAd をマウントせずプレースホルダー領域のみ保持する
+  if (!hasEnteredForeground) {
+    return (
+      <View
+        style={[
+          styles.container,
+          { minHeight: 50, backgroundColor: isEcoMode ? '#000' : '#F2F2F7', paddingBottom: bottomPadding },
+          style,
+        ]}
+      />
+    );
   }
 
   // ライブラリがロードできない環境でのフォールバック

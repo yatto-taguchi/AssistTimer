@@ -1,6 +1,9 @@
 import Foundation
 import CryptoKit
 import UserNotifications
+#if canImport(UIKit)
+import UIKit
+#endif
 #if canImport(AlarmKit)
 import AlarmKit
 import ActivityKit
@@ -33,6 +36,31 @@ enum AlarmKitBridge {
     if #available(iOS 26.0, *) { return true }
     #endif
     return true
+  }
+
+  private static func isAppForegroundActiveSync() -> Bool {
+    #if canImport(UIKit)
+    if Thread.isMainThread {
+      return UIApplication.shared.applicationState == .active
+    }
+    var active = false
+    DispatchQueue.main.sync {
+      active = (UIApplication.shared.applicationState == .active)
+    }
+    return active
+    #else
+    return true
+    #endif
+  }
+
+  private static func isAppForegroundActive() async -> Bool {
+    #if canImport(UIKit)
+    return await MainActor.run {
+      UIApplication.shared.applicationState == .active
+    }
+    #else
+    return true
+    #endif
   }
 
   private static let authStatusLock = NSLock()
@@ -134,6 +162,9 @@ enum AlarmKitBridge {
     let settings = await center.notificationSettings()
     _ = updateCachedFallbackAuthStatus(settings.authorizationStatus)
     if settings.authorizationStatus == .notDetermined {
+      guard await isAppForegroundActive() else {
+        return "denied"
+      }
       _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
     }
     let updatedSettings = await center.notificationSettings()
@@ -235,6 +266,10 @@ enum AlarmKitBridge {
     }
 
     // iOS 26+ AlarmManager.shared.alarms に残存している孤立・鳴動中アラームも直接走査して確実に停止・消去する
+    // ※ ただしバックグラウンド起動時かつローカル予約記録が0件の場合は、重い XPC 全件走査をスキップしてCPU/時間を保護する
+    if records.isEmpty && !isAppForegroundActiveSync() {
+      return keysToCancel.count
+    }
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) {
       var protectedUUIDs = Set(keepSet.map { uuid(for: $0) })
@@ -304,7 +339,11 @@ enum AlarmKitBridge {
   private static func scheduleAlarm(key: String, timestampMs: Double, title: String, soundOn: Bool) async -> String {
     let manager = AlarmManager.shared
     if manager.authorizationState == .notDetermined {
-      _ = try? await manager.requestAuthorization()
+      if await isAppForegroundActive() {
+        _ = try? await manager.requestAuthorization()
+      } else {
+        return await scheduleNotificationFallback(key: key, timestampMs: timestampMs, title: title, soundOn: soundOn)
+      }
     }
     guard manager.authorizationState == .authorized else { return "denied" }
 

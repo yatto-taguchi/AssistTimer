@@ -1,5 +1,5 @@
 import React, { createContext, useState, useEffect, useRef, useCallback } from 'react';
-import { Animated, Platform, Vibration } from 'react-native';
+import { Animated, Platform, Vibration, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ネイティブPurchasesモジュールの安全インポート
@@ -326,9 +326,13 @@ export const AppProvider = ({ children }) => {
 
 
 
-  // RevenueCat の初期化とサブスクリプション状態の自動同期
+  // RevenueCat の初期化とサブスクリプション状態の自動同期（バックグラウンドコールド起動時はフォアグラウンド遷移後に遅延実行）
   useEffect(() => {
+    let initialized = false;
+    let appStateSub = null;
     const initPurchases = async () => {
+      if (initialized) return;
+      initialized = true;
       if (Purchases && REVENUECAT_PUBLIC_APPLE_KEY && REVENUECAT_PUBLIC_APPLE_KEY !== 'appl_placeholder_key') {
         try {
           Purchases.configure({ apiKey: REVENUECAT_PUBLIC_APPLE_KEY });
@@ -344,22 +348,60 @@ export const AppProvider = ({ children }) => {
         }
       }
     };
-    initPurchases();
-  }, []);
-
-  // Google Mobile Ads (AdMob) のSDK初期化
-  useEffect(() => {
-    const initAdMob = async () => {
-      if (mobileAds) {
-        try {
-          await mobileAds().initialize();
-          console.log('Google Mobile Ads initialized successfully');
-        } catch (e) {
-          console.log('Google Mobile Ads init error:', e);
+    if (!AppState.currentState || AppState.currentState === 'active') {
+      initPurchases();
+    } else {
+      appStateSub = AppState.addEventListener('change', (nextState) => {
+        if (nextState === 'active') {
+          initPurchases();
+          if (appStateSub) {
+            appStateSub.remove();
+            appStateSub = null;
+          }
         }
+      });
+    }
+    return () => {
+      if (appStateSub) {
+        appStateSub.remove();
+        appStateSub = null;
       }
     };
-    initAdMob();
+  }, []);
+
+  // Google Mobile Ads (AdMob) のSDK初期化（バックグラウンドコールド起動時はWebKit/GPUクラッシュを防ぐためフォアグラウンド遷移後に遅延実行）
+  useEffect(() => {
+    let initialized = false;
+    let appStateSub = null;
+    const initAdMob = async () => {
+      if (initialized || !mobileAds) return;
+      initialized = true;
+      try {
+        await mobileAds().initialize();
+        console.log('Google Mobile Ads initialized successfully');
+      } catch (e) {
+        console.log('Google Mobile Ads init error:', e);
+      }
+    };
+    if (!AppState.currentState || AppState.currentState === 'active') {
+      initAdMob();
+    } else {
+      appStateSub = AppState.addEventListener('change', (nextState) => {
+        if (nextState === 'active') {
+          initAdMob();
+          if (appStateSub) {
+            appStateSub.remove();
+            appStateSub = null;
+          }
+        }
+      });
+    }
+    return () => {
+      if (appStateSub) {
+        appStateSub.remove();
+        appStateSub = null;
+      }
+    };
   }, []);
 
   // エコモード切替と保存
