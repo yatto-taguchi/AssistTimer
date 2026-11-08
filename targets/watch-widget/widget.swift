@@ -28,6 +28,8 @@ struct ComplicationSeat {
     let isRunning: Bool
     let pausedRemaining: Int
     let related: Bool
+    let shouldAlertMain: Bool
+    let shouldAlertCheck: Bool
     let totalSeconds: Int
     let isCountUpEnabled: Bool
     let creatorName: String?
@@ -46,6 +48,15 @@ struct ComplicationSeat {
     let helpProcess: String?
     let isRecruiting: Bool
     let isCheckCompleted: Bool
+
+    /// 大元タイマーが 00:00 到達後の超過カウントアップ（endDate <= date）を文字盤モジュールに表示すべきか判定
+    /// （Q1=A & Q3=A: 大元タイマーの当事者、または未完了のチェックタイマー当事者のときのみ true）
+    var shouldDisplayOvertime: Bool {
+        guard isCountUpEnabled else { return false }
+        if shouldAlertMain { return true }
+        if shouldAlertCheck && !isCheckCompleted && checkEndDate != nil { return true }
+        return false
+    }
     
     // 担当フロー（作成者 → 最終担当者）の表示情報
     var staffFlow: StaffFlowInfo {
@@ -60,10 +71,10 @@ struct ComplicationSeat {
             if creatorRaw == "自分" || creatorRaw == "あなた" {
                 return true
             }
-            if !me.isEmpty && !creatorRaw.isEmpty {
+            if !me.isEmpty && !creatorRaw.isEmpty && creatorRaw != "スタイリスト" {
                 return creatorRaw.caseInsensitiveCompare(me) == .orderedSame
             }
-            return creatorRaw.isEmpty
+            return false
         }()
         let creatorDisplay = isCreatorMe ? "自分" : (creatorRaw.isEmpty ? "主担当" : creatorRaw)
         
@@ -153,6 +164,9 @@ enum ComplicationData {
             let endDate = Date(timeIntervalSince1970: end)
             // ★ 終了時刻が未設定(<=0)または3時間(10800秒)以上経過した放置データは強制的に非稼働扱いとし、永遠のカウントアップ表示を防止
             let isValidRunning = rawRunning && end > 0 && endDate > now.addingTimeInterval(-10800)
+            let relatedVal = (d["related"] as? NSNumber)?.boolValue ?? (d["related"] as? Bool) ?? false
+            let shouldAlertMain = (d["shouldAlertMain"] as? NSNumber)?.boolValue ?? (d["shouldAlertMain"] as? Bool) ?? relatedVal
+            let shouldAlertCheck = (d["shouldAlertCheck"] as? NSNumber)?.boolValue ?? (d["shouldAlertCheck"] as? Bool) ?? false
             
             return ComplicationSeat(
                 id: id,
@@ -162,7 +176,9 @@ enum ComplicationData {
                 endDate: endDate,
                 isRunning: isValidRunning,
                 pausedRemaining: (d["pausedRemaining"] as? NSNumber)?.intValue ?? 0,
-                related: (d["related"] as? NSNumber)?.boolValue ?? false,
+                related: relatedVal,
+                shouldAlertMain: shouldAlertMain,
+                shouldAlertCheck: shouldAlertCheck,
                 totalSeconds: (d["totalSeconds"] as? NSNumber)?.intValue ?? (d["totalSeconds"] as? Int) ?? 600,
                 isCountUpEnabled: isCountUpEnabled,
                 creatorName: creator,
@@ -184,18 +200,27 @@ enum ComplicationData {
         return ComplicationSnapshot(seats: parsed, lastTouchedId: obj["lastTouchedId"] as? String)
     }
 
-    /// ①最後に操作された稼働中の席。無ければ、date の時点で
-    /// ②自分のカウントダウン中 → ③カウントダウン中 → ④自分の超過中 → ⑤超過中（それぞれ終了が近い順）
-    /// ※ 以前は終了が一番近い席を選んでいたため、放置された超過席がずっと表示されていた
-    static func pick(from snapshot: ComplicationSnapshot, at date: Date) -> ComplicationSeat? {
-        // カウントアップOFFのメインタイマーは終了時刻（endDate）に到達した時点で稼働終了とみなす
-        // また endDate が不正(<=0)または3時間以上前のデータも非稼働として除外する
-        let running = snapshot.seats.filter {
-            $0.isRunning &&
-            $0.endDate.timeIntervalSince1970 > 0 &&
-            $0.endDate > date.addingTimeInterval(-10800) &&
-            ($0.isCountUpEnabled || $0.endDate > date)
+    static func isDisplayableRunning(_ seat: ComplicationSeat, at date: Date) -> Bool {
+        guard seat.isRunning,
+              seat.endDate.timeIntervalSince1970 > 0,
+              seat.endDate > date.addingTimeInterval(-10800) else {
+            return false
         }
+        if seat.endDate > date {
+            // カウントダウン中（残り時間あり）は表示可能
+            return true
+        }
+        // ★ 超過カウントアップ中（endDate <= date）は、大元タイマーの当事者（shouldAlertMain && isCountUpEnabled）
+        //   または未完了のチェックタイマー自体が稼働・超過対象（shouldAlertCheck && !isCheckCompleted && checkEndDate != nil）のときのみ表示し、
+        //   チェック完了後（主担当・全体ヘルプでない）や無関係な他スタッフの席は文字盤モジュールに表示しない（00:00 稼働なしへ戻す）
+        return seat.shouldDisplayOvertime
+    }
+
+    /// ①最後に操作された稼働中の席。無ければ、date の時点で
+    /// ②自分のカウントダウン中 → ③カウントダウン中 → ④自分の超過中（それぞれ終了が近い順）
+    /// ※ 自分が無関係な他スタッフの超過席（およびチェック完了後のチェックのみ担当席の超過）は文字盤モジュールに表示しない
+    static func pick(from snapshot: ComplicationSnapshot, at date: Date) -> ComplicationSeat? {
+        let running = snapshot.seats.filter { isDisplayableRunning($0, at: date) }
         let hasRelatedRunning = running.contains(where: { $0.related })
         if let id = snapshot.lastTouchedId,
            let touched = running.first(where: { $0.id == id }),
@@ -207,8 +232,7 @@ enum ComplicationData {
         let groups: [[ComplicationSeat]] = [
             countingDown.filter { $0.related },
             countingDown,
-            overtime.filter { $0.related },
-            overtime
+            overtime.filter { $0.shouldDisplayOvertime }
         ]
         for group in groups where !group.isEmpty {
             return group.min { $0.endDate < $1.endDate }
@@ -217,12 +241,7 @@ enum ComplicationData {
     }
 
     static func entry(at date: Date, snapshot: ComplicationSnapshot) -> ComplicationEntry {
-        let activeCount = snapshot.seats.filter {
-            $0.isRunning &&
-            $0.endDate.timeIntervalSince1970 > 0 &&
-            $0.endDate > date.addingTimeInterval(-10800) &&
-            ($0.isCountUpEnabled || $0.endDate > date)
-        }.count
+        let activeCount = snapshot.seats.filter { isDisplayableRunning($0, at: date) }.count
         return ComplicationEntry(
             date: date,
             seat: pick(from: snapshot, at: date),
@@ -245,6 +264,8 @@ struct ComplicationProvider: TimelineProvider {
                 isRunning: true,
                 pausedRemaining: 0,
                 related: true,
+                shouldAlertMain: true,
+                shouldAlertCheck: false,
                 totalSeconds: 15 * 60,
                 isCountUpEnabled: true,
                 creatorName: "スタイリスト",
@@ -290,7 +311,7 @@ struct ComplicationProvider: TimelineProvider {
             }
             if end > now {
                 entryDates.insert(end)
-                if !seat.isCountUpEnabled {
+                if !seat.shouldDisplayOvertime {
                     entryDates.insert(end.addingTimeInterval(0.5))
                     entryDates.insert(end.addingTimeInterval(1.0))
                 }
@@ -301,7 +322,7 @@ struct ComplicationProvider: TimelineProvider {
                 let t10 = end.addingTimeInterval(-total * 0.10)
                 if t10 > now { entryDates.insert(t10) }
             }
-            if seat.isCountUpEnabled {
+            if seat.shouldDisplayOvertime {
                 // 超過バー満タン（終了＋180秒）および3時間上限（終了＋10800秒）
                 let tOverMax = end.addingTimeInterval(180)
                 if tOverMax > now { entryDates.insert(tOverMax) }
@@ -325,7 +346,7 @@ struct ComplicationProvider: TimelineProvider {
         let entries = sortedDates.prefix(40).map { ComplicationData.entry(at: $0, snapshot: snapshot) }
         // 席の追加・変更時は Watch アプリ側から reloadAllTimelines() されるが、
         // バックグラウンドサスペンド等で reload 通知が遅延した場合でも最長3分以内に最新 App Group スナップショットを再読込する
-        let hasAnyRunning = seats.contains(where: { $0.isRunning && $0.endDate.timeIntervalSince1970 > 0 })
+        let hasAnyRunning = seats.contains(where: { ComplicationData.isDisplayableRunning($0, at: now) })
         completion(Timeline(entries: entries, policy: hasAnyRunning ? .after(now.addingTimeInterval(180)) : .never))
     }
 }
@@ -340,7 +361,7 @@ struct ComplicationView: View {
               seat.isRunning,
               seat.endDate.timeIntervalSince1970 > 0,
               seat.endDate > entry.date.addingTimeInterval(-10800) else { return nil }
-        if !seat.isCountUpEnabled && seat.endDate <= entry.date {
+        if !seat.shouldDisplayOvertime && seat.endDate <= entry.date {
             return nil
         }
         return seat

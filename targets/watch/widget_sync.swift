@@ -27,6 +27,8 @@ enum WidgetSync {
     private static var pendingWorkItem: DispatchWorkItem?
     private static var pendingForceReload: Bool = false
     private static var lastPayload: Data?
+    private static var lastReloadedPayload: Data?
+    private static var lastReloadedWhileActive: Bool = false
     private static var lastReloadAt: Date = .distantPast
     private static var trailingReloadWorkItem: DispatchWorkItem?
 
@@ -39,12 +41,8 @@ enum WidgetSync {
         //   または呼び出し元がバックグラウンドスレッドのときは、0.06秒の非同期デバウンスでプロセスがサスペンドされて
         //   WidgetCenter.reloadAllTimelines() が発火し損ねるのを防ぐため、自動的に同期実行（syncQueue.sync）へ昇格する
         let isCallerBackgroundThread = !Thread.isMainThread
-        let isAppNotActive: Bool = {
-            if Thread.isMainThread {
-                return WKApplication.shared().applicationState != .active
-            }
-            return true
-        }()
+        let isAppActive: Bool = Thread.isMainThread ? (WKApplication.shared().applicationState == .active) : false
+        let isAppNotActive = !isAppActive
         let shouldExecuteSynchronously = forceReload || isCallerBackgroundThread || isAppNotActive
 
         if shouldExecuteSynchronously {
@@ -60,7 +58,8 @@ enum WidgetSync {
                     timers: timersSnapshot,
                     mainTimer: mainSnapshot,
                     userName: userSnapshot,
-                    forceReload: effectiveForce
+                    forceReload: effectiveForce,
+                    isAppActive: isAppActive
                 )
             }
             if DispatchQueue.getSpecific(key: queueKey) == true {
@@ -80,7 +79,8 @@ enum WidgetSync {
                     timers: timersSnapshot,
                     mainTimer: mainSnapshot,
                     userName: userSnapshot,
-                    forceReload: shouldForce
+                    forceReload: shouldForce,
+                    isAppActive: isAppActive
                 )
             }
             pendingWorkItem = work
@@ -88,7 +88,7 @@ enum WidgetSync {
         }
     }
 
-    private static func performSaveOnQueue(timers: [SeatTimerItem], mainTimer: SeatTimerItem?, userName: String, forceReload: Bool) {
+    private static func performSaveOnQueue(timers: [SeatTimerItem], mainTimer: SeatTimerItem?, userName: String, forceReload: Bool, isAppActive: Bool) {
         guard let defaults = UserDefaults(suiteName: appGroup) else { return }
 
         // メインタイマーも含めた全アイテムリスト
@@ -162,6 +162,8 @@ enum WidgetSync {
             if t.seatNumber > 0 {
                 currentAllKeys.insert(seatKey)
             }
+            let isRel = t.isRelated(to: userName)
+            let shouldAlertMain = t.shouldAlertMainTimer(for: userName)
             if let prev = prevStates {
                 let prevEntry = prev[t.id] ?? (t.seatNumber > 0 ? prev[seatKey] : nil)
                 let wasRunning = (prevEntry?.first ?? 0) > 0.5
@@ -171,6 +173,18 @@ enum WidgetSync {
                     let curEnd = t.targetEndTime.timeIntervalSince1970.rounded()
                     if abs(p[1] - curEnd) >= endChangeThreshold {
                         seatOrCheckActiveChanged = true
+                    }
+                    if p.count >= 4 {
+                        let prevRel = p[3] > 0.5
+                        if prevRel != isRel {
+                            seatOrCheckActiveChanged = true
+                        }
+                    }
+                    if p.count >= 5 {
+                        let prevAlertMain = p[4] > 0.5
+                        if prevAlertMain != shouldAlertMain {
+                            seatOrCheckActiveChanged = true
+                        }
                     }
                 }
                 let prevCheckEnd = (prevEntry?.count ?? 0) >= 3 ? (prevEntry?[2] ?? 0) : 0
@@ -194,7 +208,15 @@ enum WidgetSync {
         for t in allItems {
             let active = t.isRunning || t.isPreCountingDown
             let checkEnd = (!t.isCheckCompleted ? (t.checkTargetEndTime?.timeIntervalSince1970.rounded() ?? 0) : 0)
-            let entry: [Double] = [active ? 1 : 0, active ? t.targetEndTime.timeIntervalSince1970.rounded() : 0, checkEnd]
+            let isRel = (t.id == "main-timer") ? true : t.isRelated(to: userName)
+            let shouldAlertMain = (t.id == "main-timer") ? true : t.shouldAlertMainTimer(for: userName)
+            let entry: [Double] = [
+                active ? 1 : 0,
+                active ? t.targetEndTime.timeIntervalSince1970.rounded() : 0,
+                checkEnd,
+                isRel ? 1 : 0,
+                shouldAlertMain ? 1 : 0
+            ]
             newStates[t.id] = entry
             if t.id != "main-timer" && t.seatNumber > 0 {
                 newStates["seat-\(t.seatNumber)"] = entry
@@ -232,6 +254,8 @@ enum WidgetSync {
                 "isRunning": mActive,
                 "pausedRemaining": m.pausedRemainingSeconds,
                 "related": true,
+                "shouldAlertMain": true,
+                "shouldAlertCheck": false,
                 "totalSeconds": m.totalSeconds,
                 "isCountUpEnabled": true,
                 "isCheckCompleted": true
@@ -254,6 +278,8 @@ enum WidgetSync {
                 "isRunning": t.isRunning,
                 "pausedRemaining": t.pausedRemainingSeconds,
                 "related": t.isRelated(to: userName),
+                "shouldAlertMain": t.shouldAlertMainTimer(for: userName),
+                "shouldAlertCheck": (!t.isCheckCompleted && t.checkTargetEndTime != nil && t.shouldAlertCheckTimer(for: userName)),
                 "totalSeconds": t.totalSeconds,
                 "creatorName": t.creatorName,
                 "isCreatorMe": t.isCreatorMe(currentUserName: userName),
@@ -282,46 +308,68 @@ enum WidgetSync {
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
         if data == lastPayload && !anyActiveStateChanged {
-            if forceReload {
-                trailingReloadWorkItem?.cancel()
-                trailingReloadWorkItem = nil
-                let now = Date()
-                if now.timeIntervalSince(lastReloadAt) >= 0.1 {
+            let now = Date()
+            let hasPendingTrailing = (trailingReloadWorkItem != nil)
+            let neverReloadedThisPayload = (lastReloadedPayload != data)
+            let becameActiveAfterBackgroundReload = (isAppActive && !lastReloadedWhileActive)
+            let isPeriodicForceEnsure = (forceReload && now.timeIntervalSince(lastReloadAt) >= 15.0)
+            let needsForceEnsureReload = hasPendingTrailing || (forceReload && (neverReloadedThisPayload || becameActiveAfterBackgroundReload || isPeriodicForceEnsure))
+            if needsForceEnsureReload {
+                defaults.synchronize()
+                if now.timeIntervalSince(lastReloadAt) >= 0.12 || !isAppActive {
+                    trailingReloadWorkItem?.cancel()
+                    trailingReloadWorkItem = nil
                     lastReloadAt = now
+                    lastReloadedPayload = data
+                    lastReloadedWhileActive = isAppActive
                     WidgetCenter.shared.reloadAllTimelines()
+                } else {
+                    scheduleTimelineReloadOnQueue(for: data, isAppActive: isAppActive)
                 }
-            } else if trailingReloadWorkItem != nil {
-                trailingReloadWorkItem?.cancel()
-                trailingReloadWorkItem = nil
-                lastReloadAt = Date()
-                WidgetCenter.shared.reloadAllTimelines()
             }
             return
         }
         lastPayload = data
 
         defaults.set(data, forKey: snapshotKey)
-        if forceReload || anyActiveStateChanged {
+        defaults.synchronize()
+        if forceReload || anyActiveStateChanged || !isAppActive {
             trailingReloadWorkItem?.cancel()
             trailingReloadWorkItem = nil
-            lastReloadAt = Date()
+            let now = Date()
+            let elapsedSincePrevReload = now.timeIntervalSince(lastReloadAt)
+            lastReloadAt = now
+            lastReloadedPayload = data
+            lastReloadedWhileActive = isAppActive
             WidgetCenter.shared.reloadAllTimelines()
+            if elapsedSincePrevReload < 0.15 && isAppActive {
+                scheduleTimelineReloadOnQueue(for: data, isAppActive: isAppActive)
+            }
         } else {
-            scheduleTimelineReloadOnQueue()
+            scheduleTimelineReloadOnQueue(for: data, isAppActive: isAppActive)
         }
     }
 
-    private static func scheduleTimelineReloadOnQueue() {
+    private static func scheduleTimelineReloadOnQueue(for data: Data, isAppActive: Bool) {
         trailingReloadWorkItem?.cancel()
         let now = Date()
         let elapsed = now.timeIntervalSince(lastReloadAt)
         if elapsed >= 0.25 {
+            trailingReloadWorkItem = nil
+            UserDefaults(suiteName: appGroup)?.synchronize()
             lastReloadAt = now
+            lastReloadedPayload = data
+            lastReloadedWhileActive = isAppActive
             WidgetCenter.shared.reloadAllTimelines()
         } else {
-            let delay = max(0.05, 0.25 - elapsed)
+            let delay = max(0.15, 0.25 - elapsed)
             let work = DispatchWorkItem {
+                trailingReloadWorkItem = nil
+                UserDefaults(suiteName: appGroup)?.synchronize()
                 lastReloadAt = Date()
+                lastReloadedPayload = data
+                let currentActive = Thread.isMainThread ? (WKApplication.shared().applicationState == .active) : isAppActive
+                lastReloadedWhileActive = currentActive
                 WidgetCenter.shared.reloadAllTimelines()
             }
             trailingReloadWorkItem = work

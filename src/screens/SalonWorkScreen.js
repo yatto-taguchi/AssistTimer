@@ -3581,13 +3581,7 @@ export default function SalonWorkScreen() {
             const isSubCheckOnly = extra?.isSubCheck === true || (hasCheckStaff && !hasAssistantStaff);
             const rawStaff = hasCheckStaff ? extra.checkStaffName : (hasAssistantStaff ? extra.assistantStaffName : watchUser);
             const staff = (rawStaff !== undefined && rawStaff !== null) ? rawStaff : '';
-            const isAssigningOther =
-              !!staff &&
-              staff !== 'ヘルプなし' &&
-              staff !== 'none' &&
-              !checkIsStaffNameMe(staff, localPhoneUserName, localPhoneUserId, staffMembersRef.current);
             const shouldSetOperatorAsMain =
-              isAssigningOther ||
               !s.createdBy ||
               !s.colorStaffName ||
               s.colorStaffName === 'スタイリスト' ||
@@ -3611,8 +3605,7 @@ export default function SalonWorkScreen() {
             if (staff === 'ヘルプなし' || staff === 'none' || process === 'ヘルプなし') {
               return {
                 ...s,
-                colorStaffName: watchOperatorName || s.colorStaffName || localPhoneUserName || 'スタイリスト',
-                createdBy: watchOperatorUserId || s.createdBy || null,
+                ...mainOwnerPatch,
                 dirtySync: true,
                 isRecruiting: false,
                 isNoHelpNeeded: true,
@@ -3751,12 +3744,7 @@ export default function SalonWorkScreen() {
             const chkStaff = extra?.checkStaffName !== undefined && extra?.checkStaffName !== null
               ? String(extra.checkStaffName)
               : '';
-            const isAssigningOtherCheck =
-              !!chkStaff &&
-              chkStaff !== '募集中' &&
-              !checkIsStaffNameMe(chkStaff, localPhoneUserName, localPhoneUserId, staffMembersRef.current);
             const shouldSetOperatorAsMain =
-              isAssigningOtherCheck ||
               !s.createdBy ||
               !s.colorStaffName ||
               s.colorStaffName === 'スタイリスト' ||
@@ -8861,10 +8849,19 @@ export default function SalonWorkScreen() {
       setSeats((prev) => {
         const updated = prev.map((s) => {
           if (s.id !== seat.id) return s;
+          const shouldSetMeAsMain =
+            !s.createdBy ||
+            !s.colorStaffName ||
+            s.colorStaffName === 'スタイリスト' ||
+            isMainStaffOfSeat(s, userName, myUserId, staffMembers);
           return {
             ...s,
-            colorStaffName: userName || s.colorStaffName || 'スタイリスト',
-            createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+            ...(shouldSetMeAsMain
+              ? {
+                  colorStaffName: userName || s.colorStaffName || 'スタイリスト',
+                  createdBy: myUserIdRef.current || myUserId || s.createdBy || null,
+                }
+              : {}),
             dirtySync: true,
             assistantStaffName: 'ヘルプなし',
             assistantStaffConfirmed: true,
@@ -8897,12 +8894,7 @@ export default function SalonWorkScreen() {
         const resolvedAction = chosenAction || s.actionStatus || null;
         const resolvedInfo = getActionStatusInfo(resolvedAction, resolvedAction === 'shampoo');
         const resolvedHelpLabel = resolvedInfo ? resolvedInfo.label : (s.helpProcess || '');
-        const isAssigningOther =
-          !!newHelp &&
-          newHelp !== '募集中' &&
-          !isStaffNameMe(newHelp, userName, myUserId, staffMembers);
         const shouldSetMeAsMain =
-          isAssigningOther ||
           !s.createdBy ||
           !s.colorStaffName ||
           s.colorStaffName === 'スタイリスト' ||
@@ -8999,12 +8991,7 @@ export default function SalonWorkScreen() {
     setSeats((prev) => {
       const updated = prev.map((s) => {
         if (s.id !== seatId) return s;
-        const isAssigningOther =
-          !!trimmed &&
-          trimmed !== '募集中' &&
-          !isStaffNameMe(trimmed, userName, myUserId, staffMembers);
         const shouldSetMeAsMain =
-          isAssigningOther ||
           !s.createdBy ||
           !s.colorStaffName ||
           s.colorStaffName === 'スタイリスト' ||

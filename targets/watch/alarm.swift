@@ -156,7 +156,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private var scheduledNotificationEventKeys: Set<String> = []
     // システムアラーム画面で「開く」が押されてフォアグラウンド起動したか「終了」が押されたかを識別するための最終アクティブ化時刻
     private var lastAppBecameActiveAt: Date = .distantPast
-    // システムアラーム画面（[開く] / [終了]）が非アクティブ状態で閉じた際、即時完了処理を行いつつ「開く」だった場合にオーバーレイを復元するためのスナップショット
+    // システムアラーム画面（[開く] / [終了]）が非アクティブ状態で閉じた際、即時完了処理を行いつつ文字盤（wasBackground）から「開く」だった場合にオーバーレイを復元するためのスナップショット
     private struct SystemDismissedSnapshot {
         let event: WatchAlarmEvent
         let dismissedAt: Date
@@ -164,6 +164,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         let preMainTimer: SeatTimerItem?
         let preSeatTimer: SeatTimerItem?
         let wasPeerStopped: Bool
+        let wasBackground: Bool
     }
     private var lastSystemDismissedSnapshot: SystemDismissedSnapshot?
     private var pendingSystemDismissPhoneSyncWorkItem: DispatchWorkItem?
@@ -1138,9 +1139,10 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
 
         // ★ ケースA: システムのスマートアラーム画面（「"AssistTimer" からのアラームです。 [開く] [終了]」）で
-        //   左側の「開く」が押され、セッションがまだ .running（または破棄直前）のままフォアグラウンドに移行した場合:
+        //   左側の「開く」が押され、セッションがまだ .running のままフォアグラウンドに移行した場合:
         //   アラームの振動のみを止め、超過カウントアップ（+00:xx）は維持したままアクション分岐画面（「タイマーを止める」等）へ移行する！
-        if sessionStarted || (session != nil && notifiedSessions.contains(session!)) {
+        //   （※ [終了] タップで既に .invalid になったセッションを誤って「開く」として横取りしないよう s.state == .running を必須化）
+        if let s = session, s.state == .running, (sessionStarted || notifiedSessions.contains(s)) {
             let endedKey = sessionKey ?? UserDefaults.standard.string(forKey: sessionKeyStoreKey)
             let matchedEv: WatchAlarmEvent? = {
                 if let k = endedKey, let ev = events.first(where: { isSameTarget(key1: $0.key, key2: k) }) {
@@ -1171,10 +1173,12 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             return
         }
 
-        // ★ ケースB: 文字盤（.background）でシステムアラームの「開く」を押した際、watchOSの順序で didInvalidateWith が
-        //   appBecameActive より数十〜数百ミリ秒先に呼ばれていた場合も、直前スナップショットから超過カウントアップ状態を復元してアクション分岐画面へ移行する！
+        // ★ ケースB: 手首を下げる前に文字盤（.background / wasBackground == true）を表示していて、
+        //   システムアラームの「開く」を押したことで didInvalidateWith の直後（0.45秒以内）にアプリがフォアグラウンド起動した場合のみ復元して分岐画面を開く。
+        //   （※ 手首を下げる前にアプリを表示していた !wasBackground の場合は、「終了」タップ後にも背後のアプリへ appBecameActive が発火するため絶対に復元しない）
         if let snap = lastSystemDismissedSnapshot,
-           now.timeIntervalSince(snap.dismissedAt) < 1.5 {
+           snap.wasBackground,
+           now.timeIntervalSince(snap.dismissedAt) < 0.45 {
             lastSystemDismissedSnapshot = nil
             pendingSystemDismissPhoneSyncWorkItem?.cancel()
             pendingSystemDismissPhoneSyncWorkItem = nil
@@ -2644,7 +2648,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
 
             let wasStarted = (self.sessionStarted && isCurrent) || wasBackgroundAdopted || wasNotified
             let wasSystemAlert = (self.sessionPresentedSystemAlert && isCurrent) || wasBackgroundAdopted || (wasStarted && WKApplication.shared().applicationState != .active)
-            _ = (self.wasBackgroundWhenSystemAlertShown && isCurrent) || wasBackgroundAdopted
+            let wasBackground = (self.wasBackgroundWhenSystemAlertShown && isCurrent) || wasBackgroundAdopted
             // ★ セッション固有キーを優先参照し、古いチェック用セッションの遅延 didInvalidateWith が
             //   新しく予約された本体タイマーの self.sessionKey を誤って参照して TimeActionSheet を再表示させるバグを防止！
             let endedKey = sessionSpecificKey ?? (isCurrent ? (self.sessionKey ?? UserDefaults.standard.string(forKey: self.sessionKeyStoreKey)) : nil)
@@ -2660,8 +2664,13 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             //   1. 左側の「開く」を押してフォアグラウンド復帰した場合:
             //      アラームの振動のみを止め、超過カウントアップ（+00:xx）を維持したままアクション分岐画面（「タイマーを止める」等）へ移行する。
             //   2. 右側の「終了」を押した場合（またはデジタルクラウン等で閉じた場合）:
-            //      アラームの振動・音・通知のみを消火し、超過カウントアップ（+00:xx）は継続させる！
-            //      その後、超過タイムをタップした時に「タイマーを止める」ボタンが表示され、明示的に止めると 00:00 に戻る。
+            //      アラームの消火と同時に、Watch・文字盤モジュール・iPhone・クラウドのすべてを 00:00 完全停止する（Q2=A 確定仕様）。
+            //      - パターン①（!wasBackground: 手首を下げる前に AssistTimer アプリを開いていた場合）:
+            //        「開く」を押した場合は s.state == .running のうちに appBecameActive()（ケースA）が処理して wasInvalidating == true になるため、
+            //        !wasInvalidating でここへ到達した時点で 100%「終了」タップ。スナップショットを残さず 0ms 即時に完全停止する。
+            //      - パターン②（wasBackground: 手首を下げる前に文字盤 .background を表示していた場合）:
+            //        0ms 即時に Watch と文字盤モジュールを 00:00 停止しつつ、0.45秒有効な wasBackground スナップショットを保持し、
+            //        0.38秒以内に appBecameActive() が呼ばれなければ（「終了」タップで文字盤に留まった場合）iPhone・クラウドへも停止を送信する。
             //   ※ 必ず wasStarted == true（実際に鳴動開始していたセッション）かつ意図的破棄ではない場合のみシステムアラーム終了として扱う。
             if !wasInvalidating && reason != .sessionInProgress && wasStarted {
                 self.allowBackgroundHandoffScheduleUntil = Date().addingTimeInterval(2.5)
@@ -2692,7 +2701,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 }
 
                 // 「開く」が押されてアプリがすでに .active になっているか判定
-                let openedIntoForeground = (WKApplication.shared().applicationState == .active && wasSystemAlert && now.timeIntervalSince(self.lastAppBecameActiveAt) < 1.5)
+                let activeWindow: TimeInterval = wasBackground ? 1.0 : 1.5
+                let openedIntoForeground = (WKApplication.shared().applicationState == .active && wasSystemAlert && now.timeIntervalSince(self.lastAppBecameActiveAt) < activeWindow)
                 if openedIntoForeground {
                     self.lastSystemDismissedSnapshot = nil
                     self.acknowledgeRinging(sendToPhone: false, completeCheckIfNeeded: false, explicitTarget: matchedEv)
@@ -2706,11 +2716,23 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     return
                 }
 
-                // 文字盤（.background）から「開く」が押され、didInvalidateWith が appBecameActive よりわずかに先に届いた場合に備えてスナップショットを保存。
-                // 「終了」が押された場合はそのまま Watch 側タイマーを 00:00 停止し、0.35秒後に appBecameActive が来なければ iPhone & クラウドへも停止（STOP_ALARM / MAIN_TIMER_RESET）を送信する！
                 self.pendingSystemDismissPhoneSyncWorkItem?.cancel()
                 self.pendingSystemDismissPhoneSyncWorkItem = nil
-                if let ev = matchedEv {
+
+                if !wasBackground {
+                    // パターン①: 手首を下げる前に AssistTimer アプリを表示していた場合は 100%「終了」タップのため、
+                    // スナップショットを残さず 0ms 即時に Watch・文字盤モジュール・iPhone・クラウドを完全 00:00 停止する
+                    self.lastSystemDismissedSnapshot = nil
+                    self.acknowledgeRinging(
+                        sendToPhone: true,
+                        completeCheckIfNeeded: true,
+                        explicitTarget: matchedEv,
+                        deferPhoneSend: false
+                    )
+                } else if let ev = matchedEv {
+                    // パターン②: 手首を下げる前に文字盤（.background）を表示していた場合:
+                    // まず 0ms 即座に Watch と文字盤モジュールを 00:00 停止しつつ、文字盤から「開く」が押されて直後（0.45秒以内）に
+                    // appBecameActive() が来た場合のみ復元できるよう wasBackground: true スナップショットを保存し、0.38秒後に iPhone へ停止送信する
                     let isCheck = ev.key.contains("-check@")
                     let preMain = WatchSessionManager.shared.mainTimer
                     let preSeat = self.findMatchingSeat(for: ev.seatId, title: ev.title)
@@ -2731,7 +2753,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                         isCheckEvent: isCheck,
                         preMainTimer: preMain,
                         preSeatTimer: preSeat,
-                        wasPeerStopped: preWasPeerStopped
+                        wasPeerStopped: preWasPeerStopped,
+                        wasBackground: true
                     )
                     self.lastSystemDismissedSnapshot = snap
                     self.acknowledgeRinging(
@@ -2753,7 +2776,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                     self.pendingSystemDismissPhoneSyncWorkItem = work
                     ProcessInfo.processInfo.performExpiringActivity(withReason: "watchAlarmSystemDismissSync") { [weak self] expired in
                         if !expired {
-                            Thread.sleep(forTimeInterval: 2.0)
+                            Thread.sleep(forTimeInterval: 1.0)
                         } else {
                             DispatchQueue.main.async {
                                 guard let self = self,
@@ -2766,10 +2789,15 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                             }
                         }
                     }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.38, execute: work)
                 } else {
                     self.lastSystemDismissedSnapshot = nil
-                    self.acknowledgeRinging(sendToPhone: true, completeCheckIfNeeded: true, explicitTarget: nil)
+                    self.acknowledgeRinging(
+                        sendToPhone: true,
+                        completeCheckIfNeeded: true,
+                        explicitTarget: nil,
+                        deferPhoneSend: false
+                    )
                 }
 
                 self.stopForegroundHaptics()
