@@ -909,28 +909,84 @@ const getCloudPayloadSignature = (p) => {
   return `${p.seat_label || ''}|${p.color_staff_name || ''}|${p.status || ''}|${Number(p.target_seconds || 0)}|${Number(p.target_end_timestamp || 0)}|${Number(p.paused_remaining_seconds || 0)}|${p.assistant_staff_name || ''}|${p.help_process || ''}|${p.is_shampooing ? 1 : 0}|${p.comment || ''}|${Number(p.check_target_end_timestamp || 0)}|${Number(p.check_total_seconds || 0)}|${p.check_process || ''}|${p.check_staff_name || ''}`;
 };
 
+const collectLocalSeatWriteKeys = (seatOrId) => {
+  const keys = new Set();
+  if (!seatOrId) return keys;
+
+  const addNumberKeys = (n) => {
+    const num = Number(n);
+    if (Number.isInteger(num) && num > 0 && num < 1000) {
+      keys.add(`num:${num}`);
+      keys.add(`id:seat-${num}`);
+      keys.add(`lbl:${num}`);
+      keys.add(`lbl:${num}番`);
+    }
+  };
+
+  const addRawStringKeys = (rawStr, isIdCandidate = false) => {
+    const trimmed = String(rawStr || '').trim();
+    if (!trimmed) return;
+    if (isIdCandidate) {
+      keys.add(`id:${trimmed}`);
+      const seatIdMatch = trimmed.match(/^seat-(\d+)$/i);
+      if (seatIdMatch) {
+        addNumberKeys(parseInt(seatIdMatch[1], 10));
+      } else if (/^\d+$/.test(trimmed)) {
+        addNumberKeys(parseInt(trimmed, 10));
+      }
+    }
+    const cleanLbl = trimmed
+      .replace(/\s*[\(（]サンプル[\)）]/g, '')
+      .replace(/[\s\u3000]+/g, '')
+      .replace(/席$/, '')
+      .trim();
+    if (cleanLbl) {
+      keys.add(`lbl:${cleanLbl}`);
+      const baseLbl = cleanLbl.replace(/番$/, '').trim();
+      if (baseLbl) {
+        keys.add(`lbl:${baseLbl}`);
+        if (/^\d+$/.test(baseLbl)) {
+          addNumberKeys(parseInt(baseLbl, 10));
+        }
+      }
+      const seatIdInLbl = cleanLbl.match(/^seat-(\d+)$/i);
+      if (seatIdInLbl) {
+        addNumberKeys(parseInt(seatIdInLbl[1], 10));
+      }
+    }
+  };
+
+  if (typeof seatOrId === 'string' || typeof seatOrId === 'number') {
+    addRawStringKeys(seatOrId, true);
+  } else if (typeof seatOrId === 'object') {
+    const candidateIds = [seatOrId.id, seatOrId.cloudTimerId].filter(Boolean);
+    for (const cid of candidateIds) {
+      addRawStringKeys(cid, true);
+    }
+    const candidateLabels = [
+      seatOrId.seat_label,
+      seatOrId.seatLabel,
+      seatOrId.name,
+      seatOrId.oldSeatLabel,
+    ].filter(Boolean);
+    for (const rawLbl of candidateLabels) {
+      addRawStringKeys(rawLbl, false);
+    }
+    if (seatOrId.seatNumber !== undefined && seatOrId.seatNumber !== null) {
+      addNumberKeys(seatOrId.seatNumber);
+    }
+  }
+  return keys;
+};
+
 const markLocalSeatWriteTimestamp = (p) => {
   const now = Date.now();
   _lastLocalAnyCloudWriteAt = now;
-  const candidateIds = [p?.id, p?.cloudTimerId].filter(Boolean);
-  for (const cid of candidateIds) {
-    const trimmed = String(cid).trim();
-    if (trimmed) _recentLocalSeatWriteAt.set(`id:${trimmed}`, now);
+  const keys = collectLocalSeatWriteKeys(p);
+  for (const k of keys) {
+    _recentLocalSeatWriteAt.set(k, now);
   }
-  const candidateLabels = [
-    p?.seat_label,
-    p?.seatLabel,
-    p?.name,
-    p?.oldSeatLabel,
-  ].filter(Boolean);
-  for (const rawLbl of candidateLabels) {
-    const cleanLbl = String(rawLbl)
-      .replace(/\s*[\(（]サンプル[\)）]/g, '')
-      .replace(/席$/, '')
-      .trim();
-    if (cleanLbl) _recentLocalSeatWriteAt.set(`lbl:${cleanLbl}`, now);
-  }
-  if (_recentLocalSeatWriteAt.size > 100) {
+  if (_recentLocalSeatWriteAt.size > 150) {
     for (const [k, ts] of _recentLocalSeatWriteAt.entries()) {
       if (now - ts > LOCAL_ACTOR_ECHO_WINDOW_MS * 2) _recentLocalSeatWriteAt.delete(k);
     }
@@ -960,14 +1016,11 @@ export const isRecentLocalActorEcho = (rec, localUserId, windowMs = LOCAL_ACTOR_
   const recUpdatedBy = rec?.updated_by || rec?.updatedBy || null;
   if (!recUpdatedBy || !localUserId || recUpdatedBy !== localUserId) return false;
   const now = Date.now();
-  const idKey = rec?.id ? `id:${String(rec.id).trim()}` : '';
-  const rawLabel = rec?.seat_label || rec?.seatLabel || rec?.name || '';
-  const labelKey = rawLabel ? `lbl:${String(rawLabel).replace(/\s*[\(（]サンプル[\)）]/g, '').replace(/席$/, '').trim()}` : '';
-  if (idKey && _recentLocalSeatWriteAt.has(idKey)) {
-    if (now - _recentLocalSeatWriteAt.get(idKey) < windowMs) return true;
-  }
-  if (labelKey && _recentLocalSeatWriteAt.has(labelKey)) {
-    if (now - _recentLocalSeatWriteAt.get(labelKey) < windowMs) return true;
+  const lookupKeys = collectLocalSeatWriteKeys(rec);
+  for (const k of lookupKeys) {
+    if (_recentLocalSeatWriteAt.has(k) && now - _recentLocalSeatWriteAt.get(k) < windowMs) {
+      return true;
+    }
   }
   // ★ 自端末ペアリング中のApple Watchから直接Supabase REST更新された場合も自己エコーとして判定し、自端末への誤通知を防止
   const rawUpdatedAt = rec?.updated_at ?? rec?.updatedAt ?? null;
@@ -998,41 +1051,11 @@ export const isSeatRecentlyModifiedLocally = (
   const safeWindow = Number(windowMs) > 0 ? Number(windowMs) : 10000;
   let matchedWriteAt = 0;
 
-  if (typeof seatOrId === 'string' || typeof seatOrId === 'number') {
-    const raw = String(seatOrId).trim();
-    if (!raw) return false;
-    const idKey = `id:${raw}`;
-    if (_recentLocalSeatWriteAt.has(idKey)) {
-      const ts = _recentLocalSeatWriteAt.get(idKey);
+  const lookupKeys = collectLocalSeatWriteKeys(seatOrId);
+  for (const k of lookupKeys) {
+    if (_recentLocalSeatWriteAt.has(k)) {
+      const ts = _recentLocalSeatWriteAt.get(k);
       if (now - ts < safeWindow) matchedWriteAt = Math.max(matchedWriteAt, ts);
-    }
-    const cleanLabel = raw.replace(/\s*[\(（]サンプル[\)）]/g, '').replace(/席$/, '').trim();
-    if (cleanLabel) {
-      const lblKey = `lbl:${cleanLabel}`;
-      if (_recentLocalSeatWriteAt.has(lblKey)) {
-        const ts = _recentLocalSeatWriteAt.get(lblKey);
-        if (now - ts < safeWindow) matchedWriteAt = Math.max(matchedWriteAt, ts);
-      }
-    }
-  } else if (typeof seatOrId === 'object') {
-    const candidateIds = [seatOrId.id, seatOrId.cloudTimerId].filter(Boolean);
-    for (const cid of candidateIds) {
-      const idKey = `id:${String(cid).trim()}`;
-      if (_recentLocalSeatWriteAt.has(idKey)) {
-        const ts = _recentLocalSeatWriteAt.get(idKey);
-        if (now - ts < safeWindow) matchedWriteAt = Math.max(matchedWriteAt, ts);
-      }
-    }
-    const rawLabel = seatOrId.seat_label || seatOrId.seatLabel || seatOrId.name || '';
-    const cleanLabel = rawLabel
-      ? String(rawLabel).replace(/\s*[\(（]サンプル[\)）]/g, '').replace(/席$/, '').trim()
-      : '';
-    if (cleanLabel) {
-      const lblKey = `lbl:${cleanLabel}`;
-      if (_recentLocalSeatWriteAt.has(lblKey)) {
-        const ts = _recentLocalSeatWriteAt.get(lblKey);
-        if (now - ts < safeWindow) matchedWriteAt = Math.max(matchedWriteAt, ts);
-      }
     }
   }
 

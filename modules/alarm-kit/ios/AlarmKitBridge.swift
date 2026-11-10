@@ -490,6 +490,8 @@ enum AlarmKitBridge {
     return keyGenerations[key] == scheduleGeneration
   }
 
+  private static let abandonedRecordCutoffMs: Double = 3 * 3600 * 1000.0
+
   private static func currentProtectedUUIDsSnapshot(additionalKeys: Set<String> = []) -> Set<UUID> {
     recordLock.lock()
     let keepSets = Array(latestKnownKeepKeysBySource.values)
@@ -499,6 +501,7 @@ enum AlarmKitBridge {
     recordLock.unlock()
 
     let nowMs = Date().timeIntervalSince1970 * 1000.0
+    let recentCutoffMs = nowMs - abandonedRecordCutoffMs
     var protectedUUIDs = Set<UUID>()
     for set in keepSets {
       for key in set {
@@ -514,7 +517,7 @@ enum AlarmKitBridge {
     for key in inFlight {
       protectedUUIDs.insert(uuid(for: key))
     }
-    for (key, ts) in records where ts > nowMs {
+    for (key, ts) in records where ts > recentCutoffMs {
       protectedUUIDs.insert(uuid(for: key))
     }
     return protectedUUIDs
@@ -533,11 +536,19 @@ enum AlarmKitBridge {
     var records = loadRecords()
     records[key] = timestampMs
     saveRecords(records)
+    let sourceKey = (key == "main-timer") ? "main" : "salon"
+    if var set = latestKnownKeepKeysBySource[sourceKey] {
+      set.insert(key)
+      latestKnownKeepKeysBySource[sourceKey] = set
+    }
   }
 
   @discardableResult
   static func removeRecord(key: String) -> Bool {
     recordLock.lock(); defer { recordLock.unlock() }
+    for sourceKey in Array(latestKnownKeepKeysBySource.keys) {
+      latestKnownKeepKeysBySource[sourceKey]?.remove(key)
+    }
     var records = loadRecords()
     guard records[key] != nil else { return false }
     records[key] = nil
@@ -546,9 +557,12 @@ enum AlarmKitBridge {
   }
 
   /// アプリ起動時の初回同期や全停止時に、過去の残留アラームや一覧に存在しない古い予約を確実に停止・消去する
+  /// ※ keepKeys に含まれる現在進行中（カウントダウン中および直近3時間以内の超過カウントアップ中）のアラームは
+  ///   ロック画面で鳴動中の消音や takeUserStoppedAlarms の記録消失を防ぐためキャンセルしない
   static func cleanupOnSourceInit(source: String, keepKeys: [String]) -> Int {
     let keepSet = Set(keepKeys)
     let nowMs = Date().timeIntervalSince1970 * 1000.0
+    let recentCutoffMs = nowMs - abandonedRecordCutoffMs
     recordLock.lock()
     latestKnownKeepKeysBySource[source] = keepSet
     let records = loadRecords()
@@ -560,14 +574,14 @@ enum AlarmKitBridge {
     }
     for (key, ts) in records {
       if source == "main" {
-        if key == "main-timer" && (!keepSet.contains(key) || ts <= nowMs) {
+        if key == "main-timer" && (!keepSet.contains(key) || ts <= recentCutoffMs) {
           keysToCancel.insert(key)
         }
       } else if source == "salon" {
-        if key != "main-timer" && (!keepSet.contains(key) || ts <= nowMs) {
+        if key != "main-timer" && (!keepSet.contains(key) || ts <= recentCutoffMs) {
           keysToCancel.insert(key)
         }
-      } else if !keepSet.contains(key) || ts <= nowMs {
+      } else if !keepSet.contains(key) || ts <= recentCutoffMs {
         keysToCancel.insert(key)
       }
     }
@@ -585,15 +599,7 @@ enum AlarmKitBridge {
     }
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) {
-      var additionalProtectedKeys = keepSet
-      if source == "salon" {
-        additionalProtectedKeys.insert("main-timer")
-      } else if source == "main" {
-        for key in records.keys where key != "main-timer" && !keysToCancel.contains(key) {
-          additionalProtectedKeys.insert(key)
-        }
-      }
-      let extraKeys = additionalProtectedKeys
+      let extraKeys = keepSet
       enqueueFireAndForgetOperation(priority: .utility) {
         let manager = AlarmManager.shared
         guard let activeAlarms = try? manager.alarms else { return }

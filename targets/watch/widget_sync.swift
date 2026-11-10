@@ -18,6 +18,14 @@ enum WidgetSync {
     /// 終了時刻がこの秒数以上ずれたら「時間変更」とみなす（端末間の通信遅延による小さなずれは無視）
     private static let endChangeThreshold: Double = 2
 
+    /// DateからJSON安全な有限エポック秒（Double）を取得する（NaN/InfiniteによるJSONSerialization Objective-C例外SIGABRTを完全防止）
+    private static func safeFiniteEpoch(_ date: Date?) -> Double {
+        guard let d = date else { return 0 }
+        let ep = d.timeIntervalSince1970
+        guard ep.isFinite, ep > 1_000_000_000, ep <= 4_102_444_800 else { return 0 }
+        return ep.rounded()
+    }
+
     private static let queueKey = DispatchSpecificKey<Bool>()
     private static let syncQueue: DispatchQueue = {
         let q = DispatchQueue(label: "com.assisttimer.watch.widgetsync", qos: .userInitiated)
@@ -96,8 +104,8 @@ enum WidgetSync {
             var touchedRelated: String?
             var touchedOther: String?
             for t in allItems where (t.isRunning || t.isPreCountingDown) {
-                let end = t.targetEndTime.timeIntervalSince1970.rounded()
-                let checkEnd = (!t.isCheckCompleted ? (t.checkTargetEndTime?.timeIntervalSince1970.rounded() ?? 0) : 0)
+                let end = safeFiniteEpoch(t.targetEndTime)
+                let checkEnd = (!t.isCheckCompleted ? safeFiniteEpoch(t.checkTargetEndTime) : 0)
                 let isRel = (t.id == "main-timer") || t.isRelated(to: userName)
                 var didChange = false
                 let seatKey = "seat-\(t.seatNumber)"
@@ -161,7 +169,7 @@ enum WidgetSync {
                 if wasRunning != t.isRunning {
                     seatOrCheckActiveChanged = true
                 } else if t.isRunning, let p = prevEntry, p.count >= 2 {
-                    let curEnd = t.targetEndTime.timeIntervalSince1970.rounded()
+                    let curEnd = safeFiniteEpoch(t.targetEndTime)
                     if abs(p[1] - curEnd) >= endChangeThreshold {
                         seatOrCheckActiveChanged = true
                     }
@@ -179,7 +187,7 @@ enum WidgetSync {
                     }
                 }
                 let prevCheckEnd = (prevEntry?.count ?? 0) >= 3 ? (prevEntry?[2] ?? 0) : 0
-                let checkEnd = (!t.isCheckCompleted ? (t.checkTargetEndTime?.timeIntervalSince1970.rounded() ?? 0) : 0)
+                let checkEnd = (!t.isCheckCompleted ? safeFiniteEpoch(t.checkTargetEndTime) : 0)
                 if (prevCheckEnd > 0 && checkEnd == 0) || (prevCheckEnd == 0 && checkEnd > 0) || (checkEnd > 0 && abs(prevCheckEnd - checkEnd) >= endChangeThreshold) {
                     seatOrCheckActiveChanged = true
                 }
@@ -197,13 +205,13 @@ enum WidgetSync {
 
         var newStates: [String: [Double]] = [:]
         for t in allItems {
-            let active = t.isRunning || t.isPreCountingDown
-            let checkEnd = (!t.isCheckCompleted ? (t.checkTargetEndTime?.timeIntervalSince1970.rounded() ?? 0) : 0)
+            let active = (t.isRunning || t.isPreCountingDown) && safeFiniteEpoch(t.targetEndTime) > 0
+            let checkEnd = (!t.isCheckCompleted ? safeFiniteEpoch(t.checkTargetEndTime) : 0)
             let isRel = (t.id == "main-timer") ? true : t.isRelated(to: userName)
             let shouldAlertMain = (t.id == "main-timer") ? true : t.shouldAlertMainTimer(for: userName)
             let entry: [Double] = [
                 active ? 1 : 0,
-                active ? t.targetEndTime.timeIntervalSince1970.rounded() : 0,
+                active ? safeFiniteEpoch(t.targetEndTime) : 0,
                 checkEnd,
                 isRel ? 1 : 0,
                 shouldAlertMain ? 1 : 0
@@ -224,9 +232,9 @@ enum WidgetSync {
         var seats: [[String: Any]] = []
         if let m = mainTimer {
             let now = Date()
-            let runSec = m.pausedRemainingSeconds > 0 ? m.pausedRemainingSeconds : m.totalSeconds
+            let runSec = max(0, min(86_400, m.pausedRemainingSeconds > 0 ? m.pausedRemainingSeconds : m.totalSeconds))
             let prepEnd: Date? = m.isPreCountingDown
-                ? (m.prepEndTime ?? now.addingTimeInterval(TimeInterval(max(1, m.preCountdownSeconds))))
+                ? (m.prepEndTime ?? now.addingTimeInterval(TimeInterval(max(1, min(3_600, m.preCountdownSeconds)))))
                 : nil
             let effectiveEnd: Date = {
                 if let pEnd = prepEnd {
@@ -234,44 +242,47 @@ enum WidgetSync {
                 }
                 return m.targetEndTime
             }()
-            let mActive = (m.isRunning || m.isPreCountingDown)
+            let mEndEpoch = safeFiniteEpoch(effectiveEnd)
+            let mActive = (m.isRunning || m.isPreCountingDown) && mEndEpoch > 0
 
             var mainDict: [String: Any] = [
                 "id": m.id,
                 "seatNumber": 0,
                 "seatLabel": "メインタイマー",
                 "isMainTimer": true,
-                "endEpoch": mActive ? effectiveEnd.timeIntervalSince1970.rounded() : 0,
+                "endEpoch": mActive ? mEndEpoch : 0,
                 "isRunning": mActive,
-                "pausedRemaining": m.pausedRemainingSeconds,
+                "pausedRemaining": max(0, min(86_400, m.pausedRemainingSeconds)),
                 "related": true,
                 "shouldAlertMain": true,
                 "shouldAlertCheck": false,
-                "totalSeconds": m.totalSeconds,
+                "totalSeconds": max(0, min(86_400, m.totalSeconds)),
                 "isCountUpEnabled": true,
                 "isCheckCompleted": true
             ]
-            if mActive, let pEnd = prepEnd, pEnd > now {
-                mainDict["prepEndEpoch"] = pEnd.timeIntervalSince1970.rounded()
-                mainDict["prepTotalSeconds"] = max(1, m.countdownConfigSeconds)
+            if mActive, let pEnd = prepEnd, pEnd > now, safeFiniteEpoch(pEnd) > 0 {
+                mainDict["prepEndEpoch"] = safeFiniteEpoch(pEnd)
+                mainDict["prepTotalSeconds"] = max(1, min(3_600, m.countdownConfigSeconds))
             }
             seats.append(mainDict)
         }
 
         for t in timers {
+            let tEndEpoch = safeFiniteEpoch(t.targetEndTime)
+            let tRunning = t.isRunning && tEndEpoch > 0
             var d: [String: Any] = [
                 "id": t.id,
                 "seatNumber": t.seatNumber,
                 "seatLabel": t.displaySeatName,
                 "isMainTimer": false,
                 // 秒単位に丸めて、同じ内容での無駄な再読み込みを防ぐ（停止中の席は終了時刻を使わないので0）
-                "endEpoch": t.isRunning ? t.targetEndTime.timeIntervalSince1970.rounded() : 0,
-                "isRunning": t.isRunning,
-                "pausedRemaining": t.pausedRemainingSeconds,
+                "endEpoch": tRunning ? tEndEpoch : 0,
+                "isRunning": tRunning,
+                "pausedRemaining": max(0, min(86_400, t.pausedRemainingSeconds)),
                 "related": t.isRelated(to: userName),
                 "shouldAlertMain": t.shouldAlertMainTimer(for: userName),
-                "shouldAlertCheck": (!t.isCheckCompleted && t.checkTargetEndTime != nil && t.shouldAlertCheckTimer(for: userName)),
-                "totalSeconds": t.totalSeconds,
+                "shouldAlertCheck": (!t.isCheckCompleted && safeFiniteEpoch(t.checkTargetEndTime) > 0 && t.shouldAlertCheckTimer(for: userName)),
+                "totalSeconds": max(0, min(86_400, t.totalSeconds)),
                 "creatorName": t.creatorName,
                 "isCreatorMe": t.isCreatorMe(currentUserName: userName),
                 "isNoHelpNeeded": t.isNoHelpNeeded,
@@ -286,9 +297,10 @@ enum WidgetSync {
             if let staff = t.checkStaff, !staff.isEmpty {
                 d["checkStaff"] = staff
             }
-            if !t.isCheckCompleted, let checkEnd = t.checkTargetEndTime, let checkTot = t.checkTotalSeconds {
-                d["checkEndEpoch"] = checkEnd.timeIntervalSince1970.rounded()
-                d["checkTotalSeconds"] = checkTot
+            let chkEndEpoch = safeFiniteEpoch(t.checkTargetEndTime)
+            if !t.isCheckCompleted, chkEndEpoch > 0, let checkTot = t.checkTotalSeconds, checkTot > 0 {
+                d["checkEndEpoch"] = chkEndEpoch
+                d["checkTotalSeconds"] = max(1, min(86_400, checkTot))
             }
             seats.append(d)
         }
@@ -297,7 +309,8 @@ enum WidgetSync {
         if let id = lastTouchedId {
             payload["lastTouchedId"] = id
         }
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
         let shouldReloadImmediate = anyActiveStateChanged || !isAppActive
         if data == lastPayload && !anyActiveStateChanged {
             let now = Date()

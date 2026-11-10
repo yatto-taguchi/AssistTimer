@@ -255,6 +255,7 @@ export default function HomeScreen({ navigation }) {
   const lastAutoFinishedAtRef = useRef(0);
   const lastAutoFinishedEndTimestampRef = useRef(0);
   const [isAutoFinished, setIsAutoFinished] = useState(false);
+  const [isMainTimerRestored, setIsMainTimerRestored] = useState(false);
   const isMainTimerRestoredRef = useRef(false);
   const restoreActiveMainTimerPromiseRef = useRef(null);
   const restoredCategoryFromTimerRef = useRef(false);
@@ -698,21 +699,28 @@ export default function HomeScreen({ navigation }) {
             setRemainingTime(overTime);
           }
         }
-        // フォアグラウンド復帰時に AlarmKit 予約状態を1回即時同期
-        const soundOn = isAlarmSoundEnabled && !isWatchMutedRef.current;
-        let desiredTs = null;
-        if (isPreCountingDownRef.current && prepEndTimeRef.current) {
-          desiredTs = prepEndTimeRef.current + (targetTimeRef.current || targetTime || 600) * 1000;
-        } else if (isRunningRef.current && !isCountUpRef.current && targetEndTimeRef.current) {
-          desiredTs = targetEndTimeRef.current;
-        } else if (isRunningRef.current && isCountUpRef.current && overStartTimeRef.current) {
-          desiredTs = overStartTimeRef.current;
+        // フォアグラウンド復帰時に AlarmKit 予約状態を1回即時同期（ストレージ復元および設定ロード完了後のみ）
+        if (isMainTimerRestoredRef.current && isSettingsLoadedRef.current) {
+          const soundOn = isAlarmSoundEnabled && !isWatchMutedRef.current;
+          let desiredTs = null;
+          if (isPreCountingDownRef.current && prepEndTimeRef.current) {
+            desiredTs = prepEndTimeRef.current + (targetTimeRef.current || targetTime || 600) * 1000;
+          } else if (isRunningRef.current && !isCountUpRef.current && targetEndTimeRef.current) {
+            desiredTs = targetEndTimeRef.current;
+          } else if (isRunningRef.current && isCountUpRef.current && overStartTimeRef.current) {
+            desiredTs = overStartTimeRef.current;
+          } else if (
+            lastAutoFinishedAtRef.current > 0 &&
+            lastAutoFinishedEndTimestampRef.current > Date.now() - 15 * 60 * 1000
+          ) {
+            desiredTs = lastAutoFinishedEndTimestampRef.current;
+          }
+          setAlarms(
+            'main',
+            desiredTs ? [{ key: MAIN_ALARM_KEY, timestamp: desiredTs, title: '⏰ タイマー終了' }] : [],
+            { soundOn, stopPassedOnRemove: false }
+          );
         }
-        setAlarms(
-          'main',
-          desiredTs ? [{ key: MAIN_ALARM_KEY, timestamp: desiredTs, title: '⏰ タイマー終了' }] : [],
-          { soundOn, stopPassedOnRemove: false }
-        );
       }
     });
 
@@ -1020,6 +1028,7 @@ export default function HomeScreen({ navigation }) {
   // 終了時刻は複数箇所（開始・再開・準備カウント終了・復帰時など）で ref が更新されるため、
   // 動作中は1秒ごとに現在値を渡し、alarmScheduler 側で差分がある時だけ予約し直す。
   useEffect(() => {
+    if (!isMainTimerRestored || !isSettingsLoaded) return undefined;
     const soundOn = isAlarmSoundEnabled && !isWatchMuted;
     const buildDesired = () => {
       let ts = null;
@@ -1030,6 +1039,12 @@ export default function HomeScreen({ navigation }) {
       } else if (isRunning && isCountUp && overStartTimeRef.current) {
         // 超過中は「鳴っているアラーム」を一覧に残しておく（過去時刻なので再予約はされない）
         ts = overStartTimeRef.current;
+      } else if (
+        isAutoFinished &&
+        lastAutoFinishedEndTimestampRef.current > Date.now() - 15 * 60 * 1000
+      ) {
+        // カウントアップOFFで自動終了した直後も、ユーザーが停止・リセット・再スタートするまでは鳴動中アラームを保持する
+        ts = lastAutoFinishedEndTimestampRef.current;
       }
       return ts ? [{ key: MAIN_ALARM_KEY, timestamp: ts, title: '⏰ タイマー終了' }] : [];
     };
@@ -1041,7 +1056,17 @@ export default function HomeScreen({ navigation }) {
       apply();
     }, 1000);
     return () => clearInterval(id);
-  }, [isRunning, isCountUp, isPreCountingDown, isAlarmSoundEnabled, targetTime, isWatchMuted]);
+  }, [
+    isMainTimerRestored,
+    isSettingsLoaded,
+    isRunning,
+    isCountUp,
+    isPreCountingDown,
+    isAutoFinished,
+    isAlarmSoundEnabled,
+    targetTime,
+    isWatchMuted,
+  ]);
 
   const formatTime = (timeInSeconds) => {
     const isNegative = timeInSeconds < 0;
@@ -2333,6 +2358,7 @@ export default function HomeScreen({ navigation }) {
         console.warn('[HomeScreen] ensureActiveMainTimerRestored error:', e);
       } finally {
         isMainTimerRestoredRef.current = true;
+        setIsMainTimerRestored(true);
         const latest = getLatestMainTimerState();
         if (setMainTimerState) {
           setMainTimerState(latest);

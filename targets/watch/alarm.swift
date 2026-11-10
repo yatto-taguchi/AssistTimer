@@ -211,7 +211,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         let alarmSanitizeBuildKey = "watch_alarm_sanitized_build_v1"
         let shortVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         let buildVer = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
-        let currentAlarmBuild = "\(shortVer) (\(buildVer))-v119"
+        let currentAlarmBuild = "\(shortVer) (\(buildVer))-v120"
         let isNewAlarmBuild = (UserDefaults.standard.string(forKey: alarmSanitizeBuildKey) != currentAlarmBuild)
         if isNewAlarmBuild {
             UserDefaults.standard.set(currentAlarmBuild, forKey: alarmSanitizeBuildKey)
@@ -335,7 +335,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             } else {
                 finalMainEnd = effectiveEnd
             }
-            let mainEpoch = Int(finalMainEnd.timeIntervalSince1970)
+            let mainEpoch = safeEpochSecondsInt64(finalMainEnd.timeIntervalSince1970)
             let mainKey = "\(m.id)-main@\(mainEpoch)"
             if let existing = existingMain, existing.key != mainKey {
                 if isSameTarget(key1: existing.key, key2: mainKey) {
@@ -425,7 +425,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 finalSeatEnd = t.targetEndTime
             }
             if t.shouldAlertMainTimer(for: activeUser) {
-                let mainEpoch = Int(finalSeatEnd.timeIntervalSince1970)
+                let mainEpoch = safeEpochSecondsInt64(finalSeatEnd.timeIntervalSince1970)
                 let mainKey = "\(t.id)-main@\(mainEpoch)"
                 if let existing = existingSeat, existing.key != mainKey {
                     if isSameTarget(key1: existing.key, key2: mainKey) {
@@ -494,7 +494,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 } else {
                     finalCheckEnd = checkEnd
                 }
-                let checkEpoch = Int(finalCheckEnd.timeIntervalSince1970)
+                let checkEpoch = safeEpochSecondsInt64(finalCheckEnd.timeIntervalSince1970)
                 let checkKey = "\(t.id)-check@\(checkEpoch)"
                 if let existing = existingCheck, existing.key != checkKey {
                     if isSameTarget(key1: existing.key, key2: checkKey) {
@@ -639,7 +639,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 let isCheck = oldEv.key.contains("-check@")
                 let kindTag = isCheck ? "-check@" : "-main@"
                 let oldCandidates = resolveCandidateSeatIds(seatId: oldEv.seatId)
-                let baseEp = Int(oldEv.date.timeIntervalSince1970)
+                let baseEp = safeEpochSecondsInt64(oldEv.date.timeIntervalSince1970)
                 acknowledged[oldEv.key] = oldEv.date.timeIntervalSince1970
                 for cid in oldCandidates {
                     for ep in (baseEp - 15)...(baseEp + 15) {
@@ -746,11 +746,11 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
         var changed = false
         var allMainKeys = Set<String>()
-        var targetMainEpochs = Set<Int>()
+        var targetMainEpochs = Set<Int64>()
         for ev in events where ev.seatId == "main-timer" || ev.key.hasPrefix("main-timer") {
             acknowledged[ev.key] = ev.date.timeIntervalSince1970
             allMainKeys.insert(ev.key)
-            targetMainEpochs.insert(Int(ev.date.timeIntervalSince1970))
+            targetMainEpochs.insert(safeEpochSecondsInt64(ev.date.timeIntervalSince1970))
             removeForceRinging(matching: ev.key)
             scheduledNotificationEventKeys.remove(ev.key)
             restoredOverlayEvents = restoredOverlayEvents.filter { !isSameTarget(key1: $0.key, key2: ev.key) }
@@ -759,7 +759,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         for ev in ringing where ev.seatId == "main-timer" || ev.key.hasPrefix("main-timer") {
             acknowledged[ev.key] = ev.date.timeIntervalSince1970
             allMainKeys.insert(ev.key)
-            targetMainEpochs.insert(Int(ev.date.timeIntervalSince1970))
+            targetMainEpochs.insert(safeEpochSecondsInt64(ev.date.timeIntervalSince1970))
             removeForceRinging(matching: ev.key)
             scheduledNotificationEventKeys.remove(ev.key)
             restoredOverlayEvents = restoredOverlayEvents.filter { !isSameTarget(key1: $0.key, key2: ev.key) }
@@ -768,7 +768,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         for (k, ts) in armed where k.hasPrefix("main-timer") {
             acknowledged[k] = ts
             allMainKeys.insert(k)
-            targetMainEpochs.insert(Int(ts))
+            targetMainEpochs.insert(safeEpochSecondsInt64(ts))
             removeForceRinging(matching: k)
             scheduledNotificationEventKeys.remove(k)
             changed = true
@@ -777,7 +777,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             let epVal = Double(sKey.components(separatedBy: "@").last ?? "") ?? Date().timeIntervalSince1970
             acknowledged[sKey] = epVal
             allMainKeys.insert(sKey)
-            targetMainEpochs.insert(Int(epVal))
+            targetMainEpochs.insert(safeEpochSecondsInt64(epVal))
             changed = true
         }
         for baseEp in targetMainEpochs {
@@ -834,9 +834,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             persistEvents()
         }
         // ★ メモリ上のキーに加えて現在時刻・終了時刻前後30秒のエポックIDおよびプレフィックス一致で全リピート通知を一括消去
-        var baseEpochs: Set<Int> = [Int(Date().timeIntervalSince1970)]
+        var baseEpochs: Set<Int64> = [safeEpochSecondsInt64(Date().timeIntervalSince1970)]
         if let mEnd = WatchSessionManager.shared.mainTimer?.targetEndTime {
-            baseEpochs.insert(Int(mEnd.timeIntervalSince1970))
+            baseEpochs.insert(safeEpochSecondsInt64(mEnd.timeIntervalSince1970))
         }
         for baseEp in baseEpochs {
             for ep in (baseEp - 30)...(baseEp + 30) {
@@ -953,7 +953,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
         let ackKindTags = checkOnly ? ["-check@"] : (mainOnly ? ["-main@"] : ["-main@", "-check@"])
         for d in exactStoppedDates {
-            let baseEp = Int(d.timeIntervalSince1970)
+            let baseEp = safeEpochSecondsInt64(d.timeIntervalSince1970)
             for cid in candidateSeatIds {
                 for tag in ackKindTags {
                     for ep in (baseEp - 15)...(baseEp + 15) {
@@ -1023,7 +1023,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             }
         }
         let kindTags = checkOnly ? ["-check@"] : (mainOnly ? ["-main@"] : ["-main@", "-check@"])
-        let baseEpochs = Set(targetDates.map { Int($0.timeIntervalSince1970) })
+        let baseEpochs = Set(targetDates.map { safeEpochSecondsInt64($0.timeIntervalSince1970) })
         for cid in candidateSeatIds {
             for tag in kindTags {
                 for baseEp in baseEpochs {
@@ -1290,7 +1290,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         let activeUser = mgr.currentUserName
         var rebuilt: [WatchAlarmEvent] = []
         if let m = mgr.mainTimer, (m.isRunning || m.isPreCountingDown), m.targetEndTime > now.addingTimeInterval(-10800) {
-            let ep = Int(m.targetEndTime.timeIntervalSince1970)
+            let ep = safeEpochSecondsInt64(m.targetEndTime.timeIntervalSince1970)
             let k = "\(m.id)-main@\(ep)"
             if !isAcknowledged(k) {
                 if armed[k] == nil { armed[k] = m.targetEndTime.timeIntervalSince1970 }
@@ -1306,7 +1306,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         for t in mgr.timers where t.isRunning && t.targetEndTime > now.addingTimeInterval(-10800) {
             let label = t.displaySeatName
             if t.shouldAlertMainTimer(for: activeUser) {
-                let ep = Int(t.targetEndTime.timeIntervalSince1970)
+                let ep = safeEpochSecondsInt64(t.targetEndTime.timeIntervalSince1970)
                 let k = "\(t.id)-main@\(ep)"
                 if !isAcknowledged(k) {
                     if armed[k] == nil { armed[k] = t.targetEndTime.timeIntervalSince1970 }
@@ -1321,7 +1321,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             }
             if !t.isCheckCompleted, let checkEnd = t.checkTargetEndTime, (t.checkTotalSeconds ?? 0) > 0,
                checkEnd > now.addingTimeInterval(-10800), t.shouldAlertCheckTimer(for: activeUser) {
-                let ep = Int(checkEnd.timeIntervalSince1970)
+                let ep = safeEpochSecondsInt64(checkEnd.timeIntervalSince1970)
                 let k = "\(t.id)-check@\(ep)"
                 if !isAcknowledged(k) {
                     if armed[k] == nil { armed[k] = checkEnd.timeIntervalSince1970 }
@@ -1394,7 +1394,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         let parts1 = k1.components(separatedBy: "@")
         let parts2 = k2.components(separatedBy: "@")
         guard parts1.count == 2, parts2.count == 2,
-              let epoch1 = Int(parts1[1]), let epoch2 = Int(parts2[1]),
+              let epoch1 = Int64(parts1[1]), let epoch2 = Int64(parts2[1]),
+              epoch1 > 0, epoch2 > 0,
               abs(epoch1 - epoch2) <= 2 else {
             return false
         }
@@ -1645,7 +1646,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             }
             let prefixTags = candidateSeatIds.map { "\($0)\(kindTag)" }
             prefixHeaders = prefixTags.map { "\(notificationPrefix)\($0)" }
-            let baseEpoch = Int(ev.date.timeIntervalSince1970)
+            let baseEpoch = safeEpochSecondsInt64(ev.date.timeIntervalSince1970)
             for prefixTag in prefixTags {
                 for e in events where e.key.hasPrefix(prefixTag) && !protectedEventKeys.contains(e.key) { targetKeys.insert(e.key) }
                 for r in ringing where r.key.hasPrefix(prefixTag) && !protectedEventKeys.contains(r.key) { targetKeys.insert(r.key) }
@@ -1793,7 +1794,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 acknowledged[sKey] = e.date.timeIntervalSince1970
                 allAckKeys.insert(sKey)
             }
-            let baseEpoch = Int(e.date.timeIntervalSince1970)
+            let baseEpoch = safeEpochSecondsInt64(e.date.timeIntervalSince1970)
             for ep in (baseEpoch - 15)...(baseEpoch + 15) {
                 allAckKeys.insert("\(prefixTag)\(ep)")
             }
@@ -2698,7 +2699,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                         return lastRing
                     }
                     if let m = WatchSessionManager.shared.mainTimer, (m.isOvertime || m.isPreCountingDown || m.isRunning) {
-                        let ep = Int(m.targetEndTime.timeIntervalSince1970)
+                        let ep = safeEpochSecondsInt64(m.targetEndTime.timeIntervalSince1970)
                         return WatchAlarmEvent(key: "main-timer-main@\(ep)", seatId: "main-timer", date: m.targetEndTime, title: "⏱️ メインタイマー 終了")
                     }
                     return nil
@@ -2943,7 +2944,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 content.title = "⏰ \(e.title)"
                 content.body = i == 0
                     ? "タイムアップです。「アラーム停止」で止まります。"
-                    : "まだ止められていません（\(Int(offset))秒経過）"
+                    : "まだ止められていません（\(safeClampedSeconds(offset))秒経過）"
                 // ★ watchOS では content.sound を指定しないと触覚（Taptic Engine）の振動が一切鳴らない。
                 //   消音モード時はシステム側で自動的に「振動のみ」となるため、常に .default を指定して振動を保証する。
                 content.sound = .default

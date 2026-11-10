@@ -164,9 +164,12 @@ export const getActionVisualMeta = (
   customHelpProcess = '',
   isShampooing = false
 ) => {
-  const info = getActionStatusInfo(actionIdOrStatus, isShampooing);
-  const resolvedId = info ? info.id : String(actionIdOrStatus || '').trim();
   const trimmedCustom = String(customHelpProcess || '').trim();
+  const info = getActionStatusInfo(
+    actionIdOrStatus,
+    isShampooing || trimmedCustom === 'シャンプー'
+  );
+  const resolvedId = info ? info.id : String(actionIdOrStatus || '').trim();
   switch (resolvedId) {
     case 'shampoo':
       return { id: 'shampoo', emoji: '💧', label: 'シャンプー', color: '#AF52DE' };
@@ -268,7 +271,7 @@ export const detectSalonBuildUpdateOnce = () => {
         const appCfg = require('../../app.json')?.expo;
         currentBuild = `${appCfg?.version || '1.0.0'} (${appCfg?.ios?.buildNumber || appCfg?.android?.versionCode || '0'})`;
       }
-      currentBuild = `${currentBuild}-v119`;
+      currentBuild = `${currentBuild}-v120`;
       const [prevBuild, pendingCloudFlag] = await Promise.all([
         AsyncStorage.getItem(SALON_LAST_BUILD_VERSION_KEY),
         AsyncStorage.getItem(SALON_PENDING_CLOUD_BUILD_NORMALIZE_KEY),
@@ -2271,12 +2274,7 @@ export default function SalonWorkScreen() {
     ) {
       return false;
     }
-    if (
-      isSelfEcho ||
-      isRecentLocalActorEcho(cloudSeat, activeUserId) ||
-      isSeatRecentlyModifiedLocally(cloudSeat, 8000, cloudSeat, activeUserId) ||
-      isSeatRecentlyModifiedLocally(prevSeat, 8000, cloudSeat, activeUserId)
-    ) {
+    if (isSelfEcho || isRecentLocalActorEcho(cloudSeat, activeUserId)) {
       return false;
     }
     const updatedByUid = String(cloudSeat.updatedBy || '').trim();
@@ -2797,7 +2795,6 @@ export default function SalonWorkScreen() {
   };
 
   const syncChangedSeatsToCloud = async (newSeats) => {
-    if (isRemoteSyncRef.current) return;
     const targetSalonId =
       cloudSalonIdRef.current ||
       (currentSalonRef.current?.id &&
@@ -2809,6 +2806,7 @@ export default function SalonWorkScreen() {
 
     for (const seat of newSeats) {
       if (!seat || !seat.id) continue;
+      if (isRemoteSyncRef.current && !seat.dirtySync) continue;
       // ゲスト端末からはクラウドにまだ存在しない非UUID新規席のINSERTを行わない（オーナーの席マスターのみを基準とする）
       if (!isSalonOwnerRef.current && !isCloudUUID(seat.cloudTimerId || seat.id)) continue;
       // 他スタッフがクラウド上で停止・工程移行した後、自端末のみアラーム・超過継続のため status: 'running' を保持している席や、
@@ -2829,26 +2827,39 @@ export default function SalonWorkScreen() {
         upsertCloudTimer(targetSalonId, seat)
           .then((savedCloudSeat) => {
             if (savedCloudSeat?.id) {
-              lastSyncedSeatsStateRef.current[savedCloudSeat.id] = sig;
+              const isStillLatestSig = lastSyncedSeatsStateRef.current[seat.id] === sig;
+              if (isStillLatestSig || !lastSyncedSeatsStateRef.current[savedCloudSeat.id]) {
+                lastSyncedSeatsStateRef.current[savedCloudSeat.id] =
+                  lastSyncedSeatsStateRef.current[seat.id] || sig;
+              }
               if (seat.id !== savedCloudSeat.id) {
                 setSeats((curr) => {
-                  const next = curr.map((item) =>
-                    item.id === seat.id
-                      ? { ...item, id: savedCloudSeat.id, cloudTimerId: savedCloudSeat.id, dirtySync: false }
-                      : item
-                  );
+                  const next = curr.map((item) => {
+                    if (!item || item.id !== seat.id) return item;
+                    const itemStillMatches = getSeatCloudSignature(item) === sig;
+                    return {
+                      ...item,
+                      id: savedCloudSeat.id,
+                      cloudTimerId: savedCloudSeat.id,
+                      dirtySync: itemStillMatches ? false : !!item.dirtySync,
+                    };
+                  });
                   persistSeatsForSalonId(targetSalonId, next, isSalonOwnerRef.current).catch(() => {});
                   return next;
                 });
-              } else if (seat.dirtySync || seat.cloudTimerId !== savedCloudSeat.id) {
+              } else if (isStillLatestSig && (seat.dirtySync || seat.cloudTimerId !== savedCloudSeat.id)) {
                 seat.dirtySync = false;
                 seat.cloudTimerId = savedCloudSeat.id;
                 if (Array.isArray(seatsRef.current)) {
-                  const next = seatsRef.current.map((item) =>
-                    item && item.id === seat.id
-                      ? { ...item, cloudTimerId: savedCloudSeat.id, dirtySync: false }
-                      : item
-                  );
+                  const next = seatsRef.current.map((item) => {
+                    if (!item || item.id !== seat.id) return item;
+                    const itemStillMatches = getSeatCloudSignature(item) === sig;
+                    return {
+                      ...item,
+                      cloudTimerId: savedCloudSeat.id,
+                      dirtySync: itemStillMatches ? false : !!item.dirtySync,
+                    };
+                  });
                   seatsRef.current = next;
                   _cachedCurrentSeats = next;
                   persistSeatsForSalonId(targetSalonId, next, isSalonOwnerRef.current).catch(() => {});
@@ -3764,6 +3775,8 @@ export default function SalonWorkScreen() {
               isShampooing: false,
               actionStatus: null,
               helpProcess: '',
+              dirtySync: true,
+              skipCloudSyncOnce: false,
             };
           }
           case 'UPDATE_STATUS': {
@@ -3777,6 +3790,8 @@ export default function SalonWorkScreen() {
               actionStatus: isNormal ? null : (matchedInfo?.id || nextStatus || null),
               helpProcess: isNormal ? '' : (matchedInfo?.label || s.helpProcess || ''),
               assistantStaffName: isNormal ? s.assistantStaffName : (s.assistantStaffName || watchUser || ''),
+              dirtySync: true,
+              skipCloudSyncOnce: false,
               ...(isShampoo ? { history: [] } : {}),
             };
           }
@@ -5143,7 +5158,8 @@ export default function SalonWorkScreen() {
               prevMatch.status === 'running' &&
               Number(prevMatch.targetEndTimestamp) > nowMs &&
               ct.status !== 'running' &&
-              Number(ct.updatedAt || 0) <= prevStartMs + 2000 &&
+              (Number(ct.updatedAt || 0) <= prevStartMs + 2000 ||
+                isSeatRecentlyModifiedLocally(prevMatch, 8000, ct, activeMyUid)) &&
               !WatchConnectivity.isSeatTimerEndStopped(ct.id, prevMatch.targetEndTimestamp);
 
             const isLocalStopOfCloudRunning =
@@ -5576,7 +5592,8 @@ export default function SalonWorkScreen() {
                 localMatch.status === 'running' &&
                 Number(localMatch.targetEndTimestamp) > nowMs &&
                 ct.status !== 'running' &&
-                Number(ct.updatedAt || 0) <= localStartMs + 2000 &&
+                (Number(ct.updatedAt || 0) <= localStartMs + 2000 ||
+                  isSeatRecentlyModifiedLocally(localMatch, 8000, ct, activeMyUid)) &&
                 !WatchConnectivity.isSeatTimerEndStopped(ct.id, localMatch.targetEndTimestamp);
               const isLocalStoppingCloudRunning =
                 ct.status === 'running' &&
@@ -6354,7 +6371,9 @@ export default function SalonWorkScreen() {
                   const isStartingMain = prevItem.status !== 'running' && newSeat.status === 'running';
                   const isAddingCheck = !prevHadActiveCheck && newHasActiveCheck;
 
-                  const newActionMeta = newActionId ? getActionVisualMeta(newActionId, newSeat.helpProcess) : null;
+                  const newActionMeta = newActionId
+                    ? getActionVisualMeta(newActionId, newSeat.helpProcess, newSeat.isShampooing)
+                    : null;
                   const peerActorName = resolvePeerActorName(newSeat, prevItem, activeMembers);
                   const validNewAssistActor =
                     (newAssist && newAssist !== 'ヘルプなし' && newAssist !== 'none' && newAssist !== '募集中' && newAssist !== '未定'
@@ -6428,7 +6447,11 @@ export default function SalonWorkScreen() {
                       shouldAlertMainTimerForUser(prevItem, activeUser, activeUserId, activeMembers) ||
                       shouldAlertMainTimerForUser(newSeat, activeUser, activeUserId, activeMembers);
                     if (isStopStakeholder) {
-                      const actionMeta = getActionVisualMeta(newActionId, newSeat.helpProcess);
+                      const actionMeta = getActionVisualMeta(
+                        newActionId,
+                        newSeat.helpProcess,
+                        newSeat.isShampooing
+                      );
                       const stopperActor = peerActorName || (!isNewAssistMe ? validNewAssistActor : '');
                       if (actionMeta && !isSecondaryPeerStop) {
                         // タイマーを止めて「コーミング」「シャンプー」「チェック」「呼び出し」等の施術工程に入った場合、単なる停止ではなく工程移行を最優先で通知！
@@ -6552,7 +6575,11 @@ export default function SalonWorkScreen() {
                       shouldAlertMainTimerForUser(newSeat, activeUser, activeUserId, activeMembers);
                     if (isStatusStakeholder) {
                       if (newActionId) {
-                        const actionMeta = getActionVisualMeta(newActionId, newSeat.helpProcess);
+                        const actionMeta = getActionVisualMeta(
+                          newActionId,
+                          newSeat.helpProcess,
+                          newSeat.isShampooing
+                        );
                         if (actionMeta) {
                           if (newActionId === 'call') {
                             peerNotification = {
@@ -6585,7 +6612,11 @@ export default function SalonWorkScreen() {
                           }
                         }
                       } else if (prevActionId && prevItem.status !== 'running' && newSeat.status !== 'running' && !newSeat.isReset) {
-                        const prevMeta = getActionVisualMeta(prevActionId, prevItem.helpProcess);
+                        const prevMeta = getActionVisualMeta(
+                          prevActionId,
+                          prevItem.helpProcess,
+                          prevItem.isShampooing
+                        );
                         if (prevMeta) {
                           peerNotification = {
                             eventType: 'status_change',

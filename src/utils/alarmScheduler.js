@@ -71,14 +71,16 @@ const applyAlarms = async (source, desired, options) => {
 
   let dirty = false;
   const hadPreviousAlarms = current.size > 0;
-  // 初回同期時: 前回セッション（アプリ再起動やTestFlight更新前）の残留アラームや過去時刻の予約を確実に消火
+  // 初回同期時: 前回セッション（アプリ再起動やTestFlight更新前）の残留アラームや一覧に存在しない古い予約を確実に消火
+  // ※ 現在進行中（カウントダウン中および直近3時間以内の超過カウントアップ中）のキーは keepKeys として保護し、
+  //   ロック画面で鳴動中のアラームが誤消音されたり takeUserStoppedAlarms 用の records が消えたりしないようにする
   // ※ ネイティブ側 cleanupOnSourceInit はバックグラウンド時は records のみ即座に整理し、重い AlarmManager.shared.alarms XPC 走査は次回アクティブ復帰時へ自動遅延する
   if (!initializedSources.has(source)) {
     initializedSources.add(source);
-    const futureKeepKeys = Array.from(desiredMap.values())
-      .filter((d) => d.timestamp > now)
+    const keepKeys = Array.from(desiredMap.values())
+      .filter((d) => d.timestamp > now - 3 * 3600 * 1000)
       .map((d) => String(d.key));
-    AlarmKit.cleanupOnSourceInit(source, futureKeepKeys);
+    AlarmKit.cleanupOnSourceInit(source, keepKeys);
   }
   // ① 一覧から消えた予定を取り消す
   current.forEach((info, key) => {
@@ -122,8 +124,10 @@ const applyAlarms = async (source, desired, options) => {
         continue;
       }
       // ※同じ時刻の予約がすでに鳴っている場合は、その結果（ok）を維持する
-      const keepOk = prev && prev.result === 'ok' && Math.abs(prev.timestamp - d.timestamp) <= 1000;
-      current.set(key, { timestamp: d.timestamp, title: d.title, soundOn, result: keepOk ? 'ok' : 'past' });
+      //   またユーザーがロック画面ですでに停止していた場合（stopped）もその結果を維持する
+      const prevResult = prev && Math.abs(prev.timestamp - d.timestamp) <= 1000 ? prev.result : null;
+      const resolvedPastResult = prevResult === 'ok' || prevResult === 'stopped' ? prevResult : 'past';
+      current.set(key, { timestamp: d.timestamp, title: d.title, soundOn, result: resolvedPastResult });
       continue;
     }
     // eslint-disable-next-line no-await-in-loop
@@ -132,6 +136,9 @@ const applyAlarms = async (source, desired, options) => {
     lastResult = `${result} (${key})`;
   }
   if (dirty) notify();
+  if (stopSubscribers.size > 0 && AppState.currentState === 'active') {
+    checkAndDispatchUserStoppedAlarms();
+  }
 };
 
 // source の予約・鳴っているアラームをすべて止める（ユーザーが明示的に止めた時など）
@@ -178,7 +185,7 @@ const stopSubscribers = new Set();
 let stopPollTimer = null;
 let appStateSub = null;
 
-const pollUserStoppedAlarms = () => enqueue(() => {
+function checkAndDispatchUserStoppedAlarms() {
   if (stopSubscribers.size === 0 || AppState.currentState !== 'active') return;
   const stopped = AlarmKit.takeUserStoppedAlarms();
   if (!Array.isArray(stopped) || stopped.length === 0) return;
@@ -194,6 +201,10 @@ const pollUserStoppedAlarms = () => enqueue(() => {
   lastResult = `stopped by user (${stopped.map((a) => a.key).join(', ')})`;
   notify();
   stopSubscribers.forEach((cb) => { try { cb(stopped); } catch {} });
+}
+
+const pollUserStoppedAlarms = () => enqueue(() => {
+  checkAndDispatchUserStoppedAlarms();
 });
 
 const startStopPolling = () => {

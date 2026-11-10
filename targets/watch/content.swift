@@ -2,6 +2,36 @@ import SwiftUI
 import Combine
 import WatchConnectivity
 
+// MARK: - Safe Numeric Conversion Helpers (arm64_32 32-bit Int Overflow Prevention)
+
+/// TimeInterval（秒差）を32bit Intでも絶対にオーバーフローしない範囲（既定±864,000秒＝±10日）にクランプしてIntへ変換する
+func safeClampedSeconds(_ interval: TimeInterval, maxAbs: Double = 864_000.0) -> Int {
+    guard interval.isFinite else { return 0 }
+    return Int(min(maxAbs, max(-maxAbs, interval)))
+}
+
+/// TimeInterval（秒差）を切り上げ（ceil）した上で安全範囲にクランプしてIntへ変換する
+func safeClampedCeilSeconds(_ interval: TimeInterval, maxAbs: Double = 864_000.0) -> Int {
+    guard interval.isFinite else { return 0 }
+    return Int(min(maxAbs, max(-maxAbs, ceil(interval))))
+}
+
+/// UNIXエポック秒（またはミリ秒混入値）を安全にInt64秒へ変換する（2038年問題およびarm64_32 SIGTRAP完全防止）
+func safeEpochSecondsInt64(_ raw: TimeInterval) -> Int64 {
+    guard raw.isFinite, raw > 0 else { return 0 }
+    let norm = raw > 10_000_000_000 ? (raw / 1000.0) : raw
+    let clamped = min(4_102_444_800.0, max(0.0, norm))
+    return Int64(clamped.rounded())
+}
+
+/// UNIXエポックミリ秒（または秒混入値）を安全にInt64ミリ秒へ変換する（arm64_32でのInt(nowEpoch * 1000)オーバーフロー完全防止）
+func safeEpochMillisInt64(_ rawMs: Double) -> Int64 {
+    guard rawMs.isFinite, rawMs > 0 else { return 0 }
+    let ms = rawMs < 10_000_000_000 ? (rawMs * 1000.0) : rawMs
+    let clamped = min(4_102_444_800_000.0, max(0.0, ms))
+    return Int64(clamped.rounded())
+}
+
 // MARK: - ★ 全画面・全モーダルシート共通の常時稼働リアルタイムクロック（シート開閉や親View再描画で停止・リセットしない恒久Timer）
 final class WatchRealtimeClock {
     static let shared = WatchRealtimeClock()
@@ -180,7 +210,7 @@ struct SeatTimerItem: Identifiable, Equatable {
         guard isPreCountingDown else { return 0 }
         if let end = prepEndTime {
             let diff = end.timeIntervalSince(Date())
-            return max(0, Int(ceil(diff)))
+            return max(0, safeClampedCeilSeconds(diff))
         }
         return max(0, preCountdownSeconds)
     }
@@ -191,23 +221,28 @@ struct SeatTimerItem: Identifiable, Equatable {
         if !isRunning {
             return pausedRemainingSeconds
         }
+        guard targetEndTime.timeIntervalSince1970 > 1_000_000_000 else {
+            return pausedRemainingSeconds
+        }
         let diff = targetEndTime.timeIntervalSince(Date())
-        return diff > 0 ? Int(ceil(diff)) : Int(diff)
+        return diff > 0 ? safeClampedCeilSeconds(diff) : safeClampedSeconds(diff)
     }
     
     // チェックタイマー残り秒数
     var checkRemainingSeconds: Int? {
         guard !isCheckCompleted, let checkEnd = checkTargetEndTime else { return nil }
         if !isRunning { return nil }
+        guard checkEnd.timeIntervalSince1970 > 1_000_000_000 else { return nil }
         let diff = checkEnd.timeIntervalSince(Date())
-        return diff > 0 ? Int(ceil(diff)) : 0
+        return diff > 0 ? safeClampedCeilSeconds(diff) : 0
     }
     
     // チェックタイマー超過秒数（超過中は正の秒数、未超過なら0）
     var checkOvertimeSeconds: Int {
         guard isRunning, !isCheckCompleted, let checkEnd = checkTargetEndTime else { return 0 }
+        guard checkEnd.timeIntervalSince1970 > 1_000_000_000 else { return 0 }
         let diff = checkEnd.timeIntervalSince(Date())
-        return diff <= 0 ? abs(Int(diff)) : 0
+        return diff <= 0 ? abs(safeClampedSeconds(diff)) : 0
     }
     
     // チェックタイマー超過判定
@@ -1153,7 +1188,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             self.recentEnqueuedPeerBodies.append((body: cleanBody, seatNumber: incomingMeta.seatNumber, kind: incomingMeta.kind, at: nowEpoch))
 
             let item = PeerConfirmationAlertItem(
-                id: id.isEmpty ? "peer_\(Int(nowEpoch * 1000))_\(Int.random(in: 100...999))" : id,
+                id: id.isEmpty ? "peer_\(safeEpochMillisInt64(nowEpoch * 1000))_\(Int.random(in: 100...999))" : id,
                 timeText: resolvedTime,
                 text: formattedText,
                 colorHex: colorHex.isEmpty ? "#30D158" : colorHex,
@@ -1325,7 +1360,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         let nowDate = Date()
         let shortVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         let buildVer = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
-        let currentWatchSanitizeVersion = "119"
+        let currentWatchSanitizeVersion = "120"
         let currentWatchBuild = "\(shortVer) (\(buildVer))-v\(currentWatchSanitizeVersion)"
         let prevWatchBuild = UserDefaults.standard.string(forKey: savedLastBuildVersionKey)
             ?? appGroupDefaults?.string(forKey: savedLastBuildVersionKey)
@@ -1741,7 +1776,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 if t.isRunning {
                     continue
                 }
-                let dedupKey = "\(t.id)|\(Int(stopVal.end))"
+                let dedupKey = "\(t.id)|\(safeEpochSecondsInt64(stopVal.end))"
                 guard !addedStopKeys.contains(dedupKey) else { continue }
                 addedStopKeys.insert(dedupKey)
                 var stopDict: [String: Any] = [
@@ -1761,7 +1796,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
                 stoppedWatchSeats.append(stopDict)
             } else {
-                let dedupKey = "\(stopKey)|\(Int(stopVal.end))"
+                let dedupKey = "\(stopKey)|\(safeEpochSecondsInt64(stopVal.end))"
                 guard !addedStopKeys.contains(dedupKey) else { continue }
                 addedStopKeys.insert(dedupKey)
                 var dict: [String: Any] = [
@@ -2132,7 +2167,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
 
         let fireAlert = {
             let didAdd = self.enqueuePeerConfirmationAlert(
-                id: notifId.isEmpty ? "peer_\(Int(nowMs))" : notifId,
+                id: notifId.isEmpty ? "peer_\(safeEpochMillisInt64(nowMs))" : notifId,
                 text: text,
                 colorHex: colorHex,
                 timeText: timeStr
@@ -2933,7 +2968,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         recordMainTimerLocalAction(clean, endTime: endTime)
         var fullExtra = extra
         if fullExtra["actionId"] == nil {
-            fullExtra["actionId"] = "\(action)_\(Int(Date().timeIntervalSince1970 * 1000))"
+            fullExtra["actionId"] = "\(action)_\(safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000))"
         }
         if fullExtra["playSoundOnPhone"] == nil {
             let soundVal = UserDefaults.standard.object(forKey: "assisttimer.mainTimerPhoneSound.v2") as? Bool ?? false
@@ -3281,11 +3316,11 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         ackSema.signal()
                         return
                     }
-                    _ = ackSema.wait(timeout: .now() + 0.85)
-                    triggerFallbackIfNeeded("即時待機(0.85s)→予備ルート併用送信")
+                    _ = ackSema.wait(timeout: .now() + 0.75)
+                    triggerFallbackIfNeeded("即時待機(0.75s)→予備ルート併用送信")
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) {
-                    triggerFallbackIfNeeded("即時待機(0.85s)→予備ルート併用送信")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+                    triggerFallbackIfNeeded("即時待機(0.75s)→予備ルート併用送信")
                     ackSema.signal()
                 }
                 session.sendMessage(payload, replyHandler: { [weak self] _ in
@@ -3406,16 +3441,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     // カウントダウン稼働中の特定タイマーを停止する場合は upper bound (expectedEndMs + 15秒) のみ制限し、
                     // 1人目が既に停止して target_end_timestamp が 0 になっている行への 2人目の停止・シャンプー移行も確実にヒットさせつつ、
                     // 別Watchが新しく未来へ開始した別タイマー（> maxEnd）を誤って止めないよう保護する
-                    let maxEnd = Int64((expectedEndMs + 15_000).rounded())
+                    let maxEnd = safeEpochMillisInt64(expectedEndMs + 15_000)
                     items.append(URLQueryItem(name: "target_end_timestamp", value: "lte.\(maxEnd)"))
                 } else {
                     // タイムアップ超過中（+00:xx）のタイマーを停止する場合は、超過中の全タイマーを対象にしつつ、別Watchが新しく未来へスタートしたタイマーは絶対に止めない
-                    let maxOvertimeEnd = Int64((nowMs + 5_000).rounded())
+                    let maxOvertimeEnd = safeEpochMillisInt64(nowMs + 5_000)
                     items.append(URLQueryItem(name: "target_end_timestamp", value: "lte.\(maxOvertimeEnd)"))
                 }
             } else {
                 // 非稼働画面（00:00リセット・計測完了等）からの操作が、別Watchで稼働開始された未来のタイマーを潰さないようガード
-                let maxNonFutureEnd = Int64((nowMs + 2_000).rounded())
+                let maxNonFutureEnd = safeEpochMillisInt64(nowMs + 2_000)
                 items.append(URLQueryItem(name: "target_end_timestamp", value: "lte.\(maxNonFutureEnd)"))
             }
         }
@@ -3538,11 +3573,11 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             queryItems.append(URLQueryItem(name: "status", value: "eq.running"))
             let chkSec = (extra["checkTotalSeconds"] as? NSNumber)?.intValue ?? (extra["checkTotalSeconds"] as? Int) ?? 0
             let chkEndVal = (extra["checkEndTimestamp"] as? NSNumber)?.doubleValue ?? (extra["checkEndTimestamp"] as? Double) ?? 0
-            guard chkSec > 0, chkEndVal > 1_000_000_000_000 else { return }
+            guard chkSec > 0, chkEndVal.isFinite, chkEndVal > 1_000_000_000_000 else { return }
             let rawChkProc = ((extra["checkProcess"] as? String) ?? "チェック").trimmingCharacters(in: .whitespacesAndNewlines)
             let rawChkStaff = ((extra["checkStaffName"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             body["check_total_seconds"] = chkSec
-            body["check_target_end_timestamp"] = Int64(chkEndVal.rounded())
+            body["check_target_end_timestamp"] = safeEpochMillisInt64(chkEndVal)
             body["check_process"] = rawChkProc.isEmpty ? "チェック" : rawChkProc
             body["check_staff_name"] = rawChkStaff.isEmpty ? NSNull() : rawChkStaff
             let prevCreatorClean = (matchedSeat?.creatorName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3633,10 +3668,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             guard hasUUIDSeatId || hasLabelCandidate else { return }
             let targetSec = (extra["targetSeconds"] as? NSNumber)?.intValue ?? (extra["targetSeconds"] as? Int) ?? 0
             let targetEndVal = (extra["targetEndTimestamp"] as? NSNumber)?.doubleValue ?? (extra["targetEndTimestamp"] as? Double) ?? 0
-            guard targetSec > 0, targetEndVal > 1_000_000_000_000 else { return }
+            guard targetSec > 0, targetEndVal.isFinite, targetEndVal > 1_000_000_000_000 else { return }
             body["status"] = "running"
             body["target_seconds"] = targetSec
-            body["target_end_timestamp"] = Int64(targetEndVal.rounded())
+            body["target_end_timestamp"] = safeEpochMillisInt64(targetEndVal)
             body["paused_remaining_seconds"] = 0
             body["color_staff_name"] = effectiveStaff
             if Self.isValidCloudUUID(uid) {
@@ -3647,11 +3682,11 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             body["is_shampooing"] = false
             let chkSec = (extra["checkTotalSeconds"] as? NSNumber)?.intValue ?? (extra["checkTotalSeconds"] as? Int) ?? 0
             let chkEndVal = (extra["checkEndTimestamp"] as? NSNumber)?.doubleValue ?? (extra["checkEndTimestamp"] as? Double) ?? 0
-            if chkSec > 0 && chkSec < targetSec && chkEndVal > 1_000_000_000_000 {
+            if chkSec > 0 && chkSec < targetSec && chkEndVal.isFinite && chkEndVal > 1_000_000_000_000 {
                 let rawChkProc = ((extra["checkProcess"] as? String) ?? "チェック").trimmingCharacters(in: .whitespacesAndNewlines)
                 let rawChkStaff = ((extra["checkStaffName"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 body["check_total_seconds"] = chkSec
-                body["check_target_end_timestamp"] = Int64(chkEndVal.rounded())
+                body["check_target_end_timestamp"] = safeEpochMillisInt64(chkEndVal)
                 body["check_process"] = rawChkProc.isEmpty ? "チェック" : rawChkProc
                 body["check_staff_name"] = rawChkStaff.isEmpty ? NSNull() : rawChkStaff
             } else {
@@ -3667,16 +3702,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             if isSubCheck {
                 queryItems.append(URLQueryItem(name: "status", value: "eq.running"))
                 let chkEndVal = (extra["checkEndTimestamp"] as? NSNumber)?.doubleValue ?? (extra["checkEndTimestamp"] as? Double) ?? 0
-                guard chkEndVal > 1_000_000_000_000 else { return }
-                body["check_target_end_timestamp"] = Int64(chkEndVal.rounded())
+                guard chkEndVal.isFinite, chkEndVal > 1_000_000_000_000 else { return }
+                body["check_target_end_timestamp"] = safeEpochMillisInt64(chkEndVal)
                 let chkSec = (extra["checkTotalSeconds"] as? NSNumber)?.intValue ?? (extra["checkTotalSeconds"] as? Int) ?? 0
                 if chkSec > 0 {
                     body["check_total_seconds"] = chkSec
                 }
             } else {
                 let targetEndVal = (extra["targetEndTimestamp"] as? NSNumber)?.doubleValue ?? (extra["targetEndTimestamp"] as? Double) ?? 0
-                guard targetEndVal > 1_000_000_000_000 else { return }
-                body["target_end_timestamp"] = Int64(targetEndVal.rounded())
+                guard targetEndVal.isFinite, targetEndVal > 1_000_000_000_000 else { return }
+                body["target_end_timestamp"] = safeEpochMillisInt64(targetEndVal)
                 let totalSec = (extra["totalSeconds"] as? NSNumber)?.intValue ?? (extra["totalSeconds"] as? Int) ?? 0
                 if totalSec > 0 {
                     body["target_seconds"] = totalSec
@@ -3696,6 +3731,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         guard var comps = URLComponents(string: "\(Self.supabaseRestBaseURL)/salon_timers") else { return }
         comps.queryItems = queryItems
         guard let url = comps.url,
+              JSONSerialization.isValidJSONObject(body),
               let jsonData = try? JSONSerialization.data(withJSONObject: body, options: []) else {
             return
         }
@@ -3773,7 +3809,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             expState.lock.unlock()
 
             task.resume()
-            _ = sema.wait(timeout: .now() + 3.8)
+            _ = sema.wait(timeout: .now() + 3.5)
 
             expState.lock.lock()
             let expiredAfterFirst = expState.isExpired
@@ -3791,7 +3827,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 Self.updatedByColumnUnsupported = true
                 var fallbackBody = body
                 fallbackBody.removeValue(forKey: "updated_by")
-                if let fallbackData = try? JSONSerialization.data(withJSONObject: fallbackBody, options: []) {
+                if JSONSerialization.isValidJSONObject(fallbackBody),
+                   let fallbackData = try? JSONSerialization.data(withJSONObject: fallbackBody, options: []) {
                     var retryReq = request
                     retryReq.httpBody = fallbackData
                     let retrySema = DispatchSemaphore(value: 0)
@@ -3820,7 +3857,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     expState.lock.unlock()
 
                     retryTask.resume()
-                    _ = retrySema.wait(timeout: .now() + 3.8)
+                    _ = retrySema.wait(timeout: .now() + 3.5)
 
                     expState.lock.lock()
                     let expiredAfterRetry = expState.isExpired
@@ -4172,8 +4209,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             colorHex = "#FF9500"
                         }
                         let alertId = didTransitionToActiveProcess
-                            ? "cloud_stop_proc_\(rowId)_\(Int(stoppedEndEpoch))_\(nextStatus.rawValue)"
-                            : "cloud_stop_\(rowId)_\(Int(stoppedEndEpoch))"
+                            ? "cloud_stop_proc_\(rowId)_\(safeEpochSecondsInt64(stoppedEndEpoch))_\(nextStatus.rawValue)"
+                            : "cloud_stop_\(rowId)_\(safeEpochSecondsInt64(stoppedEndEpoch))"
                         let didAdd = self.enqueuePeerConfirmationAlert(
                             id: alertId,
                             text: msg,
@@ -4277,7 +4314,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             ? "【\(timeStr)】✓ \(seatDisplay)の\(chkProc)完了"
                             : "【\(timeStr)】✓ \(seatDisplay)の\(chkProc)に \(checkActor) さんが入りました（完了）"
                         let didAdd = self.enqueuePeerConfirmationAlert(
-                            id: "cloud_chk_\(rowId)_\(Int(now.timeIntervalSince1970))",
+                            id: "cloud_chk_\(rowId)_\(safeEpochSecondsInt64(now.timeIntervalSince1970))",
                             text: msg,
                             colorHex: "#30D158",
                             timeText: timeStr
@@ -4440,9 +4477,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
 
                 // ★ サブ機iPhoneロック中やPush通知遅延時でも、Watch直接クラウドポーリングで新規開始・ヘルプ募集・担当指名を即座に通知
                 let nextItem = updatedTimers[i]
-                let endEpochKey = Int(round(cloudTargetEndSec))
-                let chkEndEpochKey = Int(round(cloudCheckEndMs / 1000.0))
-                let prevChkEndEpochKey = Int(round(cur.checkTargetEndTime?.timeIntervalSince1970 ?? 0))
+                let endEpochKey = safeEpochSecondsInt64(cloudTargetEndSec)
+                let chkEndEpochKey = safeEpochSecondsInt64(cloudCheckEndMs / 1000.0)
+                let prevChkEndEpochKey = safeEpochSecondsInt64(cur.checkTargetEndTime?.timeIntervalSince1970 ?? 0)
 
                 let nextAssistStaff = (nextItem.shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 let prevAssistStaff = (cur.shampooStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4574,7 +4611,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             : "【\(timeStr)】⏱️ \(resolvedNotifyActor)さんが\(seatDisplay)のタイマー（\(mins)分）を開始しました"
                         pollColor = "#0A84FF"
                     } else if wasRunningBefore && abs(cloudTargetEndSec - cur.targetEndTime.timeIntervalSince1970) >= 25.0 && (resolvedIsCreatorMe == true || nextItem.shouldAlertMainTimer(for: self.currentUserName) || nextItem.shouldAlertCheckTimer(for: self.currentUserName)) {
-                        let remMins = max(1, Int(round(max(0, cloudTargetEndSec - now.timeIntervalSince1970) / 60.0)))
+                        let remMins = max(1, safeClampedSeconds((max(0, cloudTargetEndSec - now.timeIntervalSince1970) / 60.0).rounded()))
                         pollEventKey = "cloud_adjust_\(rowId)_\(endEpochKey)"
                         pollAlertId = pollEventKey
                         pollMsg = resolvedNotifyActor.isEmpty
@@ -4669,7 +4706,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         if !isSelfStoppedMod && isStakeholderOnStopped {
                             let timeStr = Self.peerAlertTimeFormatter.string(from: updatedAt)
                             let seatDisplay = !cloudLabel.isEmpty ? cloudLabel : cur.displaySeatName
-                            let updatedEpoch = Int(round(updatedAt.timeIntervalSince1970))
+                            let updatedEpoch = safeEpochSecondsInt64(updatedAt.timeIntervalSince1970)
 
                             if prevStatus != nextStatus && nextStatus != .normal {
                                 let procKey = "cloud_stopped_proc_\(rowId)_\(updatedEpoch)_\(nextStatus.rawValue)"
@@ -5009,19 +5046,21 @@ struct ContentView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + displayDuration, execute: workItem)
     }
     
-    // ★ 一覧画面（カードリスト / 客席マップ）からシートを開く直前に、最新の sessionManager.timers と親 timers / cachedSheetItems を完全一致させるヘルパー
-    //   （前画面でタイム入力等を行った直後に再度詳細シートを開いた際、0.5秒後の handleRemoteModalSheetAutoCloseIfNeeded で不一致判定されて一覧へ弾き戻されるバグを根絶）
+    // ★ 一覧画面（カードリスト / 客席マップ）からシートを開く直前に、最新の sessionManager.timers と cachedSheetItems を解決するヘルパー
+    //   （※ シートオープンと同一トランザクションで親 View の `@State self.timers` 配列を書き換えると、
+    //       watchOS SwiftUI の ViewGraph 再構築とシートプレゼンテーションが競合してクラッシュする原因となるため、
+    //       `self.timers` の同期更新は行わず、`cachedSheetItems` スナップショットと `self.timers` 上の既存 id 整合のみを行う）
     @discardableResult
     private func prepareSheetTarget(for item: SeatTimerItem, cacheKey: String) -> SeatTimerItem {
-        if !sessionManager.timers.isEmpty && self.timers != sessionManager.timers {
-            pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = true
-            self.timers = sessionManager.timers
-        }
-        let freshest = sessionManager.timers.first(where: { $0.id == item.id })
+        var freshest = sessionManager.timers.first(where: { $0.id == item.id })
             ?? sessionManager.timers.first(where: { $0.seatNumber == item.seatNumber })
             ?? timers.first(where: { $0.id == item.id })
             ?? timers.first(where: { $0.seatNumber == item.seatNumber })
             ?? item
+        if timers.first(where: { $0.id == freshest.id }) == nil,
+           let localMatch = timers.first(where: { $0.seatNumber == freshest.seatNumber }) {
+            freshest.id = localMatch.id
+        }
         pendingMainTimerSheetActionBox.cachedSheetItems[cacheKey] = freshest
         return freshest
     }
@@ -6481,7 +6520,7 @@ struct ContentView: View {
                 // 席名・アラーム対象 ＋ リアルタイム超過カウントアップ表示
                 VStack(spacing: 4) {
                     ForEach(alarm.ringing.prefix(3), id: \.key) { e in
-                        let overSec = max(0, Int(now.timeIntervalSince(e.date)))
+                        let overSec = max(0, safeClampedSeconds(now.timeIntervalSince(e.date)))
                         let overText = String(format: "超過 +%02d:%02d", overSec / 60, overSec % 60)
                         VStack(spacing: 2) {
                             Text(e.title)
@@ -7165,7 +7204,7 @@ struct ContentView: View {
                 }
                 main.targetEndTime = currentNow.addingTimeInterval(TimeInterval(main.totalSeconds))
             } else {
-                main.pausedRemainingSeconds = max(0, Int(ceil(main.targetEndTime.timeIntervalSince(currentNow))))
+                main.pausedRemainingSeconds = max(0, safeClampedCeilSeconds(main.targetEndTime.timeIntervalSince(currentNow)))
             }
             main.isRunning = false
             main.isPreCountingDown = false
@@ -7267,7 +7306,7 @@ struct ContentView: View {
             }
             main.targetEndTime = Date().addingTimeInterval(TimeInterval(main.totalSeconds))
         } else {
-            main.pausedRemainingSeconds = max(0, Int(ceil(main.targetEndTime.timeIntervalSince(Date()))))
+            main.pausedRemainingSeconds = max(0, safeClampedCeilSeconds(main.targetEndTime.timeIntervalSince(Date())))
         }
         main.isRunning = false
         main.isPreCountingDown = false
@@ -9206,15 +9245,35 @@ struct ContentView: View {
     }
     
     private func binding(for id: String) -> Binding<SeatTimerItem> {
-        if let index = timers.firstIndex(where: { $0.id == id }) {
-            return $timers[index]
-        }
-        // 万が一アニメーション中や配列更新の合間に見つからない場合でも、fatalErrorでクラッシュさせずに安全にフォールバック
+        // ★ `$timers[index]`（静的インデックス束縛）を完全廃止し、常に `id`（および席番号フォールバック）による動的検索 Binding を返す。
+        //   これにより、カードやシート表示中にリモート同期・席削除・UUID昇格等で `timers` 配列の要素数や順序が変化しても
+        //   `Swift/ContiguousArrayBuffer.swift: Index out of range`（SIGTRAP）が絶対に発生しない。
+        let fallbackSeatNum: Int = {
+            if let existing = self.timers.first(where: { $0.id == id }) ?? self.sessionManager.timers.first(where: { $0.id == id }) {
+                return existing.seatNumber
+            }
+            if id.hasPrefix("seat-"), let n = Int(id.dropFirst(5)), n > 0 {
+                return n
+            }
+            return 0
+        }()
         return Binding(
             get: {
-                self.timers.first(where: { $0.id == id }) ?? SeatTimerItem(
+                if let match = self.timers.first(where: { $0.id == id }) {
+                    return match
+                }
+                if fallbackSeatNum > 0, let matchByNum = self.timers.first(where: { $0.seatNumber == fallbackSeatNum }) {
+                    return matchByNum
+                }
+                if let sessionMatch = self.sessionManager.timers.first(where: { $0.id == id }) {
+                    return sessionMatch
+                }
+                if fallbackSeatNum > 0, let sessionByNum = self.sessionManager.timers.first(where: { $0.seatNumber == fallbackSeatNum }) {
+                    return sessionByNum
+                }
+                return SeatTimerItem(
                     id: id,
-                    seatNumber: 1,
+                    seatNumber: max(1, fallbackSeatNum),
                     creatorName: "",
                     totalSeconds: 0,
                     targetEndTime: Date(),
@@ -9227,6 +9286,10 @@ struct ContentView: View {
             set: { newValue in
                 if let idx = self.timers.firstIndex(where: { $0.id == id }) {
                     self.timers[idx] = newValue
+                } else if fallbackSeatNum > 0, let idxByNum = self.timers.firstIndex(where: { $0.seatNumber == fallbackSeatNum }) {
+                    self.timers[idxByNum] = newValue
+                } else if let idxByNewNum = self.timers.firstIndex(where: { $0.seatNumber == newValue.seatNumber }) {
+                    self.timers[idxByNewNum] = newValue
                 }
             }
         )
@@ -10270,7 +10333,7 @@ struct OvertimeActionSheet: View {
     
     // 超過秒数のフォーマット（MM:SS）
     var overtimeFormatted: String {
-        let sec = abs(min(0, Int(item.targetEndTime.timeIntervalSince(now))))
+        let sec = abs(min(0, safeClampedSeconds(item.targetEndTime.timeIntervalSince(now))))
         let m = sec / 60
         let s = sec % 60
         return String(format: "%02d:%02d", m, s)
@@ -10537,9 +10600,9 @@ struct MainTimerActionSheet: View {
     
     var currentSeconds: Int {
         if isRunning {
-            return max(0, Int(ceil(currentItem.targetEndTime.timeIntervalSince(now))))
+            return max(0, safeClampedCeilSeconds(currentItem.targetEndTime.timeIntervalSince(now)))
         } else if isOvertime {
-            return abs(min(0, Int(currentItem.targetEndTime.timeIntervalSince(now))))
+            return abs(min(0, safeClampedSeconds(currentItem.targetEndTime.timeIntervalSince(now))))
         } else {
             return max(0, currentItem.pausedRemainingSeconds)
         }
@@ -10679,7 +10742,7 @@ struct MainTimerActionSheet: View {
                 // ② ００:００の巨大デジタル表示エリア（分・秒をそれぞれタップしてリューズで入力）
                 CrownMinSecPicker(
                     totalSeconds: Binding(
-                        get: { Int(crownSeconds) },
+                        get: { safeClampedSeconds(crownSeconds) },
                         set: { crownSeconds = Double(min(7200, max(0, $0))) }
                     ),
                     maxMinutes: 120,
@@ -10748,9 +10811,9 @@ struct MainTimerActionSheet: View {
                 .padding(.horizontal, 2)
                 
                 // ⑤ 決定ボタン（★時間が1秒以上設定された時は「決定」、00:00時は前回設定分数でのワンタップスタートも表示）
-                if Int(crownSeconds) > 0 {
+                if safeClampedSeconds(crownSeconds) > 0 {
                     Button(action: {
-                        let sec = max(10, Int(crownSeconds))
+                        let sec = max(10, safeClampedSeconds(crownSeconds))
                         WKInterfaceDevice.current().play(.click)
                         closeSheetAfter {
                             onSetTime(sec)
@@ -10759,7 +10822,7 @@ struct MainTimerActionSheet: View {
                         HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
                                 .font(.system(size: 12, weight: .heavy))
-                            Text("決定 (\(formatSeconds(Int(crownSeconds))))")
+                            Text("決定 (\(formatSeconds(safeClampedSeconds(crownSeconds))))")
                                 .font(.system(size: 12, weight: .black))
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.75)
@@ -11574,19 +11637,20 @@ struct TimeActionSheet: View {
     }
     
     var isOvertime: Bool {
-        liveItem.isRunning && liveItem.targetEndTime.timeIntervalSince(now) <= 0 && accumulatedDelta <= 0
+        liveItem.isRunning && liveItem.targetEndTime.timeIntervalSince1970 > 1_000_000_000 && liveItem.targetEndTime.timeIntervalSince(now) <= 0 && accumulatedDelta <= 0
     }
     
     var overtimeSeconds: Int {
-        abs(min(0, Int(liveItem.targetEndTime.timeIntervalSince(now))))
+        guard liveItem.isRunning && liveItem.targetEndTime.timeIntervalSince1970 > 1_000_000_000 else { return 0 }
+        return abs(min(0, safeClampedSeconds(liveItem.targetEndTime.timeIntervalSince(now))))
     }
     
     // 現在の残り秒数 ＋ 累積追加秒数（リアルタイム反映）
     var currentDisplaySeconds: Int {
         let baseRemaining: Int
-        if liveItem.isRunning {
+        if liveItem.isRunning && liveItem.targetEndTime.timeIntervalSince1970 > 1_000_000_000 {
             let diff = liveItem.targetEndTime.timeIntervalSince(now)
-            baseRemaining = diff > 0 ? Int(ceil(diff)) : 0
+            baseRemaining = diff > 0 ? safeClampedCeilSeconds(diff) : 0
         } else {
             baseRemaining = max(0, liveItem.pausedRemainingSeconds)
         }
@@ -11597,8 +11661,9 @@ struct TimeActionSheet: View {
     // 途中チェックの残り秒数
     var currentCheckRemainingSeconds: Int? {
         guard !liveItem.isCheckCompleted, let checkEnd = liveItem.checkTargetEndTime, liveItem.isRunning else { return nil }
+        guard checkEnd.timeIntervalSince1970 > 1_000_000_000 else { return nil }
         let diff = checkEnd.timeIntervalSince(now)
-        return diff > 0 ? Int(ceil(diff)) : 0
+        return diff > 0 ? safeClampedCeilSeconds(diff) : 0
     }
     
     // 途中チェックの表示秒数（残り秒数 ＋ チェック用累積追加秒数）
@@ -11609,12 +11674,14 @@ struct TimeActionSheet: View {
     
     var isCheckOvertime: Bool {
         guard liveItem.isRunning, !liveItem.isCheckCompleted, let checkEnd = liveItem.checkTargetEndTime else { return false }
+        guard checkEnd.timeIntervalSince1970 > 1_000_000_000 else { return false }
         return checkEnd.timeIntervalSince(now) <= 0 && checkAccumulatedDelta <= 0
     }
     
     var checkOvertimeSeconds: Int {
         guard liveItem.isRunning, !liveItem.isCheckCompleted, let checkEnd = liveItem.checkTargetEndTime else { return 0 }
-        return abs(min(0, Int(checkEnd.timeIntervalSince(now))))
+        guard checkEnd.timeIntervalSince1970 > 1_000_000_000 else { return 0 }
+        return abs(min(0, safeClampedSeconds(checkEnd.timeIntervalSince(now))))
     }
     
     private func formatSeconds(_ seconds: Int) -> String {
@@ -11856,7 +11923,7 @@ struct TimeActionSheet: View {
                 // ② ００:００の巨大デジタル表示エリア（分・秒をそれぞれタップしてリューズで入力）
                 CrownMinSecPicker(
                     totalSeconds: Binding(
-                        get: { Int(crownSeconds) },
+                        get: { safeClampedSeconds(crownSeconds) },
                         set: { crownSeconds = Double(min(5400, max(0, $0))) }
                     ),
                     maxMinutes: 90,
@@ -11976,9 +12043,9 @@ struct TimeActionSheet: View {
                 .padding(.top, 2)
                 
                 // ④ 決定ボタン（★時間が1秒以上設定された時だけスッと出現！）
-                if Int(crownSeconds) > 0 {
+                if safeClampedSeconds(crownSeconds) > 0 {
                     Button(action: {
-                        let sec = Int(crownSeconds)
+                        let sec = safeClampedSeconds(crownSeconds)
                         if sec > 0 {
                             WKInterfaceDevice.current().play(.click)
                             applyReinputAndShowStandard(totalSec: sec)
@@ -11987,13 +12054,13 @@ struct TimeActionSheet: View {
                         HStack(spacing: 4) {
                             Image(systemName: "checkmark.circle.fill")
                                 .font(.system(size: 12, weight: .heavy))
-                            if checkMinutes > 0 && (checkMinutes * 60) < Int(crownSeconds) {
-                                Text("決定 (\(formatSeconds(Int(crownSeconds)))) 【\(checkMinutes)分CHK】")
+                            if checkMinutes > 0 && (checkMinutes * 60) < safeClampedSeconds(crownSeconds) {
+                                Text("決定 (\(formatSeconds(safeClampedSeconds(crownSeconds)))) 【\(checkMinutes)分CHK】")
                                     .font(.system(size: 10.5, weight: .black))
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.72)
                             } else {
-                                Text("決定 (\(formatSeconds(Int(crownSeconds))))")
+                                Text("決定 (\(formatSeconds(safeClampedSeconds(crownSeconds))))")
                                     .font(.system(size: 12, weight: .black))
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.75)
@@ -13535,9 +13602,9 @@ struct TimeActionSheet: View {
         HStack(spacing: 5) {
             Button(action: {
                 let baseRem: Int = {
-                    if liveItem.isRunning {
+                    if liveItem.isRunning && liveItem.targetEndTime.timeIntervalSince1970 > 1_000_000_000 {
                         let diff = liveItem.targetEndTime.timeIntervalSince(now)
-                        return diff > 0 ? Int(ceil(diff)) : 0
+                        return diff > 0 ? safeClampedCeilSeconds(diff) : 0
                     }
                     return max(0, liveItem.pausedRemainingSeconds)
                 }()
@@ -14875,6 +14942,7 @@ struct CrownMinSecPicker: View {
     @FocusState private var focusedUnit: EditTimeUnit?
     @State private var minuteValue: Double = 0
     @State private var secondValue: Double = 0
+    @State private var isMounted: Bool = false
 
     private let minuteColor = Color(hex: "#FFD60A")
     private let secondColor = Color(hex: "#30D158")
@@ -14934,26 +15002,33 @@ struct CrownMinSecPicker: View {
             .foregroundColor(focusedUnit == .second ? secondColor : minuteColor)
         }
         .onAppear {
+            isMounted = true
             syncFromTotal(totalSeconds)
             focusedUnit = .minute
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                guard isMounted else { return }
                 if focusedUnit == nil {
                     focusedUnit = .minute
                 }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+                guard isMounted else { return }
                 if focusedUnit == nil {
                     focusedUnit = .minute
                 }
             }
         }
+        .onDisappear {
+            isMounted = false
+            focusedUnit = nil
+        }
         .onChange(of: minuteValue) { _, newValue in
-            let m = min(maxMinutes, max(0, Int(newValue.rounded())))
+            let m = min(maxMinutes, max(0, safeClampedSeconds(newValue.rounded())))
             let next = m * 60 + totalSeconds % 60
             if next != totalSeconds { totalSeconds = next }
         }
         .onChange(of: secondValue) { _, newValue in
-            let s = min(59, max(0, Int(newValue.rounded())))
+            let s = min(59, max(0, safeClampedSeconds(newValue.rounded())))
             let next = (totalSeconds / 60) * 60 + s
             if next != totalSeconds { totalSeconds = next }
         }
@@ -15989,7 +16064,7 @@ struct SeatThumbnailMapSheet: View {
             )
             .onChange(of: crownValue) { oldVal, newVal in
                 guard !isModalSheetPresented else { return }
-                let delta = Int(newVal.rounded()) - Int(oldVal.rounded())
+                let delta = safeClampedSeconds(newVal.rounded()) - safeClampedSeconds(oldVal.rounded())
                 guard delta != 0 else { return }
                 let direction = delta > 0 ? 1 : -1
                 let nextStep = min(maxScrollStep, max(0, currentScrollStep + direction))
@@ -16008,6 +16083,17 @@ struct SeatThumbnailMapSheet: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     if !isModalSheetPresented {
                         isMapCrownFocused = true
+                    }
+                }
+            }
+            .onChange(of: isModalSheetPresented) { _, presented in
+                if presented {
+                    isMapCrownFocused = false
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                        if !isModalSheetPresented {
+                            isMapCrownFocused = true
+                        }
                     }
                 }
             }
