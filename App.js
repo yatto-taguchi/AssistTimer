@@ -1,5 +1,5 @@
 import React, { useContext, useEffect, useRef } from 'react';
-import { Animated, View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { Animated, View, Text, TouchableOpacity, StyleSheet, AppState } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NavigationContainer, DefaultTheme, DarkTheme, createNavigationContainerRef } from '@react-navigation/native';
 import { createBottomTabNavigator, BottomTabBar } from '@react-navigation/bottom-tabs';
@@ -66,7 +66,7 @@ function MainTabs() {
           </Animated.View>
         )}
         screenOptions={({ route }) => ({
-          lazy: false, // ★ 起動時にHomeScreenとSalonWorkScreenの両方を確実にマウントし、Watch双方向同期を常時稼働
+          lazy: true, // ★ Home / Salon は個別 options で lazy: false を指定し、Records / Settings は初回アクセス時まで遅延マウント
           headerShown: false,
           tabBarActiveTintColor: isEcoMode ? '#888' : '#007AFF', // 選択中を明るいグレーに
           tabBarInactiveTintColor: isEcoMode ? '#333' : '#8E8E93', // 非選択中もうっすら見えるように
@@ -149,6 +149,11 @@ function GlobalPeerToastOverlay() {
 
   useEffect(() => {
     if (globalPeerToast) {
+      if (AppState.currentState !== 'active') {
+        translateY.setValue(0);
+        opacity.setValue(1);
+        return;
+      }
       translateY.setValue(-28);
       opacity.setValue(0);
       Animated.parallel([

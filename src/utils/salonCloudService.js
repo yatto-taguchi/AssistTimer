@@ -912,10 +912,24 @@ const getCloudPayloadSignature = (p) => {
 const markLocalSeatWriteTimestamp = (p) => {
   const now = Date.now();
   _lastLocalAnyCloudWriteAt = now;
-  const idKey = p?.id ? `id:${String(p.id).trim()}` : '';
-  const labelKey = p?.seat_label ? `lbl:${String(p.seat_label).replace(/席$/, '').trim()}` : '';
-  if (idKey) _recentLocalSeatWriteAt.set(idKey, now);
-  if (labelKey) _recentLocalSeatWriteAt.set(labelKey, now);
+  const candidateIds = [p?.id, p?.cloudTimerId].filter(Boolean);
+  for (const cid of candidateIds) {
+    const trimmed = String(cid).trim();
+    if (trimmed) _recentLocalSeatWriteAt.set(`id:${trimmed}`, now);
+  }
+  const candidateLabels = [
+    p?.seat_label,
+    p?.seatLabel,
+    p?.name,
+    p?.oldSeatLabel,
+  ].filter(Boolean);
+  for (const rawLbl of candidateLabels) {
+    const cleanLbl = String(rawLbl)
+      .replace(/\s*[\(（]サンプル[\)）]/g, '')
+      .replace(/席$/, '')
+      .trim();
+    if (cleanLbl) _recentLocalSeatWriteAt.set(`lbl:${cleanLbl}`, now);
+  }
   if (_recentLocalSeatWriteAt.size > 100) {
     for (const [k, ts] of _recentLocalSeatWriteAt.entries()) {
       if (now - ts > LOCAL_ACTOR_ECHO_WINDOW_MS * 2) _recentLocalSeatWriteAt.delete(k);
@@ -965,6 +979,85 @@ export const isRecentLocalActorEcho = (rec, localUserId, windowMs = LOCAL_ACTOR_
     }
   }
   return _lastLocalAnyCloudWriteAt > 0 && now - _lastLocalAnyCloudWriteAt < 6000;
+};
+
+/**
+ * 指定された席（ID文字列または席オブジェクト）が直近 windowMs ミリ秒以内に
+ * 自端末ローカルからクラウド保存要求されたかどうかを判定する。
+ * ポーリング（reconcileCloudTimers）での自己エコー通知抑止および非同期UPSERT中の巻き戻り保護に使用。
+ * ただし cloudSeat が別スタッフによるさらに新しい更新である場合は false を返し、他スタッフ操作を握り潰さない。
+ */
+export const isSeatRecentlyModifiedLocally = (
+  seatOrId,
+  windowMs = 10000,
+  cloudSeat = null,
+  localUserId = null
+) => {
+  if (!seatOrId) return false;
+  const now = Date.now();
+  const safeWindow = Number(windowMs) > 0 ? Number(windowMs) : 10000;
+  let matchedWriteAt = 0;
+
+  if (typeof seatOrId === 'string' || typeof seatOrId === 'number') {
+    const raw = String(seatOrId).trim();
+    if (!raw) return false;
+    const idKey = `id:${raw}`;
+    if (_recentLocalSeatWriteAt.has(idKey)) {
+      const ts = _recentLocalSeatWriteAt.get(idKey);
+      if (now - ts < safeWindow) matchedWriteAt = Math.max(matchedWriteAt, ts);
+    }
+    const cleanLabel = raw.replace(/\s*[\(（]サンプル[\)）]/g, '').replace(/席$/, '').trim();
+    if (cleanLabel) {
+      const lblKey = `lbl:${cleanLabel}`;
+      if (_recentLocalSeatWriteAt.has(lblKey)) {
+        const ts = _recentLocalSeatWriteAt.get(lblKey);
+        if (now - ts < safeWindow) matchedWriteAt = Math.max(matchedWriteAt, ts);
+      }
+    }
+  } else if (typeof seatOrId === 'object') {
+    const candidateIds = [seatOrId.id, seatOrId.cloudTimerId].filter(Boolean);
+    for (const cid of candidateIds) {
+      const idKey = `id:${String(cid).trim()}`;
+      if (_recentLocalSeatWriteAt.has(idKey)) {
+        const ts = _recentLocalSeatWriteAt.get(idKey);
+        if (now - ts < safeWindow) matchedWriteAt = Math.max(matchedWriteAt, ts);
+      }
+    }
+    const rawLabel = seatOrId.seat_label || seatOrId.seatLabel || seatOrId.name || '';
+    const cleanLabel = rawLabel
+      ? String(rawLabel).replace(/\s*[\(（]サンプル[\)）]/g, '').replace(/席$/, '').trim()
+      : '';
+    if (cleanLabel) {
+      const lblKey = `lbl:${cleanLabel}`;
+      if (_recentLocalSeatWriteAt.has(lblKey)) {
+        const ts = _recentLocalSeatWriteAt.get(lblKey);
+        if (now - ts < safeWindow) matchedWriteAt = Math.max(matchedWriteAt, ts);
+      }
+    }
+  }
+
+  if (matchedWriteAt <= 0) return false;
+
+  if (cloudSeat && typeof cloudSeat === 'object') {
+    const cloudUpdatedBy = String(cloudSeat.updated_by || cloudSeat.updatedBy || '').trim();
+    const myUid = String(localUserId || '').trim();
+    const isUpdatedByOtherPeer =
+      Boolean(cloudUpdatedBy && myUid && cloudUpdatedBy.toLowerCase() !== myUid.toLowerCase());
+    const rawCloudUpdatedAt = cloudSeat.updated_at ?? cloudSeat.updatedAt ?? 0;
+    const cloudUpdatedMs =
+      typeof rawCloudUpdatedAt === 'number'
+        ? rawCloudUpdatedAt
+        : new Date(rawCloudUpdatedAt).getTime();
+    if (
+      isUpdatedByOtherPeer &&
+      Number.isFinite(cloudUpdatedMs) &&
+      cloudUpdatedMs > matchedWriteAt + 1000
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 };
 
 /**
@@ -1062,6 +1155,7 @@ const executeSalonTimerUpdateById = async (salonId, timerId, rawPayload) => {
  */
 export const upsertCloudTimer = async (salonId, seat) => {
   if (!salonId || !seat) return null;
+  markLocalSeatWriteTimestamp(seat);
   const userId = await getOrCreateUserId();
   const payload = mapSeatToCloudTimer(seat, salonId, userId);
   recordLocalCloudPayload(payload);

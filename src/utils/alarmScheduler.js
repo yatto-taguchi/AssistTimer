@@ -72,20 +72,13 @@ const applyAlarms = async (source, desired, options) => {
   let dirty = false;
   const hadPreviousAlarms = current.size > 0;
   // 初回同期時: 前回セッション（アプリ再起動やTestFlight更新前）の残留アラームや過去時刻の予約を確実に消火
-  // ※ バックグラウンドコールド起動時にまだ予約対象が0件の場合は、重いネイティブ初期化クリーンアップを遅延する
+  // ※ ネイティブ側 cleanupOnSourceInit はバックグラウンド時は records のみ即座に整理し、重い AlarmManager.shared.alarms XPC 走査は次回アクティブ復帰時へ自動遅延する
   if (!initializedSources.has(source)) {
-    const isBackgroundEmptyInit =
-      Boolean(AppState.currentState && AppState.currentState !== 'active') && desiredMap.size === 0;
-    if (!isBackgroundEmptyInit) {
-      initializedSources.add(source);
-      const futureKeepKeys = Array.from(desiredMap.values())
-        .filter((d) => d.timestamp > now)
-        .map((d) => String(d.key));
-      AlarmKit.cleanupOnSourceInit(source, futureKeepKeys);
-      if (source === 'main' && !desiredMap.has('main-timer')) {
-        AlarmKit.cancel('main-timer');
-      }
-    }
+    initializedSources.add(source);
+    const futureKeepKeys = Array.from(desiredMap.values())
+      .filter((d) => d.timestamp > now)
+      .map((d) => String(d.key));
+    AlarmKit.cleanupOnSourceInit(source, futureKeepKeys);
   }
   // ① 一覧から消えた予定を取り消す
   current.forEach((info, key) => {
@@ -184,13 +177,9 @@ const USER_STOP_POLL_MS = 3000;
 const stopSubscribers = new Set();
 let stopPollTimer = null;
 let appStateSub = null;
-let hasCheckedInitialStoppedAlarms = false;
 
 const pollUserStoppedAlarms = () => enqueue(() => {
   if (stopSubscribers.size === 0 || AppState.currentState !== 'active') return;
-  const hasAnyScheduled = Object.values(scheduledBySource).some((m) => m && m.size > 0);
-  if (!hasAnyScheduled && hasCheckedInitialStoppedAlarms) return;
-  hasCheckedInitialStoppedAlarms = true;
   const stopped = AlarmKit.takeUserStoppedAlarms();
   if (!Array.isArray(stopped) || stopped.length === 0) return;
   // 止められた予約はもう鳴らないので、こちらの予約記録からも外す（二重鳴動防止の判定を正しく保つ）
@@ -228,7 +217,6 @@ export const subscribeUserStoppedAlarms = (cb) => {
   if (!appStateSub) {
     appStateSub = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
-        hasCheckedInitialStoppedAlarms = false;
         pollUserStoppedAlarms();
         startStopPolling();
       } else {

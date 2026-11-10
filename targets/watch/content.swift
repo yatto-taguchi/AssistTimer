@@ -1325,7 +1325,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         let nowDate = Date()
         let shortVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         let buildVer = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
-        let currentWatchSanitizeVersion = "117"
+        let currentWatchSanitizeVersion = "119"
         let currentWatchBuild = "\(shortVer) (\(buildVer))-v\(currentWatchSanitizeVersion)"
         let prevWatchBuild = UserDefaults.standard.string(forKey: savedLastBuildVersionKey)
             ?? appGroupDefaults?.string(forKey: savedLastBuildVersionKey)
@@ -2975,6 +2975,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     // ③ペアリング中のiPhoneがロック・バックグラウンド休止中でも共有相手のWatch/iPhoneへ即座に停止を届けるため、
     //   Watch自身からも直接 Supabase REST API へ PATCH 更新を実行（Realtime + APNs Push トリガーを即時発火）
     func sendActionToPhone(action: String, seatId: String, extra: [String: Any] = [:]) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.sendActionToPhone(action: action, seatId: seatId, extra: extra)
+            }
+            return
+        }
         var resolvedSeatId = seatId
         var matchedSeatForCloud: SeatTimerItem? = nil
         var payload: [String: Any] = [
@@ -3706,6 +3712,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         final class DirectCloudExpiringState {
             let lock = NSLock()
             var isExpired = false
+            var shouldRetryWithoutUpdatedBy = false
+            var patchSucceeded = false
             var currentTask: URLSessionDataTask?
             var currentSema: DispatchSemaphore?
         }
@@ -3735,18 +3743,20 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             expState.currentSema = sema
             expState.lock.unlock()
 
-            var shouldRetryWithoutUpdatedBy = false
-            var patchSucceeded = false
             let task = URLSession.shared.dataTask(with: request) { _, response, error in
                 if let error = error {
                     print("[WatchCloudSync] Direct PATCH \(action) error: \(error.localizedDescription)")
                 } else if let http = response as? HTTPURLResponse {
                     if (200...299).contains(http.statusCode) {
-                        patchSucceeded = true
+                        expState.lock.lock()
+                        expState.patchSucceeded = true
+                        expState.lock.unlock()
                     } else {
                         print("[WatchCloudSync] Direct PATCH \(action) status: \(http.statusCode)")
                         if http.statusCode == 400 && body["updated_by"] != nil {
-                            shouldRetryWithoutUpdatedBy = true
+                            expState.lock.lock()
+                            expState.shouldRetryWithoutUpdatedBy = true
+                            expState.lock.unlock()
                         }
                     }
                 }
@@ -3767,6 +3777,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
 
             expState.lock.lock()
             let expiredAfterFirst = expState.isExpired
+            let shouldRetry = expState.shouldRetryWithoutUpdatedBy
             expState.currentTask = nil
             expState.currentSema = nil
             expState.lock.unlock()
@@ -3776,7 +3787,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
 
             // ★ Supabase 側に updated_by カラムが存在しない環境で 400 Bad Request となった場合は即座に updated_by を外して再送信する
-            if shouldRetryWithoutUpdatedBy {
+            if shouldRetry {
                 Self.updatedByColumnUnsupported = true
                 var fallbackBody = body
                 fallbackBody.removeValue(forKey: "updated_by")
@@ -3789,7 +3800,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             print("[WatchCloudSync] Direct PATCH retry \(action) error: \(retryErr.localizedDescription)")
                         } else if let http = retryResp as? HTTPURLResponse {
                             if (200...299).contains(http.statusCode) {
-                                patchSucceeded = true
+                                expState.lock.lock()
+                                expState.patchSucceeded = true
+                                expState.lock.unlock()
                             } else {
                                 print("[WatchCloudSync] Direct PATCH retry \(action) status: \(http.statusCode)")
                             }
@@ -3821,7 +3834,11 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
             }
 
-            if !patchSucceeded || !hasUUIDSeatId {
+            expState.lock.lock()
+            let didPatchSucceed = expState.patchSucceeded
+            expState.lock.unlock()
+
+            if !didPatchSucceed || !hasUUIDSeatId {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                     self?.pollCloudTimersFromSupabaseIfNeeded(force: true)
                 }

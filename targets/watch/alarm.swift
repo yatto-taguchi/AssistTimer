@@ -209,7 +209,9 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         //   すでに期限切れ（ts <= nowEpoch）のアラーム予定をすべて即座に acknowledged にして残留シート表示・誤鳴動を完全リセットする。
         let nowEpoch = Date().timeIntervalSince1970
         let alarmSanitizeBuildKey = "watch_alarm_sanitized_build_v1"
-        let currentAlarmBuild = "117"
+        let shortVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+        let buildVer = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+        let currentAlarmBuild = "\(shortVer) (\(buildVer))-v119"
         let isNewAlarmBuild = (UserDefaults.standard.string(forKey: alarmSanitizeBuildKey) != currentAlarmBuild)
         if isNewAlarmBuild {
             UserDefaults.standard.set(currentAlarmBuild, forKey: alarmSanitizeBuildKey)

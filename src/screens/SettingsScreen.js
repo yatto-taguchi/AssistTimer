@@ -3,7 +3,7 @@ import {
   StyleSheet, Text, View, Switch, TouchableOpacity, Modal, 
   TextInput, KeyboardAvoidingView, Platform, ScrollView,
   LayoutAnimation, UIManager, Vibration, Linking, Animated,
-  Image, Dimensions, Alert 
+  Image, Dimensions, Alert, AppState 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
@@ -129,7 +129,8 @@ export default function SettingsScreen({ route }) {
     markNewsAsRead,
     markAllNewsAsRead,
     hideNewsUntilNextUpdate,
-    restoreNewsIcon
+    restoreNewsIcon,
+    isSettingsLoaded
   } = useContext(AppContext);
 
   const [newsModalVisible, setNewsModalVisible] = useState(false);
@@ -267,8 +268,13 @@ export default function SettingsScreen({ route }) {
 
   useEffect(() => {
     return () => {
-      if (testVibrationTimeoutRef.current) clearTimeout(testVibrationTimeoutRef.current);
-      Vibration.cancel();
+      if (testVibrationTimeoutRef.current) {
+        clearTimeout(testVibrationTimeoutRef.current);
+        testVibrationTimeoutRef.current = null;
+        if (AppState.currentState === 'active') {
+          Vibration.cancel();
+        }
+      }
     };
   }, []);
 
@@ -284,11 +290,17 @@ export default function SettingsScreen({ route }) {
 
   // モード切替時のアコーディオン発光ハイライト演出（「こっちも調整しとく？」アピール）
   const accordionHighlightAnim = useRef(new Animated.Value(0)).current;
-  const isInitialMount = useRef(true);
+  const hasSyncedLoadedEcoRef = useRef(false);
 
   useEffect(() => {
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
+    if (!isSettingsLoaded) {
+      return;
+    }
+    if (!hasSyncedLoadedEcoRef.current) {
+      hasSyncedLoadedEcoRef.current = true;
+      return;
+    }
+    if (AppState.currentState !== 'active') {
       return;
     }
     accordionHighlightAnim.setValue(0);
@@ -310,7 +322,7 @@ export default function SettingsScreen({ route }) {
       ...singlePulse(),
       ...singlePulse(),
     ]).start();
-  }, [isEcoMode]);
+  }, [isEcoMode, isSettingsLoaded]);
 
   // タイマー画面のクイックアクセスバー長押しからの遷移時、該当アコーディオンを自動展開＆スクロール
   useEffect(() => {

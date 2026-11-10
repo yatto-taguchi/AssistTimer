@@ -6,6 +6,10 @@ public class ExpoAlarmKitModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ExpoAlarmKit")
 
+    OnCreate {
+      AlarmKitBridge.setupLifecycleObserversIfNeeded()
+    }
+
     Function("isAvailable") { () -> Bool in
       return AlarmKitBridge.isAvailable()
     }

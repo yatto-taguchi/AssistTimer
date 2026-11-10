@@ -33,7 +33,7 @@ const AD_UNIT_ID = __DEV__
 export default function AdBannerComponent({ style }) {
   const { isProMode, isEcoMode } = useContext(AppContext);
   const [hasEnteredForeground, setHasEnteredForeground] = useState(
-    () => !AppState.currentState || AppState.currentState === 'active'
+    () => AppState.currentState === 'active'
   );
   let insets = { bottom: 0 };
   try {
@@ -44,7 +44,7 @@ export default function AdBannerComponent({ style }) {
 
   useEffect(() => {
     if (hasEnteredForeground) return undefined;
-    if (!AppState.currentState || AppState.currentState === 'active') {
+    if (AppState.currentState === 'active') {
       setHasEnteredForeground(true);
       return undefined;
     }

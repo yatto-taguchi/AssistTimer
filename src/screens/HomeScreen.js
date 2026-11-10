@@ -277,7 +277,7 @@ export default function HomeScreen({ navigation }) {
       clearTimeout(idleCheerTimeoutRef.current);
     }
     idleCheerTimeoutRef.current = setTimeout(() => {
-      if (AppState.currentState && AppState.currentState !== 'active') return;
+      if (AppState.currentState !== 'active') return;
       // タイマーが動いていない（待機中）ことを確認
       if (!isRunningRef.current && !isPreCountingDownRef.current) {
         const todayCount = (homeQuickStats?.todaySessions || 0) + 1;
@@ -291,7 +291,7 @@ export default function HomeScreen({ navigation }) {
   // バイブレーション制御ヘルパー（強度およびタイミング個別設定対応）
   // ※ タイム終了時（type === 'finish'）のバイブレーションは仕様（Section 40.1）により常時ON（スマホのアラーム音OFF時でも本体振動で作動）
   const triggerVibration = (type) => {
-    if (AppState.currentState && AppState.currentState !== 'active') return;
+    if (AppState.currentState !== 'active') return;
     if (type !== 'finish' && !isVibrationEnabled) return;
     try {
       if (type === 'finish') {
@@ -361,13 +361,16 @@ export default function HomeScreen({ navigation }) {
   };
 
   const cancelVibration = () => {
+    const hadActiveVibTimer = !!vibrationTimeoutRef.current;
     if (vibrationTimeoutRef.current) {
       clearTimeout(vibrationTimeoutRef.current);
       vibrationTimeoutRef.current = null;
     }
-    try {
-      Vibration.cancel();
-    } catch (e) {}
+    if (hadActiveVibTimer || AppState.currentState === 'active') {
+      try {
+        Vibration.cancel();
+      } catch (e) {}
+    }
   };
 
   const silentSoundRef = useRef(null);
@@ -400,7 +403,7 @@ export default function HomeScreen({ navigation }) {
   useEffect(() => {
     const isTimerActive = isPreCountingDown || isRunning;
     if (isTimerActive) {
-      if (!AppState.currentState || AppState.currentState === 'active') {
+      if (AppState.currentState === 'active') {
         keepAwakeActiveRef.current = true;
         Promise.resolve(activateKeepAwakeAsync()).catch(() => {});
       }
@@ -418,7 +421,7 @@ export default function HomeScreen({ navigation }) {
 
   // 初回起動時のサウンドロード等と再生用関数
   const playAlarm = async () => {
-    if (AppState.currentState && AppState.currentState !== 'active') return;
+    if (AppState.currentState !== 'active') return;
     triggerVibration('finish');
     if (isWatchMutedRef.current) {
       console.log('[HomeScreen] Alarm sound suppressed (Watch muted)');
@@ -459,7 +462,7 @@ export default function HomeScreen({ navigation }) {
   };
 
   const playVoice = async (key) => {
-    if (AppState.currentState && AppState.currentState !== 'active') return;
+    if (AppState.currentState !== 'active') return;
     if (isWatchMutedRef.current) {
       console.log('[HomeScreen] Voice announcement suppressed (Watch muted)');
       return;
@@ -507,11 +510,11 @@ export default function HomeScreen({ navigation }) {
   }, [voiceSound]);
 
   useEffect(() => {
-    if (!AppState.currentState || AppState.currentState === 'active') {
+    if (AppState.currentState === 'active') {
       cancelVibration();
     }
     return () => {
-      if (!AppState.currentState || AppState.currentState === 'active') {
+      if (AppState.currentState === 'active') {
         cancelVibration();
       }
       if (keepAwakeActiveRef.current) {
@@ -608,7 +611,8 @@ export default function HomeScreen({ navigation }) {
       if (nextAppState === 'active') {
         const now = Date.now();
         if (isPreCountingDownRef.current || isRunningRef.current) {
-          activateKeepAwakeAsync().catch(() => {});
+          keepAwakeActiveRef.current = true;
+          Promise.resolve(activateKeepAwakeAsync()).catch(() => {});
           startSilentBackgroundAudio();
         }
         if (isPreCountingDownRef.current && prepEndTimeRef.current) {
@@ -725,7 +729,7 @@ export default function HomeScreen({ navigation }) {
         prepEndTimeRef.current = Date.now() + preCountdownTimeRef.current * 1000;
       }
       interval = setInterval(() => {
-        if (AppState.currentState && AppState.currentState !== 'active') return;
+        if (AppState.currentState !== 'active') return;
         const now = Date.now();
         const diffMs = prepEndTimeRef.current - now;
         const nextTime = Math.max(0, Math.ceil(diffMs / 1000));
@@ -775,13 +779,13 @@ export default function HomeScreen({ navigation }) {
         const prepElapsedSec = countdownSeconds - nextTime;
         if (prepElapsedSec >= 1 && !triggeredPrepVoicesRef.current.has('cheer_prep_first')) {
           triggeredPrepVoicesRef.current.add('cheer_prep_first');
-          if (!AppState.currentState || AppState.currentState === 'active') {
+          if (AppState.currentState === 'active') {
             console.log('[HomeScreen] Prep cheer walker triggered! elapsed:', prepElapsedSec);
             cheerOverlayRef.current?.trigger('prep', 1.0, { prepSeconds: countdownSeconds });
           }
         } else if (countdownSeconds >= 30 && nextTime === Math.floor(countdownSeconds / 2) && !triggeredPrepVoicesRef.current.has('cheer_prep_mid')) {
           triggeredPrepVoicesRef.current.add('cheer_prep_mid');
-          if (!AppState.currentState || AppState.currentState === 'active') {
+          if (AppState.currentState === 'active') {
             cheerOverlayRef.current?.trigger('prep', 0.65, { prepSeconds: countdownSeconds });
           }
         }
@@ -832,7 +836,7 @@ export default function HomeScreen({ navigation }) {
       }
 
       timerRef.current = setInterval(() => {
-        if (AppState.currentState && AppState.currentState !== 'active') return;
+        if (AppState.currentState !== 'active') return;
         const now = Date.now();
 
         if (!isCountUpRef.current) {
@@ -893,7 +897,7 @@ export default function HomeScreen({ navigation }) {
                 nextCheerIntervalMsRef.current = (Math.floor(Math.random() * (240 - 120 + 1)) + 120) * 1000;
               }
               // 初回は100%確実に出現し、走るやつ（広告バナー上ランナー）を優先確定発動！（序盤フェーズ: スタート・ファイト等）
-              if (!AppState.currentState || AppState.currentState === 'active') {
+              if (AppState.currentState === 'active') {
                 console.log('[HomeScreen] First cheer runner triggered! elapsedSec:', elapsedSec);
                 cheerOverlayRef.current?.trigger('running', 1.0, { forceBannerRunner: true, phase: 'early' });
               }
@@ -912,7 +916,7 @@ export default function HomeScreen({ navigation }) {
               // タイマー進行フェーズを判定（残り60秒以内または70%以上はlate、30%未満はearly、それ以外はmid）
               const progress = targetTime > 0 ? (targetTime - nextTime) / targetTime : 0;
               const phase = nextTime <= 60 || progress >= 0.70 ? 'late' : (progress < 0.30 ? 'early' : 'mid');
-              if (!AppState.currentState || AppState.currentState === 'active') {
+              if (AppState.currentState === 'active') {
                 cheerOverlayRef.current?.trigger('running', 0.85, { phase });
               }
             }
@@ -931,7 +935,7 @@ export default function HomeScreen({ navigation }) {
               triggeredOverVoicesRef.current.clear();
               remainingTimeRef.current = 0;
               setRemainingTime(0);
-              if (!AppState.currentState || AppState.currentState === 'active') {
+              if (AppState.currentState === 'active') {
                 cheerOverlayRef.current?.trigger('overtime_start', 0.85);
               }
             } else {
@@ -947,7 +951,7 @@ export default function HomeScreen({ navigation }) {
               remainingTimeRef.current = 0;
               setRemainingTime(0);
               resetControlsVisible();
-              if (!AppState.currentState || AppState.currentState === 'active') {
+              if (AppState.currentState === 'active') {
                 cheerOverlayRef.current?.trigger('finish_success', 0.85);
               }
             }
@@ -991,7 +995,7 @@ export default function HomeScreen({ navigation }) {
           // カウントアップ（超過時間中）のランダムやまいも登場（超過時演出：最低45秒インターバル＋超過開始直後を避ける）
           if (now - lastCheerTriggerTimeRef.current >= 45000 && nextTime >= 20) {
             lastCheerTriggerTimeRef.current = now;
-            if (!AppState.currentState || AppState.currentState === 'active') {
+            if (AppState.currentState === 'active') {
               cheerOverlayRef.current?.trigger('overtime_start', 0.65);
             }
           }
@@ -1033,7 +1037,7 @@ export default function HomeScreen({ navigation }) {
     apply();
     if (!isRunning && !isPreCountingDown) return undefined;
     const id = setInterval(() => {
-      if (AppState.currentState && AppState.currentState !== 'active') return;
+      if (AppState.currentState !== 'active') return;
       apply();
     }, 1000);
     return () => clearInterval(id);

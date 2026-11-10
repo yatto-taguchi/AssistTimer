@@ -32,34 +32,210 @@ enum AlarmKitBridge {
   }
 
   static func isAvailable() -> Bool {
+    setupLifecycleObserversIfNeeded()
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) { return true }
     #endif
     return true
   }
 
-  private static func isAppForegroundActiveSync() -> Bool {
+  private static let appStateLock = NSLock()
+  private static var cachedIsAppActive: Bool = false
+  private static var didSetupAppStateObservers: Bool = false
+  private static var pendingOrphanSweepOnActive: Bool = false
+  private static var didCleanupUnrecordedMainTimerOnce: Bool = false
+
+  private static let opQueueLock = NSLock()
+  private static var tailTask: Task<Void, Never>? = nil
+  private static var tailOpId: UInt64 = 0
+
+  private static func takePreviousTailAndBumpOpId() -> (previous: Task<Void, Never>?, opId: UInt64) {
+    opQueueLock.lock()
+    defer { opQueueLock.unlock() }
+    let previous = tailTask
+    tailOpId &+= 1
+    return (previous, tailOpId)
+  }
+
+  private static func setTailTask(_ task: Task<Void, Never>) {
+    opQueueLock.lock()
+    tailTask = task
+    opQueueLock.unlock()
+  }
+
+  private static func clearTailTaskIfMatching(opId: UInt64) {
+    opQueueLock.lock()
+    if tailOpId == opId {
+      tailTask = nil
+    }
+    opQueueLock.unlock()
+  }
+
+  private static func enqueueFireAndForgetOperation(
+    priority: TaskPriority = .userInitiated,
+    _ operation: @escaping @Sendable () async -> Void
+  ) {
+    opQueueLock.lock()
+    let previous = tailTask
+    tailOpId &+= 1
+    let myOpId = tailOpId
+    let task = Task.detached(priority: priority) {
+      if let previous = previous {
+        _ = await previous.value
+      }
+      await operation()
+      clearTailTaskIfMatching(opId: myOpId)
+    }
+    tailTask = task
+    opQueueLock.unlock()
+  }
+
+  private static func enqueueAsyncOperation<T: Sendable>(
+    priority: TaskPriority = .userInitiated,
+    _ operation: @escaping @Sendable () async -> T
+  ) async -> T {
+    let resultTask = registerAsyncOperationTask(priority: priority, operation)
+    return await resultTask.value
+  }
+
+  private static func registerAsyncOperationTask<T: Sendable>(
+    priority: TaskPriority,
+    _ operation: @escaping @Sendable () async -> T
+  ) -> Task<T, Never> {
+    opQueueLock.lock()
+    let previous = tailTask
+    tailOpId &+= 1
+    let myOpId = tailOpId
+    let resultTask = Task.detached(priority: priority) { () -> T in
+      if let previous = previous {
+        _ = await previous.value
+      }
+      return await operation()
+    }
+    let trackerTask = Task.detached(priority: priority) {
+      _ = await resultTask.value
+      clearTailTaskIfMatching(opId: myOpId)
+    }
+    tailTask = trackerTask
+    opQueueLock.unlock()
+    return resultTask
+  }
+
+  private static func updateCachedIsAppActiveAndCheckSweep(_ isActiveNow: Bool) {
+    appStateLock.lock()
+    cachedIsAppActive = isActiveNow
+    let shouldSweep = isActiveNow && pendingOrphanSweepOnActive
+    if shouldSweep {
+      pendingOrphanSweepOnActive = false
+    }
+    appStateLock.unlock()
+    if shouldSweep {
+      performDeferredOrphanSweepAsync()
+    }
+  }
+
+  static func setupLifecycleObserversIfNeeded() {
     #if canImport(UIKit)
+    appStateLock.lock()
+    let alreadySetup = didSetupAppStateObservers
+    if !alreadySetup {
+      didSetupAppStateObservers = true
+    }
+    appStateLock.unlock()
+
+    if alreadySetup {
+      if Thread.isMainThread {
+        let isActive = (UIApplication.shared.applicationState == .active)
+        updateCachedIsAppActiveAndCheckSweep(isActive)
+      }
+      return
+    }
+
+    let registerObservers = {
+      let isActiveNow = (UIApplication.shared.applicationState == .active)
+      updateCachedIsAppActiveAndCheckSweep(isActiveNow)
+
+      let center = NotificationCenter.default
+      center.addObserver(
+        forName: UIApplication.didBecomeActiveNotification,
+        object: nil,
+        queue: .main
+      ) { _ in
+        updateCachedIsAppActiveAndCheckSweep(true)
+      }
+      center.addObserver(
+        forName: UIApplication.willResignActiveNotification,
+        object: nil,
+        queue: .main
+      ) { _ in
+        appStateLock.lock()
+        cachedIsAppActive = false
+        appStateLock.unlock()
+      }
+      center.addObserver(
+        forName: UIApplication.didEnterBackgroundNotification,
+        object: nil,
+        queue: .main
+      ) { _ in
+        appStateLock.lock()
+        cachedIsAppActive = false
+        appStateLock.unlock()
+      }
+    }
+
     if Thread.isMainThread {
-      return UIApplication.shared.applicationState == .active
+      registerObservers()
+    } else {
+      DispatchQueue.main.async(execute: registerObservers)
     }
-    var active = false
-    DispatchQueue.main.sync {
-      active = (UIApplication.shared.applicationState == .active)
+    #endif
+  }
+
+  /// JS スレッド等の非メインスレッドから呼ばれても DispatchQueue.main.sync を一切使わず 0ms で安全にフォアグラウンド判定を返す
+  private static func isAppForegroundActive() -> Bool {
+    #if canImport(UIKit)
+    setupLifecycleObserversIfNeeded()
+    if Thread.isMainThread {
+      let active = (UIApplication.shared.applicationState == .active)
+      updateCachedIsAppActiveAndCheckSweep(active)
+      return active
     }
+    appStateLock.lock()
+    let active = cachedIsAppActive
+    appStateLock.unlock()
     return active
     #else
     return true
     #endif
   }
 
-  private static func isAppForegroundActive() async -> Bool {
+  /// 非同期コンテキスト（scheduleAlarm / scheduleNotificationFallback）から MainActor 経由で確実に最新のフォアグラウンド状態を取得する
+  private static func isAppForegroundActiveAsync() async -> Bool {
     #if canImport(UIKit)
-    return await MainActor.run {
+    setupLifecycleObserversIfNeeded()
+    let active = await MainActor.run {
       UIApplication.shared.applicationState == .active
     }
+    updateCachedIsAppActiveAndCheckSweep(active)
+    return active
     #else
     return true
+    #endif
+  }
+
+  private static func performDeferredOrphanSweepAsync() {
+    #if canImport(AlarmKit)
+    if #available(iOS 26.0, *) {
+      enqueueFireAndForgetOperation(priority: .utility) {
+        let manager = AlarmManager.shared
+        guard let activeAlarms = try? manager.alarms else { return }
+        let protectedUUIDs = currentProtectedUUIDsSnapshot()
+        for alarm in activeAlarms where !protectedUUIDs.contains(alarm.id) {
+          _ = try? manager.stop(id: alarm.id)
+          _ = try? manager.cancel(id: alarm.id)
+        }
+      }
+    }
     #endif
   }
 
@@ -124,22 +300,55 @@ enum AlarmKitBridge {
     }
   }
 
-  // 戻り値: "ok" / "past" / "denied" / "unavailable" / "error: …"
+  // 戻り値: "ok" / "past" / "denied" / "unavailable" / "cancelled" / "error: …"
   static func schedule(key: String, timestampMs: Double, title: String, soundOn: Bool) async -> String {
-    #if canImport(AlarmKit)
-    if #available(iOS 26.0, *) {
-      return await scheduleAlarm(key: key, timestampMs: timestampMs, title: title, soundOn: soundOn)
+    let schedGen = bumpKeyGeneration(for: key, markInFlight: true)
+    defer { clearInFlightSchedule(for: key, generation: schedGen) }
+    return await enqueueAsyncOperation(priority: .userInitiated) {
+      guard isScheduleStillValid(for: key, scheduleGeneration: schedGen) else {
+        return "cancelled"
+      }
+      #if canImport(AlarmKit)
+      if #available(iOS 26.0, *) {
+        return await scheduleAlarm(
+          key: key,
+          timestampMs: timestampMs,
+          title: title,
+          soundOn: soundOn,
+          scheduleGeneration: schedGen
+        )
+      }
+      #endif
+      return await scheduleNotificationFallback(
+        key: key,
+        timestampMs: timestampMs,
+        title: title,
+        soundOn: soundOn,
+        scheduleGeneration: schedGen
+      )
     }
-    #endif
-    return await scheduleNotificationFallback(key: key, timestampMs: timestampMs, title: title, soundOn: soundOn)
   }
 
   // 予約の取り消し＋鳴っている最中なら停止
   static func cancel(key: String) -> Bool {
+    let (cancelGen, wasInFlight) = bumpKeyGenerationForCancel(for: key)
     // こちらから取り消した予約は「ユーザーが止めた」と判定しないよう、記録から先に消す
     let hadRecord = removeRecord(key: key)
-    if !hadRecord && key != "main-timer" {
-      return false
+    if !hadRecord && !wasInFlight {
+      if key != "main-timer" {
+        return false
+      }
+      // バックグラウンド中は記録のない main-timer に対して AlarmManager XPC を呼ばない
+      guard isAppForegroundActive() else {
+        return false
+      }
+      appStateLock.lock()
+      let alreadyCleaned = didCleanupUnrecordedMainTimerOnce
+      didCleanupUnrecordedMainTimerOnce = true
+      appStateLock.unlock()
+      if alreadyCleaned {
+        return false
+      }
     }
     let notifId = "assisttimer.fallback.\(key)"
     UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [notifId])
@@ -147,28 +356,49 @@ enum AlarmKitBridge {
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) {
       let id = uuid(for: key)
-      let manager = AlarmManager.shared
-      var done = false
-      if (try? manager.stop(id: id)) != nil { done = true }
-      if (try? manager.cancel(id: id)) != nil { done = true }
-      return done
+      // 同期 JSI 呼び出し元の JS スレッドを XPC 待ちでブロックしないよう FIFO 直列キューで停止・取消を実行
+      enqueueFireAndForgetOperation(priority: .userInitiated) {
+        guard isCancelStillValid(for: key, cancelGeneration: cancelGen) else { return }
+        let manager = AlarmManager.shared
+        _ = try? manager.stop(id: id)
+        _ = try? manager.cancel(id: id)
+      }
+      return true
     }
     #endif
     return true
   }
 
-  private static func scheduleNotificationFallback(key: String, timestampMs: Double, title: String, soundOn: Bool) async -> String {
+  private static func scheduleNotificationFallback(
+    key: String,
+    timestampMs: Double,
+    title: String,
+    soundOn: Bool,
+    scheduleGeneration: UInt64
+  ) async -> String {
+    guard isScheduleStillValid(for: key, scheduleGeneration: scheduleGeneration) else {
+      return "cancelled"
+    }
     let center = UNUserNotificationCenter.current()
     let settings = await center.notificationSettings()
     _ = updateCachedFallbackAuthStatus(settings.authorizationStatus)
+    guard isScheduleStillValid(for: key, scheduleGeneration: scheduleGeneration) else {
+      return "cancelled"
+    }
     if settings.authorizationStatus == .notDetermined {
-      guard await isAppForegroundActive() else {
+      guard await isAppForegroundActiveAsync() else {
         return "denied"
       }
       _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+      guard isScheduleStillValid(for: key, scheduleGeneration: scheduleGeneration) else {
+        return "cancelled"
+      }
     }
     let updatedSettings = await center.notificationSettings()
     _ = updateCachedFallbackAuthStatus(updatedSettings.authorizationStatus)
+    guard isScheduleStillValid(for: key, scheduleGeneration: scheduleGeneration) else {
+      return "cancelled"
+    }
     guard updatedSettings.authorizationStatus == .authorized ||
           updatedSettings.authorizationStatus == .provisional ||
           updatedSettings.authorizationStatus == .ephemeral else {
@@ -198,6 +428,12 @@ enum AlarmKitBridge {
     let request = UNNotificationRequest(identifier: notifId, content: content, trigger: trigger)
     do {
       try await center.add(request)
+      guard isScheduleStillValid(for: key, scheduleGeneration: scheduleGeneration) else {
+        center.removePendingNotificationRequests(withIdentifiers: [notifId])
+        center.removeDeliveredNotifications(withIdentifiers: [notifId])
+        removeRecord(key: key)
+        return "cancelled"
+      }
       addRecord(key: key, timestampMs: timestampMs)
       return "ok"
     } catch {
@@ -205,11 +441,84 @@ enum AlarmKitBridge {
     }
   }
 
-  // MARK: - ユーザーがアラーム画面で「停止」した予約の検出
+  // MARK: - ユーザーがアラーム画面で「停止」した予約の検出と世代・InFlight排他管理
   // AlarmKit には「停止が押された」通知が無いため、予約したキーと鳴る時刻を端末内に記録しておき、
   // 「鳴る時刻を過ぎたのに、こちらが取り消していないのに AlarmKit の一覧から消えた」ものを止められたと判断する。
   static let scheduledRecordKey = "assisttimer.alarmkit.scheduled"
   private static let recordLock = NSLock()
+  private static var keyGenerations: [String: UInt64] = [:]
+  private static var inFlightScheduleKeys: Set<String> = []
+  private static var latestKnownKeepKeysBySource: [String: Set<String>] = [:]
+
+  private static func bumpKeyGeneration(for key: String, markInFlight: Bool) -> UInt64 {
+    recordLock.lock(); defer { recordLock.unlock() }
+    let next = (keyGenerations[key] ?? 0) &+ 1
+    keyGenerations[key] = next
+    if markInFlight {
+      inFlightScheduleKeys.insert(key)
+    } else {
+      inFlightScheduleKeys.remove(key)
+    }
+    return next
+  }
+
+  private static func bumpKeyGenerationForCancel(for key: String) -> (generation: UInt64, wasInFlight: Bool) {
+    recordLock.lock(); defer { recordLock.unlock() }
+    let wasInFlight = inFlightScheduleKeys.remove(key) != nil
+    let next = (keyGenerations[key] ?? 0) &+ 1
+    keyGenerations[key] = next
+    return (next, wasInFlight)
+  }
+
+  private static func clearInFlightSchedule(for key: String, generation: UInt64) {
+    recordLock.lock(); defer { recordLock.unlock() }
+    if keyGenerations[key] == generation {
+      inFlightScheduleKeys.remove(key)
+    }
+  }
+
+  private static func isCancelStillValid(for key: String, cancelGeneration: UInt64) -> Bool {
+    recordLock.lock(); defer { recordLock.unlock() }
+    guard keyGenerations[key] == cancelGeneration else { return false }
+    guard !inFlightScheduleKeys.contains(key) else { return false }
+    let records = loadRecords()
+    return records[key] == nil
+  }
+
+  private static func isScheduleStillValid(for key: String, scheduleGeneration: UInt64) -> Bool {
+    recordLock.lock(); defer { recordLock.unlock() }
+    return keyGenerations[key] == scheduleGeneration
+  }
+
+  private static func currentProtectedUUIDsSnapshot(additionalKeys: Set<String> = []) -> Set<UUID> {
+    recordLock.lock()
+    let keepSets = Array(latestKnownKeepKeysBySource.values)
+    let mainInitialized = (latestKnownKeepKeysBySource["main"] != nil)
+    let inFlight = inFlightScheduleKeys
+    let records = loadRecords()
+    recordLock.unlock()
+
+    let nowMs = Date().timeIntervalSince1970 * 1000.0
+    var protectedUUIDs = Set<UUID>()
+    for set in keepSets {
+      for key in set {
+        protectedUUIDs.insert(uuid(for: key))
+      }
+    }
+    if !mainInitialized {
+      protectedUUIDs.insert(uuid(for: "main-timer"))
+    }
+    for key in additionalKeys {
+      protectedUUIDs.insert(uuid(for: key))
+    }
+    for key in inFlight {
+      protectedUUIDs.insert(uuid(for: key))
+    }
+    for (key, ts) in records where ts > nowMs {
+      protectedUUIDs.insert(uuid(for: key))
+    }
+    return protectedUUIDs
+  }
 
   private static func loadRecords() -> [String: Double] {
     return (UserDefaults.standard.dictionary(forKey: scheduledRecordKey) as? [String: Double]) ?? [:]
@@ -241,6 +550,7 @@ enum AlarmKitBridge {
     let keepSet = Set(keepKeys)
     let nowMs = Date().timeIntervalSince1970 * 1000.0
     recordLock.lock()
+    latestKnownKeepKeysBySource[source] = keepSet
     let records = loadRecords()
     recordLock.unlock()
 
@@ -266,22 +576,28 @@ enum AlarmKitBridge {
     }
 
     // iOS 26+ AlarmManager.shared.alarms に残存している孤立・鳴動中アラームも直接走査して確実に停止・消去する
-    // ※ ただしバックグラウンド起動時かつローカル予約記録が0件の場合は、重い XPC 全件走査をスキップしてCPU/時間を保護する
-    if records.isEmpty && !isAppForegroundActiveSync() {
+    // ※ バックグラウンド／非アクティブ時は records の有無にかかわらず重い XPC 全件走査を絶対に実行せず、次回アクティブ復帰時に非同期実行する
+    guard isAppForegroundActive() else {
+      appStateLock.lock()
+      pendingOrphanSweepOnActive = true
+      appStateLock.unlock()
       return keysToCancel.count
     }
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) {
-      var protectedUUIDs = Set(keepSet.map { uuid(for: $0) })
+      var additionalProtectedKeys = keepSet
       if source == "salon" {
-        protectedUUIDs.insert(uuid(for: "main-timer"))
+        additionalProtectedKeys.insert("main-timer")
       } else if source == "main" {
         for key in records.keys where key != "main-timer" && !keysToCancel.contains(key) {
-          protectedUUIDs.insert(uuid(for: key))
+          additionalProtectedKeys.insert(key)
         }
       }
-      let manager = AlarmManager.shared
-      if let activeAlarms = try? manager.alarms {
+      let extraKeys = additionalProtectedKeys
+      enqueueFireAndForgetOperation(priority: .utility) {
+        let manager = AlarmManager.shared
+        guard let activeAlarms = try? manager.alarms else { return }
+        let protectedUUIDs = currentProtectedUUIDsSnapshot(additionalKeys: extraKeys)
         for alarm in activeAlarms where !protectedUUIDs.contains(alarm.id) {
           _ = try? manager.stop(id: alarm.id)
           _ = try? manager.cancel(id: alarm.id)
@@ -297,11 +613,18 @@ enum AlarmKitBridge {
   static func takeUserStoppedAlarms() -> [[String: Any]] {
     #if canImport(AlarmKit)
     if #available(iOS 26.0, *) {
+      let nowMs = Date().timeIntervalSince1970 * 1000.0
+      recordLock.lock()
+      let initialRecords = loadRecords()
+      recordLock.unlock()
+      guard !initialRecords.isEmpty else { return [] }
+      // 鳴る時刻を過ぎた予約だけが対象（まだ鳴っていない予約は調べない）
+      let initialDue = initialRecords.filter { $0.value <= nowMs - 1000 }
+      guard !initialDue.isEmpty else { return [] }
+      guard isAppForegroundActive() else { return [] }
+
       recordLock.lock(); defer { recordLock.unlock() }
       var records = loadRecords()
-      guard !records.isEmpty else { return [] }
-      let nowMs = Date().timeIntervalSince1970 * 1000.0
-      // 鳴る時刻を過ぎた予約だけが対象（まだ鳴っていない予約は調べない）
       let due = records.filter { $0.value <= nowMs - 1000 }
       guard !due.isEmpty else { return [] }
       // 一覧を取得できない時は判定しない（誤って席を止めない）
@@ -336,16 +659,37 @@ enum AlarmKitBridge {
   }
 
   @available(iOS 26.0, *)
-  private static func scheduleAlarm(key: String, timestampMs: Double, title: String, soundOn: Bool) async -> String {
+  private static func scheduleAlarm(
+    key: String,
+    timestampMs: Double,
+    title: String,
+    soundOn: Bool,
+    scheduleGeneration: UInt64
+  ) async -> String {
+    guard isScheduleStillValid(for: key, scheduleGeneration: scheduleGeneration) else {
+      return "cancelled"
+    }
     let manager = AlarmManager.shared
     if manager.authorizationState == .notDetermined {
-      if await isAppForegroundActive() {
+      if await isAppForegroundActiveAsync() {
         _ = try? await manager.requestAuthorization()
+        guard isScheduleStillValid(for: key, scheduleGeneration: scheduleGeneration) else {
+          return "cancelled"
+        }
       } else {
-        return await scheduleNotificationFallback(key: key, timestampMs: timestampMs, title: title, soundOn: soundOn)
+        return await scheduleNotificationFallback(
+          key: key,
+          timestampMs: timestampMs,
+          title: title,
+          soundOn: soundOn,
+          scheduleGeneration: scheduleGeneration
+        )
       }
     }
     guard manager.authorizationState == .authorized else { return "denied" }
+    guard isScheduleStillValid(for: key, scheduleGeneration: scheduleGeneration) else {
+      return "cancelled"
+    }
 
     let id = uuid(for: key)
     // 同じキーの古い予約は先に取り消す（時間変更時の二重予約防止）
@@ -370,6 +714,12 @@ enum AlarmKitBridge {
     )
     do {
       _ = try await manager.schedule(id: id, configuration: configuration)
+      guard isScheduleStillValid(for: key, scheduleGeneration: scheduleGeneration) else {
+        _ = try? manager.stop(id: id)
+        _ = try? manager.cancel(id: id)
+        removeRecord(key: key)
+        return "cancelled"
+      }
       addRecord(key: key, timestampMs: timestampMs)
       return "ok"
     } catch {

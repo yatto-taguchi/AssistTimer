@@ -107,19 +107,29 @@ export const AppProvider = ({ children }) => {
   const controlsTimeoutRef = useRef(null);
 
   const showControls = (autoHide = false) => {
+    if (controlsTimeoutRef.current) {
+      clearTimeout(controlsTimeoutRef.current);
+      controlsTimeoutRef.current = null;
+    }
     setControlsVisible(true);
+    if (AppState.currentState !== 'active') {
+      controlsOpacity.setValue(1);
+      return;
+    }
     Animated.timing(controlsOpacity, {
       toValue: 1,
       duration: 200,
       useNativeDriver: true,
     }).start();
 
-    if (controlsTimeoutRef.current) {
-      clearTimeout(controlsTimeoutRef.current);
-    }
-
     if (autoHide) {
       controlsTimeoutRef.current = setTimeout(() => {
+        controlsTimeoutRef.current = null;
+        if (AppState.currentState !== 'active') {
+          controlsOpacity.setValue(0);
+          setControlsVisible(false);
+          return;
+        }
         Animated.timing(controlsOpacity, {
           toValue: 0,
           duration: 300,
@@ -132,8 +142,13 @@ export const AppProvider = ({ children }) => {
   const resetControlsVisible = () => {
     if (controlsTimeoutRef.current) {
       clearTimeout(controlsTimeoutRef.current);
+      controlsTimeoutRef.current = null;
     }
     setControlsVisible(true);
+    if (AppState.currentState !== 'active') {
+      controlsOpacity.setValue(1);
+      return;
+    }
     Animated.timing(controlsOpacity, {
       toValue: 1,
       duration: 200,
@@ -348,7 +363,7 @@ export const AppProvider = ({ children }) => {
         }
       }
     };
-    if (!AppState.currentState || AppState.currentState === 'active') {
+    if (AppState.currentState === 'active') {
       initPurchases();
     } else {
       appStateSub = AppState.addEventListener('change', (nextState) => {
@@ -383,7 +398,7 @@ export const AppProvider = ({ children }) => {
         console.log('Google Mobile Ads init error:', e);
       }
     };
-    if (!AppState.currentState || AppState.currentState === 'active') {
+    if (AppState.currentState === 'active') {
       initAdMob();
     } else {
       appStateSub = AppState.addEventListener('change', (nextState) => {
@@ -905,7 +920,7 @@ export const AppProvider = ({ children }) => {
       return [...prev.slice(-19), newItem];
     });
 
-    if (Platform.OS !== 'web' && options.vibrate !== false) {
+    if (Platform.OS !== 'web' && options.vibrate !== false && AppState.currentState === 'active') {
       Vibration.vibrate([0, 180, 90, 220]);
     }
   }, []);

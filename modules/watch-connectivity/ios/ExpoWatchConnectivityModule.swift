@@ -26,6 +26,7 @@ public class ExpoWatchConnectivityModule: Module {
   // ★ JSの受信準備が整う前およびイベント取りこぼし防止用の受信キュー（連番管理）
   private let eventLock = NSLock()
   private var jsReady: Bool = false
+  private var hasListeners: Bool = false
   private var nextEventSeq: Int = 0
   private var pendingEvents: [[String: Any]] = []
   private let maxPendingEvents = 100
@@ -43,6 +44,18 @@ public class ExpoWatchConnectivityModule: Module {
       "onUserInfoReceived",
       "onStatusChanged"
     )
+
+    OnStartObserving {
+      self.eventLock.lock()
+      self.hasListeners = true
+      self.eventLock.unlock()
+    }
+
+    OnStopObserving {
+      self.eventLock.lock()
+      self.hasListeners = false
+      self.eventLock.unlock()
+    }
 
     OnCreate {
       if WCSession.isSupported() {
@@ -83,8 +96,14 @@ public class ExpoWatchConnectivityModule: Module {
           promise.resolve(true)
           return
         }
-        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
-          promise.resolve(granted)
+        DispatchQueue.main.async {
+          guard UIApplication.shared.applicationState == .active else {
+            promise.resolve(false)
+            return
+          }
+          center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+            promise.resolve(granted)
+          }
         }
       }
     }
@@ -121,11 +140,17 @@ public class ExpoWatchConnectivityModule: Module {
         case .authorized, .provisional, .ephemeral:
           enqueueNotification()
         case .notDetermined:
-          center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
-            if granted {
-              enqueueNotification()
-            } else {
+          DispatchQueue.main.async {
+            guard UIApplication.shared.applicationState == .active else {
               promise.resolve(false)
+              return
+            }
+            center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+              if granted {
+                enqueueNotification()
+              } else {
+                promise.resolve(false)
+              }
             }
           }
         default:
@@ -402,10 +427,22 @@ public class ExpoWatchConnectivityModule: Module {
     if pendingEvents.count > maxPendingEvents {
       pendingEvents.removeFirst(pendingEvents.count - maxPendingEvents)
     }
-    let ready = jsReady
+    let canEmit = (jsReady && hasListeners)
     eventLock.unlock()
-    if ready {
-      sendEvent(name, taggedBody)
+    if canEmit {
+      if Thread.isMainThread {
+        sendEvent(name, taggedBody)
+      } else {
+        DispatchQueue.main.async { [weak self] in
+          guard let self = self else { return }
+          self.eventLock.lock()
+          let stillCanEmit = (self.jsReady && self.hasListeners)
+          self.eventLock.unlock()
+          if stillCanEmit {
+            self.sendEvent(name, taggedBody)
+          }
+        }
+      }
     }
   }
 
@@ -448,10 +485,21 @@ public class ExpoWatchConnectivityModule: Module {
 
   fileprivate func emitStatus() {
     self.eventLock.lock()
-    let ready = self.jsReady
+    let canEmit = (self.jsReady && self.hasListeners)
     self.eventLock.unlock()
-    guard ready else { return }
-    sendEvent("onStatusChanged", buildStatus())
+    guard canEmit else { return }
+    if Thread.isMainThread {
+      self.sendEvent("onStatusChanged", self.buildStatus())
+    } else {
+      DispatchQueue.main.async { [weak self] in
+        guard let self = self else { return }
+        self.eventLock.lock()
+        let stillCanEmit = (self.jsReady && self.hasListeners)
+        self.eventLock.unlock()
+        guard stillCanEmit else { return }
+        self.sendEvent("onStatusChanged", self.buildStatus())
+      }
+    }
   }
 
   fileprivate func setLastActivationError(_ errorText: String) {

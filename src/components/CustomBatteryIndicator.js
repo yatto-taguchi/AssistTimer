@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useContext } from 'react';
-import { View, Text, StyleSheet, Platform, StatusBar as RNStatusBar, Animated } from 'react-native';
+import { View, Text, StyleSheet, Platform, StatusBar as RNStatusBar, Animated, AppState } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Battery from 'expo-battery';
 import { Ionicons } from '@expo/vector-icons';
@@ -21,12 +21,16 @@ export default function CustomBatteryIndicator() {
     // Provider外等の安全フォールバック
   }
 
-  // 電池残量の取得
+  // 電池残量の取得（エコモード＆電池表示ON時のみ稼働、バックグラウンド時は休止）
   useEffect(() => {
+    if (!isEcoMode || !isEcoBatteryEnabled) {
+      return undefined;
+    }
     let subscription;
     let isMounted = true;
 
     const fetchBattery = async () => {
+      if (AppState.currentState !== 'active') return;
       try {
         const level = await Battery.getBatteryLevelAsync();
         if (!isMounted) return;
@@ -47,11 +51,16 @@ export default function CustomBatteryIndicator() {
 
     // 30秒ごとに定期ポーリング（実機での残量変化追従）
     const interval = setInterval(fetchBattery, 30000);
+    const appStateSub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        fetchBattery();
+      }
+    });
 
     // バッテリー残量変更リスナー
     try {
       subscription = Battery.addBatteryLevelListener(({ batteryLevel }) => {
-        if (!isMounted) return;
+        if (!isMounted || AppState.currentState !== 'active') return;
         if (batteryLevel >= 0) {
           setBatteryLevel(batteryLevel);
         } else {
@@ -65,12 +74,16 @@ export default function CustomBatteryIndicator() {
     return () => {
       isMounted = false;
       clearInterval(interval);
+      if (appStateSub) appStateSub.remove();
       if (subscription) subscription.remove();
     };
-  }, []);
+  }, [isEcoMode, isEcoBatteryEnabled]);
 
-  // 時刻の取得と更新
+  // 時刻の取得と更新（エコモード＆時計表示ON時のみ稼働、バックグラウンド時は休止）
   useEffect(() => {
+    if (!isEcoMode || !isEcoClockEnabled) {
+      return undefined;
+    }
     const updateTime = () => {
       const now = new Date();
       const h = now.getHours().toString().padStart(2, '0');
@@ -78,9 +91,20 @@ export default function CustomBatteryIndicator() {
       setTimeStr(`${h}:${m}`);
     };
     updateTime();
-    const interval = setInterval(updateTime, 5000);
-    return () => clearInterval(interval);
-  }, []);
+    const interval = setInterval(() => {
+      if (AppState.currentState !== 'active') return;
+      updateTime();
+    }, 5000);
+    const appStateSub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        updateTime();
+      }
+    });
+    return () => {
+      clearInterval(interval);
+      if (appStateSub) appStateSub.remove();
+    };
+  }, [isEcoMode, isEcoClockEnabled]);
 
   // 通常モードはOS標準ステータスバーがあるため、CustomBatteryIndicatorはエコモード専用
   if (!isEcoMode) {
