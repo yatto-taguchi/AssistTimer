@@ -2218,7 +2218,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         let nowDate = Date()
         let shortVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         let buildVer = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
-        let currentWatchSanitizeVersion = "121"
+        let currentWatchSanitizeVersion = "122"
         let currentWatchBuild = "\(shortVer) (\(buildVer))-v\(currentWatchSanitizeVersion)"
         let prevWatchBuild = UserDefaults.standard.string(forKey: savedLastBuildVersionKey)
             ?? appGroupDefaults?.string(forKey: savedLastBuildVersionKey)

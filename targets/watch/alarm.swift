@@ -219,7 +219,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         let alarmSanitizeBuildKey = "watch_alarm_sanitized_build_v1"
         let shortVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         let buildVer = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
-        let currentAlarmBuild = "\(shortVer) (\(buildVer))-v121"
+        let currentAlarmBuild = "\(shortVer) (\(buildVer))-v122"
         let isNewAlarmBuild = (UserDefaults.standard.string(forKey: alarmSanitizeBuildKey) != currentAlarmBuild)
         if isNewAlarmBuild {
             UserDefaults.standard.set(currentAlarmBuild, forKey: alarmSanitizeBuildKey)
