@@ -52,7 +52,6 @@ import {
   markPeerNotificationHandled,
   registerAndSyncSalonPushToken,
   removeSalonPushToken,
-  markPeerNotificationHandled,
   purgeStaleSemanticKeysForSeatState,
   subscribeRemotePushEvents,
 } from '../utils/pushNotificationService';
