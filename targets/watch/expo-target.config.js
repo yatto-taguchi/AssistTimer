@@ -10,5 +10,7 @@ module.exports = config => ({
   entitlements: {
     // 文字盤コンプリケーション（targets/watch-widget）と席タイマーの要約を共有する
     "com.apple.security.application-groups": ["group.com.assisttimer"],
+    // 集中モード・仕事モード中もサロン共有タイマー通知を即時表示する
+    "com.apple.developer.usernotifications.time-sensitive": true,
   },
 });

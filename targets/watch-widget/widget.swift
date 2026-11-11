@@ -12,6 +12,12 @@ import WidgetKit
 
 private let appGroup = "group.com.assisttimer"
 private let snapshotKey = "assisttimer.widget.snapshot"
+private let savedAtEpochKey = "assisttimer.widget.savedAtEpoch"
+private let lastTouchedKey = "assisttimer.widget.lastTouchedId"
+private let lastTouchedAtEpochKey = "assisttimer.widget.lastTouchedAtEpoch"
+private let widgetFetchedAtEpochKey = "assisttimer.widget.fetchedAtEpoch"
+private let supabaseRestBaseURL = "https://hcmjcwcmvcwicjmnhtdc.supabase.co/rest/v1"
+private let supabaseAnonKey = "sb_publishable_MWb3aHCk_XtQthwbw3be3g_bjObUVeq"
 
 struct StaffFlowInfo {
     let creator: String
@@ -36,6 +42,7 @@ struct ComplicationSeat {
     let isCreatorMeExplicit: Bool?
     let isNoHelpNeeded: Bool
     let currentUserName: String?
+    let userAliases: [String]
     
     // チェック・ヘルプタイマー情報
     let prepEndDate: Date?
@@ -49,6 +56,34 @@ struct ComplicationSeat {
     let isRecruiting: Bool
     let isCheckCompleted: Bool
 
+    static func isStaffMe(_ staff: String?, currentUserName: String?, userAliases: [String]) -> Bool {
+        guard let raw = staff?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return false }
+        if raw == "自分" || raw == "あなた" { return true }
+        let lower = raw.lowercased()
+        if raw == "ヘルプなし" || lower == "none" || raw == "未定" || raw == "募集中" { return false }
+        let normalize = { (s: String) -> String in
+            s.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: " ", with: "")
+                .replacingOccurrences(of: "　", with: "")
+                .lowercased()
+        }
+        let normRaw = normalize(raw)
+        guard !normRaw.isEmpty else { return false }
+        if let me = currentUserName?.trimmingCharacters(in: .whitespacesAndNewlines), !me.isEmpty, me != "スタイリスト" {
+            if raw.caseInsensitiveCompare(me) == .orderedSame || normalize(me) == normRaw {
+                return true
+            }
+        }
+        for alias in userAliases {
+            let cleanAlias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanAlias.isEmpty, cleanAlias != "スタイリスト" else { continue }
+            if raw.caseInsensitiveCompare(cleanAlias) == .orderedSame || normalize(cleanAlias) == normRaw {
+                return true
+            }
+        }
+        return false
+    }
+
     /// 大元タイマーが 00:00 到達後の超過カウントアップ（endDate <= date）を文字盤モジュールに表示すべきか判定
     /// （Q1=A & Q3=A: 大元タイマーの当事者、または未完了のチェックタイマー当事者のときのみ true）
     var shouldDisplayOvertime: Bool {
@@ -60,7 +95,6 @@ struct ComplicationSeat {
     
     // 担当フロー（作成者 → 最終担当者）の表示情報
     var staffFlow: StaffFlowInfo {
-        let me = (currentUserName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let creatorRaw = (creatorName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         
         // 作成者（左側）: 自分が作成したなら「自分」、他人ならその名前
@@ -68,11 +102,8 @@ struct ComplicationSeat {
             if let explicit = isCreatorMeExplicit {
                 return explicit
             }
-            if creatorRaw == "自分" || creatorRaw == "あなた" {
+            if creatorRaw != "スタイリスト" && Self.isStaffMe(creatorRaw, currentUserName: currentUserName, userAliases: userAliases) {
                 return true
-            }
-            if !me.isEmpty && !creatorRaw.isEmpty && creatorRaw != "スタイリスト" {
-                return creatorRaw.caseInsensitiveCompare(me) == .orderedSame
             }
             return false
         }()
@@ -89,15 +120,7 @@ struct ComplicationSeat {
             recruiting = false
         } else if !shampooRaw.isEmpty {
             // 最終担当決定済み
-            let isTargetMe: Bool = {
-                if shampooRaw == "自分" || shampooRaw == "あなた" {
-                    return true
-                }
-                if !me.isEmpty {
-                    return shampooRaw.caseInsensitiveCompare(me) == .orderedSame
-                }
-                return false
-            }()
+            let isTargetMe = Self.isStaffMe(shampooRaw, currentUserName: currentUserName, userAliases: userAliases)
             targetDisplay = isTargetMe ? "自分" : shampooRaw
             recruiting = false
         } else {
@@ -122,6 +145,12 @@ struct ComplicationEntry: TimelineEntry {
 struct ComplicationSnapshot {
     var seats: [ComplicationSeat] = []
     var lastTouchedId: String?
+    var lastTouchedAtEpoch: Double = 0
+    var userName: String? = nil
+    var userAliases: [String] = []
+    var cloudSalonId: String = ""
+    var cloudUserId: String = ""
+    var savedAtEpoch: Double = 0
 }
 
 enum ComplicationData {
@@ -132,6 +161,26 @@ enum ComplicationData {
               let seats = obj["seats"] as? [[String: Any]] else { return ComplicationSnapshot() }
         let now = Date()
         let currentUserName = obj["userName"] as? String
+        var userAliases = (obj["userAliases"] as? [String])
+            ?? defaults.stringArray(forKey: "assisttimer.watch.userAliases.v1")
+            ?? []
+        let cloudSalonId = ((obj["cloudSalonId"] as? String)
+            ?? defaults.string(forKey: "assisttimer.watch.cloudSalonId.v1")
+            ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let cloudUserId = ((obj["cloudUserId"] as? String)
+            ?? defaults.string(forKey: "assisttimer.watch.cloudUserId.v1")
+            ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cloudUserId.isEmpty,
+           let memberMap = defaults.dictionary(forKey: "assisttimer.watch.memberIdMap.v1") as? [String: String] {
+            for (k, v) in memberMap where k.caseInsensitiveCompare(cloudUserId) == .orderedSame {
+                let cleanV = v.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !cleanV.isEmpty, cleanV != "スタイリスト", !userAliases.contains(cleanV) {
+                    userAliases.append(cleanV)
+                }
+            }
+        }
+        let savedAtEpoch = defaults.double(forKey: savedAtEpochKey)
+
         let parsed: [ComplicationSeat] = seats.compactMap { d in
             guard let end = (d["endEpoch"] as? NSNumber)?.doubleValue else { return nil }
             let num = (d["seatNumber"] as? NSNumber)?.intValue ?? 0
@@ -159,7 +208,10 @@ enum ComplicationData {
             let isCreatorMeExplicit = (d["isCreatorMe"] as? NSNumber)?.boolValue ?? (d["isCreatorMe"] as? Bool)
             let isNoHelp = (d["isNoHelpNeeded"] as? NSNumber)?.boolValue ?? (d["isNoHelpNeeded"] as? Bool) ?? false
 
-            let isCountUpEnabled = true
+            let defaultMainCountUp = (defaults.object(forKey: "assisttimer.watch.isCountUpEnabled") as? Bool) ?? true
+            let isCountUpEnabled = (d["isCountUpEnabled"] as? NSNumber)?.boolValue
+                ?? (d["isCountUpEnabled"] as? Bool)
+                ?? (isMain ? defaultMainCountUp : true)
             let rawRunning = (d["isRunning"] as? NSNumber)?.boolValue ?? (d["isRunning"] as? Bool) ?? false
             let endDate = Date(timeIntervalSince1970: end)
             // ★ 終了時刻が未設定(<=0)または3時間(10800秒)以上経過した放置データは強制的に非稼働扱いとし、永遠のカウントアップ表示を防止
@@ -185,6 +237,7 @@ enum ComplicationData {
                 isCreatorMeExplicit: isCreatorMeExplicit,
                 isNoHelpNeeded: isNoHelp,
                 currentUserName: currentUserName,
+                userAliases: userAliases,
                 prepEndDate: prepEnd,
                 prepTotalSeconds: prepTot,
                 checkEndDate: checkEnd,
@@ -197,7 +250,445 @@ enum ComplicationData {
                 isCheckCompleted: isCheckComp
             )
         }
-        return ComplicationSnapshot(seats: parsed, lastTouchedId: obj["lastTouchedId"] as? String)
+        let loadedTouchedId = (obj["lastTouchedId"] as? String) ?? defaults.string(forKey: lastTouchedKey)
+        let rawTouchedAt = (obj["lastTouchedAtEpoch"] as? NSNumber)?.doubleValue
+            ?? (obj["lastTouchedAtEpoch"] as? Double)
+            ?? defaults.double(forKey: lastTouchedAtEpochKey)
+        let loadedTouchedAtEpoch = (loadedTouchedId != nil && rawTouchedAt.isFinite && rawTouchedAt > 0) ? rawTouchedAt : 0
+        return ComplicationSnapshot(
+            seats: parsed,
+            lastTouchedId: loadedTouchedId,
+            lastTouchedAtEpoch: loadedTouchedAtEpoch,
+            userName: currentUserName,
+            userAliases: userAliases,
+            cloudSalonId: cloudSalonId,
+            cloudUserId: cloudUserId,
+            savedAtEpoch: savedAtEpoch
+        )
+    }
+
+    /// WidgetExtension から直接 Supabase REST API を取得し、Watch 本体アプリが .background で起床遅延していても
+    /// 文字盤（モジュラー）のタイムライン更新タイミングで最新の客席稼働状態を直接反映する
+    static func fetchLatestFromSupabaseIfAvailable(
+        baseSnapshot: ComplicationSnapshot,
+        timeout: TimeInterval = 2.2,
+        completion: @escaping (ComplicationSnapshot, Bool) -> Void
+    ) {
+        let salonId = baseSnapshot.cloudSalonId
+        let now = Date()
+        let nowEpoch = now.timeIntervalSince1970
+        let lastWidgetFetchEpoch = UserDefaults(suiteName: appGroup)?.double(forKey: widgetFetchedAtEpochKey) ?? 0
+        guard UUID(uuidString: salonId) != nil else {
+            completion(baseSnapshot, false)
+            return
+        }
+        // ★ HIGH-6: 直近1.2秒以内にWatch本体アプリがWidgetSyncを書き込んだばかり、または0.6秒以内にフェッチ済みの場合は通信をスキップし、
+        //   didSkipByDebounce = true を返して getTimeline 側で 2.0秒後に必ず再評価（「開始→0.5秒後にヘルプ指名」の取りこぼしを根絶）
+        let shouldDebounce = (nowEpoch - baseSnapshot.savedAtEpoch < 1.2) ||
+            (nowEpoch - lastWidgetFetchEpoch < 0.6 && !baseSnapshot.seats.isEmpty)
+        if shouldDebounce {
+            completion(baseSnapshot, true)
+            return
+        }
+
+        var comps = URLComponents(string: "\(supabaseRestBaseURL)/salon_timers")
+        comps?.queryItems = [
+            URLQueryItem(name: "salon_id", value: "eq.\(salonId)"),
+            URLQueryItem(name: "select", value: "id,seat_label,status,target_seconds,target_end_timestamp,paused_remaining_seconds,created_by,updated_by,color_staff_name,assistant_staff_name,help_process,is_shampooing,check_target_end_timestamp,check_total_seconds,check_process,check_staff_name,sort_order,updated_at"),
+            URLQueryItem(name: "order", value: "updated_at.desc")
+        ]
+        guard let url = comps?.url else {
+            completion(baseSnapshot, false)
+            return
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.timeoutInterval = timeout
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.setValue(supabaseAnonKey, forHTTPHeaderField: "apikey")
+        req.setValue("Bearer \(supabaseAnonKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let lock = NSLock()
+        var didComplete = false
+        let finishOnce: (ComplicationSnapshot, Bool) -> Void = { snap, skipped in
+            lock.lock()
+            if didComplete {
+                lock.unlock()
+                return
+            }
+            didComplete = true
+            lock.unlock()
+            completion(snap, skipped)
+        }
+
+        let task = URLSession.shared.dataTask(with: req) { data, response, error in
+            guard error == nil,
+                  let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode),
+                  let data = data,
+                  let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                finishOnce(baseSnapshot, false)
+                return
+            }
+
+            let appDefaults = UserDefaults(suiteName: appGroup)
+            let localStops = (appDefaults?.dictionary(forKey: "assisttimer.watch.localStops.v1") as? [String: [String: Double]]) ?? [:]
+            let peerStoppedEnds = (appDefaults?.dictionary(forKey: "assisttimer.watch.peerStoppedSeatEnds.v1") as? [String: Double]) ?? [:]
+            let confirmedPeerStops = (appDefaults?.dictionary(forKey: "assisttimer.watch.confirmedPeerStoppedEnds.v1") as? [String: Double]) ?? [:]
+            let myUid = (!baseSnapshot.cloudUserId.isEmpty
+                ? baseSnapshot.cloudUserId
+                : (appDefaults?.string(forKey: "assisttimer.watch.cloudUserId.v1") ?? "")
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            let myName = baseSnapshot.userName
+            let myAliases = baseSnapshot.userAliases
+            let isoFormatterFrac = ISO8601DateFormatter()
+            isoFormatterFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let isoFormatterBasic = ISO8601DateFormatter()
+            isoFormatterBasic.formatOptions = [.withInternetDateTime]
+            let normalizeSeatMatchKey: (String) -> String = { s in
+                let withoutSuffix = s.replacingOccurrences(of: "席", with: "")
+                let noSpaces = String(String.UnicodeScalarView(withoutSuffix.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }))
+                return noSpaces.lowercased()
+            }
+
+            // 1. 個人用メインタイマー（isMainTimer）はクラウドに存在しないため必ず先頭に保護維持
+            let mainSeats: [ComplicationSeat] = baseSnapshot.seats.filter { $0.isMainTimer }
+            var cloudSeats: [ComplicationSeat] = []
+
+            // order=updated_at.desc で取得し、同一席ラベルの重複行を最新1件に絞った上で seatNumber 昇順にソートする
+            var seenLabels = Set<String>()
+            var touchedRelatedId: String? = nil
+            var touchedOtherId: String? = nil
+
+            for (idx, row) in rows.enumerated() {
+                guard let id = row["id"] as? String, !id.isEmpty else { continue }
+                let rawLabel = ((row["seat_label"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let cleanKey = normalizeSeatMatchKey(rawLabel)
+                if !cleanKey.isEmpty {
+                    if seenLabels.contains(cleanKey) { continue }
+                    seenLabels.insert(cleanKey)
+                }
+
+                let digits = cleanKey.filter { $0.isNumber }
+                let sortOrderSeatNum = ((row["sort_order"] as? NSNumber)?.intValue ?? (row["sort_order"] as? Int)).map { $0 + 1 }
+                let localMatchedByIdOrLabel = baseSnapshot.seats.first(where: { seat in
+                    guard !seat.isMainTimer else { return false }
+                    if seat.id == id { return true }
+                    let locClean = normalizeSeatMatchKey(seat.seatLabel)
+                    return !cleanKey.isEmpty && locClean == cleanKey
+                })
+                let seatNum = Int(digits) ?? localMatchedByIdOrLabel?.seatNumber ?? sortOrderSeatNum ?? (idx + 1)
+                let localMatch = localMatchedByIdOrLabel ?? baseSnapshot.seats.first(where: { !$0.isMainTimer && $0.seatNumber == seatNum })
+                let seatLabel = rawLabel.isEmpty ? "\(seatNum)番席" : (rawLabel.hasSuffix("席") ? rawLabel : "\(rawLabel)席")
+                let statusStr = (row["status"] as? String) ?? "paused"
+                let endMs = (row["target_end_timestamp"] as? NSNumber)?.doubleValue ?? (row["target_end_timestamp"] as? Double) ?? 0
+                let endEpoch = endMs > 1_000_000_000_000 ? (endMs / 1000.0).rounded() : endMs.rounded()
+                var endDate = Date(timeIntervalSince1970: max(0, endEpoch))
+                var isRunning = (statusStr == "running" && endEpoch > 0 && endDate > now.addingTimeInterval(-10800))
+
+                let rowUpdatedAtEpoch: Double = {
+                    guard let rawUpd = (row["updated_at"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !rawUpd.isEmpty else { return 0 }
+                    if let d = isoFormatterFrac.date(from: rawUpd) ?? isoFormatterBasic.date(from: rawUpd) {
+                        return d.timeIntervalSince1970
+                    }
+                    return 0
+                }()
+
+                // 2. デグレ防止ガード: Watch本体側で実際に停止操作が行われた席（assisttimer.watch.localStops.v1）のみをピンポイントで保護
+                if isRunning {
+                    let stopRecord = localStops[id] ?? (localMatch.flatMap { localStops[$0.id] }) ?? localStops["seat-\(seatNum)"]
+                    let stoppedAtEpoch = stopRecord?["at"] ?? 0
+                    let stoppedEndEpoch = stopRecord?["end"] ?? 0
+                    let isSameStoppedEnd = (stoppedEndEpoch > 0 && abs(stoppedEndEpoch - endEpoch) <= 2.5 && nowEpoch - stoppedAtEpoch < 14400)
+                    let isCloudRowOlderThanSeatStop = (stoppedAtEpoch > 0 && nowEpoch - stoppedAtEpoch < 8.0 && rowUpdatedAtEpoch > 0 && rowUpdatedAtEpoch + 0.5 < stoppedAtEpoch)
+                    if isSameStoppedEnd || isCloudRowOlderThanSeatStop {
+                        isRunning = false
+                    }
+                }
+
+                let totalSec = max(0, min(86_400, (row["target_seconds"] as? NSNumber)?.intValue ?? 600))
+                let pausedRem = max(0, min(86_400, (row["paused_remaining_seconds"] as? NSNumber)?.intValue ?? 0))
+                let createdBy = ((row["created_by"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let updatedBy = ((row["updated_by"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let colorStaff = ((row["color_staff_name"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let assistRaw = ((row["assistant_staff_name"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let helpProc = ((row["help_process"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let checkStaff = ((row["check_staff_name"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let checkProc = ((row["check_process"] as? String) ?? "チェック").trimmingCharacters(in: .whitespacesAndNewlines)
+                let chkEndMs = (row["check_target_end_timestamp"] as? NSNumber)?.doubleValue ?? 0
+                let chkEndEpoch = chkEndMs > 1_000_000_000_000 ? (chkEndMs / 1000.0).rounded() : chkEndMs.rounded()
+                let chkTotalSec = (row["check_total_seconds"] as? NSNumber)?.intValue ?? 0
+                let hasCloudUnfinishedCheck = chkEndEpoch > 0 && chkTotalSec > 0
+
+                let isCreatorMe: Bool = {
+                    if !myUid.isEmpty && !createdBy.isEmpty {
+                        return createdBy.caseInsensitiveCompare(myUid) == .orderedSame
+                    }
+                    if !colorStaff.isEmpty && colorStaff != "スタイリスト" {
+                        return ComplicationSeat.isStaffMe(colorStaff, currentUserName: myName, userAliases: myAliases)
+                    }
+                    return localMatch?.isCreatorMeExplicit ?? false
+                }()
+                let isNoHelp = (assistRaw == "ヘルプなし" || assistRaw.lowercased() == "none" || helpProc == "ヘルプなし")
+                let isRecruiting = (assistRaw == "募集中")
+                let shampooStaff: String? = (!isNoHelp && !isRecruiting && !assistRaw.isEmpty) ? assistRaw : nil
+                let isAssistMe = (shampooStaff != nil) && ComplicationSeat.isStaffMe(shampooStaff, currentUserName: myName, userAliases: myAliases)
+                let isCheckMeRaw = hasCloudUnfinishedCheck && ComplicationSeat.isStaffMe(checkStaff, currentUserName: myName, userAliases: myAliases)
+                let shouldAlertMain = isCreatorMe || isAssistMe
+                let wouldAlertCheckIfRunning = hasCloudUnfinishedCheck && (isCreatorMe || isCheckMeRaw || (checkStaff == "募集中" && isCreatorMe))
+
+                let cloudIsShampooing = (row["is_shampooing"] as? NSNumber)?.boolValue ?? (row["is_shampooing"] as? Bool) ?? false
+                let hasActiveCustomHelpProc = !helpProc.isEmpty && helpProc != "シャンプー" && helpProc != "ヘルプなし" && helpProc.lowercased() != "none" && helpProc != "募集中" && helpProc != "未定"
+                let hasActivePostStopProcess = cloudIsShampooing || hasActiveCustomHelpProc
+                let hasOtherConcreteAssist = !assistRaw.isEmpty
+                    && assistRaw != "ヘルプなし"
+                    && assistRaw.lowercased() != "none"
+                    && assistRaw != "募集中"
+                    && assistRaw != "未定"
+                    && assistRaw != "スタイリスト"
+                    && assistRaw != "スタッフ"
+                    && !ComplicationSeat.isStaffMe(assistRaw, currentUserName: myName, userAliases: myAliases)
+
+                // ★ CRITICAL-1: ローカルで超過継続中の席について、自機（iPhone/Watch）で止めた場合や確認済みピア停止、担当解除済みの場合は
+                //   絶対に復活させず 00:00 に戻し、実際に「他スタッフが先に止めて自分はまだ未確認」の当事者席のみ超過継続を保護する
+                if !isRunning, let loc = localMatch, loc.isRunning, loc.endDate <= now, loc.shouldDisplayOvertime {
+                    let locEndEpoch = loc.endDate.timeIntervalSince1970
+                    let stopRecord = localStops[id] ?? localStops[loc.id] ?? localStops["seat-\(seatNum)"]
+                    let stoppedAtEpoch = stopRecord?["at"] ?? 0
+                    let stoppedEndEpoch = stopRecord?["end"] ?? 0
+                    let isLocallyStopped = (stoppedEndEpoch > 0 && abs(stoppedEndEpoch - locEndEpoch) <= 2.5 && nowEpoch - stoppedAtEpoch < 14400)
+                        || (stoppedAtEpoch > 0 && nowEpoch - stoppedAtEpoch < 8.0)
+                    let isStoppedByMe = !myUid.isEmpty && !updatedBy.isEmpty && updatedBy.caseInsensitiveCompare(myUid) == .orderedSame
+                    let confirmedPeerEnd = confirmedPeerStops[id] ?? confirmedPeerStops[loc.id] ?? confirmedPeerStops["seat-\(seatNum)"] ?? 0
+                    let isConfirmedPeerStop = confirmedPeerEnd > 0 && abs(confirmedPeerEnd - locEndEpoch) <= 2.5
+                    let activePeerEnd = peerStoppedEnds[id] ?? peerStoppedEnds[loc.id] ?? peerStoppedEnds["seat-\(seatNum)"] ?? 0
+                    let hasUnconfirmedPeerStop = activePeerEnd > 0 && abs(activePeerEnd - locEndEpoch) <= 2.5
+                    // Watch本体の reconcileTimersFromDirectCloudRows と完全一致:
+                    // - updated_by と myUid が両方ある場合は UUID 不一致で判定
+                    // - updated_by が NULL/空 または myUid 未同期の場合は「停止後工程（シャンプー等）稼働中 かつ 自分以外の具体名担当者あり」の明示的証拠がある時のみ他者停止継続とし、
+                    //   通常の自端末停止で3時間 +00:15 が文字盤に残るゾンビ復活を完全防止する
+                    let isStoppedByOtherPeer: Bool = {
+                        if !myUid.isEmpty && !updatedBy.isEmpty {
+                            return updatedBy.caseInsensitiveCompare(myUid) != .orderedSame
+                        }
+                        return hasActivePostStopProcess && hasOtherConcreteAssist
+                    }()
+                    let isStillStakeholderOnCloud = shouldAlertMain || wouldAlertCheckIfRunning
+                    if !isLocallyStopped && !isStoppedByMe && !isConfirmedPeerStop && (hasUnconfirmedPeerStop || isStoppedByOtherPeer) && isStillStakeholderOnCloud {
+                        isRunning = true
+                        endDate = loc.endDate
+                    }
+                }
+
+                let hasActiveCheck = isRunning && hasCloudUnfinishedCheck
+                let isCheckCompleted = !hasActiveCheck && chkTotalSec > 0
+                let isCheckMe = hasActiveCheck && isCheckMeRaw
+                // ★ HIGH-7: Watch 本体の SeatTimerItem.shouldAlertCheckTimer と完全一致
+                let shouldAlertCheck = hasActiveCheck && (isCreatorMe || isCheckMe || (checkStaff == "募集中" && isCreatorMe))
+                let isRelated = shouldAlertMain || (hasActiveCheck && isCheckMe)
+
+                if isRunning {
+                    let wasRunning = localMatch?.isRunning ?? false
+                    let prevEnd = localMatch?.endDate.timeIntervalSince1970 ?? 0
+                    let prevChkEnd = (!((localMatch?.isCheckCompleted) ?? false) ? (localMatch?.checkEndDate?.timeIntervalSince1970 ?? 0) : 0)
+                    let curChkEnd = hasActiveCheck ? chkEndEpoch : 0
+                    let prevRel = localMatch?.related ?? false
+                    let prevAlertMain = localMatch?.shouldAlertMain ?? false
+                    if !wasRunning
+                        || abs(prevEnd - endDate.timeIntervalSince1970) >= 2.0
+                        || (curChkEnd > 0 && abs(prevChkEnd - curChkEnd) >= 2.0)
+                        || (!prevRel && isRelated)
+                        || (!prevAlertMain && shouldAlertMain) {
+                        if isRelated {
+                            touchedRelatedId = id
+                        } else {
+                            touchedOtherId = id
+                        }
+                    }
+                }
+
+                let seatItem = ComplicationSeat(
+                    id: id,
+                    seatNumber: seatNum,
+                    seatLabel: seatLabel,
+                    isMainTimer: false,
+                    endDate: endDate,
+                    isRunning: isRunning,
+                    pausedRemaining: pausedRem,
+                    related: isRelated,
+                    shouldAlertMain: shouldAlertMain,
+                    shouldAlertCheck: shouldAlertCheck,
+                    totalSeconds: totalSec,
+                    isCountUpEnabled: localMatch?.isCountUpEnabled ?? true,
+                    creatorName: colorStaff.isEmpty ? "スタイリスト" : colorStaff,
+                    isCreatorMeExplicit: isCreatorMe,
+                    isNoHelpNeeded: isNoHelp,
+                    currentUserName: myName,
+                    userAliases: myAliases,
+                    prepEndDate: nil,
+                    prepTotalSeconds: nil,
+                    checkEndDate: hasActiveCheck ? Date(timeIntervalSince1970: chkEndEpoch) : nil,
+                    checkTotalSeconds: hasActiveCheck ? chkTotalSec : nil,
+                    checkProcess: checkProc.isEmpty ? "チェック" : checkProc,
+                    checkStaff: checkStaff.isEmpty ? nil : checkStaff,
+                    shampooStaff: shampooStaff,
+                    helpProcess: helpProc,
+                    isRecruiting: isRecruiting,
+                    isCheckCompleted: isCheckCompleted
+                )
+                cloudSeats.append(seatItem)
+            }
+
+            cloudSeats.sort {
+                if $0.seatNumber != $1.seatNumber {
+                    return $0.seatNumber < $1.seatNumber
+                }
+                return $0.id < $1.id
+            }
+            let mergedSeats = mainSeats + cloudSeats
+
+            var resolvedTouchedId = baseSnapshot.lastTouchedId
+            var resolvedTouchedAtEpoch = baseSnapshot.lastTouchedAtEpoch
+            let hasAnyRelatedRunning = mergedSeats.contains(where: { $0.isRunning && $0.related })
+            if let rel = touchedRelatedId {
+                resolvedTouchedId = rel
+                resolvedTouchedAtEpoch = (nowEpoch * 1000.0).rounded() / 1000.0
+            } else if !hasAnyRelatedRunning, let other = touchedOtherId {
+                resolvedTouchedId = other
+                resolvedTouchedAtEpoch = (nowEpoch * 1000.0).rounded() / 1000.0
+            } else if let existingId = resolvedTouchedId {
+                if let matchedActive = mergedSeats.first(where: { ($0.id == existingId || (!$0.isMainTimer && "seat-\($0.seatNumber)" == existingId)) && $0.isRunning }) {
+                    if hasAnyRelatedRunning && !matchedActive.related {
+                        resolvedTouchedId = nil
+                        resolvedTouchedAtEpoch = 0
+                    } else {
+                        resolvedTouchedId = matchedActive.id
+                    }
+                } else {
+                    resolvedTouchedId = nil
+                    resolvedTouchedAtEpoch = 0
+                }
+            }
+
+            let updatedSnapshot = ComplicationSnapshot(
+                seats: mergedSeats,
+                lastTouchedId: resolvedTouchedId,
+                lastTouchedAtEpoch: resolvedTouchedId != nil ? resolvedTouchedAtEpoch : 0,
+                userName: myName,
+                userAliases: myAliases,
+                cloudSalonId: salonId,
+                cloudUserId: myUid,
+                savedAtEpoch: baseSnapshot.savedAtEpoch
+            )
+            persistSnapshotToAppGroup(updatedSnapshot)
+            finishOnce(updatedSnapshot, false)
+        }
+        task.resume()
+
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout) {
+            finishOnce(baseSnapshot, false)
+        }
+    }
+
+    private static func safeFiniteEpoch(_ date: Date?) -> Double {
+        guard let d = date else { return 0 }
+        let raw = d.timeIntervalSince1970
+        guard raw.isFinite, raw > 0, raw < 4_102_444_800 else { return 0 }
+        return raw.rounded()
+    }
+
+    private static func persistSnapshotToAppGroup(_ snap: ComplicationSnapshot) {
+        guard let defaults = UserDefaults(suiteName: appGroup) else { return }
+        var serializedSeats: [[String: Any]] = []
+        for s in snap.seats {
+            let endEpoch = s.isRunning ? safeFiniteEpoch(s.endDate) : 0
+            var d: [String: Any] = [
+                "id": s.id,
+                "seatNumber": s.seatNumber,
+                "seatLabel": s.seatLabel,
+                "isMainTimer": s.isMainTimer,
+                "endEpoch": endEpoch,
+                "isRunning": s.isRunning && endEpoch > 0,
+                "pausedRemaining": max(0, min(86_400, s.pausedRemaining)),
+                "related": s.related,
+                "shouldAlertMain": s.shouldAlertMain,
+                "shouldAlertCheck": s.shouldAlertCheck,
+                "totalSeconds": max(0, min(86_400, s.totalSeconds)),
+                "isCountUpEnabled": s.isCountUpEnabled,
+                "isNoHelpNeeded": s.isNoHelpNeeded,
+                "isRecruiting": s.isRecruiting,
+                "isCheckCompleted": s.isCheckCompleted
+            ]
+            if let creator = s.creatorName {
+                d["creatorName"] = creator
+            }
+            if let isCreatorMe = s.isCreatorMeExplicit {
+                d["isCreatorMe"] = isCreatorMe
+            }
+            if let prepEnd = s.prepEndDate {
+                let pEpoch = safeFiniteEpoch(prepEnd)
+                if pEpoch > 0 {
+                    d["prepEndEpoch"] = pEpoch
+                    if let pTot = s.prepTotalSeconds, pTot > 0 {
+                        d["prepTotalSeconds"] = max(1, min(3_600, pTot))
+                    }
+                }
+            }
+            if !s.isCheckCompleted, let chkEnd = s.checkEndDate {
+                let cEpoch = safeFiniteEpoch(chkEnd)
+                if cEpoch > 0 {
+                    d["checkEndEpoch"] = cEpoch
+                    if let cTot = s.checkTotalSeconds, cTot > 0 {
+                        d["checkTotalSeconds"] = max(1, min(86_400, cTot))
+                    }
+                }
+            }
+            if let checkProc = s.checkProcess, !checkProc.isEmpty {
+                d["checkProcess"] = checkProc
+            }
+            if let checkStaff = s.checkStaff, !checkStaff.isEmpty {
+                d["checkStaff"] = checkStaff
+            }
+            if let shampoo = s.shampooStaff, !shampoo.isEmpty {
+                d["shampooStaff"] = shampoo
+            }
+            if let helpProc = s.helpProcess, !helpProc.isEmpty {
+                d["helpProcess"] = helpProc
+            }
+            serializedSeats.append(d)
+        }
+        var payload: [String: Any] = [
+            "seats": serializedSeats,
+            "userAliases": snap.userAliases,
+            "cloudSalonId": snap.cloudSalonId,
+            "cloudUserId": snap.cloudUserId
+        ]
+        if let uName = snap.userName {
+            payload["userName"] = uName
+        }
+        if let touchedId = snap.lastTouchedId {
+            payload["lastTouchedId"] = touchedId
+            if snap.lastTouchedAtEpoch > 0 {
+                payload["lastTouchedAtEpoch"] = snap.lastTouchedAtEpoch
+            }
+        }
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
+        if let touchedId = snap.lastTouchedId {
+            defaults.set(touchedId, forKey: lastTouchedKey)
+            if snap.lastTouchedAtEpoch > 0 {
+                defaults.set(snap.lastTouchedAtEpoch, forKey: lastTouchedAtEpochKey)
+            } else {
+                defaults.removeObject(forKey: lastTouchedAtEpochKey)
+            }
+        } else {
+            defaults.removeObject(forKey: lastTouchedKey)
+            defaults.removeObject(forKey: lastTouchedAtEpochKey)
+        }
+        defaults.set(data, forKey: snapshotKey)
+        defaults.set(Date().timeIntervalSince1970, forKey: widgetFetchedAtEpochKey)
     }
 
     static func isDisplayableRunning(_ seat: ComplicationSeat, at date: Date) -> Bool {
@@ -216,26 +707,71 @@ enum ComplicationData {
         return seat.shouldDisplayOvertime
     }
 
-    /// ①最後に操作された稼働中の席。無ければ、date の時点で
-    /// ②自分のカウントダウン中 → ③カウントダウン中 → ④自分の超過中（それぞれ終了が近い順）
-    /// ※ 自分が無関係な他スタッフの超過席（およびチェック完了後のチェックのみ担当席の超過）は文字盤モジュールに表示しない
+    /// 席の実効終了時刻（自分の対象である未完了チェックタイマーが本タイマーより先に到来する場合はチェック終了時刻を優先）
+    static func effectiveEndDate(for seat: ComplicationSeat) -> Date {
+        if !seat.isCheckCompleted, seat.shouldAlertCheck, let chkEnd = seat.checkEndDate, chkEnd < seat.endDate {
+            return chkEnd
+        }
+        return seat.endDate
+    }
+
+    /// 自分の当事者席で本タイマーまたは中間チェックタイマーが超過中かどうか
+    static func isSeatOvertime(_ seat: ComplicationSeat, at date: Date) -> Bool {
+        if seat.endDate <= date && seat.shouldDisplayOvertime {
+            return true
+        }
+        if !seat.isCheckCompleted, seat.shouldAlertCheck, let chkEnd = seat.checkEndDate, chkEnd <= date {
+            return true
+        }
+        return false
+    }
+
+    /// 自分の関係席で緊急状態（本タイマー/チェック超過中、または実効残り3分＝180秒以内）かどうか
+    static func isUrgentRelatedSeat(_ seat: ComplicationSeat, at date: Date) -> Bool {
+        guard seat.related else { return false }
+        if isSeatOvertime(seat, at: date) {
+            return true
+        }
+        return effectiveEndDate(for: seat).timeIntervalSince(date) <= 180.0
+    }
+
+    /// Q1確定仕様：「20秒プレビュー ＋ 緊急席オーバーライド」および優先順位
+    /// - 直近20秒以内に開始・操作・指名された席（lastTouchedId）があれば20秒間プレビュー表示して手首でのセット確認を保証
+    /// - ただし別席が超過中または残り3分以内の緊急状態にある場合は即座に緊急席を優先（緊急席オーバーライド）
+    /// - 20秒経過後（またはプレビュー対象なし時）は：
+    ///   ①自分の超過中席 ➔ ②自分のカウントダウン中席 ➔ ③（自分の稼働席が0件のときのみ）他スタッフのカウントダウン中席（各グループ内は effectiveEndDate が近い順）
     static func pick(from snapshot: ComplicationSnapshot, at date: Date) -> ComplicationSeat? {
         let running = snapshot.seats.filter { isDisplayableRunning($0, at: date) }
+        guard !running.isEmpty else { return nil }
         let hasRelatedRunning = running.contains(where: { $0.related })
-        if let id = snapshot.lastTouchedId,
-           let touched = running.first(where: { $0.id == id }),
+        let dateEpoch = date.timeIntervalSince1970
+        let isWithinPreviewWindow = snapshot.lastTouchedAtEpoch > 0
+            && dateEpoch >= (snapshot.lastTouchedAtEpoch - 1.0)
+            && dateEpoch < (snapshot.lastTouchedAtEpoch + 20.0)
+
+        if isWithinPreviewWindow,
+           let id = snapshot.lastTouchedId,
+           let touched = running.first(where: { $0.id == id || (!$0.isMainTimer && "seat-\($0.seatNumber)" == id) }),
            (touched.related || !hasRelatedRunning) {
-            return touched
+            let hasOtherOvertime = running.contains { $0.id != touched.id && $0.related && isSeatOvertime($0, at: date) }
+            let hasOtherUrgent = running.contains { $0.id != touched.id && isUrgentRelatedSeat($0, at: date) }
+            if !hasOtherUrgent
+                || isSeatOvertime(touched, at: date)
+                || (isUrgentRelatedSeat(touched, at: date) && !hasOtherOvertime) {
+                return touched
+            }
         }
-        let countingDown = running.filter { $0.endDate > date }
-        let overtime = running.filter { $0.endDate <= date }
+
+        let myOvertime = running.filter { $0.related && isSeatOvertime($0, at: date) }
+        let myCountingDown = running.filter { $0.related && !isSeatOvertime($0, at: date) && $0.endDate > date }
+        let otherCountingDown = hasRelatedRunning ? [] : running.filter { !$0.related && $0.endDate > date }
         let groups: [[ComplicationSeat]] = [
-            countingDown.filter { $0.related },
-            countingDown,
-            overtime.filter { $0.shouldDisplayOvertime }
+            myOvertime,
+            myCountingDown,
+            otherCountingDown
         ]
         for group in groups where !group.isEmpty {
-            return group.min { $0.endDate < $1.endDate }
+            return group.min { effectiveEndDate(for: $0) < effectiveEndDate(for: $1) }
         }
         return nil
     }
@@ -272,6 +808,7 @@ struct ComplicationProvider: TimelineProvider {
                 isCreatorMeExplicit: true,
                 isNoHelpNeeded: false,
                 currentUserName: "スタイリスト",
+                userAliases: [],
                 prepEndDate: nil,
                 prepTotalSeconds: nil,
                 checkEndDate: Date().addingTimeInterval(3 * 60),
@@ -296,58 +833,78 @@ struct ComplicationProvider: TimelineProvider {
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<ComplicationEntry>) -> Void) {
-        let now = Date()
-        let snapshot = ComplicationData.load()
-        let seats = snapshot.seats
-        var entryDates = Set<Date>()
-        entryDates.insert(now)
-        
-        // 各席のキーポイント時刻にエントリーを入れて、色変化（青→黄→赤）および超過切り替えを自動で行う
-        for seat in seats where seat.isRunning {
-            let total = max(10, Double(seat.totalSeconds))
-            let end = seat.endDate
-            if let prepEnd = seat.prepEndDate, prepEnd > now {
-                entryDates.insert(prepEnd)
-            }
-            if end > now {
-                entryDates.insert(end)
-                if !seat.shouldDisplayOvertime {
-                    entryDates.insert(end.addingTimeInterval(0.5))
-                    entryDates.insert(end.addingTimeInterval(1.0))
+        let baseSnapshot = ComplicationData.load()
+        ComplicationData.fetchLatestFromSupabaseIfAvailable(baseSnapshot: baseSnapshot, timeout: 2.2) { snapshot, didSkipByDebounce in
+            let now = Date()
+            let seats = snapshot.seats
+            var entryDates = Set<Date>()
+            entryDates.insert(now)
+            if snapshot.lastTouchedAtEpoch > 0 {
+                let previewEnd = Date(timeIntervalSince1970: snapshot.lastTouchedAtEpoch + 20.0)
+                if previewEnd > now {
+                    entryDates.insert(previewEnd)
                 }
-                // 残り30%（黄に切り替え）
-                let t30 = end.addingTimeInterval(-total * 0.30)
-                if t30 > now { entryDates.insert(t30) }
-                // 残り10%（赤に切り替え）
-                let t10 = end.addingTimeInterval(-total * 0.10)
-                if t10 > now { entryDates.insert(t10) }
-            }
-            if seat.shouldDisplayOvertime {
-                // 超過バー満タン（終了＋180秒）および3時間上限（終了＋10800秒）
-                let tOverMax = end.addingTimeInterval(180)
-                if tOverMax > now { entryDates.insert(tOverMax) }
-                let tAutoExpire = end.addingTimeInterval(10800)
-                if tAutoExpire > now { entryDates.insert(tAutoExpire) }
             }
             
-            // ★ チェックタイマーのエントリー（終了時刻 ＆ 残り1分前で赤切り替え）
-            if let checkEnd = seat.checkEndDate, !seat.isCheckCompleted {
-                if checkEnd > now {
-                    entryDates.insert(checkEnd)
-                    let checkRedTime = checkEnd.addingTimeInterval(-60)
-                    if checkRedTime > now {
-                        entryDates.insert(checkRedTime)
+            // 各席のキーポイント時刻にエントリーを入れて、色変化（青→黄→赤）・20秒プレビュー終了・緊急席切替・超過切り替えを自動で行う
+            for seat in seats where seat.isRunning {
+                let total = max(10, Double(seat.totalSeconds))
+                let end = seat.endDate
+                if let prepEnd = seat.prepEndDate, prepEnd > now {
+                    entryDates.insert(prepEnd)
+                }
+                if end > now {
+                    entryDates.insert(end)
+                    if !seat.shouldDisplayOvertime {
+                        entryDates.insert(end.addingTimeInterval(0.5))
+                        entryDates.insert(end.addingTimeInterval(1.0))
+                    }
+                    if seat.related {
+                        let tUrgent = end.addingTimeInterval(-180)
+                        if tUrgent > now { entryDates.insert(tUrgent) }
+                    }
+                    // 残り30%（黄に切り替え）
+                    let t30 = end.addingTimeInterval(-total * 0.30)
+                    if t30 > now { entryDates.insert(t30) }
+                    // 残り10%（赤に切り替え）
+                    let t10 = end.addingTimeInterval(-total * 0.10)
+                    if t10 > now { entryDates.insert(t10) }
+                }
+                if seat.shouldDisplayOvertime {
+                    // 超過バー満タン（終了＋180秒）および3時間上限（終了＋10800秒）
+                    let tOverMax = end.addingTimeInterval(180)
+                    if tOverMax > now { entryDates.insert(tOverMax) }
+                    let tAutoExpire = end.addingTimeInterval(10800)
+                    if tAutoExpire > now { entryDates.insert(tAutoExpire) }
+                }
+                
+                // ★ チェックタイマーのエントリー（終了時刻・緊急3分前・残り1分前で赤切り替え）
+                if let checkEnd = seat.checkEndDate, !seat.isCheckCompleted {
+                    if checkEnd > now {
+                        entryDates.insert(checkEnd)
+                        if seat.related && seat.shouldAlertCheck {
+                            let checkUrgent = checkEnd.addingTimeInterval(-180)
+                            if checkUrgent > now {
+                                entryDates.insert(checkUrgent)
+                            }
+                        }
+                        let checkRedTime = checkEnd.addingTimeInterval(-60)
+                        if checkRedTime > now {
+                            entryDates.insert(checkRedTime)
+                        }
                     }
                 }
             }
+            
+            let sortedDates = entryDates.sorted()
+            let entries = sortedDates.prefix(40).map { ComplicationData.entry(at: $0, snapshot: snapshot) }
+            // ★ HIGH-6: デバウンスによりフェッチをスキップした場合（タイマー開始直後の連続操作中）は 2.0秒後に再評価ポリシーを設定し、
+            //   0.5秒後のヘルプ指名等の後続変更が最大60秒間取り残されるのを完全防止する。
+            //   通常時は稼働席あり60秒後・待機時120秒後の再取得ポリシーを設定する。
+            let hasAnyRunning = seats.contains(where: { ComplicationData.isDisplayableRunning($0, at: now) })
+            let reloadInterval: TimeInterval = didSkipByDebounce ? 2.0 : (hasAnyRunning ? 60 : 120)
+            completion(Timeline(entries: entries, policy: .after(now.addingTimeInterval(reloadInterval))))
         }
-        
-        let sortedDates = entryDates.sorted()
-        let entries = sortedDates.prefix(40).map { ComplicationData.entry(at: $0, snapshot: snapshot) }
-        // 席の追加・変更時は Watch アプリ側から reloadAllTimelines() されるが、
-        // バックグラウンドサスペンド等で reload 通知が遅延した場合でも最長3分以内に最新 App Group スナップショットを再読込する
-        let hasAnyRunning = seats.contains(where: { ComplicationData.isDisplayableRunning($0, at: now) })
-        completion(Timeline(entries: entries, policy: hasAnyRunning ? .after(now.addingTimeInterval(180)) : .never))
     }
 }
 
@@ -626,13 +1183,12 @@ struct ComplicationView: View {
             let staffText: String = {
                 let rawProc = (seat.checkProcess ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 let proc = rawProc.isEmpty ? "チェック" : rawProc
-                let me = (seat.currentUserName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 let rawCheckStaff = (seat.checkStaff ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 if rawCheckStaff.isEmpty {
                     return "\(proc) 未定"
                 } else if rawCheckStaff == "募集中" {
                     return "\(proc) 募集中"
-                } else if rawCheckStaff == "自分" || rawCheckStaff == "あなた" || (!me.isEmpty && rawCheckStaff.caseInsensitiveCompare(me) == .orderedSame) {
+                } else if ComplicationSeat.isStaffMe(rawCheckStaff, currentUserName: seat.currentUserName, userAliases: seat.userAliases) {
                     return "\(proc) 自分"
                 } else {
                     return "\(proc) \(rawCheckStaff)"

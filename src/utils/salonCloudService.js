@@ -1,5 +1,43 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from './supabase';
+import { dispatchSalonTimerEventPush } from './pushNotificationService';
+
+const _lastKnownCloudSeatBySalonKey = new Map();
+
+const buildSalonSeatCacheKeys = (salonId, seat) => {
+  const keys = [];
+  if (!salonId || !seat || typeof seat !== 'object') return keys;
+  const sid = String(salonId).trim();
+  const id = String(seat.cloudTimerId || seat.id || '').trim();
+  if (id) keys.push(`${sid}|id:${id}`);
+  const num = Number(seat.seatNumber || 0);
+  if (Number.isInteger(num) && num > 0) keys.push(`${sid}|num:${num}`);
+  const lbl = String(seat.seatLabel || seat.seat_label || seat.name || '')
+    .replace(/\s*[\(（]サンプル[\)）]/g, '')
+    .replace(/席$/, '')
+    .trim();
+  if (lbl) keys.push(`${sid}|lbl:${lbl}`);
+  return keys;
+};
+
+const getLastKnownCloudSeat = (salonId, seat) => {
+  const keys = buildSalonSeatCacheKeys(salonId, seat);
+  for (const k of keys) {
+    if (_lastKnownCloudSeatBySalonKey.has(k)) {
+      return _lastKnownCloudSeatBySalonKey.get(k);
+    }
+  }
+  return null;
+};
+
+const setLastKnownCloudSeat = (salonId, seat) => {
+  if (!salonId || !seat || typeof seat !== 'object') return;
+  const snapshot = { ...seat };
+  const keys = buildSalonSeatCacheKeys(salonId, snapshot);
+  for (const k of keys) {
+    _lastKnownCloudSeatBySalonKey.set(k, snapshot);
+  }
+};
 
 const USER_ID_KEY = '@assist_timer_user_id';
 let _cachedLocalUserId = null;
@@ -725,6 +763,16 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
     normalizedStatus === 'paused' && effectiveHasActiveCheck
       ? Math.max(0, Math.round((effectiveCheckEndTs - nowMs) / 1000))
       : null;
+  const isCleanEmptyIdleSeat =
+    shouldForceIdleZero ||
+    (normalizedStatus === 'idle' &&
+      isReset &&
+      !cloudTimer.color_staff_name &&
+      !rawAssist &&
+      !helpProcess &&
+      !isShampooing &&
+      !effectiveHasActiveCheck &&
+      !cloudTimer.check_staff_name);
 
   return {
     id: cloudTimer.id,
@@ -745,7 +793,7 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
     timeUpTimestamp: isOver ? targetEndTs : null,
     escalationLevel: initialEscalationLevel,
     colorStaffName:
-      normalizedStatus === 'idle' && isReset && !cloudTimer.color_staff_name
+      isCleanEmptyIdleSeat
         ? ''
         : (cloudTimer.color_staff_name || 'スタッフ'),
     assistantStaffName: shouldForceIdleZero ? '' : assistantStaffName,
@@ -756,7 +804,7 @@ export const mapCloudTimerToSeat = (cloudTimer, index = null) => {
     isNoHelpNeeded: shouldForceIdleZero ? false : isNoHelpNeeded,
     comment: isLegacySampleSeat ? '' : (cloudTimer.comment || ''),
     sortOrder: cloudTimer.sort_order || 0,
-    createdBy: cloudTimer.created_by || null,
+    createdBy: isCleanEmptyIdleSeat ? null : (cloudTimer.created_by || null),
     updatedBy: cloudTimer.updated_by || null,
     checkEndTimestamp: effectiveCheckEndTs,
     checkPausedRemainingSeconds: checkPausedRemainingSeconds,
@@ -873,7 +921,7 @@ export const fetchSalonTimers = async (salonId, options = {}) => {
         }
       }
     });
-    return mapped.map((seat) => {
+    const finalSeats = mapped.map((seat) => {
       if (/\d+/.test(String(seat.seatLabel || ''))) {
         return seat;
       }
@@ -887,6 +935,8 @@ export const fetchSalonTimers = async (salonId, options = {}) => {
       usedNums.add(maxUsed);
       return { ...seat, seatNumber: maxUsed };
     });
+    finalSeats.forEach((seat) => setLastKnownCloudSeat(salonId, seat));
+    return finalSeats;
   } catch (e) {
     console.warn('fetchSalonTimers failed:', e);
     return returnNullOnError ? null : [];
@@ -1175,13 +1225,50 @@ const executeSalonTimerUpdateById = async (salonId, timerId, rawPayload) => {
 
 /**
  * 1席のタイマー状態をクラウドへ保存/更新（UPSERT / UPDATE）
+ * 保存完了後、状態変化があればクライアントから直接 Expo Push API（+ Edge Function フォールバック）へ即時通知を配信する
  */
-export const upsertCloudTimer = async (salonId, seat) => {
+export const upsertCloudTimer = async (salonId, seat, options = {}) => {
   if (!salonId || !seat) return null;
+  const prevSeatSnapshot =
+    options?.prevSeatOverride ||
+    options?.prevSeat ||
+    seat?._preActionSeatSnapshot ||
+    getLastKnownCloudSeat(salonId, seat) ||
+    null;
   markLocalSeatWriteTimestamp(seat);
   const userId = await getOrCreateUserId();
   const payload = mapSeatToCloudTimer(seat, salonId, userId);
   recordLocalCloudPayload(payload);
+
+  const finalizeUpsertResult = (mappedSeat) => {
+    const resolvedSeat = mappedSeat || seat;
+    if (resolvedSeat) {
+      setLastKnownCloudSeat(salonId, resolvedSeat);
+    }
+    const shouldSkipDirectPush =
+      options?.skipDirectPush === true ||
+      options?.skipPushDispatch === true ||
+      seat?.skipDirectPushOnce === true;
+    if (!shouldSkipDirectPush && resolvedSeat) {
+      const inferredActorName =
+        String(
+          options?.actorName ||
+            seat?.stoppedBy ||
+            (seat?.status === 'running' && (!prevSeatSnapshot || prevSeatSnapshot.status !== 'running')
+              ? seat?.colorStaffName || ''
+              : '')
+        ).trim();
+      dispatchSalonTimerEventPush({
+        salonId,
+        actorUserId: userId,
+        actorName: inferredActorName,
+        prevSeat: prevSeatSnapshot,
+        nextSeat: resolvedSeat,
+        staffMembers: Array.isArray(options?.staffMembers) ? options.staffMembers : [],
+      }).catch(() => {});
+    }
+    return mappedSeat;
+  };
 
   try {
     const isUUID = (seat.cloudTimerId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seat.cloudTimerId))
@@ -1193,7 +1280,7 @@ export const upsertCloudTimer = async (salonId, seat) => {
       if (!payload.created_by) {
         const updRes = await executeSalonTimerUpdateById(salonId, payload.id, payload);
         if (!updRes.error && updRes.data) {
-          return mapCloudTimerToSeat(updRes.data);
+          return finalizeUpsertResult(mapCloudTimerToSeat(updRes.data));
         }
         if (updRes.error) {
           console.warn('upsertCloudTimer update-by-id error:', updRes.error);
@@ -1202,7 +1289,7 @@ export const upsertCloudTimer = async (salonId, seat) => {
       }
       const { data, error } = await executeSalonTimerUpsert(payload, userId);
       if (error) console.warn('upsertCloudTimer update error:', error);
-      return data ? mapCloudTimerToSeat(data) : null;
+      return data ? finalizeUpsertResult(mapCloudTimerToSeat(data)) : null;
     } else {
       // 席名（変更前ラベルおよび「1番」⇔「1番席」表記ゆれ含む）で同一サロン内の席を検索して既存があればIDを再利用
       const baseLabel = payload.seat_label;
@@ -1229,7 +1316,7 @@ export const upsertCloudTimer = async (salonId, seat) => {
           if (!payload.created_by) {
             const updRes = await executeSalonTimerUpdateById(salonId, payload.id, payload);
             if (!updRes.error && updRes.data) {
-              return mapCloudTimerToSeat(updRes.data);
+              return finalizeUpsertResult(mapCloudTimerToSeat(updRes.data));
             }
           }
         }
@@ -1237,7 +1324,7 @@ export const upsertCloudTimer = async (salonId, seat) => {
       const { data, error } = await executeSalonTimerUpsert(payload, userId);
 
       if (error) console.warn('upsertCloudTimer insert error:', error);
-      return data ? mapCloudTimerToSeat(data) : null;
+      return data ? finalizeUpsertResult(mapCloudTimerToSeat(data)) : null;
     }
   } catch (e) {
     console.warn('upsertCloudTimer failed:', e);
@@ -1327,9 +1414,13 @@ export const subscribeSalonTimers = (salonId, onTimerEvent) => {
                     }
                   : null)
               : (oldRec ? mapCloudTimerToSeat(oldRec) : null);
+          const mappedNewSeat = newRec ? mapCloudTimerToSeat(newRec) : null;
+          if (mappedNewSeat) {
+            setLastKnownCloudSeat(salonId, mappedNewSeat);
+          }
           onTimerEvent({
             eventType,
-            newSeat: newRec ? mapCloudTimerToSeat(newRec) : null,
+            newSeat: mappedNewSeat,
             oldSeat: resolvedOldSeat,
             isSelfEcho,
             rawPayload: payload,

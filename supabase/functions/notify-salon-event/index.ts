@@ -31,6 +31,7 @@ interface SalonTimerRecord {
   check_total_seconds?: number | null;
   check_process?: string | null;
   check_staff_name?: string | null;
+  sort_order?: number | null;
   comment?: string | null;
   updated_at?: string | null;
 }
@@ -50,11 +51,114 @@ interface PushTokenRow {
 interface NotificationPlan {
   userIds: Set<string>;
   eventType: string;
+  stateDisc: string;
+  title?: string;
   body: string;
   color: string;
 }
 
 const EXPO_PUSH_ENDPOINT = 'https://exp.host/--/api/v2/push/send';
+
+const normalizeSemanticToken = (raw?: unknown): string =>
+  String(raw ?? '')
+    .trim()
+    .replace(/[\s\u3000]+/g, '')
+    .replace(/\|/g, '_')
+    .toLowerCase();
+
+const buildPeerEventStateDisc = (
+  eventType: string,
+  params: Record<string, unknown> = {}
+): string => {
+  const ev = normalizeSemanticToken(eventType);
+  if (!ev) return '';
+  const canonHelp = (p?: unknown) => {
+    const n = normalizeSemanticToken(p);
+    return !n || n === 'ヘルプ' || n === 'ヘルプなし' || n === 'none' ? 'シャンプー' : n;
+  };
+  const canonCheck = (p?: unknown) => {
+    const n = normalizeSemanticToken(p);
+    return n || 'チェック';
+  };
+  const canonUnassignNext = (staff?: unknown, proc?: unknown) => {
+    const np = normalizeSemanticToken(proc);
+    const ns = normalizeSemanticToken(staff);
+    if (np === 'ヘルプなし' || ns === 'ヘルプなし' || ns === 'none') return 'ヘルプなし';
+    if (!ns || ns === '未定') return 'none';
+    return ns;
+  };
+
+  switch (ev) {
+    case 'assign_assist':
+      return `${normalizeSemanticToken(params.nextAssist)}:${canonHelp(params.helpProc)}`;
+    case 'unassign_assist':
+      return `${normalizeSemanticToken(params.prevAssist)}->${canonUnassignNext(params.nextAssist, params.nextHelpProc)}`;
+    case 'assign_check':
+      return `${normalizeSemanticToken(params.nextCheckStaff)}:${canonCheck(params.checkProc)}`;
+    case 'unassign_check':
+      return `${normalizeSemanticToken(params.prevCheckStaff)}->${canonUnassignNext(params.nextCheckStaff, '')}`;
+    case 'recruit':
+      return `${normalizeSemanticToken(params.recruitProc || params.helpProc || 'シャンプー')}`;
+    case 'time_adjust':
+    case 'timer_start':
+    case 'assign_main':
+      return `${Math.round((Number(params.nextEnd) || 0) / 5000)}`;
+    case 'add_check':
+      return `${Math.round((Number(params.nextCheckEnd) || 0) / 5000)}:${canonCheck(params.checkProc)}`;
+    case 'status_change':
+      return `${normalizeSemanticToken(params.procLabel || 'none')}:${normalizeSemanticToken(params.nextAssist || 'none')}`;
+    case 'stop':
+    case 'check_done':
+      return 'stop';
+    default:
+      return normalizeSemanticToken(params.stateDisc || '');
+  }
+};
+
+const fnv1a32HexUtf8 = (input: string): string => {
+  const bytes = new TextEncoder().encode(String(input || ''));
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i += 1) {
+    hash ^= bytes[i];
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+};
+
+const buildExpoCollapseId = (timerId: string, eventType: string, stateDisc = ''): string => {
+  const normTimer = normalizeSemanticToken(timerId);
+  const normEvt = normalizeSemanticToken(eventType);
+  const normDisc = normalizeSemanticToken(stateDisc);
+  const shortTimer = normTimer.replace(/[^a-z0-9]/g, '').slice(0, 12) || 'seat';
+  const shortEvt = normEvt.replace(/[^a-z0-9_]/g, '').slice(0, 12) || 'evt';
+  const hash8 = fnv1a32HexUtf8(`${normTimer}|${normEvt}|${normDisc}`);
+  return `at:${shortTimer}:${shortEvt}:${hash8}`;
+};
+
+const buildPeerEventSemanticKey = (
+  timerIdOrLabel: string,
+  eventType: string,
+  actorId = '',
+  stateDisc = ''
+): string => {
+  const target = normalizeSemanticToken(timerIdOrLabel);
+  const ev = normalizeSemanticToken(eventType);
+  const actor = normalizeSemanticToken(actorId);
+  const disc = normalizeSemanticToken(stateDisc);
+  if (!target || !ev) return '';
+  if (disc) return `${target}|${ev}|${actor}|${disc}`;
+  return actor ? `${target}|${ev}|${actor}` : `${target}|${ev}`;
+};
+
+const parseSeatNumberFromLabel = (label: string, sortOrder?: number | null): number => {
+  const m = String(label || '').match(/(\d+)/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  const so = Number(sortOrder || 0);
+  return Number.isFinite(so) && so > 0 ? Math.round(so) : 0;
+};
 
 const cleanSeatLabel = (raw?: string | null): string =>
   String(raw || '席')
@@ -158,8 +262,10 @@ Deno.serve(async (req: Request) => {
 
     const normalizeStaffName = (name?: string | null): string =>
       String(name || '')
+        .normalize('NFKC')
         .trim()
-        .replace(/[\s\u3000]+/g, '');
+        .replace(/[\s\u3000]+/g, '')
+        .toLowerCase();
 
     const resolveUserIdsByName = (rawName?: string | null): string[] => {
       const target = String(rawName || '').trim();
@@ -288,6 +394,20 @@ Deno.serve(async (req: Request) => {
         isRecentPrevStopperWindow
     );
 
+    const nowMs = Date.now();
+    const currEnd = Number(curr.target_end_timestamp || 0);
+    const prevEnd = Number(prev?.target_end_timestamp || 0);
+    const currCheckEnd = Number(curr.check_target_end_timestamp || 0);
+    const formatRemainingSuffix = (targetTs: number): string => {
+      if (!(targetTs > 0)) return '';
+      if (targetTs <= nowMs) return '（超過中）';
+      const remMin = Math.max(1, Math.round((targetTs - nowMs) / 60000));
+      return `（残り約${remMin}分）`;
+    };
+    const actorDisplayName = resolveActorDisplayName(actorUserId);
+    const actorPrefix =
+      actorDisplayName && actorDisplayName !== 'スタイリスト' ? `${actorDisplayName}さんが` : '';
+
     const plans: NotificationPlan[] = [];
 
     // ① チェックタイマー完了・解除（大元タイマー稼働継続中）
@@ -302,6 +422,8 @@ Deno.serve(async (req: Request) => {
       plans.push({
         userIds: targets,
         eventType: 'check_done',
+        stateDisc: buildPeerEventStateDisc('check_done'),
+        title: `✓ ${label} ${checkProcLabel}完了`,
         body: isCompleted
           ? `✓ ${label}の${checkProcLabel}完了${staffSuffix}`
           : `⏹ ${label}の${checkProcLabel}タイマーが解除されました`,
@@ -331,7 +453,7 @@ Deno.serve(async (req: Request) => {
               prevStopperSet
             );
 
-      const stopperDisplayName = resolveActorDisplayName(actorUserId);
+      const stopperDisplayName = actorDisplayName;
       const namedActor = stopperDisplayName || (isNamedAssistant(currAssist) ? currAssist : '');
       let body = didResetOrFinishPaused
         ? `⏹ ${label}のタイマーがリセットされました`
@@ -339,10 +461,13 @@ Deno.serve(async (req: Request) => {
         ? `⏹ ${label}のタイマーを ${namedActor} さんが止めました`
         : `⏹ ${label}のタイマーが停止されました`;
       let color = '#FF9500';
+      let title = `⏹ ${label} タイマー停止`;
 
       if (currMeta && !isSecondaryStopTimer) {
         color = currMeta.color;
+        title = `⏹ ${label} ${currMeta.label}移行`;
         if (currMeta.id === 'call') {
+          title = `🔔 ${label} 呼び出し`;
           body = `🔔 ${label}から呼び出しがあります${namedActor ? `（${namedActor}）` : ''}`;
         } else if (namedActor) {
           body = `${currMeta.emoji} ${label}の${currMeta.label}に ${namedActor} さんが入りました`;
@@ -354,27 +479,13 @@ Deno.serve(async (req: Request) => {
       plans.push({
         userIds: targets,
         eventType: 'stop',
+        stateDisc: buildPeerEventStateDisc('stop'),
+        title,
         body,
         color,
       });
     }
-    // ③ ヘルプ募集・チェック募集の開始（募集中）
-    else if (prevAssist !== '募集中' && currAssist === '募集中') {
-      plans.push({
-        userIds: new Set(allMemberUserIds),
-        eventType: 'recruit',
-        body: `📢 ${label}が${helpProcLabel}担当を募集しています！`,
-        color: '#FF453A',
-      });
-    } else if (prevCheck !== '募集中' && currCheck === '募集中') {
-      plans.push({
-        userIds: new Set(allMemberUserIds),
-        eventType: 'recruit',
-        body: `📢 ${label}が${checkProcLabel}担当を募集しています！`,
-        color: '#FF9F0A',
-      });
-    }
-    // ④ 新規タイマー開始時（担当同時指名＋主担当設定＋関係者/ヘルプ未定メンバーへの開始通知をすべて独立判定）
+    // ③ 新規タイマー開始時（担当同時指名＋主担当設定＋募集＋関係者開始通知をすべて独立判定）
     else if ((!prev || prev.status !== 'running') && curr.status === 'running') {
       const mins = Math.max(1, Math.round(Number(curr.target_seconds || 600) / 60));
       const notified = new Set<string>();
@@ -387,6 +498,11 @@ Deno.serve(async (req: Request) => {
           plans.push({
             userIds: chkUsers,
             eventType: 'assign_check',
+            stateDisc: buildPeerEventStateDisc('assign_check', {
+              nextCheckStaff: currCheck,
+              checkProc: checkProcLabel,
+            }),
+            title: `🔔 ${label} ${checkProcLabel}担当指名`,
             body: `🔍 ${label}の${checkProcLabel}（${chkMins}分）担当に指定されました`,
             color: '#FF9F0A',
           });
@@ -399,6 +515,11 @@ Deno.serve(async (req: Request) => {
           plans.push({
             userIds: assistUsers,
             eventType: 'assign_assist',
+            stateDisc: buildPeerEventStateDisc('assign_assist', {
+              nextAssist: currAssist,
+              helpProc: helpProcLabel,
+            }),
+            title: `🔔 ${label} ${helpProcLabel}担当指名`,
             body:
               currActionId === 'call'
                 ? `🔔 ${label}からあなたへ呼び出しがあります！`
@@ -408,14 +529,44 @@ Deno.serve(async (req: Request) => {
         }
       }
       const mainStaffUsers = new Set(Array.from(collectMainStaffIds(curr)).filter((u) => !notified.has(u)));
-      if (mainStaffUsers.size > 0) {
+      if (mainStaffUsers.size > 0 && currColor && currColor !== 'スタッフ' && currColor !== 'スタイリスト') {
         for (const u of mainStaffUsers) notified.add(u);
         plans.push({
           userIds: mainStaffUsers,
           eventType: 'assign_main',
+          stateDisc: buildPeerEventStateDisc('assign_main', { nextEnd: currEnd }),
+          title: `🔔 ${label} 主担当指名`,
           body: `🎨 ${label}のタイマー（${mins}分）があなた主担当で設定されました`,
           color: '#AF52DE',
         });
+      }
+      if (currAssist === '募集中') {
+        const recUsers = new Set(Array.from(allMemberUserIds).filter((u) => !notified.has(u)));
+        for (const u of recUsers) notified.add(u);
+        if (recUsers.size > 0) {
+          plans.push({
+            userIds: recUsers,
+            eventType: 'recruit',
+            stateDisc: buildPeerEventStateDisc('recruit', { recruitProc: helpProcLabel }),
+            title: `📢 ${label} ${helpProcLabel}ヘルプ募集`,
+            body: `📢 ${label}が${helpProcLabel}（${mins}分）担当を募集しています！`,
+            color: '#FF453A',
+          });
+        }
+      } else if (currCheck === '募集中') {
+        const chkMins = Math.max(1, Math.round(Number(curr.check_total_seconds || 300) / 60));
+        const recUsers = new Set(Array.from(allMemberUserIds).filter((u) => !notified.has(u)));
+        for (const u of recUsers) notified.add(u);
+        if (recUsers.size > 0) {
+          plans.push({
+            userIds: recUsers,
+            eventType: 'recruit',
+            stateDisc: buildPeerEventStateDisc('recruit', { recruitProc: checkProcLabel }),
+            title: `📢 ${label} ${checkProcLabel}ヘルプ募集`,
+            body: `📢 ${label}が${checkProcLabel}（${chkMins}分）担当を募集しています！`,
+            color: '#FF9F0A',
+          });
+        }
       }
       const startCandidates = mergeSets(
         collectMainTimerAlertCandidates(curr),
@@ -426,59 +577,152 @@ Deno.serve(async (req: Request) => {
         plans.push({
           userIds: startCandidates,
           eventType: 'timer_start',
+          stateDisc: buildPeerEventStateDisc('timer_start', { nextEnd: currEnd }),
+          title: `▶️ ${label} タイマー開始`,
           body: `▶️ ${label}のタイマー（${mins}分）が開始されました`,
           color: '#0A84FF',
         });
       }
     }
-    // ⑤ 稼働中・停止中における担当者指名・途中チェック追加・施術ステータス変更・残り時間変更
+    // ④ 稼働中・停止中における担当者指名・解除・募集・途中チェック追加・施術ステータス変更・残り時間変更
     else {
       const isAddingCheck = !prevHadActiveCheck && currHasActiveCheck && prev?.status === 'running' && curr.status === 'running';
       const prevStopperSet =
         isRecentPrevStopperWindow && prevUpdatedBy ? new Set<string>([prevUpdatedBy]) : new Set<string>();
 
-      // 5-1. 本人への担当指名通知を最優先でプラン登録（sentTokens により本人へ確実に「担当に指定されました」が届く）
-      if ((prevCheck !== currCheck || isAddingCheck) && isNamedCheckStaff(currCheck)) {
+      // 4-1. 本人への担当指名通知を最優先でプラン登録
+      if (
+        (normalizeStaffName(prevCheck) !== normalizeStaffName(currCheck) || isAddingCheck) &&
+        isNamedCheckStaff(currCheck) &&
+        currCheck !== 'スタッフ' &&
+        currCheck !== 'スタイリスト'
+      ) {
         const assignedCheckIds = new Set(resolveUserIdsByName(currCheck));
         if (assignedCheckIds.size > 0) {
           const chkMins = Math.max(1, Math.round(Number(curr.check_total_seconds || 300) / 60));
+          const remSuffix = isAddingCheck
+            ? `（${chkMins}分）`
+            : (currHasActiveCheck ? formatRemainingSuffix(currCheckEnd) : '');
           plans.push({
             userIds: assignedCheckIds,
             eventType: 'assign_check',
-            body: currHasActiveCheck
-              ? `🔍 ${label}の${checkProcLabel}（${chkMins}分）担当に指定されました`
-              : `🔍 ${label}の${checkProcLabel}担当に指定されました`,
+            stateDisc: buildPeerEventStateDisc('assign_check', {
+              nextCheckStaff: currCheck,
+              checkProc: checkProcLabel,
+            }),
+            title: `🔔 ${label} ${checkProcLabel}担当指名`,
+            body: `🔍 ${label}の${checkProcLabel}担当に指定されました${remSuffix}`,
             color: '#FF9F0A',
+          });
+        }
+      }
+
+      // 4-1b. 稼働中のチェック担当解除・別スタッフ変更 (unassign_check)
+      if (
+        prev?.status === 'running' &&
+        curr.status === 'running' &&
+        prevHadActiveCheck &&
+        currHasActiveCheck &&
+        isNamedCheckStaff(prevCheck) &&
+        prevCheck !== 'スタッフ' &&
+        prevCheck !== 'スタイリスト' &&
+        normalizeStaffName(prevCheck) !== normalizeStaffName(currCheck)
+      ) {
+        const prevChkUsers = new Set(resolveUserIdsByName(prevCheck));
+        if (prevChkUsers.size > 0) {
+          const unassignChkBody =
+            isNamedCheckStaff(currCheck) && currCheck !== 'スタッフ' && currCheck !== 'スタイリスト'
+              ? `${label}: ${actorPrefix}${checkProcLabel}担当を${currCheck}さんに変更しました`
+              : `${label}: ${actorPrefix}${checkProcLabel}担当から外れました`;
+          plans.push({
+            userIds: prevChkUsers,
+            eventType: 'unassign_check',
+            stateDisc: buildPeerEventStateDisc('unassign_check', {
+              prevCheckStaff: prevCheck,
+              nextCheckStaff: currCheck,
+            }),
+            title: `ℹ️ ${label} ${checkProcLabel}担当解除`,
+            body: unassignChkBody,
+            color: '#8E8E93',
           });
         }
       }
 
       if (
         (curr.status === 'running' || !currMeta || currActionId === 'call') &&
-        (prevAssist !== currAssist || (prevActionId !== currActionId && Boolean(currActionId))) &&
-        isNamedAssistant(currAssist)
+        (normalizeStaffName(prevAssist) !== normalizeStaffName(currAssist) ||
+          (prevActionId !== currActionId && Boolean(currActionId))) &&
+        isNamedAssistant(currAssist) &&
+        currAssist !== 'スタッフ' &&
+        currAssist !== 'スタイリスト'
       ) {
         const assignedAssistIds = new Set(resolveUserIdsByName(currAssist));
         if (assignedAssistIds.size > 0) {
+          const remSuffix = curr.status === 'running' && currActionId !== 'call' ? formatRemainingSuffix(currEnd) : '';
           plans.push({
             userIds: assignedAssistIds,
             eventType: 'assign_assist',
+            stateDisc: buildPeerEventStateDisc('assign_assist', {
+              nextAssist: currAssist,
+              helpProc: helpProcLabel,
+            }),
+            title: `🔔 ${label} ${helpProcLabel}担当指名`,
             body:
               currActionId === 'call'
                 ? `🔔 ${label}からあなたへ呼び出しがあります！`
-                : `🙋‍♂️ ${label}の${helpProcLabel}担当に指定されました`,
+                : `🙋‍♂️ ${label}の${helpProcLabel}担当に指定されました${remSuffix}`,
             color: currActionId === 'call' ? '#FF9500' : '#0A84FF',
           });
         }
       }
 
-      if (prevColor !== currColor && currColor && currColor !== 'スタッフ' && currColor !== 'スタイリスト') {
+      // 4-1c. 稼働中のヘルプ担当解除・別スタッフ変更 (unassign_assist)
+      if (
+        prev?.status === 'running' &&
+        curr.status === 'running' &&
+        isNamedAssistant(prevAssist) &&
+        prevAssist !== 'スタッフ' &&
+        prevAssist !== 'スタイリスト' &&
+        normalizeStaffName(prevAssist) !== normalizeStaffName(currAssist)
+      ) {
+        const prevAssistUsers = new Set(resolveUserIdsByName(prevAssist));
+        if (prevAssistUsers.size > 0) {
+          const nextHelpRaw = String(curr.help_process || '').trim();
+          const isExplicitNoHelp = isNoHelp(currAssist) || nextHelpRaw === 'ヘルプなし';
+          const unassignBody = isExplicitNoHelp
+            ? `${label}: ${actorPrefix}ヘルプ担当を解除しました（ヘルプなし）`
+            : isNamedAssistant(currAssist) && currAssist !== 'スタッフ' && currAssist !== 'スタイリスト'
+              ? `${label}: ${actorPrefix}ヘルプ担当を${currAssist}さんに変更しました`
+              : `${label}: ${actorPrefix}ヘルプ担当から外れました`;
+          plans.push({
+            userIds: prevAssistUsers,
+            eventType: 'unassign_assist',
+            stateDisc: buildPeerEventStateDisc('unassign_assist', {
+              prevAssist,
+              nextAssist: currAssist,
+              nextHelpProc: nextHelpRaw,
+            }),
+            title: `ℹ️ ${label} ヘルプ担当解除`,
+            body: unassignBody,
+            color: '#8E8E93',
+          });
+        }
+      }
+
+      if (
+        normalizeStaffName(prevColor) !== normalizeStaffName(currColor) &&
+        currColor &&
+        currColor !== 'スタッフ' &&
+        currColor !== 'スタイリスト'
+      ) {
         const assignedMainIds = new Set(resolveUserIdsByName(currColor));
         if (assignedMainIds.size > 0) {
           const mins = Math.max(1, Math.round(Number(curr.target_seconds || 600) / 60));
           plans.push({
             userIds: assignedMainIds,
             eventType: 'assign_main',
+            stateDisc: buildPeerEventStateDisc('assign_main', { nextEnd: currEnd }),
+            title: `🔔 ${label} 主担当指名`,
             body:
               curr.status === 'running'
                 ? `🎨 ${label}のタイマー（${mins}分）があなた主担当で設定されました`
@@ -488,7 +732,33 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      // 5-2. 稼働中席への途中チェック追加（担当者以外の主担当・関係者・未定時の全員へ共有）
+      // 4-1d. 稼働途中の全員募集への切り替え（前任者には上の unassign が優先配信され、残りのメンバーに募集が届く）
+      if (prevAssist !== '募集中' && currAssist === '募集中') {
+        const remSuffix = curr.status === 'running' ? formatRemainingSuffix(currEnd) : '';
+        plans.push({
+          userIds: new Set(allMemberUserIds),
+          eventType: 'recruit',
+          stateDisc: buildPeerEventStateDisc('recruit', { recruitProc: helpProcLabel }),
+          title: `📢 ${label} ${helpProcLabel}ヘルプ募集`,
+          body: `📢 ${label}が${helpProcLabel}担当を募集しています！${remSuffix}`,
+          color: '#FF453A',
+        });
+      } else if (prevCheck !== '募集中' && currCheck === '募集中') {
+        const chkMins = Math.max(1, Math.round(Number(curr.check_total_seconds || 300) / 60));
+        const remSuffix = isAddingCheck
+          ? `（${chkMins}分）`
+          : (currHasActiveCheck ? formatRemainingSuffix(currCheckEnd) : '');
+        plans.push({
+          userIds: new Set(allMemberUserIds),
+          eventType: 'recruit',
+          stateDisc: buildPeerEventStateDisc('recruit', { recruitProc: checkProcLabel }),
+          title: `📢 ${label} ${checkProcLabel}ヘルプ募集`,
+          body: `📢 ${label}が${checkProcLabel}担当を募集しています！${remSuffix}`,
+          color: '#FF9F0A',
+        });
+      }
+
+      // 4-2. 稼働中席への途中チェック追加（担当者以外の主担当・関係者へ共有）
       if (isAddingCheck) {
         const chkMins = Math.max(1, Math.round(Number(curr.check_total_seconds || 300) / 60));
         const targets = collectCheckTimerAlertCandidates(curr);
@@ -496,12 +766,17 @@ Deno.serve(async (req: Request) => {
         plans.push({
           userIds: targets,
           eventType: 'add_check',
+          stateDisc: buildPeerEventStateDisc('add_check', {
+            nextCheckEnd: currCheckEnd,
+            checkProc: checkProcLabel,
+          }),
+          title: `⏱ ${label} ${checkProcLabel}タイマー追加`,
           body: `🔍 ${label}に${checkProcLabel}（${chkMins}分）が追加されました${staffSuffix}`,
           color: '#FF9F0A',
         });
       }
 
-      // 5-3. タイマー停止を伴わない施術ステータス（呼び出し・コーミング・シャンプー等）の変更（1人目が停止後に2人目がシャンプー等に入った場合を含む）
+      // 4-3. タイマー停止を伴わない施術ステータス（呼び出し・コーミング・シャンプー等）の変更
       if (
         currAssist !== '募集中' &&
         (prevActionId !== currActionId || Boolean(prev?.is_shampooing) !== Boolean(curr.is_shampooing)) &&
@@ -521,7 +796,7 @@ Deno.serve(async (req: Request) => {
                 collectMainTimerAlertCandidates(prev),
                 prevStopperSet
               );
-        const namedActor = resolveActorDisplayName(actorUserId) || (isNamedAssistant(currAssist) ? currAssist : '');
+        const namedActor = actorDisplayName || (isNamedAssistant(currAssist) ? currAssist : '');
 
         if (currMeta) {
           let body = `${currMeta.emoji} ${label}が${currMeta.label}に入りました`;
@@ -535,6 +810,11 @@ Deno.serve(async (req: Request) => {
           plans.push({
             userIds: targets,
             eventType: 'status_change',
+            stateDisc: buildPeerEventStateDisc('status_change', {
+              procLabel: currMeta.label,
+              nextAssist: currAssist,
+            }),
+            title: currMeta.id === 'call' ? `🔔 ${label} 呼び出し` : `🚿 ${label} ${currMeta.label}開始`,
             body,
             color: currMeta.color,
           });
@@ -542,55 +822,82 @@ Deno.serve(async (req: Request) => {
           plans.push({
             userIds: targets,
             eventType: 'status_change',
+            stateDisc: buildPeerEventStateDisc('status_change', {
+              procLabel: `done_${prevMeta.label}`,
+              nextAssist: currAssist,
+            }),
+            title: `✅ ${label} ${prevMeta.label}完了`,
             body: `✅ ${label}の${prevMeta.label}が完了しました`,
             color: '#30D158',
           });
         }
       }
 
-      // 5-4. ヘルプ担当・チェック担当への参戦／指名共有（主担当・既存関係者・直近停止者へ通知）
-      if (prevAssist !== currAssist && isNamedAssistant(currAssist)) {
+      // 4-4. ヘルプ担当・チェック担当への参戦／指名共有（主担当・既存関係者・直近停止者へ通知）
+      if (normalizeStaffName(prevAssist) !== normalizeStaffName(currAssist) && isNamedAssistant(currAssist)) {
+        const mainStaffOfCurr = collectMainStaffIds(curr);
         const stakeholderIds = mergeSets(
-          collectMainStaffIds(curr),
+          mainStaffOfCurr,
           collectAssignedStakeholders(prev),
           prevStopperSet
         );
         for (const uid of resolveUserIdsByName(currAssist)) stakeholderIds.delete(uid);
+        for (const uid of resolveUserIdsByName(prevAssist)) {
+          if (!mainStaffOfCurr.has(uid)) stakeholderIds.delete(uid);
+        }
         if (stakeholderIds.size > 0) {
+          const remSuffix = curr.status === 'running' ? formatRemainingSuffix(currEnd) : '';
           plans.push({
             userIds: stakeholderIds,
             eventType: 'assign_assist',
-            body: `🤝 ${label}の${helpProcLabel}に ${currAssist} さんが入りました`,
+            stateDisc: buildPeerEventStateDisc('assign_assist', {
+              nextAssist: currAssist,
+              helpProc: helpProcLabel,
+            }),
+            title: `🔔 ${label} ${helpProcLabel}担当変更`,
+            body: `🤝 ${label}の${helpProcLabel}に ${currAssist} さんが入りました${remSuffix}`,
             color: '#30D158',
           });
         }
       }
 
-      if (prevCheck !== currCheck && isNamedCheckStaff(currCheck)) {
-        const stakeholderIds = mergeSets(collectMainStaffIds(curr), collectAssignedStakeholders(prev));
+      if (normalizeStaffName(prevCheck) !== normalizeStaffName(currCheck) && isNamedCheckStaff(currCheck)) {
+        const mainStaffOfCurr = collectMainStaffIds(curr);
+        const stakeholderIds = mergeSets(mainStaffOfCurr, collectAssignedStakeholders(prev));
         for (const uid of resolveUserIdsByName(currCheck)) stakeholderIds.delete(uid);
+        for (const uid of resolveUserIdsByName(prevCheck)) {
+          if (!mainStaffOfCurr.has(uid)) stakeholderIds.delete(uid);
+        }
         if (stakeholderIds.size > 0) {
+          const remSuffix = currHasActiveCheck ? formatRemainingSuffix(currCheckEnd) : '';
           plans.push({
             userIds: stakeholderIds,
             eventType: 'assign_check',
-            body: `🔍 ${label}の${checkProcLabel}に ${currCheck} さんが入りました`,
+            stateDisc: buildPeerEventStateDisc('assign_check', {
+              nextCheckStaff: currCheck,
+              checkProc: checkProcLabel,
+            }),
+            title: `🔔 ${label} ${checkProcLabel}担当変更`,
+            body: `🔍 ${label}の${checkProcLabel}に ${currCheck} さんが入りました${remSuffix}`,
             color: '#30D158',
           });
         }
       }
 
-      // 5-5. 稼働中タイマーの残り時間変更（25秒以上の変更時）
+      // 4-5. 稼働中タイマーの残り時間変更（25秒以上の変更時）
       if (
         prev?.status === 'running' &&
         curr.status === 'running' &&
-        Math.abs(Number(curr.target_end_timestamp || 0) - Number(prev.target_end_timestamp || 0)) >= 25000
+        Math.abs(currEnd - prevEnd) >= 25000
       ) {
-        const remSec = Math.max(0, Math.round((Number(curr.target_end_timestamp || 0) - Date.now()) / 1000));
+        const remSec = Math.max(0, Math.round((currEnd - nowMs) / 1000));
         const remMins = Math.max(1, Math.round(remSec / 60));
         const targets = mergeSets(collectMainTimerAlertCandidates(curr), collectAssignedStakeholders(curr));
         plans.push({
           userIds: targets,
           eventType: 'time_adjust',
+          stateDisc: buildPeerEventStateDisc('time_adjust', { nextEnd: currEnd }),
+          title: `⏱ ${label} 残り時間変更`,
           body: `⏱ ${label}の残り時間が変更されました（残り約${remMins}分）`,
           color: '#0A84FF',
         });
@@ -628,12 +935,50 @@ Deno.serve(async (req: Request) => {
       return Response.json({ ok: true, sent: 0, reason: 'no_registered_tokens' });
     }
 
-    const updatedTsMs = curr.updated_at ? new Date(curr.updated_at).getTime() : Date.now();
+    const updatedTsMs = curr.updated_at ? new Date(curr.updated_at).getTime() : nowMs;
+    const seatNumber = parseSeatNumberFromLabel(label, (curr as { sort_order?: number | null }).sort_order);
+    const seatSnapshot = {
+      id: curr.id,
+      seatNumber,
+      seatLabel: label,
+      status: curr.status === 'running' && currEnd > 0 ? 'running' : 'paused',
+      targetSeconds: Number(curr.target_seconds || 0) || 0,
+      targetEndTimestamp: currEnd,
+      pausedRemainingSeconds: Number(curr.paused_remaining_seconds || 0) || 0,
+      createdBy: curr.created_by || null,
+      colorStaffName: curr.color_staff_name || null,
+      assistantStaffName: curr.assistant_staff_name || null,
+      helpProcess: curr.help_process || null,
+      isShampooing: Boolean(curr.is_shampooing),
+      actionStatus: currActionId || 'normal',
+      checkTargetEndTimestamp: currCheckEnd > 0 ? currCheckEnd : null,
+      checkTotalSeconds: Number(curr.check_total_seconds || 0) || null,
+      checkProcess: curr.check_process || null,
+      checkStaffName: curr.check_staff_name || null,
+      updatedBy: actorUserId || null,
+      updatedAt: Number.isFinite(updatedTsMs) && updatedTsMs > 0 ? updatedTsMs : nowMs,
+    };
+
     const messages: Record<string, unknown>[] = [];
-    const sentTokens = new Set<string>();
+    const sentTokens = new Set<string>(
+      Array.isArray(payload?.alreadyNotifiedTokens)
+        ? payload.alreadyNotifiedTokens
+            .map((t: unknown) => String(t || '').trim())
+            .filter(Boolean)
+        : []
+    );
 
     for (const plan of activePlans) {
       const notifId = `push_${curr.id}_${plan.eventType}_${updatedTsMs}`;
+      const semanticKey = buildPeerEventSemanticKey(
+        curr.id,
+        plan.eventType,
+        actorUserId,
+        plan.stateDisc
+      );
+      const collapseId = buildExpoCollapseId(curr.id, plan.eventType, plan.stateDisc);
+      const isGentleUnassign =
+        plan.eventType === 'unassign_assist' || plan.eventType === 'unassign_check';
       for (const row of tokens) {
         if (!plan.userIds.has(String(row.user_id))) continue;
         const expoToken = String(row.expo_push_token || '').trim();
@@ -642,20 +987,32 @@ Deno.serve(async (req: Request) => {
 
         messages.push({
           to: expoToken,
-          title: 'サロン共有通知',
+          title: plan.title || 'サロン共有通知',
           body: plan.body,
-          sound: 'default',
+          ...(isGentleUnassign ? {} : { sound: 'default' }),
           priority: 'high',
-          interruptionLevel: 'time-sensitive',
+          interruptionLevel: isGentleUnassign ? 'active' : 'time-sensitive',
           channelId: 'salon-shared-events',
           _contentAvailable: true,
+          collapseId,
           data: {
+            type: 'SALON_EVENT_PUSH',
             salonId,
             timerId: curr.id,
+            seatNumber,
             seatLabel: label,
             notifId,
             eventType: plan.eventType,
+            isGentleInfo: isGentleUnassign,
+            stateDisc: plan.stateDisc,
+            semanticKey,
+            notifText: plan.body,
+            notifColor: plan.color,
             color: plan.color,
+            updatedBy: actorUserId || null,
+            actorId: actorUserId || null,
+            updatedAt: Number.isFinite(updatedTsMs) && updatedTsMs > 0 ? updatedTsMs : nowMs,
+            seatSnapshot,
           },
         });
       }

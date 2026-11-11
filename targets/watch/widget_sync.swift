@@ -12,6 +12,9 @@ import WidgetKit
 enum WidgetSync {
     static let appGroup = "group.com.assisttimer"
     static let snapshotKey = "assisttimer.widget.snapshot"
+    static let savedAtEpochKey = "assisttimer.widget.savedAtEpoch"
+    static let lastTouchedAtEpochKey = "assisttimer.widget.lastTouchedAtEpoch"
+    private static let widgetFetchedAtEpochKey = "assisttimer.widget.fetchedAtEpoch"
     private static let prevStatesKey = "assisttimer.widget.prevStates"
     private static let lastTouchedKey = "assisttimer.widget.lastTouchedId"
 
@@ -90,6 +93,51 @@ enum WidgetSync {
     private static func performSaveOnQueue(timers: [SeatTimerItem], mainTimer: SeatTimerItem?, userName: String, forceReload: Bool, isAppActive: Bool) {
         guard let defaults = UserDefaults(suiteName: appGroup) else { return }
 
+        let nowEpoch = Date().timeIntervalSince1970
+
+        // ★ HIGH-7: 直近15秒以内に WidgetKit がクラウドから最新状態を自律フェッチした直後に、
+        //   Watch 本体アプリの「コールド起動直後でまだ一度も権威ある同期（SYNC_SEATS / 直接クラウドポーリング / 自機操作）を受けていない未同期メモリ」から
+        //   「全客席 00:00 非稼働」かつローカル停止記録もないデータが渡された場合のみ、App Group の稼働中客席スナップショットを逆上書きしないよう保護する。
+        //   （※既に SYNC_SEATS やクラウド同期を受信済み（hasReceivedAuthoritativeSyncInSession == true）のリモート停止・担当解除では絶対にブロックしない）
+        let lastWidgetFetchEpoch = defaults.double(forKey: widgetFetchedAtEpochKey)
+        let hasAnyIncomingRunningSeat = timers.contains(where: { $0.isRunning && safeFiniteEpoch($0.targetEndTime) > 0 })
+        let isIncomingMainActive = (mainTimer?.isRunning == true || mainTimer?.isPreCountingDown == true)
+        let isColdBootUnsyncedMemory = !WatchSessionManager.shared.hasReceivedAuthoritativeSyncInSession
+        if isColdBootUnsyncedMemory && !hasAnyIncomingRunningSeat && !isIncomingMainActive && lastWidgetFetchEpoch > 0 && (nowEpoch - lastWidgetFetchEpoch) < 15.0,
+           let existingData = defaults.data(forKey: snapshotKey),
+           let existingObj = try? JSONSerialization.jsonObject(with: existingData) as? [String: Any],
+           let existingSeats = existingObj["seats"] as? [[String: Any]] {
+            let hadRunningMainInExisting = existingSeats.contains { sDict in
+                let isMain = (sDict["isMainTimer"] as? NSNumber)?.boolValue ?? (sDict["isMainTimer"] as? Bool) ?? false
+                let sRunning = (sDict["isRunning"] as? NSNumber)?.boolValue ?? (sDict["isRunning"] as? Bool) ?? false
+                return isMain && sRunning
+            }
+            if !hadRunningMainInExisting {
+                let localStopsDict = (defaults.dictionary(forKey: "assisttimer.watch.localStops.v1") as? [String: [String: Double]]) ?? [:]
+                let confirmedPeerStopsDict = (defaults.dictionary(forKey: "assisttimer.watch.confirmedPeerStoppedEnds.v1") as? [String: Double]) ?? [:]
+                let hasUnstoppedActiveCloudSeatInExisting = existingSeats.contains { sDict in
+                    let isMain = (sDict["isMainTimer"] as? NSNumber)?.boolValue ?? (sDict["isMainTimer"] as? Bool) ?? false
+                    guard !isMain else { return false }
+                    let sRunning = (sDict["isRunning"] as? NSNumber)?.boolValue ?? (sDict["isRunning"] as? Bool) ?? false
+                    let sEnd = (sDict["endEpoch"] as? NSNumber)?.doubleValue ?? (sDict["endEpoch"] as? Double) ?? 0
+                    guard sRunning, sEnd > 0, sEnd > nowEpoch - 10800 else { return false }
+                    let sId = (sDict["id"] as? String) ?? ""
+                    let sNum = (sDict["seatNumber"] as? NSNumber)?.intValue ?? (sDict["seatNumber"] as? Int) ?? 0
+                    let stopRec = localStopsDict[sId] ?? (sNum > 0 ? localStopsDict["seat-\(sNum)"] : nil)
+                    let stopAt = stopRec?["at"] ?? 0
+                    let stopEnd = stopRec?["end"] ?? 0
+                    let wasStoppedLocally = (stopEnd > 0 && abs(stopEnd - sEnd) <= 2.5 && nowEpoch - stopAt < 14400)
+                        || (stopAt > 0 && nowEpoch - stopAt < 15.0)
+                    let confirmedPeerEnd = confirmedPeerStopsDict[sId] ?? (sNum > 0 ? confirmedPeerStopsDict["seat-\(sNum)"] : nil) ?? 0
+                    let wasConfirmedPeerStop = confirmedPeerEnd > 0 && abs(confirmedPeerEnd - sEnd) <= 2.5
+                    return !wasStoppedLocally && !wasConfirmedPeerStop
+                }
+                if hasUnstoppedActiveCloudSeatInExisting {
+                    return
+                }
+            }
+        }
+
         // メインタイマーも含めた全アイテムリスト
         var allItems = timers
         if let m = mainTimer {
@@ -98,6 +146,8 @@ enum WidgetSync {
 
         // ── 最後に操作された席の判定（自分が関わる席を最優先し、他人の無関係な席で自分の文字盤が奪われないようにする） ──
         var lastTouchedId = defaults.string(forKey: lastTouchedKey)
+        var lastTouchedAtEpoch = defaults.double(forKey: lastTouchedAtEpochKey)
+        var didTouchChange = false
         let prevStates = defaults.dictionary(forKey: prevStatesKey) as? [String: [Double]] // id: [isRunning(0/1), endEpoch, checkEndEpoch]
         let hasAnyRelatedActive = allItems.contains(where: { ($0.isRunning || $0.isPreCountingDown) && ($0.id == "main-timer" || $0.isRelated(to: userName)) })
         if let prev = prevStates {
@@ -107,14 +157,17 @@ enum WidgetSync {
                 let end = safeFiniteEpoch(t.targetEndTime)
                 let checkEnd = (!t.isCheckCompleted ? safeFiniteEpoch(t.checkTargetEndTime) : 0)
                 let isRel = (t.id == "main-timer") || t.isRelated(to: userName)
+                let shouldAlertMain = (t.id == "main-timer") || t.shouldAlertMainTimer(for: userName)
                 var didChange = false
                 let seatKey = "seat-\(t.seatNumber)"
                 let prevEntry = prev[t.id] ?? (t.seatNumber > 0 ? prev[seatKey] : nil)
                 if let p = prevEntry, p.count >= 2 {
                     let wasRunning = p[0] > 0.5
                     let prevCheckEnd = p.count >= 3 ? p[2] : 0
-                    if !wasRunning || abs(p[1] - end) >= endChangeThreshold || (checkEnd > 0 && abs(prevCheckEnd - checkEnd) >= endChangeThreshold) {
-                        didChange = true // スタート（再開含む）・時間変更・チェックタイマー追加/変更
+                    let prevRel = p.count >= 4 ? (p[3] > 0.5) : false
+                    let prevAlertMain = p.count >= 5 ? (p[4] > 0.5) : false
+                    if !wasRunning || abs(p[1] - end) >= endChangeThreshold || (checkEnd > 0 && abs(prevCheckEnd - checkEnd) >= endChangeThreshold) || (!prevRel && isRel) || (!prevAlertMain && shouldAlertMain) {
+                        didChange = true // スタート（再開含む）・時間変更・チェックタイマー追加/変更・自分へのヘルプ/チェック担当新規指名
                     }
                 } else if !prev.isEmpty {
                     // 新規作成（起動直後の「空→全席」読み込みは操作とみなさない）
@@ -130,8 +183,10 @@ enum WidgetSync {
             }
             if let rel = touchedRelated {
                 lastTouchedId = rel
+                didTouchChange = true
             } else if !hasAnyRelatedActive, let other = touchedOther {
                 lastTouchedId = other
+                didTouchChange = true
             }
         }
         // 削除された席、または停止した席の ID は忘れる（また、自分の関係席が稼働中なのに無関係な席が lastTouchedId になっている場合もリセット）
@@ -146,6 +201,11 @@ enum WidgetSync {
             } else if !allItems.isEmpty {
                 lastTouchedId = nil
             }
+        }
+        if lastTouchedId == nil {
+            lastTouchedAtEpoch = 0
+        } else if didTouchChange {
+            lastTouchedAtEpoch = nowEpoch.isFinite ? (nowEpoch * 1000.0).rounded() / 1000.0 : 0
         }
 
         // ★ メインタイマー・全客席タイマー・チェックタイマーの稼働/停止遷移および稼働中席の削除を完全検知（anyActiveStateChanged）
@@ -224,8 +284,14 @@ enum WidgetSync {
         defaults.set(newStates, forKey: prevStatesKey)
         if let id = lastTouchedId {
             defaults.set(id, forKey: lastTouchedKey)
+            if lastTouchedAtEpoch.isFinite && lastTouchedAtEpoch > 0 {
+                defaults.set(lastTouchedAtEpoch, forKey: lastTouchedAtEpochKey)
+            } else {
+                defaults.removeObject(forKey: lastTouchedAtEpochKey)
+            }
         } else {
             defaults.removeObject(forKey: lastTouchedKey)
+            defaults.removeObject(forKey: lastTouchedAtEpochKey)
         }
 
         // ── コンプリケーション用の要約 ──
@@ -257,7 +323,7 @@ enum WidgetSync {
                 "shouldAlertMain": true,
                 "shouldAlertCheck": false,
                 "totalSeconds": max(0, min(86_400, m.totalSeconds)),
-                "isCountUpEnabled": true,
+                "isCountUpEnabled": m.isCountUpEnabled,
                 "isCheckCompleted": true
             ]
             if mActive, let pEnd = prepEnd, pEnd > now, safeFiniteEpoch(pEnd) > 0 {
@@ -283,6 +349,7 @@ enum WidgetSync {
                 "shouldAlertMain": t.shouldAlertMainTimer(for: userName),
                 "shouldAlertCheck": (!t.isCheckCompleted && safeFiniteEpoch(t.checkTargetEndTime) > 0 && t.shouldAlertCheckTimer(for: userName)),
                 "totalSeconds": max(0, min(86_400, t.totalSeconds)),
+                "isCountUpEnabled": t.isCountUpEnabled,
                 "creatorName": t.creatorName,
                 "isCreatorMe": t.isCreatorMe(currentUserName: userName),
                 "isNoHelpNeeded": t.isNoHelpNeeded,
@@ -305,15 +372,29 @@ enum WidgetSync {
             seats.append(d)
         }
 
-        var payload: [String: Any] = ["seats": seats, "userName": userName]
+        let salonId = (defaults.string(forKey: "assisttimer.watch.cloudSalonId.v1") ?? WatchSessionManager.shared.cloudSalonId).trimmingCharacters(in: .whitespacesAndNewlines)
+        let userId = (defaults.string(forKey: "assisttimer.watch.cloudUserId.v1") ?? WatchSessionManager.shared.cloudUserId).trimmingCharacters(in: .whitespacesAndNewlines)
+        let aliases = (defaults.stringArray(forKey: "assisttimer.watch.userAliases.v1") ?? WatchSessionManager.shared.currentUserAliases)
+
+        var payload: [String: Any] = [
+            "seats": seats,
+            "userName": userName,
+            "userAliases": aliases,
+            "cloudSalonId": salonId,
+            "cloudUserId": userId
+        ]
         if let id = lastTouchedId {
             payload["lastTouchedId"] = id
+            if lastTouchedAtEpoch.isFinite && lastTouchedAtEpoch > 0 {
+                payload["lastTouchedAtEpoch"] = lastTouchedAtEpoch
+            }
         }
         guard JSONSerialization.isValidJSONObject(payload),
               let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
         let shouldReloadImmediate = anyActiveStateChanged || !isAppActive
         if data == lastPayload && !anyActiveStateChanged {
             let now = Date()
+            defaults.set(now.timeIntervalSince1970, forKey: savedAtEpochKey)
             let hasPendingTrailing = (trailingReloadWorkItem != nil)
             let neverReloadedThisPayload = (lastReloadedPayload != data)
             let becameActiveAfterBackgroundReload = (isAppActive && !lastReloadedWhileActive)
@@ -330,6 +411,7 @@ enum WidgetSync {
         lastPayload = data
 
         defaults.set(data, forKey: snapshotKey)
+        defaults.set(Date().timeIntervalSince1970, forKey: savedAtEpochKey)
         if shouldReloadImmediate || forceReload {
             defaults.synchronize()
         }

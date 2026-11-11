@@ -28,15 +28,30 @@ struct watchEntry: App {
         WindowGroup {
             ContentView()
         }
-        // ★ バックグラウンドで iPhone からデータが届いた時、受信処理が終わるまで最小限の待機のみ維持
-        //   （長時間のスリープ保持による Watchdog 0x8badf00d クラッシュを防ぐため最大 0.45 秒で即時解放）
+        // ★ バックグラウンド（文字盤表示中）で iPhone からデータが届いた時、WCSession デリゲート配送と
+        //   直接クラウド補完ポーリング・WidgetSync 書き込みが完了するまで待機（最低 0.3秒、最大 1.8秒で安全解放）
         .backgroundTask(.watchConnectivity) {
             await MainActor.run {
-                _ = WatchSessionManager.shared
+                WatchSessionManager.shared.syncFromLatestApplicationContextIfNewer()
+                WatchSessionManager.shared.pollCloudTimersFromSupabaseIfNeeded(force: true)
             }
-            for _ in 0..<3 {
-                if !WCSession.isSupported() || !WCSession.default.hasContentPending { break }
+            for i in 0..<12 {
                 try? await Task.sleep(nanoseconds: 150_000_000)
+                let shouldContinue = await MainActor.run {
+                    let hasWCPending = WCSession.isSupported() && WCSession.default.hasContentPending
+                    let isPolling = WatchSessionManager.shared.isDirectCloudPollInFlight
+                    return i < 2 || hasWCPending || isPolling
+                }
+                if !shouldContinue { break }
+            }
+            await MainActor.run {
+                WatchSessionManager.shared.syncFromLatestApplicationContextIfNewer()
+                WidgetSync.save(
+                    timers: WatchSessionManager.shared.timers,
+                    mainTimer: WatchSessionManager.shared.mainTimer,
+                    userName: WatchSessionManager.shared.currentUserName,
+                    forceReload: true
+                )
             }
         }
     }

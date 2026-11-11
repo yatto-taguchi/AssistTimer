@@ -35,6 +35,73 @@ const safeAddListener = (eventName, callback) => {
 let lastSyncedSeats = null;
 let lastSyncedMainTimer = null;
 
+// ★ B-2: transferCurrentComplicationUserInfo（1日50回上限）の重複消費防止用シグネチャ（8秒TTL・notification付きは常に即時通過）
+let lastHighPriorityUserInfoSig = '';
+let lastHighPriorityUserInfoAt = 0;
+const HIGH_PRIORITY_USERINFO_DEDUP_MS = 8000;
+
+const buildHighPriorityWakeSignature = (payload) => {
+  if (!payload || typeof payload !== 'object' || payload.notification) return '';
+  const type = String(payload.type || '');
+  const salonId = String(payload.salonId || '');
+  const userId = String(payload.userId || '');
+  const userName = String(payload.userName || '');
+  const aliases = Array.isArray(payload.userAliases)
+    ? payload.userAliases.map((a) => String(a || '').trim()).filter(Boolean).sort().join(',')
+    : '';
+  const watchAlarmSound = payload.watchAlarmSound ? 1 : 0;
+  const mt = payload.mainTimer && typeof payload.mainTimer === 'object'
+    ? [
+        payload.mainTimer.isRunning ? 1 : 0,
+        payload.mainTimer.isPaused ? 1 : 0,
+        payload.mainTimer.explicitStop ? 1 : 0,
+        payload.mainTimer.isExplicitReset ? 1 : 0,
+        Math.round(Number(payload.mainTimer.targetEndTimestamp || payload.mainTimer.endTime || 0) / 1000),
+        Math.round(Number(payload.mainTimer.totalSeconds || payload.mainTimer.duration || 0)),
+        Math.round(Number(payload.mainTimer.pausedRemainingSeconds || payload.mainTimer.remainingWhenPaused || 0)),
+        payload.mainTimer.isPreCountingDown ? 1 : 0,
+        Math.round(Number(payload.mainTimer.prepEndTimestamp || 0) / 1000),
+        String(payload.mainTimer.soundType || ''),
+        payload.mainTimer.vibrationEnabled ? 1 : 0,
+        payload.mainTimer.smartAlarmEnabled ? 1 : 0,
+      ].join(':')
+    : '';
+  const seatsArr = Array.isArray(payload.seats) ? payload.seats : [];
+  const seatsSig = seatsArr
+    .map((s) => {
+      if (!s || typeof s !== 'object') return '';
+      return [
+        String(s.id || s.cloudTimerId || ''),
+        Number(s.seatNumber ?? s.number ?? 0),
+        String(s.seatLabel || ''),
+        s.isRunning ? 1 : 0,
+        Math.round(Number(s.targetEndTimestamp || s.endTime || 0) / 1000),
+        s.isRunning ? 0 : Math.round(Number(s.pausedRemainingSeconds || s.remainingTime || 0)),
+        Math.round(Number(s.peerStoppedTargetEndTimestamp || 0) / 1000),
+        String(s.status || ''),
+        String(s.helpProcess || s.task || ''),
+        String(s.shampooStaff || s.assistantStaffName || ''),
+        String(s.createdBy || ''),
+        String(s.creatorName || s.stylist || ''),
+        s.isRecruiting ? 1 : 0,
+        s.isNoHelpNeeded ? 1 : 0,
+        String(s.checkProcess || ''),
+        String(s.checkStaffName || s.checkStaff || ''),
+        Number(s.checkTargetSeconds || s.checkInterval || 0),
+        Math.round(Number(s.checkEndTimestamp || s.nextCheckEndTime || 0) / 1000),
+        s.isCheckCompleted ? 1 : 0,
+        s.watchAlarmSoundEnabled ? 1 : 0,
+        s.alarmSoundEnabled ? 1 : 0,
+        String(s.soundType || ''),
+        s.vibrationEnabled ? 1 : 0,
+        s.smartAlarmEnabled ? 1 : 0,
+      ].join(':');
+    })
+    .sort()
+    .join(';');
+  return `${type}|${salonId}|${userId}|${userName}|${aliases}|${watchAlarmSound}|${mt}|${seatsSig}`;
+};
+
 // ★ 診断用ストア（画面の通信状態表示で使用）
 const diagnostics = {
   lastSendAt: 0,
@@ -609,9 +676,6 @@ export const WatchConnectivity = {
       try {
         const contextPayload = cleanWireData && typeof cleanWireData === 'object' ? { ...cleanWireData } : cleanWireData;
         if (contextPayload && typeof contextPayload === 'object') {
-          if ('notification' in contextPayload) {
-            delete contextPayload.notification;
-          }
           if ('highPriorityWake' in contextPayload) {
             delete contextPayload.highPriorityWake;
           }
@@ -641,6 +705,19 @@ export const WatchConnectivity = {
       const sendUserInfoFallback = async () => {
         if (userInfoFallbackSent || typeof NativeModule.transferUserInfo !== 'function') return;
         userInfoFallbackSent = true;
+        // ★ B-2: notification を伴わない同一タイマー状態の連続送信（Realtime自己エコーや再レンダー等）が
+        //   8秒以内に重なった場合は、applicationContext 保存のみで済ませ transferCurrentComplicationUserInfo 枠（1日50回）を保護する
+        if (!cleanWireData?.notification) {
+          const sig = buildHighPriorityWakeSignature(cleanWireData);
+          const nowMs = Date.now();
+          if (sig && sig === lastHighPriorityUserInfoSig && (nowMs - lastHighPriorityUserInfoAt) < HIGH_PRIORITY_USERINFO_DEDUP_MS) {
+            return;
+          }
+          if (sig) {
+            lastHighPriorityUserInfoSig = sig;
+            lastHighPriorityUserInfoAt = nowMs;
+          }
+        }
         try {
           await NativeModule.transferUserInfo(cleanWireData);
         } catch (uErr) {
@@ -649,6 +726,7 @@ export const WatchConnectivity = {
       };
 
       const isSyncPayload = cleanWireData?.type === 'SYNC_MAIN_TIMER' || cleanWireData?.type === 'SYNC_SEATS' || isHighPriorityWake;
+      const shouldWakeBackgroundWatch = isHighPriorityWake || cleanWireData?.type === 'SYNC_MAIN_TIMER';
       if (reachable) {
         if (isSyncPayload) {
           // ★ Watch への状態同期（開始・停止・変更）時:
@@ -667,11 +745,15 @@ export const WatchConnectivity = {
           if (outcome.status === 'ok') {
             messageResult = '即時OK';
           } else if (outcome.status === 'timeout') {
-            messageResult = '即時応答遅延→背景起床転送';
-            await sendUserInfoFallback();
+            messageResult = shouldWakeBackgroundWatch ? '即時応答遅延→背景起床転送' : '即時応答遅延→保存データ待機';
+            if (shouldWakeBackgroundWatch) {
+              await sendUserInfoFallback();
+            }
           } else {
             messageResult = `失敗: ${errorText(outcome.err)}`;
-            await sendUserInfoFallback();
+            if (shouldWakeBackgroundWatch) {
+              await sendUserInfoFallback();
+            }
           }
         } else {
           try {
@@ -686,9 +768,9 @@ export const WatchConnectivity = {
       }
 
       // ★ Watchがバックグラウンド（文字盤表示中・消灯中）で即時通信（sendMessage）できなかった場合、
-      //   updateApplicationContext だけでは Watch アプリがバックグラウンド起床せず文字盤モジュールやアラーム予約が更新されないため、
-      //   transferUserInfo（緊急開始・停止時はコンプリケーション優先枠使用）も併用してバックグラウンドの Watch Extension を確実に起こす
-      const needUserInfoFallback = isSyncPayload && (!reachable || messageResult.startsWith('失敗'));
+      //   緊急開始・停止・ヘルプ指名・募集・通知などの shouldWakeBackgroundWatch 時は
+      //   transferUserInfo（コンプリケーション優先枠使用）を併用してバックグラウンドの Watch Extension を確実に起こす
+      const needUserInfoFallback = shouldWakeBackgroundWatch && (!reachable || messageResult.startsWith('失敗'));
       if (needUserInfoFallback) {
         await sendUserInfoFallback();
       }

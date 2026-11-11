@@ -316,18 +316,21 @@ public class ExpoWatchConnectivityModule: Module {
       let isHighPriorityWake =
         (cleanUserInfo["highPriorityWake"] as? Bool) == true ||
         (cleanUserInfo["highPriorityWake"] as? NSNumber)?.boolValue == true ||
-        cleanUserInfo["notification"] != nil
+        cleanUserInfo["notification"] != nil ||
+        (cleanUserInfo["type"] as? String) == "SYNC_MAIN_TIMER"
       var wireUserInfo = cleanUserInfo
       wireUserInfo.removeValue(forKey: "highPriorityWake")
 
       self.transferLock.lock()
       // ★ WCSession.outstandingUserInfoTransfers のイテレーションと .cancel() は wcd IPC競合クラッシュを引き起こすため行わない
-      // ★ 1日50回の transferCurrentComplicationUserInfo 優先起床枠のうち最後の15回は、
-      //   タイマー停止・一時停止・リセットおよび共有通知（isHighPriorityWake）専用に温存し、通常同期による枯渇を防止する
+      // ★ 1日50回の transferCurrentComplicationUserInfo 優先起床枠は、
+      //   Watchが非Reachable（手首下げ文字盤表示・バックグラウンド中）かつタイマー開始・停止・指名・募集・共有通知およびメインタイマー同期（isHighPriorityWake）専用に使用し、
+      //   isReachable == true 時（sendMessage + updateApplicationContext で 0ms 到達済み）の不要消費による枯渇を防止する
       let canUseComplicationTransfer =
+        isHighPriorityWake &&
+        !session.isReachable &&
         session.isComplicationEnabled &&
-        session.remainingComplicationUserInfoTransfers > 0 &&
-        (isHighPriorityWake || session.remainingComplicationUserInfoTransfers > 15)
+        session.remainingComplicationUserInfoTransfers > 0
 
       let transfer: WCSessionUserInfoTransfer
       if canUseComplicationTransfer {
@@ -400,14 +403,16 @@ public class ExpoWatchConnectivityModule: Module {
     let isHighPriorityWake =
       (pending["highPriorityWake"] as? Bool) == true ||
       (pending["highPriorityWake"] as? NSNumber)?.boolValue == true ||
-      pending["notification"] != nil
+      pending["notification"] != nil ||
+      (pending["type"] as? String) == "SYNC_MAIN_TIMER"
     var wirePending = pending
     wirePending.removeValue(forKey: "highPriorityWake")
     self.transferLock.lock()
     let canUseComplicationTransfer =
+      isHighPriorityWake &&
+      !session.isReachable &&
       session.isComplicationEnabled &&
-      session.remainingComplicationUserInfoTransfers > 0 &&
-      (isHighPriorityWake || session.remainingComplicationUserInfoTransfers > 15)
+      session.remainingComplicationUserInfoTransfers > 0
     if canUseComplicationTransfer {
       session.transferCurrentComplicationUserInfo(wirePending)
     } else {

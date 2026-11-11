@@ -84,8 +84,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private var lastPeerNotifAt: Date = .distantPast
     private var forceSystemBannerRequestIds: Set<String> = []
 
-    /// 共有相手（関係者の席）でチェック完了・タイマー停止・担当指名・募集などが行われた際にWatchへ通知する
-    func postPeerActionNotification(text: String, forceSystemBanner: Bool = false) {
+    /// 共有相手（関係者の席）でチェック完了・タイマー停止・担当指名・募集・担当解除などが行われた際にWatchへ通知する
+    func postPeerActionNotification(text: String, forceSystemBanner: Bool = false, isGentleInfo: Bool = false, eventType: String? = nil) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let now = Date()
@@ -95,21 +95,29 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         lastPeerNotifText = trimmed
         lastPeerNotifAt = now
 
+        let effectiveGentle = isGentleInfo || eventType == "unassign_assist" || eventType == "unassign_check"
         let isActive = (WKApplication.shared().applicationState == .active)
         if !isActive {
-            WKInterfaceDevice.current().play(.notification)
+            WKInterfaceDevice.current().play(effectiveGentle ? .click : .notification)
         }
 
         // フォアグラウンド時も通知センター履歴(.list)に残し、さらにモーダルシート表示中(forceSystemBanner)や
-        // バックグラウンド／常時表示(.inactive)時はOS標準バナー＋サウンドで確実に見逃しを防止する
+        // バックグラウンド／常時表示(.inactive)時は trigger: nil (0ms即時配信) でサスペンド前に確実に通知バナー＋振動を発火させる
         let content = UNMutableNotificationContent()
         content.title = "AssistTimer"
         content.body = trimmed
-        content.sound = .default
+        content.sound = effectiveGentle ? nil : .default
+        content.userInfo = [
+            "type": "PEER_ACTION",
+            "eventType": eventType ?? "",
+            "isGentleInfo": effectiveGentle
+        ]
         if #available(watchOS 8.0, *) {
-            content.interruptionLevel = .timeSensitive
+            content.interruptionLevel = effectiveGentle ? .active : .timeSensitive
         }
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.15, repeats: false)
+        let trigger: UNNotificationTrigger? = isActive
+            ? UNTimeIntervalNotificationTrigger(timeInterval: 0.15, repeats: false)
+            : nil
         let reqId = "assisttimer.peer.\(UUID().uuidString)"
         if forceSystemBanner {
             forceSystemBannerRequestIds.insert(reqId)
@@ -211,7 +219,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         let alarmSanitizeBuildKey = "watch_alarm_sanitized_build_v1"
         let shortVer = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
         let buildVer = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
-        let currentAlarmBuild = "\(shortVer) (\(buildVer))-v120"
+        let currentAlarmBuild = "\(shortVer) (\(buildVer))-v121"
         let isNewAlarmBuild = (UserDefaults.standard.string(forKey: alarmSanitizeBuildKey) != currentAlarmBuild)
         if isNewAlarmBuild {
             UserDefaults.standard.set(currentAlarmBuild, forKey: alarmSanitizeBuildKey)
@@ -581,9 +589,12 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                                 matchedSeat.isRunning &&
                                 !matchedSeat.isCheckCompleted &&
                                 matchedSeat.checkTargetEndTime != nil &&
-                                (matchedSeat.checkTotalSeconds ?? 0) > 0
+                                (matchedSeat.checkTotalSeconds ?? 0) > 0 &&
+                                matchedSeat.shouldAlertCheckTimer(for: activeUser)
                         } else {
-                            isStillActiveInModel = matchedSeat.isRunning
+                            isStillActiveInModel =
+                                matchedSeat.isRunning &&
+                                matchedSeat.shouldAlertMainTimer(for: activeUser)
                         }
                     } else {
                         isStillActiveInModel = false
@@ -2988,23 +2999,91 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
     }
 
+    private static let knownSalonPeerEventTypes: Set<String> = [
+        "assign_assist", "unassign_assist", "recruit",
+        "assign_check", "unassign_check", "recruit_check", "add_check", "check_done",
+        "timer_start", "time_adjust", "stop", "status_change",
+        "shampoo", "combing", "check", "help_enter", "assign_main"
+    ]
+
+    private static func parseNestedNotificationDict(_ raw: Any?) -> [AnyHashable: Any]? {
+        if let dict = raw as? [AnyHashable: Any] {
+            return dict
+        }
+        if let str = (raw as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           str.hasPrefix("{"),
+           let data = str.data(using: .utf8),
+           let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            var converted: [AnyHashable: Any] = [:]
+            for (k, v) in json {
+                converted[k] = v
+            }
+            return converted
+        }
+        return nil
+    }
+
+    private static func extractBoolValue(_ raw: Any?) -> Bool? {
+        if let b = raw as? Bool { return b }
+        if let n = raw as? NSNumber { return n.boolValue }
+        if let s = (raw as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            if s == "true" || s == "1" { return true }
+            if s == "false" || s == "0" { return false }
+        }
+        return nil
+    }
+
+    private static func parseSalonPeerNotificationInfo(_ userInfo: [AnyHashable: Any]) -> (topType: String, eventType: String, isGentleInfo: Bool, isRemotePeerPush: Bool) {
+        let bodyDict = parseNestedNotificationDict(userInfo["body"])
+        let dataDict = parseNestedNotificationDict(userInfo["data"])
+        let nestedBodyDataDict = parseNestedNotificationDict(bodyDict?["data"])
+        let dicts: [[AnyHashable: Any]] = [userInfo, bodyDict, dataDict, nestedBodyDataDict].compactMap { $0 }
+
+        var topType = ""
+        var eventType = ""
+        var rawGentle: Bool? = nil
+
+        for d in dicts {
+            if topType.isEmpty, let t = (d["type"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
+                topType = t
+            }
+            if eventType.isEmpty, let ev = (d["eventType"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !ev.isEmpty {
+                eventType = ev
+            }
+            if rawGentle == nil, let g = extractBoolValue(d["isGentleInfo"]) {
+                rawGentle = g
+            }
+        }
+
+        let isRemotePeerPush = (topType == "SALON_EVENT_PUSH" || topType == "SALON_SHARED_EVENT")
+            || (!eventType.isEmpty && knownSalonPeerEventTypes.contains(eventType))
+        let isGentleInfo = (rawGentle == true) || eventType == "unassign_assist" || eventType == "unassign_check"
+        return (topType: topType, eventType: eventType, isGentleInfo: isGentleInfo, isRemotePeerPush: isRemotePeerPush)
+    }
+
     // アプリ表示中は画面のアラーム表示＋振動で知らせるので通知バナーは出さない（常時表示 .inactive やバックグラウンドでは通知＋触覚も確実に出す）
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification,
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         let reqId = notification.request.identifier
+        let userInfo = notification.request.content.userInfo
+        let meta = Self.parseSalonPeerNotificationInfo(userInfo)
+        let isLocalPeerReq = reqId.hasPrefix("assisttimer.peer.") || reqId.hasPrefix("peer-action-") || meta.topType == "PEER_ACTION"
+        let isRemotePeerPush = meta.isRemotePeerPush
         DispatchQueue.main.async {
-            if reqId.hasPrefix("assisttimer.peer.") {
+            if isLocalPeerReq || isRemotePeerPush {
                 let shouldForceBanner = self.forceSystemBannerRequestIds.remove(reqId) != nil
                 let isActive = (WKApplication.shared().applicationState == .active)
-                if isActive && !shouldForceBanner {
-                    // フォアグラウンド通常画面ではカスタムバナー＋ダブル触覚を表示しつつ、通知センター履歴(.list)にも残して見逃しを防止
+                if isRemotePeerPush {
+                    WatchSessionManager.shared.pollCloudTimersFromSupabaseIfNeeded(force: true)
+                }
+                if isLocalPeerReq && isActive && !shouldForceBanner {
+                    // フォアグラウンド通常画面ではカスタムバナー＋触覚を表示済みのため、通知センター履歴(.list)のみ残して二重バナー・二重振動を防止
                     completionHandler([.list])
                 } else {
-                    if !isActive {
-                        WKInterfaceDevice.current().play(.notification)
-                    }
-                    completionHandler([.banner, .sound, .list])
+                    // ※ postPeerActionNotification 側（非アクティブ時）または OS Push 配信側で既に1回触覚が鳴るため、
+                    //   willPresent 内での WKInterfaceDevice.current().play(.notification) 再実行や playNextHaptic() は行わず二重振動と解除時の強振動を防止
+                    completionHandler(meta.isGentleInfo ? [.banner, .list] : [.banner, .sound, .list])
                 }
                 return
             }
@@ -3044,7 +3123,16 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let reqId = response.notification.request.identifier
-        if reqId.hasPrefix("assisttimer.peer.") {
+        let respInfo = response.notification.request.content.userInfo
+        let meta = Self.parseSalonPeerNotificationInfo(respInfo)
+        let isLocalPeerReq = reqId.hasPrefix("assisttimer.peer.") || reqId.hasPrefix("peer-action-") || meta.topType == "PEER_ACTION"
+        let isAlarmNotification = reqId.hasPrefix(self.notificationPrefix)
+            || response.notification.request.content.categoryIdentifier == "ALARM_CATEGORY"
+            || response.actionIdentifier == "STOP_ACTION"
+        if isLocalPeerReq || meta.isRemotePeerPush || !isAlarmNotification {
+            DispatchQueue.main.async {
+                WatchSessionManager.shared.pollCloudTimersFromSupabaseIfNeeded(force: true)
+            }
             completionHandler()
             return
         }
