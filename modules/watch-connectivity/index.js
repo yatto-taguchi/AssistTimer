@@ -1,5 +1,10 @@
 import { EventEmitter, requireNativeModule } from 'expo-modules-core';
 import { AppState, Platform } from 'react-native';
+import {
+  logSyncTrace,
+  computeSeatsCompositeStateRev,
+  registerWatchTraceBridge,
+} from '../../src/utils/syncTraceLogger';
 
 let NativeModule = null;
 let emitter = null;
@@ -331,7 +336,22 @@ const STOP_OR_FINISH_ACTIONS = new Set([
 
 const handleIncoming = (kind, body, seq = null) => {
   if (!body) return;
-  if (!markEventSeqProcessed(seq)) return;
+  const rxTraceId = String(body.traceId || body.extra?.traceId || '');
+  const rxSeat = body.seatId != null ? String(body.seatId) : '';
+  const rxAct = String(body.action || body.type || '?');
+  if (!markEventSeqProcessed(seq)) {
+    logSyncTrace({
+      hop: 'P_WC_RX',
+      ch: kind,
+      seat: rxSeat,
+      act: rxAct,
+      res: 'drop',
+      rsn: 'drop_dup_seq',
+      traceId: rxTraceId,
+      meta: { seq },
+    });
+    return;
+  }
   recordJsReceived(kind, body);
   if (body.action) {
     const actionStr = String(body.action);
@@ -387,9 +407,27 @@ const handleIncoming = (kind, body, seq = null) => {
       actionStr === 'MAIN_TIMER_ADJUST'
     ) {
       if (targetEndTs > 0 && isMainTimerEndStopped(targetEndTs)) {
+        logSyncTrace({
+          hop: 'P_WC_RX',
+          ch: kind,
+          seat: 'main-timer',
+          act: actionStr,
+          res: 'drop',
+          rsn: 'drop_dup_main_stop',
+          traceId: rxTraceId,
+        });
         return;
       }
       if (ts > 0 && lastLocalMainTimerStopAt > 0 && ts <= lastLocalMainTimerStopAt + 500) {
+        logSyncTrace({
+          hop: 'P_WC_RX',
+          ch: kind,
+          seat: 'main-timer',
+          act: actionStr,
+          res: 'drop',
+          rsn: 'drop_stale_main_stop',
+          traceId: rxTraceId,
+        });
         return;
       }
     }
@@ -400,10 +438,28 @@ const handleIncoming = (kind, body, seq = null) => {
     ) {
       const seatKey = String(body.seatId);
       if (targetEndTs > 0 && isSeatTimerEndStopped(seatKey, targetEndTs)) {
+        logSyncTrace({
+          hop: 'P_WC_RX',
+          ch: kind,
+          seat: seatKey,
+          act: actionStr,
+          res: 'drop',
+          rsn: 'drop_dup_seat_stop',
+          traceId: rxTraceId,
+        });
         return;
       }
       const lastSeatStop = lastLocalSeatStopAt.get(seatKey) || 0;
       if (ts > 0 && lastSeatStop > 0 && ts <= lastSeatStop + 500) {
+        logSyncTrace({
+          hop: 'P_WC_RX',
+          ch: kind,
+          seat: seatKey,
+          act: actionStr,
+          res: 'drop',
+          rsn: 'drop_stale_seat_stop',
+          traceId: rxTraceId,
+        });
         return;
       }
       // ★ 新しいタイマー開始が確定した場合は、該当席の古い停止履歴をクリアして後続同期での誤ブロックを防ぐ
@@ -422,6 +478,15 @@ const handleIncoming = (kind, body, seq = null) => {
 
     if (isMainAction && ts > 0) {
       if (ts < lastMainTimerActionTimestamp - 200) {
+        logSyncTrace({
+          hop: 'P_WC_RX',
+          ch: kind,
+          seat: 'main-timer',
+          act: actionStr,
+          res: 'drop',
+          rsn: 'drop_main_ts_order',
+          traceId: rxTraceId,
+        });
         return;
       }
       if (ts > lastMainTimerActionTimestamp) {
@@ -430,7 +495,11 @@ const handleIncoming = (kind, body, seq = null) => {
     }
 
     // ★ REQUEST_SYNC に含まれる watchMainTimerActive が既に停止済みのタイマーを指している場合は無害化
-    let payloadToDeliver = body;
+    let payloadToDeliver = {
+      ...body,
+      _wcRxKind: kind,
+      ...(rxTraceId && !body.traceId ? { traceId: rxTraceId } : {}),
+    };
     const hasWatchActive = Boolean(body.watchMainTimerActive || body.extra?.watchMainTimerActive);
     if (actionStr === 'REQUEST_SYNC' && hasWatchActive) {
       const watchEndTs = Number(
@@ -445,7 +514,7 @@ const handleIncoming = (kind, body, seq = null) => {
         (ts > 0 && lastLocalMainTimerStopAt > 0 && ts <= lastLocalMainTimerStopAt + 1000);
       if (isStoppedMain) {
         payloadToDeliver = {
-          ...body,
+          ...payloadToDeliver,
           watchMainTimerActive: false,
           extra: body.extra ? { ...body.extra, watchMainTimerActive: false } : body.extra,
         };
@@ -466,9 +535,29 @@ const handleIncoming = (kind, body, seq = null) => {
         (lastLocalMainTimerStopAt === 0 || ts > lastLocalMainTimerStopAt + 500);
       const maxAgeMs = (isStopOrFinish || hasActiveMainEnd) ? 3 * 3600 * 1000 : 60000;
       if (Number.isFinite(ageMs) && ageMs > maxAgeMs) {
+        logSyncTrace({
+          hop: 'P_WC_RX',
+          ch: kind,
+          seat: rxSeat,
+          act: actionStr,
+          res: 'drop',
+          rsn: 'drop_aged_packet',
+          traceId: rxTraceId,
+          meta: { ageMs: Math.round(ageMs), maxAgeMs },
+        });
         return;
       }
     }
+    logSyncTrace({
+      hop: 'P_WC_RX',
+      ch: kind,
+      seat: rxSeat,
+      act: actionStr,
+      res: 'ok',
+      rsn: 'accepted',
+      traceId: rxTraceId,
+      meta: { seq, consumers: actionConsumers.size },
+    });
     deliverAction(payloadToDeliver);
   }
 };
@@ -693,6 +782,17 @@ export const WatchConnectivity = {
       }
     })();
 
+    const syncT0 = Date.now();
+    const txTraceId = String(
+      cleanWireData?.traceId || cleanWireData?.notification?.traceId || ''
+    );
+    const txStateRev =
+      cleanWireData && Array.isArray(cleanWireData.seats)
+        ? computeSeatsCompositeStateRev(cleanWireData.seats)
+        : '';
+    let userInfoKind = 'none';
+    let deduped8sWake = false;
+
     try {
       let reachable = false;
       try {
@@ -711,6 +811,8 @@ export const WatchConnectivity = {
           const sig = buildHighPriorityWakeSignature(cleanWireData);
           const nowMs = Date.now();
           if (sig && sig === lastHighPriorityUserInfoSig && (nowMs - lastHighPriorityUserInfoAt) < HIGH_PRIORITY_USERINFO_DEDUP_MS) {
+            deduped8sWake = true;
+            userInfoKind = 'deduped_8s';
             return;
           }
           if (sig) {
@@ -719,8 +821,12 @@ export const WatchConnectivity = {
           }
         }
         try {
-          await NativeModule.transferUserInfo(cleanWireData);
+          const transferred = await NativeModule.transferUserInfo(cleanWireData);
+          userInfoKind = transferred
+            ? (isHighPriorityWake ? 'wake_transfer' : 'normal_transfer')
+            : 'transfer_false';
         } catch (uErr) {
+          userInfoKind = 'transfer_err';
           console.warn('[WatchConnectivity] transferUserInfo fallback error:', uErr);
         }
       };
@@ -779,6 +885,37 @@ export const WatchConnectivity = {
     }
 
     await contextUpdatePromise;
+
+    let remCompTransfers = null;
+    let compEnabled = null;
+    try {
+      const st = typeof NativeModule.getStatus === 'function' ? NativeModule.getStatus() : null;
+      if (st) {
+        remCompTransfers = st.remainingComplicationTransfers ?? null;
+        compEnabled = st.isComplicationEnabled ?? null;
+      }
+    } catch {}
+
+    logSyncTrace({
+      hop: 'P_WC_SYNC_TX',
+      ch: messageResult === '即時OK' ? 'wc_msg' : 'wc_ctx_userinfo',
+      act: String(cleanWireData?.type || 'SYNC'),
+      res: (contextResult === '保存OK' || messageResult === '即時OK') ? 'ok' : 'err',
+      rsn: messageResult,
+      traceId: txTraceId,
+      stateRev: txStateRev,
+      ms: Date.now() - syncT0,
+      meta: {
+        contextOk: contextResult === '保存OK',
+        msgResult: messageResult,
+        userInfoKind,
+        deduped8sWake,
+        seatCount,
+        hasNotif: Boolean(cleanWireData?.notification),
+        remainingComplicationTransfers: remCompTransfers,
+        isComplicationEnabled: compEnabled,
+      },
+    });
 
     updateDiagnostics({
       lastSendAt: Date.now(),
@@ -867,6 +1004,125 @@ export const WatchConnectivity = {
       return false;
     }
   },
+
+  // ★ Issue #13: 診断ログのオンデマンド回収・クリア・シーン同期（通常テスト中は一切呼ばれない）
+  flushNativeDiagLogs: () => {
+    if (!NativeModule || typeof NativeModule.flushNativeDiagLogs !== 'function') return [];
+    try {
+      return NativeModule.flushNativeDiagLogs() || [];
+    } catch {
+      return [];
+    }
+  },
+
+  clearNativeDiagLogs: () => {
+    if (!NativeModule || typeof NativeModule.clearNativeDiagLogs !== 'function') return false;
+    try {
+      return !!NativeModule.clearNativeDiagLogs();
+    } catch {
+      return false;
+    }
+  },
+
+  pullWatchDiagLogs: async () => {
+    if (!NativeModule || Platform.OS !== 'ios' || typeof NativeModule.sendMessage !== 'function') {
+      return { ok: false, reason: 'not_supported' };
+    }
+    try {
+      const reachable = typeof NativeModule.isReachable === 'function' ? NativeModule.isReachable() : false;
+      if (!reachable) {
+        return { ok: false, reason: 'watch_not_reachable' };
+      }
+    } catch {}
+    let timer = null;
+    try {
+      const sendPromise = NativeModule.sendMessage({
+        type: 'PULL_SYNC_TRACE_LOGS',
+        timestamp: Date.now(),
+      }).then((reply) => ({ ok: true, reply })).catch((err) => ({ ok: false, reason: errorText(err) }));
+      const timeoutPromise = new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ ok: false, reason: 'timeout_2500ms' }), 2500);
+      });
+      const res = await Promise.race([sendPromise, timeoutPromise]);
+      if (timer) clearTimeout(timer);
+      if (res && res.ok && res.reply && Array.isArray(res.reply.entries)) {
+        return {
+          ok: true,
+          entries: res.reply.entries,
+          watchNowMs: Number(res.reply.watchNowMs || 0),
+        };
+      }
+      return { ok: false, reason: res?.reason || 'invalid_reply' };
+    } catch (e) {
+      if (timer) clearTimeout(timer);
+      return { ok: false, reason: errorText(e) };
+    }
+  },
+
+  clearWatchDiagLogs: async (scene = 'S1') => {
+    if (!NativeModule || Platform.OS !== 'ios' || typeof NativeModule.sendMessage !== 'function') {
+      return { ok: false, reason: 'not_supported' };
+    }
+    let timer = null;
+    try {
+      const reachable = typeof NativeModule.isReachable === 'function' ? NativeModule.isReachable() : false;
+      if (!reachable) return { ok: false, reason: 'watch_not_reachable' };
+      const sendPromise = NativeModule.sendMessage({
+        type: 'CLEAR_SYNC_TRACE_LOGS',
+        scene: String(scene || 'S1'),
+        timestamp: Date.now(),
+      }).then(() => ({ ok: true })).catch((err) => ({ ok: false, reason: errorText(err) }));
+      const timeoutPromise = new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ ok: false, reason: 'timeout_1500ms' }), 1500);
+      });
+      const res = await Promise.race([sendPromise, timeoutPromise]);
+      if (timer) clearTimeout(timer);
+      return res;
+    } catch (e) {
+      if (timer) clearTimeout(timer);
+      return { ok: false, reason: errorText(e) };
+    }
+  },
+
+  setWatchDiagScene: async (scene = 'S1') => {
+    if (!NativeModule || Platform.OS !== 'ios' || typeof NativeModule.sendMessage !== 'function') {
+      return false;
+    }
+    let timer = null;
+    try {
+      const reachable = typeof NativeModule.isReachable === 'function' ? NativeModule.isReachable() : false;
+      if (!reachable) return false;
+      const sendPromise = NativeModule.sendMessage({
+        type: 'SET_DIAG_SCENE',
+        scene: String(scene || 'S1'),
+        timestamp: Date.now(),
+      }).then(() => true).catch(() => false);
+      const timeoutPromise = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), 1200);
+      });
+      const res = await Promise.race([sendPromise, timeoutPromise]);
+      if (timer) clearTimeout(timer);
+      return !!res;
+    } catch {
+      if (timer) clearTimeout(timer);
+      return false;
+    }
+  },
 };
+
+export const flushNativeDiagLogs = WatchConnectivity.flushNativeDiagLogs;
+export const clearNativeDiagLogs = WatchConnectivity.clearNativeDiagLogs;
+export const pullWatchDiagLogs = WatchConnectivity.pullWatchDiagLogs;
+export const clearWatchDiagLogs = WatchConnectivity.clearWatchDiagLogs;
+export const setWatchDiagScene = WatchConnectivity.setWatchDiagScene;
+
+registerWatchTraceBridge({
+  flushNativeDiagLogs: WatchConnectivity.flushNativeDiagLogs,
+  clearNativeDiagLogs: WatchConnectivity.clearNativeDiagLogs,
+  pullWatchDiagLogs: WatchConnectivity.pullWatchDiagLogs,
+  clearWatchDiagLogs: WatchConnectivity.clearWatchDiagLogs,
+  setWatchDiagScene: WatchConnectivity.setWatchDiagScene,
+  getStatus: WatchConnectivity.getStatus,
+});
 
 export default WatchConnectivity;

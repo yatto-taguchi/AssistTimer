@@ -30,6 +30,7 @@ import {
   adoptWatchActiveSeatsIntoCache,
   detectSalonBuildUpdateOnce,
 } from './SalonWorkScreen';
+import { createSyncTraceId, logSyncTrace } from '../utils/syncTraceLogger';
 
 const MAIN_ALARM_KEY = 'main-timer';
 const ACTIVE_MAIN_TIMER_STORAGE_KEY = '@assist_timer_active_main_timer_v1';
@@ -1104,6 +1105,37 @@ export default function HomeScreen({ navigation }) {
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
+  const lastMainWatchTraceIdRef = useRef({ traceId: '', at: 0 });
+  const recentLocalMainOriginTraceRef = useRef({ traceId: '', at: 0 });
+  const resolveMainOriginTraceId = (act, rsn) => {
+    const nowMs = Date.now();
+    if (
+      lastMainWatchTraceIdRef.current.at &&
+      nowMs - lastMainWatchTraceIdRef.current.at < 400 &&
+      lastMainWatchTraceIdRef.current.traceId
+    ) {
+      return lastMainWatchTraceIdRef.current.traceId;
+    }
+    if (
+      recentLocalMainOriginTraceRef.current.at &&
+      nowMs - recentLocalMainOriginTraceRef.current.at < 350 &&
+      recentLocalMainOriginTraceRef.current.traceId
+    ) {
+      return recentLocalMainOriginTraceRef.current.traceId;
+    }
+    const minted = createSyncTraceId(nowMs);
+    recentLocalMainOriginTraceRef.current = { traceId: minted, at: nowMs };
+    logSyncTrace({
+      hop: 'P_MAIN_ORIGIN',
+      traceId: minted,
+      seat: 'main-timer',
+      act,
+      res: 'ok',
+      rsn,
+    });
+    return minted;
+  };
+
   const toggleTimer = (isFromWatch = false, watchTiming = null) => {
     const fromWatch = isFromWatch === true;
     if (!fromWatch) {
@@ -1180,7 +1212,8 @@ export default function HomeScreen({ navigation }) {
           setMainTimerState(prepState);
         }
         updateCachedMainTimerState(prepState);
-        syncMainTimerToWatch(prepState, { immediate: true });
+        const prepTraceId = resolveMainOriginTraceId('MAIN_TIMER_PREP', 'prep_start');
+        syncMainTimerToWatch(prepState, { immediate: true, traceId: prepTraceId });
       }
 
       // カウント開始時のアナウンス
@@ -1248,7 +1281,12 @@ export default function HomeScreen({ navigation }) {
             setMainTimerState(cancelState);
           }
           updateCachedMainTimerState(cancelState);
-          syncMainTimerToWatch(cancelState, { immediate: true, highPriorityWake: true });
+          const cancelTraceId = resolveMainOriginTraceId('MAIN_TIMER_CANCEL_PREP', 'prep_cancel');
+          syncMainTimerToWatch(cancelState, {
+            immediate: true,
+            highPriorityWake: true,
+            traceId: cancelTraceId,
+          });
         }
         cancelVibration();
         cheerOverlayRef.current?.dismiss();
@@ -1382,7 +1420,15 @@ export default function HomeScreen({ navigation }) {
                 setMainTimerState(stoppedOverState);
               }
               updateCachedMainTimerState(stoppedOverState);
-              syncMainTimerToWatch(stoppedOverState, { immediate: true, highPriorityWake: true });
+              const stopOverTraceId = resolveMainOriginTraceId(
+                'MAIN_TIMER_STOP_OVER',
+                'stop_overtime'
+              );
+              syncMainTimerToWatch(stoppedOverState, {
+                immediate: true,
+                highPriorityWake: true,
+                traceId: stopOverTraceId,
+              });
             }
           }
           cancelVibration();
@@ -1489,7 +1535,15 @@ export default function HomeScreen({ navigation }) {
         setMainTimerState(resetState);
       }
       updateCachedMainTimerState(resetState);
-      syncMainTimerToWatch(resetState, { immediate: true, highPriorityWake: true });
+      const resetTraceId = resolveMainOriginTraceId(
+        'MAIN_TIMER_RESET',
+        fromSave ? 'from_save' : 'local_reset'
+      );
+      syncMainTimerToWatch(resetState, {
+        immediate: true,
+        highPriorityWake: true,
+        traceId: resetTraceId,
+      });
     }
 
     // リセットボタン押下後の待機中やまいもウォーキング演出（クールダウン30秒、出現率50%）
@@ -1621,7 +1675,25 @@ export default function HomeScreen({ navigation }) {
       prevIsAutoFinishedForWatchRef.current = isAutoFinishedNow;
       if (Platform.OS === 'ios') {
         const shouldWakeWatchForStop = (isStateToggled || isPreCountdownToggled || isAutoFinishedToggled) && !effectiveIsRunning && !effectiveIsPre && !isAutoFinishedNow;
-        syncMainTimerToWatch(newState, { immediate: true, highPriorityWake: shouldWakeWatchForStop });
+        const mainSyncTraceId = resolveMainOriginTraceId(
+          effectiveIsRunning
+            ? 'MAIN_TIMER_RUNNING'
+            : effectiveIsPre
+              ? 'MAIN_TIMER_PREP'
+              : 'MAIN_TIMER_STOPPED_OR_CFG',
+          isStateToggled
+            ? 'state_toggle'
+            : isPreCountdownToggled
+              ? 'prep_toggle'
+              : isTargetChanged
+                ? 'target_change'
+                : 'state_sync'
+        );
+        syncMainTimerToWatch(newState, {
+          immediate: true,
+          highPriorityWake: shouldWakeWatchForStop,
+          traceId: mainSyncTraceId,
+        });
       }
     } else {
       prevRemainingTimeForWatchRef.current = effectiveRemaining;
@@ -1656,6 +1728,9 @@ export default function HomeScreen({ navigation }) {
   const handleMainTimerActionDispatch = useCallback((action, payload = {}, actionId = null) => {
     const rawAction = String(action || '');
     const cleanAction = rawAction.replace(/^MAIN_TIMER_/, '').toLowerCase(); // 'start', 'pause', 'toggle', 'reset', 'stop', 'set_time', 'adjust'
+    const incomingTraceId = String(payload?.traceId || payload?.extra?.traceId || '').trim();
+    const incomingRxKind = String(payload?._wcRxKind || '').trim() || 'wc';
+    const isFromPhoneOrigin = payload?.fromPhone === true;
     const isStopOrResetAction = cleanAction === 'reset' || cleanAction === 'stop' || cleanAction === 'pause';
     const isStillActiveOrAutoFinished =
       isRunningRef.current ||
@@ -1666,6 +1741,17 @@ export default function HomeScreen({ navigation }) {
 
     if (dedupeId) {
       if (processedMainActionIdsRef.current.has(dedupeId) && !(isStopOrResetAction && isStillActiveOrAutoFinished)) {
+        if (!isFromPhoneOrigin) {
+          logSyncTrace({
+            hop: 'P_MAIN_WATCH_RX',
+            traceId: incomingTraceId,
+            ch: incomingRxKind,
+            seat: 'main-timer',
+            act: rawAction,
+            res: 'drop',
+            rsn: 'dup_action_id',
+          });
+        }
         return; // すでに処理済みの同一操作
       }
       processedMainActionIdsRef.current.add(dedupeId);
@@ -1684,9 +1770,38 @@ export default function HomeScreen({ navigation }) {
         lastDispatchedActionInfoRef.current.key === actionSignature &&
         nowMs - lastDispatchedActionInfoRef.current.time < 500
       ) {
+        if (!isFromPhoneOrigin) {
+          logSyncTrace({
+            hop: 'P_MAIN_WATCH_RX',
+            traceId: incomingTraceId,
+            ch: incomingRxKind,
+            seat: 'main-timer',
+            act: rawAction,
+            res: 'drop',
+            rsn: 'dup_500ms',
+          });
+        }
         return;
       }
       lastDispatchedActionInfoRef.current = { key: actionSignature, time: nowMs };
+    }
+
+    let dispatchTraceId = incomingTraceId || '';
+    if (!isFromPhoneOrigin) {
+      const resolvedWatchTrace = incomingTraceId || createSyncTraceId();
+      lastMainWatchTraceIdRef.current = { traceId: resolvedWatchTrace, at: Date.now() };
+      dispatchTraceId = resolvedWatchTrace;
+      logSyncTrace({
+        hop: 'P_MAIN_WATCH_RX',
+        traceId: resolvedWatchTrace,
+        ch: incomingRxKind,
+        seat: 'main-timer',
+        act: rawAction,
+        res: 'ok',
+        rsn: 'applied',
+      });
+    } else if (!dispatchTraceId) {
+      dispatchTraceId = resolveMainOriginTraceId(rawAction || 'MAIN_TIMER_ACT', 'phone_dispatch');
     }
 
     if (cleanAction === 'start') {
@@ -1759,7 +1874,10 @@ export default function HomeScreen({ navigation }) {
             setMainTimerState(startState);
           }
           updateCachedMainTimerState(startState);
-          syncMainTimerToWatch(startState, { immediate: true });
+          syncMainTimerToWatch(startState, {
+            immediate: true,
+            traceId: dispatchTraceId || undefined,
+          });
         }
       }
     } else if (cleanAction === 'pause') {
@@ -1816,7 +1934,11 @@ export default function HomeScreen({ navigation }) {
             setMainTimerState(pauseState);
           }
           updateCachedMainTimerState(pauseState);
-          syncMainTimerToWatch(pauseState, { immediate: true, highPriorityWake: true });
+          syncMainTimerToWatch(pauseState, {
+            immediate: true,
+            highPriorityWake: true,
+            traceId: dispatchTraceId || undefined,
+          });
         }
       }
     } else if (cleanAction === 'toggle') {
@@ -1877,7 +1999,11 @@ export default function HomeScreen({ navigation }) {
           setMainTimerState(resetState);
         }
         updateCachedMainTimerState(resetState);
-        syncMainTimerToWatch(resetState, { immediate: true, highPriorityWake: true });
+        syncMainTimerToWatch(resetState, {
+          immediate: true,
+          highPriorityWake: true,
+          traceId: dispatchTraceId || undefined,
+        });
       }
     } else if (cleanAction === 'set_time') {
       const sec = Number(payload?.totalSeconds || payload?.extra?.totalSeconds || payload?.seconds || payload?.extra?.seconds);
@@ -1953,7 +2079,10 @@ export default function HomeScreen({ navigation }) {
               setMainTimerState(startState);
             }
             updateCachedMainTimerState(startState);
-            syncMainTimerToWatch(startState, { immediate: true });
+            syncMainTimerToWatch(startState, {
+              immediate: true,
+              traceId: dispatchTraceId || undefined,
+            });
           }
         } else {
           applyTimeInSecondsRef.current(sec, { fromWatch: !isFromPhone });
@@ -2058,7 +2187,10 @@ export default function HomeScreen({ navigation }) {
             setMainTimerState(updated);
           }
           updateCachedMainTimerState(updated);
-          syncMainTimerToWatch(updated, { immediate: true });
+          syncMainTimerToWatch(updated, {
+            immediate: true,
+            traceId: dispatchTraceId || undefined,
+          });
         }
       }
     } else if (cleanAction === 'update_sound') {
@@ -2873,7 +3005,10 @@ export default function HomeScreen({ navigation }) {
         setMainTimerState(updated);
       }
       updateCachedMainTimerState(updated);
-      syncMainTimerToWatch(updated, { immediate: true });
+      const setTimeTraceId = options?.fromWatch
+        ? lastMainWatchTraceIdRef.current.traceId || undefined
+        : resolveMainOriginTraceId('MAIN_TIMER_SET_TIME', 'apply_time');
+      syncMainTimerToWatch(updated, { immediate: true, traceId: setTimeTraceId });
     }
   };
   applyTimeInSecondsRef.current = applyTimeInSeconds;
@@ -3086,7 +3221,12 @@ export default function HomeScreen({ navigation }) {
         setMainTimerState(stoppedState);
       }
       updateCachedMainTimerState(stoppedState);
-      syncMainTimerToWatch(stoppedState, { immediate: true, highPriorityWake: true });
+      const saveStopTraceId = resolveMainOriginTraceId('MAIN_TIMER_FINISH', 'open_save_modal');
+      syncMainTimerToWatch(stoppedState, {
+        immediate: true,
+        highPriorityWake: true,
+        traceId: saveStopTraceId,
+      });
     }
   };
 
@@ -3174,7 +3314,12 @@ export default function HomeScreen({ navigation }) {
         setMainTimerState(stoppedState);
       }
       updateCachedMainTimerState(stoppedState);
-      syncMainTimerToWatch(stoppedState, { immediate: true, highPriorityWake: true });
+      const saveStopTraceId = resolveMainOriginTraceId('MAIN_TIMER_FINISH', 'open_save_modal');
+      syncMainTimerToWatch(stoppedState, {
+        immediate: true,
+        highPriorityWake: true,
+        traceId: saveStopTraceId,
+      });
     }
   };
 

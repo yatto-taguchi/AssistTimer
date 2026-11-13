@@ -23,6 +23,13 @@ public class ExpoWatchConnectivityModule: Module {
   fileprivate var lastNativeReceivedKind: String = ""
   fileprivate var lastNativeReceivedAction: String = ""
 
+  // ★ Issue #13: ネイティブ層リングバッファ（ロック保護メモリ追記のみ・最大150件・通信副作用ゼロ）
+  private let diagLock = NSLock()
+  private var nativeDiagLogs: [[String: Any]] = []
+  private var nativeDiagSeq: Int = 0
+  private let maxNativeDiagLogs = 150
+  private var cachedAppState: String = "unknown"
+
   // ★ JSの受信準備が整う前およびイベント取りこぼし防止用の受信キュー（連番管理）
   private let eventLock = NSLock()
   private var jsReady: Bool = false
@@ -68,10 +75,11 @@ public class ExpoWatchConnectivityModule: Module {
       DispatchQueue.main.async {
         let center = UNUserNotificationCenter.current()
         if !(center.delegate is PeerNotificationCenterDelegate) {
-          let notifDelegate = PeerNotificationCenterDelegate(previousDelegate: center.delegate)
+          let notifDelegate = PeerNotificationCenterDelegate(previousDelegate: center.delegate, module: self)
           self.notificationDelegate = notifDelegate
           center.delegate = notifDelegate
         }
+        _ = self.currentAppStateText()
         self.setupBackgroundTaskObservers()
       }
     }
@@ -130,7 +138,14 @@ public class ExpoWatchConnectivityModule: Module {
         content.threadIdentifier = "assisttimer.peer.shared"
         let identifier = "assisttimer.peer.\(UUID().uuidString)"
         let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
-        center.add(request) { error in
+        center.add(request) { [weak self] error in
+          self?.appendNativeDiagLog(
+            hop: "N_LOCAL_NOTIF",
+            ch: "local_enqueue",
+            act: "presentLocalNotification",
+            res: error == nil ? "ok" : "err",
+            rsn: error?.localizedDescription ?? "enqueued"
+          )
           promise.resolve(error == nil)
         }
       }
@@ -201,6 +216,16 @@ public class ExpoWatchConnectivityModule: Module {
     // ★ 診断用: 現在の通信状態をまとめて返す
     Function("getStatus") { () -> [String: Any] in
       return self.buildStatus()
+    }
+
+    // ★ Issue #13: ネイティブ層トレースログのオンデマンド回収・クリア
+    Function("flushNativeDiagLogs") { () -> [[String: Any]] in
+      return self.drainNativeDiagLogs()
+    }
+
+    Function("clearNativeDiagLogs") { () -> Bool in
+      self.resetNativeDiagLogs()
+      return true
     }
 
     // ★ ネイティブビルドバージョン（CFBundleShortVersionString + CFBundleVersion）を同期取得（TestFlightアップデート検知用）
@@ -326,11 +351,14 @@ public class ExpoWatchConnectivityModule: Module {
       // ★ 1日50回の transferCurrentComplicationUserInfo 優先起床枠は、
       //   Watchが非Reachable（手首下げ文字盤表示・バックグラウンド中）かつタイマー開始・停止・指名・募集・共有通知およびメインタイマー同期（isHighPriorityWake）専用に使用し、
       //   isReachable == true 時（sendMessage + updateApplicationContext で 0ms 到達済み）の不要消費による枯渇を防止する
+      let isReachableSnap = session.isReachable
+      let isCompEnabledSnap = session.isComplicationEnabled
+      let remQuotaBefore = session.remainingComplicationUserInfoTransfers
       let canUseComplicationTransfer =
         isHighPriorityWake &&
-        !session.isReachable &&
-        session.isComplicationEnabled &&
-        session.remainingComplicationUserInfoTransfers > 0
+        !isReachableSnap &&
+        isCompEnabledSnap &&
+        remQuotaBefore > 0
 
       let transfer: WCSessionUserInfoTransfer
       if canUseComplicationTransfer {
@@ -339,7 +367,33 @@ public class ExpoWatchConnectivityModule: Module {
         transfer = session.transferUserInfo(wireUserInfo)
       }
       let isTransferring = transfer.isTransferring
+      let remQuotaAfter = session.remainingComplicationUserInfoTransfers
       self.transferLock.unlock()
+
+      let txReason: String = {
+        if !isHighPriorityWake { return "normal_priority" }
+        if isReachableSnap { return "skip_complication_reachable" }
+        if !isCompEnabledSnap { return "downgrade_complication_disabled" }
+        if remQuotaBefore <= 0 { return "downgrade_quota_zero" }
+        return "complication_priority_tx"
+      }()
+      let txTraceId = (wireUserInfo["traceId"] as? String)
+        ?? ((wireUserInfo["notification"] as? [String: Any])?["traceId"] as? String)
+        ?? ""
+      self.appendNativeDiagLog(
+        hop: "N_WC_TRANSFER_TX",
+        ch: canUseComplicationTransfer ? "complication_userinfo" : "userinfo",
+        act: (wireUserInfo["type"] as? String) ?? "transfer",
+        res: isTransferring ? "ok" : "err",
+        rsn: txReason,
+        traceId: txTraceId,
+        meta: [
+          "isHighPriorityWake": isHighPriorityWake,
+          "isReachable": isReachableSnap,
+          "isComplicationEnabled": isCompEnabledSnap,
+          "remainingQuota": remQuotaAfter
+        ]
+      )
       self.eventLock.lock()
       self.pendingUserInfo = nil
       self.eventLock.unlock()
@@ -393,6 +447,83 @@ public class ExpoWatchConnectivityModule: Module {
     }
   }
 
+  fileprivate func currentAppStateText() -> String {
+    if Thread.isMainThread {
+      let txt: String
+      switch UIApplication.shared.applicationState {
+      case .active: txt = "active"
+      case .inactive: txt = "inactive"
+      case .background: txt = "background"
+      @unknown default: txt = "unknown"
+      }
+      diagLock.lock()
+      cachedAppState = txt
+      diagLock.unlock()
+      return txt
+    }
+    diagLock.lock()
+    let snap = cachedAppState
+    diagLock.unlock()
+    return snap
+  }
+
+  fileprivate func appendNativeDiagLog(
+    hop: String,
+    ch: String = "wc_native",
+    act: String = "",
+    res: String = "ok",
+    rsn: String = "",
+    traceId: String = "",
+    seat: String = "",
+    ms: Int? = nil,
+    meta: [String: Any]? = nil
+  ) {
+    let wallMs = Int64((Date().timeIntervalSince1970 * 1000.0).rounded())
+    let monoMs = Int64((ProcessInfo.processInfo.systemUptime * 1000.0).rounded())
+    let appState = currentAppStateText()
+    diagLock.lock()
+    nativeDiagSeq += 1
+    var entry: [String: Any] = [
+      "seq": nativeDiagSeq,
+      "wallMs": Double(wallMs),
+      "monoMs": Double(monoMs),
+      "hop": hop,
+      "ch": ch,
+      "act": act,
+      "res": res,
+      "rsn": rsn,
+      "traceId": traceId,
+      "seat": seat,
+      "appState": appState
+    ]
+    if let ms = ms {
+      entry["ms"] = ms
+    }
+    if let meta = meta {
+      entry["meta"] = sanitizeDictionary(meta)
+    }
+    nativeDiagLogs.append(entry)
+    if nativeDiagLogs.count > maxNativeDiagLogs {
+      nativeDiagLogs.removeFirst(nativeDiagLogs.count - maxNativeDiagLogs)
+    }
+    diagLock.unlock()
+  }
+
+  fileprivate func drainNativeDiagLogs() -> [[String: Any]] {
+    diagLock.lock()
+    let items = nativeDiagLogs
+    nativeDiagLogs.removeAll()
+    diagLock.unlock()
+    return items
+  }
+
+  fileprivate func resetNativeDiagLogs() {
+    diagLock.lock()
+    nativeDiagLogs.removeAll()
+    nativeDiagSeq = 0
+    diagLock.unlock()
+  }
+
   fileprivate func flushPendingUserInfo(session: WCSession) {
     guard session.isPaired, session.isWatchAppInstalled else { return }
     self.eventLock.lock()
@@ -408,20 +539,49 @@ public class ExpoWatchConnectivityModule: Module {
     var wirePending = pending
     wirePending.removeValue(forKey: "highPriorityWake")
     self.transferLock.lock()
+    let isReachableSnap = session.isReachable
+    let isCompEnabledSnap = session.isComplicationEnabled
+    let remQuotaBefore = session.remainingComplicationUserInfoTransfers
     let canUseComplicationTransfer =
       isHighPriorityWake &&
-      !session.isReachable &&
-      session.isComplicationEnabled &&
-      session.remainingComplicationUserInfoTransfers > 0
+      !isReachableSnap &&
+      isCompEnabledSnap &&
+      remQuotaBefore > 0
     if canUseComplicationTransfer {
       session.transferCurrentComplicationUserInfo(wirePending)
     } else {
       session.transferUserInfo(wirePending)
     }
+    let remQuotaAfter = session.remainingComplicationUserInfoTransfers
     self.transferLock.unlock()
+    let txReason: String = {
+      if !isHighPriorityWake { return "flush_normal_priority" }
+      if isReachableSnap { return "flush_skip_complication_reachable" }
+      if !isCompEnabledSnap { return "flush_downgrade_complication_disabled" }
+      if remQuotaBefore <= 0 { return "flush_downgrade_quota_zero" }
+      return "flush_complication_priority_tx"
+    }()
+    let txTraceId = (wirePending["traceId"] as? String)
+      ?? ((wirePending["notification"] as? [String: Any])?["traceId"] as? String)
+      ?? ""
+    self.appendNativeDiagLog(
+      hop: "N_WC_TRANSFER_TX",
+      ch: canUseComplicationTransfer ? "complication_userinfo" : "userinfo",
+      act: (wirePending["type"] as? String) ?? "flush_transfer",
+      res: "ok",
+      rsn: txReason,
+      traceId: txTraceId,
+      meta: [
+        "isHighPriorityWake": isHighPriorityWake,
+        "isReachable": isReachableSnap,
+        "isComplicationEnabled": isCompEnabledSnap,
+        "remainingQuota": remQuotaAfter
+      ]
+    )
   }
 
-  fileprivate func dispatchEvent(_ name: String, _ body: [String: Any]) {
+  @discardableResult
+  fileprivate func dispatchEvent(_ name: String, _ body: [String: Any]) -> (seq: Int, canEmit: Bool, jsReady: Bool, hasListeners: Bool) {
     let cleanBody = self.sanitizeDictionary(body)
     eventLock.lock()
     nextEventSeq += 1
@@ -432,7 +592,9 @@ public class ExpoWatchConnectivityModule: Module {
     if pendingEvents.count > maxPendingEvents {
       pendingEvents.removeFirst(pendingEvents.count - maxPendingEvents)
     }
-    let canEmit = (jsReady && hasListeners)
+    let jsReadySnap = jsReady
+    let hasListenersSnap = hasListeners
+    let canEmit = (jsReadySnap && hasListenersSnap)
     eventLock.unlock()
     if canEmit {
       if Thread.isMainThread {
@@ -449,6 +611,7 @@ public class ExpoWatchConnectivityModule: Module {
         }
       }
     }
+    return (seq, canEmit, jsReadySnap, hasListenersSnap)
   }
 
   fileprivate func activationStateText(_ state: WCSessionActivationState) -> String {
@@ -479,6 +642,8 @@ public class ExpoWatchConnectivityModule: Module {
       "isPaired": s.isPaired,
       "isWatchAppInstalled": s.isWatchAppInstalled,
       "isReachable": s.isReachable,
+      "isComplicationEnabled": s.isComplicationEnabled,
+      "remainingComplicationTransfers": s.remainingComplicationUserInfoTransfers,
       "delegateOk": delegateOk,
       "activationError": actErr,
       "nativeReceivedCount": rxCount,
@@ -528,11 +693,26 @@ public class ExpoWatchConnectivityModule: Module {
   // ★ スマホ画面閉鎖・別アプリ切替直後も Supabase Realtime 受信および Watch/OSバナー通知送出を完了できるようバックグラウンド実行猶予を確保
   fileprivate func setupBackgroundTaskObservers() {
     guard bgObserverTokens.isEmpty else { return }
+    let becomeActive = NotificationCenter.default.addObserver(
+      forName: UIApplication.didBecomeActiveNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      _ = self?.currentAppStateText()
+    }
+    let resignActive = NotificationCenter.default.addObserver(
+      forName: UIApplication.willResignActiveNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      _ = self?.currentAppStateText()
+    }
     let enterBg = NotificationCenter.default.addObserver(
       forName: UIApplication.didEnterBackgroundNotification,
       object: nil,
       queue: .main
     ) { [weak self] _ in
+      _ = self?.currentAppStateText()
       self?.beginRealtimeBackgroundTask()
     }
     let enterFg = NotificationCenter.default.addObserver(
@@ -540,10 +720,11 @@ public class ExpoWatchConnectivityModule: Module {
       object: nil,
       queue: .main
     ) { [weak self] _ in
+      _ = self?.currentAppStateText()
       self?.endRealtimeBackgroundTask()
       self?.endWatchActionBackgroundTask()
     }
-    bgObserverTokens = [enterBg, enterFg]
+    bgObserverTokens = [becomeActive, resignActive, enterBg, enterFg]
   }
 
   private func beginRealtimeBackgroundTask() {
@@ -635,6 +816,13 @@ public class ExpoWatchConnectivityModule: Module {
     var isCreating = true
     let startedId = UIApplication.shared.beginBackgroundTask(withName: "AssistTimerWatchActionCloudSync") { [weak self] in
       guard let self = self else { return }
+      self.appendNativeDiagLog(
+        hop: "N_BG_TASK_EXPIRE",
+        ch: "bg_task",
+        act: "watch_action_3.5s",
+        res: "skip",
+        rsn: "os_expiration"
+      )
       self.bgTaskLock.lock()
       if isCreating {
         expiredBeforeStore = true
@@ -644,6 +832,17 @@ public class ExpoWatchConnectivityModule: Module {
       self.bgTaskLock.unlock()
       self.endWatchActionBackgroundTask()
     }
+    let remBgSec = UIApplication.shared.backgroundTimeRemaining
+    self.appendNativeDiagLog(
+      hop: "N_BG_TASK_BEGIN",
+      ch: "bg_task",
+      act: "watch_action_3.5s",
+      res: startedId == .invalid ? "err" : "ok",
+      rsn: startedId == .invalid ? "invalid_task_id" : "started",
+      meta: [
+        "bgTimeRemainingSec": remBgSec.isFinite ? min(999, Int(remBgSec)) : -1
+      ]
+    )
     if startedId == .invalid {
       return
     }
@@ -662,6 +861,13 @@ public class ExpoWatchConnectivityModule: Module {
       oldTaskId = watchActionBgTaskId
       watchActionBgTaskId = startedId
       let workItem = DispatchWorkItem { [weak self] in
+        self?.appendNativeDiagLog(
+          hop: "N_BG_TASK_EXPIRE",
+          ch: "bg_task",
+          act: "watch_action_3.5s",
+          res: "ok",
+          rsn: "timer_3.5s"
+        )
         self?.endWatchActionBackgroundTask()
       }
       watchActionBgWorkItem = workItem
@@ -703,10 +909,18 @@ public class ExpoWatchConnectivityModule: Module {
 // MARK: - OS標準バナー通知表示デリゲート（inactive / background 時の確実なバナー表示＆既存デリゲート委譲）
 private class PeerNotificationCenterDelegate: NSObject, UNUserNotificationCenterDelegate {
   weak var previousDelegate: UNUserNotificationCenterDelegate?
+  weak var module: ExpoWatchConnectivityModule?
 
-  init(previousDelegate: UNUserNotificationCenterDelegate?) {
+  init(previousDelegate: UNUserNotificationCenterDelegate?, module: ExpoWatchConnectivityModule? = nil) {
     self.previousDelegate = previousDelegate
+    self.module = module
     super.init()
+  }
+
+  private static func extractTraceId(from userInfo: [AnyHashable: Any]) -> String {
+    if let t = userInfo["traceId"] as? String, !t.isEmpty { return t }
+    if let body = userInfo["body"] as? [String: Any], let t = body["traceId"] as? String, !t.isEmpty { return t }
+    return ""
   }
 
   func userNotificationCenter(
@@ -716,7 +930,16 @@ private class PeerNotificationCenterDelegate: NSObject, UNUserNotificationCenter
   ) {
     let handleOnMain = { [weak self] in
       let reqId = notification.request.identifier
+      let traceId = Self.extractTraceId(from: notification.request.content.userInfo)
       if reqId.hasPrefix("assisttimer.peer.") {
+        self?.module?.appendNativeDiagLog(
+          hop: "N_LOCAL_NOTIF",
+          ch: "local_will_present",
+          act: "peer_banner",
+          res: "ok",
+          rsn: "shown",
+          traceId: traceId
+        )
         if #available(iOS 14.0, *) {
           completionHandler([.banner, .list, .sound])
         } else {
@@ -726,10 +949,26 @@ private class PeerNotificationCenterDelegate: NSObject, UNUserNotificationCenter
       }
       if notification.request.trigger is UNPushNotificationTrigger {
         if UIApplication.shared.applicationState == .active {
+          self?.module?.appendNativeDiagLog(
+            hop: "N_LOCAL_NOTIF",
+            ch: "apns_will_present",
+            act: "remote_push",
+            res: "skip",
+            rsn: "fg_suppressed_native",
+            traceId: traceId
+          )
           // アプリがフォアグラウンド（active）の時はRealtimeのアプリ内トースト＋Watch直接通知のみとし、OSリモートプッシュバナーの二重表示を抑止
           completionHandler([])
           return
         }
+        self?.module?.appendNativeDiagLog(
+          hop: "N_LOCAL_NOTIF",
+          ch: "apns_will_present",
+          act: "remote_push",
+          res: "ok",
+          rsn: "delegated_non_active",
+          traceId: traceId
+        )
       }
       if let prev = self?.previousDelegate,
          prev.responds(to: #selector(UNUserNotificationCenterDelegate.userNotificationCenter(_:willPresent:withCompletionHandler:))) {
@@ -773,6 +1012,17 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
     super.init()
   }
 
+  private static func extractRxDiagFields(_ body: [String: Any]) -> (act: String, traceId: String, seat: String) {
+    let act = (body["action"] as? String) ?? (body["type"] as? String) ?? "?"
+    let traceId = (body["traceId"] as? String)
+      ?? ((body["extra"] as? [String: Any])?["traceId"] as? String)
+      ?? ""
+    let seat = (body["seatId"] as? String)
+      ?? (body["seatId"] as? NSNumber)?.stringValue
+      ?? ""
+    return (act, traceId, seat)
+  }
+
   func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
     let errorText = error?.localizedDescription ?? ""
     DispatchQueue.main.async {
@@ -810,7 +1060,22 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
     DispatchQueue.main.async {
       self.module?.beginWatchActionBackgroundTask()
       self.module?.recordReceived(kind: "message", body: message)
-      self.module?.dispatchEvent("onMessageReceived", ["message": message])
+      let res = self.module?.dispatchEvent("onMessageReceived", ["message": message])
+      let fields = Self.extractRxDiagFields(message)
+      self.module?.appendNativeDiagLog(
+        hop: "N_WC_RX",
+        ch: "message_noreply",
+        act: fields.act,
+        res: "ok",
+        rsn: (res?.canEmit == true) ? "js_dispatched" : "queued_pre_js",
+        traceId: fields.traceId,
+        seat: fields.seat,
+        meta: [
+          "seq": res?.seq ?? 0,
+          "jsReady": res?.jsReady ?? false,
+          "hasListeners": res?.hasListeners ?? false
+        ]
+      )
     }
   }
 
@@ -818,15 +1083,56 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
     DispatchQueue.main.async {
       self.module?.beginWatchActionBackgroundTask()
       self.module?.recordReceived(kind: "message", body: message)
-      self.module?.dispatchEvent("onMessageReceived", ["message": message])
+      let res = self.module?.dispatchEvent("onMessageReceived", ["message": message])
+      let fields = Self.extractRxDiagFields(message)
+      self.module?.appendNativeDiagLog(
+        hop: "N_WC_RX",
+        ch: "message_reply",
+        act: fields.act,
+        res: "ok",
+        rsn: (res?.canEmit == true) ? "js_dispatched" : "queued_pre_js",
+        traceId: fields.traceId,
+        seat: fields.seat,
+        meta: [
+          "seq": res?.seq ?? 0,
+          "jsReady": res?.jsReady ?? false,
+          "hasListeners": res?.hasListeners ?? false
+        ]
+      )
       if UIApplication.shared.applicationState != .active {
         // バックグラウンド起床時はすでに beginWatchActionBackgroundTask()（3.5秒保護）を開始しているため、
         // Watch側 0.85s タイムアウトより十分に早くACKが返るよう 0.10秒で replyHandler を返す
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) { [weak self] in
           replyHandler(["status": "acknowledged"])
+          self?.module?.appendNativeDiagLog(
+            hop: "N_WC_ACK_SENT",
+            ch: "message_reply",
+            act: fields.act,
+            res: "ok",
+            rsn: "delayed_100ms_bg",
+            traceId: fields.traceId,
+            seat: fields.seat,
+            meta: [
+              "seq": res?.seq ?? 0,
+              "jsDispatched": res?.canEmit ?? false
+            ]
+          )
         }
       } else {
         replyHandler(["status": "acknowledged"])
+        self.module?.appendNativeDiagLog(
+          hop: "N_WC_ACK_SENT",
+          ch: "message_reply",
+          act: fields.act,
+          res: "ok",
+          rsn: "immediate_fg",
+          traceId: fields.traceId,
+          seat: fields.seat,
+          meta: [
+            "seq": res?.seq ?? 0,
+            "jsDispatched": res?.canEmit ?? false
+          ]
+        )
       }
     }
   }
@@ -835,7 +1141,22 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
     DispatchQueue.main.async {
       self.module?.beginWatchActionBackgroundTask()
       self.module?.recordReceived(kind: "context", body: applicationContext)
-      self.module?.dispatchEvent("onApplicationContextReceived", ["context": applicationContext])
+      let res = self.module?.dispatchEvent("onApplicationContextReceived", ["context": applicationContext])
+      let fields = Self.extractRxDiagFields(applicationContext)
+      self.module?.appendNativeDiagLog(
+        hop: "N_WC_RX",
+        ch: "context",
+        act: fields.act,
+        res: "ok",
+        rsn: (res?.canEmit == true) ? "js_dispatched" : "queued_pre_js",
+        traceId: fields.traceId,
+        seat: fields.seat,
+        meta: [
+          "seq": res?.seq ?? 0,
+          "jsReady": res?.jsReady ?? false,
+          "hasListeners": res?.hasListeners ?? false
+        ]
+      )
     }
   }
 
@@ -844,7 +1165,22 @@ private class SessionDelegate: NSObject, WCSessionDelegate {
     DispatchQueue.main.async {
       self.module?.beginWatchActionBackgroundTask()
       self.module?.recordReceived(kind: "userInfo", body: userInfo)
-      self.module?.dispatchEvent("onUserInfoReceived", ["userInfo": userInfo])
+      let res = self.module?.dispatchEvent("onUserInfoReceived", ["userInfo": userInfo])
+      let fields = Self.extractRxDiagFields(userInfo)
+      self.module?.appendNativeDiagLog(
+        hop: "N_WC_RX",
+        ch: "userInfo",
+        act: fields.act,
+        res: "ok",
+        rsn: (res?.canEmit == true) ? "js_dispatched" : "queued_pre_js",
+        traceId: fields.traceId,
+        seat: fields.seat,
+        meta: [
+          "seq": res?.seq ?? 0,
+          "jsReady": res?.jsReady ?? false,
+          "hasListeners": res?.hasListeners ?? false
+        ]
+      )
     }
   }
 }

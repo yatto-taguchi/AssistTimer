@@ -2,6 +2,11 @@ import { Platform, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from './supabase';
 import { getOrCreateUserId, isValidUUID } from './salonCloudService';
+import {
+  logSyncTrace,
+  computeSeatStateRev,
+  formatDiagSeatRef,
+} from './syncTraceLogger';
 
 // ネイティブ再ビルド前の既存バイナリ環境でもクラッシュしないよう安全に動的ロード
 let Notifications = null;
@@ -76,8 +81,39 @@ export const configurePushNotificationHandler = () => {
             shouldSetBadge: false,
           };
         }
+        const content = notification?.request?.content || {};
+        const data = content?.data && typeof content.data === 'object' ? content.data : {};
+        const isSalonPush = data?.type === 'SALON_EVENT_PUSH';
+        const diagSeat = isSalonPush
+          ? formatDiagSeatRef(
+              data?.seatSnapshot || {
+                id: data?.timerId,
+                seatNumber: data?.seatNumber,
+                seatLabel: data?.seatLabel,
+              }
+            )
+          : '';
+        const diagTraceId = isSalonPush ? String(data?.traceId || '') : '';
+        const diagStateRev =
+          isSalonPush && data?.seatSnapshot && typeof data.seatSnapshot === 'object'
+            ? computeSeatStateRev(data.seatSnapshot)
+            : '';
+        const eventType = data?.eventType ? String(data.eventType) : '';
+
         const isForeground = AppState.currentState === 'active';
         if (isForeground) {
+          if (isSalonPush) {
+            logSyncTrace({
+              hop: 'P_OS_BANNER_DECISION',
+              ch: 'expo_notif',
+              seat: diagSeat,
+              act: eventType || 'SALON_EVENT_PUSH',
+              res: 'skip',
+              rsn: 'fg_suppressed',
+              traceId: diagTraceId,
+              stateRev: diagStateRev,
+            });
+          }
           return {
             shouldShowAlert: false,
             shouldShowBanner: false,
@@ -86,11 +122,8 @@ export const configurePushNotificationHandler = () => {
             shouldSetBadge: false,
           };
         }
-        const content = notification?.request?.content || {};
-        const data = content?.data && typeof content.data === 'object' ? content.data : {};
         const notifId = data?.notifId ? String(data.notifId) : reqId;
         const timerKey = data?.timerId || data?.seatLabel || '';
-        const eventType = data?.eventType ? String(data.eventType) : '';
         const stateDisc = data?.stateDisc ? String(data.stateDisc) : '';
         const semanticKey =
           (data?.semanticKey ? String(data.semanticKey) : '') ||
@@ -105,6 +138,18 @@ export const configurePushNotificationHandler = () => {
         }
 
         if (hasHandledPeerNotification({ notifId, semanticKey, channel: 'os_banner' })) {
+          if (isSalonPush) {
+            logSyncTrace({
+              hop: 'P_OS_BANNER_DECISION',
+              ch: 'expo_notif',
+              seat: diagSeat,
+              act: eventType || 'SALON_EVENT_PUSH',
+              res: 'drop',
+              rsn: 'dup_os_banner',
+              traceId: diagTraceId,
+              stateRev: diagStateRev,
+            });
+          }
           return {
             shouldShowAlert: false,
             shouldShowBanner: false,
@@ -116,6 +161,18 @@ export const configurePushNotificationHandler = () => {
         markPeerNotificationHandled({ notifId, semanticKey, channel: 'os_banner' });
         const isGentleUnassign =
           eventType === 'unassign_assist' || eventType === 'unassign_check';
+        if (isSalonPush) {
+          logSyncTrace({
+            hop: 'P_OS_BANNER_DECISION',
+            ch: 'expo_notif',
+            seat: diagSeat,
+            act: eventType || 'SALON_EVENT_PUSH',
+            res: 'ok',
+            rsn: 'shown',
+            traceId: diagTraceId,
+            stateRev: diagStateRev,
+          });
+        }
         return {
           shouldShowAlert: true,
           shouldShowBanner: true,
@@ -1314,8 +1371,22 @@ export const dispatchSalonTimerEventPush = async ({
   prevSeat = null,
   nextSeat = null,
   staffMembers = [],
+  traceId = '',
 }) => {
-  if (!salonId || !nextSeat) return { sent: 0 };
+  const resolvedTraceId = String(traceId || nextSeat?._traceId || nextSeat?.traceId || '').trim();
+  const pushStartMs = Date.now();
+  if (!salonId || !nextSeat) {
+    if (resolvedTraceId) {
+      logSyncTrace({
+        hop: 'P_PUSH_TX',
+        ch: 'expo_push',
+        res: 'skip',
+        rsn: 'no_next_seat',
+        traceId: resolvedTraceId,
+      });
+    }
+    return { sent: 0 };
+  }
 
   try {
     let resolvedActorId = actorUserId ? String(actorUserId).trim() : '';
@@ -1326,7 +1397,23 @@ export const dispatchSalonTimerEventPush = async ({
 
     const prev = prevSeat ? normalizeSeatSnapshotForPush(prevSeat) : null;
     const next = normalizeSeatSnapshotForPush(nextSeat, resolvedActorId);
-    if (!next) return { sent: 0 };
+    if (!next) {
+      if (resolvedTraceId) {
+        logSyncTrace({
+          hop: 'P_PUSH_TX',
+          ch: 'expo_push',
+          res: 'skip',
+          rsn: 'no_next_seat',
+          traceId: resolvedTraceId,
+        });
+      }
+      return { sent: 0 };
+    }
+    if (resolvedTraceId) {
+      next.traceId = resolvedTraceId;
+    }
+    const nextStateRev = computeSeatStateRev(next);
+    const diagSeat = formatDiagSeatRef(next);
 
     // 状態遷移時点で同一席・同一ロール系の古い semanticKey を即時無効化（A→自分→A 等で中間イベントが送信0件になるケースも含め完全解放）
     purgeStaleSemanticKeysForSeatState(prev, next, { salonId });
@@ -2027,6 +2114,17 @@ export const dispatchSalonTimerEventPush = async ({
     }
 
     if (candidateEvents.length === 0 && !hasUnresolvedPersonalTarget) {
+      logSyncTrace({
+        hop: 'P_PUSH_TX',
+        ch: 'expo_push',
+        seat: diagSeat,
+        act: String(next.status || 'none'),
+        res: 'skip',
+        rsn: 'no_events_detected',
+        traceId: resolvedTraceId,
+        stateRev: nextStateRev,
+        ms: Date.now() - pushStartMs,
+      });
       return { sent: 0 };
     }
 
@@ -2066,10 +2164,14 @@ export const dispatchSalonTimerEventPush = async ({
 
     // 受信者 user_id ごとに最優先の1イベントのみを割り当て
     const recipientEventMap = new Map();
+    let throttledCount = 0;
     for (const ev of candidateEvents) {
       const dedupKey = `${salonId}|${ev.semanticKey}`;
       const lastSentAt = _dispatchedSemanticKeyMap.get(dedupKey) || 0;
-      if (nowMs - lastSentAt < 4000) continue;
+      if (nowMs - lastSentAt < 4000) {
+        throttledCount += 1;
+        continue;
+      }
 
       let assignedAny = false;
       for (const uid of ev.targetUserIds) {
@@ -2087,6 +2189,21 @@ export const dispatchSalonTimerEventPush = async ({
     let targetRecipientIds = Array.from(recipientEventMap.keys());
     const hasBroadcastEligibleEvent = candidateEvents.some((ev) => ev.allowBroadcastFallback);
     if (targetRecipientIds.length === 0 && !hasBroadcastEligibleEvent && !hasUnresolvedPersonalTarget) {
+      logSyncTrace({
+        hop: 'P_PUSH_TX',
+        ch: 'expo_push',
+        seat: diagSeat,
+        act: candidateEvents.map((e) => e.eventType).join(',') || 'none',
+        res: 'skip',
+        rsn: throttledCount > 0 ? 'throttle_4s' : 'no_target_uid',
+        traceId: resolvedTraceId,
+        stateRev: nextStateRev,
+        ms: Date.now() - pushStartMs,
+        meta: {
+          candidateCount: candidateEvents.length,
+          throttledCount,
+        },
+      });
       return { sent: 0 };
     }
 
@@ -2164,6 +2281,17 @@ export const dispatchSalonTimerEventPush = async ({
           const dedupKey = `${salonId}|${primaryBroadcastEv.semanticKey}`;
           const lastSentAt = _dispatchedSemanticKeyMap.get(dedupKey) || 0;
           if (targetRecipientIds.length === 0 && nowMs - lastSentAt < 4000) {
+            logSyncTrace({
+              hop: 'P_PUSH_TX',
+              ch: 'expo_push',
+              seat: diagSeat,
+              act: primaryBroadcastEv.eventType || 'broadcast',
+              res: 'skip',
+              rsn: 'throttle_4s',
+              traceId: resolvedTraceId,
+              stateRev: nextStateRev,
+              ms: Date.now() - pushStartMs,
+            });
             return { sent: 0 };
           }
           _dispatchedSemanticKeyMap.set(dedupKey, nowMs);
@@ -2221,11 +2349,13 @@ export const dispatchSalonTimerEventPush = async ({
           updatedBy: effectiveActor || null,
           actorId: effectiveActor || null,
           updatedAt: nowMs,
+          ...(resolvedTraceId ? { traceId: resolvedTraceId } : {}),
           seatSnapshot: next,
         },
       });
     }
 
+    const joinedEventTypes = candidateEvents.map((e) => e.eventType).join(',') || 'unresolved_target';
     let hadExpoFetchError = false;
     const actuallySentTokens = new Set();
     if (messages.length > 0) {
@@ -2253,6 +2383,22 @@ export const dispatchSalonTimerEventPush = async ({
         }
       }
       if (!hadExpoFetchError && !hasUnresolvedPersonalTarget) {
+        logSyncTrace({
+          hop: 'P_PUSH_TX',
+          ch: 'expo_push',
+          seat: diagSeat,
+          act: joinedEventTypes,
+          res: 'ok',
+          rsn: 'expo_http_result',
+          traceId: resolvedTraceId,
+          stateRev: nextStateRev,
+          ms: Date.now() - pushStartMs,
+          meta: {
+            sent: actuallySentTokens.size,
+            targetUids: targetRecipientIds.length,
+            tokens: tokenRows.length,
+          },
+        });
         return { sent: actuallySentTokens.size };
       }
     }
@@ -2260,14 +2406,31 @@ export const dispatchSalonTimerEventPush = async ({
     // 正常に送信対象トークンが0件だった場合は不要な Edge Function 呼び出しを行わず終了し、
     // 未解決の個人指名ターゲットがある場合・トークン取得DBエラー・または Expo Push HTTP 通信失敗時のみ Edge Function（サーバー側最新 salon_members 解決）へフォールバックする
     if (!hadTokenQueryError && !hadExpoFetchError && !hasUnresolvedPersonalTarget) {
+      logSyncTrace({
+        hop: 'P_PUSH_TX',
+        ch: 'expo_push',
+        seat: diagSeat,
+        act: joinedEventTypes,
+        res: 'skip',
+        rsn: 'no_tokens',
+        traceId: resolvedTraceId,
+        stateRev: nextStateRev,
+        ms: Date.now() - pushStartMs,
+        meta: {
+          targetUids: targetRecipientIds.length,
+          tokens: tokenRows.length,
+        },
+      });
       return { sent: 0 };
     }
 
+    let edgeInvokeErr = null;
     if (typeof supabase?.functions?.invoke === 'function') {
-      await supabase.functions.invoke('notify-salon-event', {
+      const invokeRes = await supabase.functions.invoke('notify-salon-event', {
         body: {
           type: prev ? 'UPDATE' : 'INSERT',
           table: 'salon_timers',
+          ...(resolvedTraceId ? { traceId: resolvedTraceId } : {}),
           alreadyNotifiedTokens: Array.from(actuallySentTokens),
           record: {
             id: next.id,
@@ -2311,10 +2474,42 @@ export const dispatchSalonTimerEventPush = async ({
             : null,
         },
       });
+      edgeInvokeErr = invokeRes?.error || null;
     }
+    logSyncTrace({
+      hop: 'P_PUSH_TX',
+      ch: 'edge_fn_fallback',
+      seat: diagSeat,
+      act: joinedEventTypes,
+      res: edgeInvokeErr ? 'err' : 'ok',
+      rsn: 'edge_fallback_result',
+      traceId: resolvedTraceId,
+      stateRev: nextStateRev,
+      ms: Date.now() - pushStartMs,
+      meta: {
+        directSent: actuallySentTokens.size,
+        plannedMessages: messages.length,
+        hadTokenQueryError,
+        hadExpoFetchError,
+        hasUnresolvedPersonalTarget,
+        edgeErr: edgeInvokeErr ? String(edgeInvokeErr.message || edgeInvokeErr).slice(0, 60) : '',
+      },
+    });
     return { sent: messages.length };
   } catch (e) {
     console.warn('[PushNotification] dispatchSalonTimerEventPush warning:', e?.message || e);
+    logSyncTrace({
+      hop: 'P_PUSH_TX',
+      ch: 'expo_push',
+      seat: formatDiagSeatRef(nextSeat),
+      res: 'err',
+      rsn: 'exception',
+      traceId: resolvedTraceId,
+      ms: Date.now() - pushStartMs,
+      meta: {
+        err: String(e?.message || e).slice(0, 60),
+      },
+    });
     return { sent: 0 };
   }
 };

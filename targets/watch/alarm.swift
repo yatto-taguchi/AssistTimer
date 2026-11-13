@@ -83,13 +83,22 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
     private var lastPeerNotifText: String = ""
     private var lastPeerNotifAt: Date = .distantPast
     private var forceSystemBannerRequestIds: Set<String> = []
+    private var lastLoggedAlarmSyncSig: String = ""
 
     /// 共有相手（関係者の席）でチェック完了・タイマー停止・担当指名・募集・担当解除などが行われた際にWatchへ通知する
-    func postPeerActionNotification(text: String, forceSystemBanner: Bool = false, isGentleInfo: Bool = false, eventType: String? = nil) {
+    func postPeerActionNotification(text: String, forceSystemBanner: Bool = false, isGentleInfo: Bool = false, eventType: String? = nil, traceId: String = "") {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let now = Date()
         if trimmed == lastPeerNotifText && now.timeIntervalSince(lastPeerNotifAt) < 2.5 {
+            SyncTraceLogger.shared.log(
+                hop: "W_LOCAL_NOTIF",
+                ch: "peer_notif",
+                act: eventType ?? "peer",
+                res: "skip",
+                rsn: "dup_2.5s",
+                traceId: traceId
+            )
             return
         }
         lastPeerNotifText = trimmed
@@ -110,7 +119,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         content.userInfo = [
             "type": "PEER_ACTION",
             "eventType": eventType ?? "",
-            "isGentleInfo": effectiveGentle
+            "isGentleInfo": effectiveGentle,
+            "traceId": traceId
         ]
         if #available(watchOS 8.0, *) {
             content.interruptionLevel = effectiveGentle ? .active : .timeSensitive
@@ -128,6 +138,15 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         }
         let req = UNNotificationRequest(identifier: reqId, content: content, trigger: trigger)
         UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+        SyncTraceLogger.shared.log(
+            hop: "W_LOCAL_NOTIF",
+            ch: "peer_notif",
+            act: eventType ?? "peer",
+            res: "ok",
+            rsn: isActive ? (forceSystemBanner ? "active_force_banner" : "active_list_only") : "bg_immediate_banner",
+            traceId: traceId,
+            meta: ["gentle": effectiveGentle]
+        )
     }
 
     private var events: [WatchAlarmEvent] = []
@@ -1546,6 +1565,28 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         updateAlarmAudio()
         rescheduleNotifications(now)
         updateStatusText()
+
+        let unackedEvents = events.filter { !isAcknowledged($0.key) }
+        let sessStateTag = sessionStarted ? "running" : (session != nil ? "scheduled" : "none")
+        let alarmSig = unackedEvents.map { $0.key }.sorted().joined(separator: ",")
+            + "##" + ringing.map { $0.key }.sorted().joined(separator: ",")
+            + "##" + sessStateTag
+        if alarmSig != lastLoggedAlarmSyncSig {
+            lastLoggedAlarmSyncSig = alarmSig
+            SyncTraceLogger.shared.log(
+                hop: "W_ALARM_SYNC",
+                ch: "alarm_coord",
+                act: !ringing.isEmpty ? "ringing" : (!unackedEvents.isEmpty ? "scheduled" : "idle"),
+                res: "ok",
+                stateRev: SyncTraceLogger.computeCompositeStateRev(WatchSessionManager.shared.timers),
+                meta: [
+                    "eventCount": unackedEvents.count,
+                    "ringingCount": ringing.count,
+                    "smartSession": sessStateTag,
+                    "barDisabled": isBackgroundRefreshDisabled
+                ]
+            )
+        }
     }
 
     private func findMatchingSeat(for seatId: String, title: String = "") -> SeatTimerItem? {
@@ -3033,7 +3074,7 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         return nil
     }
 
-    private static func parseSalonPeerNotificationInfo(_ userInfo: [AnyHashable: Any]) -> (topType: String, eventType: String, isGentleInfo: Bool, isRemotePeerPush: Bool) {
+    private static func parseSalonPeerNotificationInfo(_ userInfo: [AnyHashable: Any]) -> (topType: String, eventType: String, isGentleInfo: Bool, isRemotePeerPush: Bool, traceId: String, seatLabel: String) {
         let bodyDict = parseNestedNotificationDict(userInfo["body"])
         let dataDict = parseNestedNotificationDict(userInfo["data"])
         let nestedBodyDataDict = parseNestedNotificationDict(bodyDict?["data"])
@@ -3042,6 +3083,8 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
         var topType = ""
         var eventType = ""
         var rawGentle: Bool? = nil
+        var traceId = ""
+        var seatLabel = ""
 
         for d in dicts {
             if topType.isEmpty, let t = (d["type"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
@@ -3053,12 +3096,18 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             if rawGentle == nil, let g = extractBoolValue(d["isGentleInfo"]) {
                 rawGentle = g
             }
+            if traceId.isEmpty, let tr = (d["traceId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !tr.isEmpty {
+                traceId = tr
+            }
+            if seatLabel.isEmpty, let sl = (d["seatLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !sl.isEmpty {
+                seatLabel = sl
+            }
         }
 
         let isRemotePeerPush = (topType == "SALON_EVENT_PUSH" || topType == "SALON_SHARED_EVENT")
             || (!eventType.isEmpty && knownSalonPeerEventTypes.contains(eventType))
         let isGentleInfo = (rawGentle == true) || eventType == "unassign_assist" || eventType == "unassign_check"
-        return (topType: topType, eventType: eventType, isGentleInfo: isGentleInfo, isRemotePeerPush: isRemotePeerPush)
+        return (topType: topType, eventType: eventType, isGentleInfo: isGentleInfo, isRemotePeerPush: isRemotePeerPush, traceId: traceId, seatLabel: seatLabel)
     }
 
     // アプリ表示中は画面のアラーム表示＋振動で知らせるので通知バナーは出さない（常時表示 .inactive やバックグラウンドでは通知＋触覚も確実に出す）
@@ -3075,6 +3124,16 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
                 let shouldForceBanner = self.forceSystemBannerRequestIds.remove(reqId) != nil
                 let isActive = (WKApplication.shared().applicationState == .active)
                 if isRemotePeerPush {
+                    SyncTraceLogger.shared.log(
+                        hop: "W_APNS_RX",
+                        ch: "apns_will_present",
+                        seat: meta.seatLabel.isEmpty ? "" : SyncTraceLogger.normalizeSeatKey(seatNumber: 0, seatLabel: meta.seatLabel),
+                        act: meta.eventType.isEmpty ? meta.topType : meta.eventType,
+                        res: "ok",
+                        rsn: isActive ? "banner_shown_active" : "banner_shown_bg",
+                        traceId: meta.traceId,
+                        meta: ["gentle": meta.isGentleInfo]
+                    )
                     WatchSessionManager.shared.pollCloudTimersFromSupabaseIfNeeded(force: true)
                 }
                 if isLocalPeerReq && isActive && !shouldForceBanner {
@@ -3131,6 +3190,17 @@ final class WatchAlarmCoordinator: NSObject, ObservableObject, WKExtendedRuntime
             || response.actionIdentifier == "STOP_ACTION"
         if isLocalPeerReq || meta.isRemotePeerPush || !isAlarmNotification {
             DispatchQueue.main.async {
+                if meta.isRemotePeerPush {
+                    SyncTraceLogger.shared.log(
+                        hop: "W_APNS_RX",
+                        ch: "apns_did_receive",
+                        seat: meta.seatLabel.isEmpty ? "" : SyncTraceLogger.normalizeSeatKey(seatNumber: 0, seatLabel: meta.seatLabel),
+                        act: meta.eventType.isEmpty ? meta.topType : meta.eventType,
+                        res: "ok",
+                        rsn: "user_tapped_push",
+                        traceId: meta.traceId
+                    )
+                }
                 WatchSessionManager.shared.pollCloudTimersFromSupabaseIfNeeded(force: true)
             }
             completionHandler()

@@ -31,7 +31,16 @@ struct watchEntry: App {
         // ★ バックグラウンド（文字盤表示中）で iPhone からデータが届いた時、WCSession デリゲート配送と
         //   直接クラウド補完ポーリング・WidgetSync 書き込みが完了するまで待機（最低 0.3秒、最大 1.8秒で安全解放）
         .backgroundTask(.watchConnectivity) {
+            let startMs = safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0)
             await MainActor.run {
+                let hasPending = WCSession.isSupported() && WCSession.default.hasContentPending
+                SyncTraceLogger.shared.log(
+                    hop: "W_BG_WC_TASK",
+                    ch: "bg_wc",
+                    act: "begin",
+                    res: "ok",
+                    rsn: hasPending ? "has_pending" : "no_pending"
+                )
                 WatchSessionManager.shared.syncFromLatestApplicationContextIfNewer()
                 WatchSessionManager.shared.pollCloudTimersFromSupabaseIfNeeded(force: true)
             }
@@ -51,6 +60,15 @@ struct watchEntry: App {
                     mainTimer: WatchSessionManager.shared.mainTimer,
                     userName: WatchSessionManager.shared.currentUserName,
                     forceReload: true
+                )
+                let elapsed = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - startMs))
+                SyncTraceLogger.shared.log(
+                    hop: "W_BG_WC_TASK",
+                    ch: "bg_wc",
+                    act: "end",
+                    res: "ok",
+                    stateRev: SyncTraceLogger.computeCompositeStateRev(WatchSessionManager.shared.timers),
+                    ms: elapsed
                 )
             }
         }

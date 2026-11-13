@@ -1,6 +1,12 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from './supabase';
 import { dispatchSalonTimerEventPush } from './pushNotificationService';
+import {
+  logSyncTrace,
+  computeSeatStateRev,
+  formatDiagSeatRef,
+  setTraceDeviceUserId,
+} from './syncTraceLogger';
 
 const _lastKnownCloudSeatBySalonKey = new Map();
 
@@ -46,7 +52,10 @@ let _cachedLocalUserId = null;
  * 端末固有の一意UUIDを生成または取得
  */
 export const getOrCreateUserId = async () => {
-  if (_cachedLocalUserId) return _cachedLocalUserId;
+  if (_cachedLocalUserId) {
+    setTraceDeviceUserId(_cachedLocalUserId);
+    return _cachedLocalUserId;
+  }
   try {
     let uid = await AsyncStorage.getItem(USER_ID_KEY);
     if (!uid) {
@@ -58,6 +67,7 @@ export const getOrCreateUserId = async () => {
       await AsyncStorage.setItem(USER_ID_KEY, uid);
     }
     _cachedLocalUserId = uid;
+    setTraceDeviceUserId(uid);
     return uid;
   } catch (e) {
     console.warn('Failed to getOrCreateUserId', e);
@@ -1229,6 +1239,8 @@ const executeSalonTimerUpdateById = async (salonId, timerId, rawPayload) => {
  */
 export const upsertCloudTimer = async (salonId, seat, options = {}) => {
   if (!salonId || !seat) return null;
+  const traceId = String(options?.traceId || seat?._traceId || '').trim();
+  const upsertStartMs = Date.now();
   const prevSeatSnapshot =
     options?.prevSeatOverride ||
     options?.prevSeat ||
@@ -1240,16 +1252,43 @@ export const upsertCloudTimer = async (salonId, seat, options = {}) => {
   const payload = mapSeatToCloudTimer(seat, salonId, userId);
   recordLocalCloudPayload(payload);
 
-  const finalizeUpsertResult = (mappedSeat) => {
+  const finalizeUpsertResult = (mappedSeat, pathRsn = 'ok') => {
     const resolvedSeat = mappedSeat || seat;
     if (resolvedSeat) {
       setLastKnownCloudSeat(salonId, resolvedSeat);
     }
+    const stateRev = computeSeatStateRev(resolvedSeat);
+    const diagSeat = formatDiagSeatRef(resolvedSeat);
+    logSyncTrace({
+      hop: 'P_CLOUD_UPSERT',
+      ch: 'supabase_rest',
+      seat: diagSeat,
+      act: String(payload.status || 'upsert'),
+      res: 'ok',
+      rsn: pathRsn,
+      traceId,
+      stateRev,
+      ms: Date.now() - upsertStartMs,
+      meta: {
+        cloudTimerId: resolvedSeat?.cloudTimerId || resolvedSeat?.id || payload.id || '',
+      },
+    });
     const shouldSkipDirectPush =
       options?.skipDirectPush === true ||
       options?.skipPushDispatch === true ||
       seat?.skipDirectPushOnce === true;
-    if (!shouldSkipDirectPush && resolvedSeat) {
+    if (shouldSkipDirectPush) {
+      logSyncTrace({
+        hop: 'P_PUSH_TX',
+        ch: 'expo_push',
+        seat: diagSeat,
+        act: String(payload.status || 'upsert'),
+        res: 'skip',
+        rsn: 'skip_direct_push_opt',
+        traceId,
+        stateRev,
+      });
+    } else if (resolvedSeat) {
       const inferredActorName =
         String(
           options?.actorName ||
@@ -1265,6 +1304,7 @@ export const upsertCloudTimer = async (salonId, seat, options = {}) => {
         prevSeat: prevSeatSnapshot,
         nextSeat: resolvedSeat,
         staffMembers: Array.isArray(options?.staffMembers) ? options.staffMembers : [],
+        traceId,
       }).catch(() => {});
     }
     return mappedSeat;
@@ -1280,16 +1320,49 @@ export const upsertCloudTimer = async (salonId, seat, options = {}) => {
       if (!payload.created_by) {
         const updRes = await executeSalonTimerUpdateById(salonId, payload.id, payload);
         if (!updRes.error && updRes.data) {
-          return finalizeUpsertResult(mapCloudTimerToSeat(updRes.data));
+          return finalizeUpsertResult(mapCloudTimerToSeat(updRes.data), 'update_by_id_ok');
         }
         if (updRes.error) {
           console.warn('upsertCloudTimer update-by-id error:', updRes.error);
+          logSyncTrace({
+            hop: 'P_CLOUD_UPSERT',
+            ch: 'supabase_rest',
+            seat: formatDiagSeatRef(seat),
+            act: String(payload.status || 'upsert'),
+            res: 'err',
+            rsn: 'update_by_id_err',
+            traceId,
+            stateRev: computeSeatStateRev(seat),
+            ms: Date.now() - upsertStartMs,
+            meta: {
+              cloudTimerId: payload.id || '',
+              code: String(updRes.error?.code || ''),
+            },
+          });
           return null;
         }
       }
       const { data, error } = await executeSalonTimerUpsert(payload, userId);
       if (error) console.warn('upsertCloudTimer update error:', error);
-      return data ? finalizeUpsertResult(mapCloudTimerToSeat(data)) : null;
+      if (data) {
+        return finalizeUpsertResult(mapCloudTimerToSeat(data), 'upsert_uuid_ok');
+      }
+      logSyncTrace({
+        hop: 'P_CLOUD_UPSERT',
+        ch: 'supabase_rest',
+        seat: formatDiagSeatRef(seat),
+        act: String(payload.status || 'upsert'),
+        res: 'err',
+        rsn: error ? 'upsert_update_err' : 'upsert_update_no_data',
+        traceId,
+        stateRev: computeSeatStateRev(seat),
+        ms: Date.now() - upsertStartMs,
+        meta: {
+          cloudTimerId: payload.id || '',
+          code: String(error?.code || ''),
+        },
+      });
+      return null;
     } else {
       // 席名（変更前ラベルおよび「1番」⇔「1番席」表記ゆれ含む）で同一サロン内の席を検索して既存があればIDを再利用
       const baseLabel = payload.seat_label;
@@ -1316,7 +1389,7 @@ export const upsertCloudTimer = async (salonId, seat, options = {}) => {
           if (!payload.created_by) {
             const updRes = await executeSalonTimerUpdateById(salonId, payload.id, payload);
             if (!updRes.error && updRes.data) {
-              return finalizeUpsertResult(mapCloudTimerToSeat(updRes.data));
+              return finalizeUpsertResult(mapCloudTimerToSeat(updRes.data), 'reuse_update_ok');
             }
           }
         }
@@ -1324,10 +1397,45 @@ export const upsertCloudTimer = async (salonId, seat, options = {}) => {
       const { data, error } = await executeSalonTimerUpsert(payload, userId);
 
       if (error) console.warn('upsertCloudTimer insert error:', error);
-      return data ? finalizeUpsertResult(mapCloudTimerToSeat(data)) : null;
+      if (data) {
+        return finalizeUpsertResult(
+          mapCloudTimerToSeat(data),
+          payload.id ? 'reuse_upsert_ok' : 'insert_new_ok'
+        );
+      }
+      logSyncTrace({
+        hop: 'P_CLOUD_UPSERT',
+        ch: 'supabase_rest',
+        seat: formatDiagSeatRef(seat),
+        act: String(payload.status || 'upsert'),
+        res: 'err',
+        rsn: error ? 'upsert_insert_err' : 'upsert_insert_no_data',
+        traceId,
+        stateRev: computeSeatStateRev(seat),
+        ms: Date.now() - upsertStartMs,
+        meta: {
+          cloudTimerId: payload.id || '',
+          code: String(error?.code || ''),
+        },
+      });
+      return null;
     }
   } catch (e) {
     console.warn('upsertCloudTimer failed:', e);
+    logSyncTrace({
+      hop: 'P_CLOUD_UPSERT',
+      ch: 'supabase_rest',
+      seat: formatDiagSeatRef(seat),
+      act: String(payload.status || 'upsert'),
+      res: 'err',
+      rsn: 'exception',
+      traceId,
+      stateRev: computeSeatStateRev(seat),
+      ms: Date.now() - upsertStartMs,
+      meta: {
+        err: String(e?.message || e).slice(0, 60),
+      },
+    });
     return null;
   }
 };
@@ -1428,7 +1536,16 @@ export const subscribeSalonTimers = (salonId, onTimerEvent) => {
         }
       }
     )
-    .subscribe();
+    .subscribe((status, err) => {
+      logSyncTrace({
+        hop: 'P_RT_CH_STATE',
+        ch: 'supabase_rt',
+        act: String(status || ''),
+        res: status === 'SUBSCRIBED' ? 'ok' : status === 'CLOSED' ? 'skip' : 'err',
+        rsn: err ? String(err.message || err).slice(0, 80) : String(status || ''),
+        meta: { salonId },
+      });
+    });
 
   return () => {
     supabase.removeChannel(channel);

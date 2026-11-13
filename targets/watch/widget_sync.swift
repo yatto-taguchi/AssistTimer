@@ -42,6 +42,7 @@ enum WidgetSync {
     private static var lastReloadedWhileActive: Bool = false
     private static var lastReloadAt: Date = .distantPast
     private static var trailingReloadWorkItem: DispatchWorkItem?
+    private static var lastLoggedSkipDedup: Bool = false
 
     static func save(timers: [SeatTimerItem], mainTimer: SeatTimerItem? = nil, userName: String, forceReload: Bool = false) {
         let timersSnapshot = timers
@@ -133,6 +134,14 @@ enum WidgetSync {
                     return !wasStoppedLocally && !wasConfirmedPeerStop
                 }
                 if hasUnstoppedActiveCloudSeatInExisting {
+                    SyncTraceLogger.shared.log(
+                        hop: "W_WIDGET_SAVE",
+                        ch: "app_group",
+                        act: "save",
+                        res: "skip",
+                        rsn: "skip_cold_boot_15s",
+                        stateRev: SyncTraceLogger.computeCompositeStateRev(timers)
+                    )
                     return
                 }
             }
@@ -391,6 +400,7 @@ enum WidgetSync {
         }
         guard JSONSerialization.isValidJSONObject(payload),
               let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
+        let compositeRev = SyncTraceLogger.computeCompositeStateRev(timers)
         let shouldReloadImmediate = anyActiveStateChanged || !isAppActive
         if data == lastPayload && !anyActiveStateChanged {
             let now = Date()
@@ -401,13 +411,34 @@ enum WidgetSync {
             let isPeriodicForceEnsure = (forceReload && now.timeIntervalSince(lastReloadAt) >= 15.0)
             let needsForceEnsureReload = hasPendingTrailing || (forceReload && (neverReloadedThisPayload || becameActiveAfterBackgroundReload || isPeriodicForceEnsure))
             if needsForceEnsureReload {
+                lastLoggedSkipDedup = false
                 if !isAppActive || forceReload {
                     defaults.synchronize()
                 }
+                SyncTraceLogger.shared.log(
+                    hop: "W_WIDGET_SAVE",
+                    ch: "widget_center",
+                    act: "force_ensure_reload",
+                    res: "ok",
+                    rsn: !isAppActive ? "reload_immediate" : "reload_trailing",
+                    stateRev: compositeRev,
+                    meta: ["isAppActive": isAppActive]
+                )
                 scheduleTimelineReloadOnQueue(for: data, isAppActive: isAppActive, immediate: !isAppActive)
+            } else if !lastLoggedSkipDedup {
+                lastLoggedSkipDedup = true
+                SyncTraceLogger.shared.log(
+                    hop: "W_WIDGET_SAVE",
+                    ch: "app_group",
+                    act: "save",
+                    res: "skip",
+                    rsn: "skip_dedup",
+                    stateRev: compositeRev
+                )
             }
             return
         }
+        lastLoggedSkipDedup = false
         lastPayload = data
 
         defaults.set(data, forKey: snapshotKey)
@@ -415,6 +446,18 @@ enum WidgetSync {
         if shouldReloadImmediate || forceReload {
             defaults.synchronize()
         }
+        SyncTraceLogger.shared.log(
+            hop: "W_WIDGET_SAVE",
+            ch: "widget_center",
+            act: "save_and_reload",
+            res: "ok",
+            rsn: shouldReloadImmediate ? "reload_immediate" : "reload_trailing",
+            stateRev: compositeRev,
+            meta: [
+                "runningCount": timers.filter { $0.isRunning }.count,
+                "isAppActive": isAppActive
+            ]
+        )
         scheduleTimelineReloadOnQueue(for: data, isAppActive: isAppActive, immediate: shouldReloadImmediate)
     }
 
@@ -454,5 +497,584 @@ enum WidgetSync {
             trailingReloadWorkItem = work
             syncQueue.asyncAfter(deadline: .now() + delay, execute: work)
         }
+    }
+}
+
+// MARK: - Issue #13: Watch & Widget 一気通貫トレースロガー（通信副作用ゼロ・UserDefaults不使用・全時刻Int64）
+final class SyncTraceLogger {
+    static let shared = SyncTraceLogger()
+
+    private static let appGroup = "group.com.assisttimer"
+    private static let watchLogFileName = "sync_trace_watch.jsonl"
+    private static let widgetLogFileName = "sync_trace_widget.jsonl"
+    private static let maxEntries = 220
+
+    private let lock = NSLock()
+    private var entries: [[String: Any]] = []
+    private var nextSeq: Int = 0
+    private var currentScene: String = "S1"
+    private var cachedAppState: String = "unknown"
+    private let sessionDevFallback: String
+
+    private let ioQueue = DispatchQueue(label: "com.assisttimer.watch.synctrace", qos: .utility)
+    private var persistWorkItem: DispatchWorkItem?
+
+    private init() {
+        self.sessionDevFallback = String(format: "w#%04x", UInt32.random(in: 0...0xFFFF))
+        hydrateFromDiskAsync()
+    }
+
+    // MARK: - 4層完全共通ハッシュ ＆ PIIマスク
+
+    static func fnv1a32HexUtf8(_ input: String) -> String {
+        var hash: UInt32 = 0x811c9dc5
+        for byte in input.utf8 {
+            hash ^= UInt32(byte)
+            hash = hash &* 0x01000193
+        }
+        return String(format: "%08x", hash)
+    }
+
+    static func normalizeStaffToken(_ raw: String?) -> String {
+        guard let raw = raw, !raw.isEmpty else { return "" }
+        let nfkc = raw.precomposedStringWithCompatibilityMapping
+        let scalars = nfkc.unicodeScalars.filter { scalar in
+            !CharacterSet.whitespacesAndNewlines.contains(scalar) && scalar.value != 0x3000 && scalar.value != 0xFEFF
+        }
+        return String(String.UnicodeScalarView(scalars)).lowercased()
+    }
+
+    static func maskStaff(_ raw: String?) -> String {
+        let norm = normalizeStaffToken(raw)
+        if norm.isEmpty { return "empty" }
+        if norm == "未定" { return "unset" }
+        if norm == "ヘルプなし" || norm == "none" { return "none" }
+        if norm == "募集中" { return "recruit" }
+        if norm == "スタイリスト" || norm == "スタッフ" { return "default_stylist" }
+        let h = fnv1a32HexUtf8(norm)
+        return "stf#" + String(h.prefix(4))
+    }
+
+    private static func isUuidLike(_ lower: String) -> Bool {
+        let bytes = Array(lower.utf8)
+        guard bytes.count >= 14, bytes[8] == 0x2d, bytes[13] == 0x2d else { return false }
+        let isHex: (UInt8) -> Bool = { b in
+            (b >= 0x30 && b <= 0x39) || (b >= 0x61 && b <= 0x66)
+        }
+        for i in 0..<8 where !isHex(bytes[i]) { return false }
+        for i in 9..<13 where !isHex(bytes[i]) { return false }
+        return true
+    }
+
+    static func maskId(_ raw: String?, prefix: String = "") -> String {
+        let s = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return "" }
+        let lower = s.lowercased()
+        if prefix == "u" || prefix == "s" {
+            return "\(prefix)#\(String(lower.prefix(6)))"
+        }
+        if isUuidLike(lower) {
+            let p = prefix.isEmpty ? "t" : prefix
+            return "\(p)#\(String(lower.prefix(6)))"
+        }
+        return String(s.prefix(24))
+    }
+
+    static func maskToken(_ raw: String?) -> String {
+        let s = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return "" }
+        if let openIdx = s.firstIndex(of: "["),
+           let closeIdx = s[openIdx...].firstIndex(of: "]"),
+           openIdx < closeIdx {
+            let inner = s[s.index(after: openIdx)..<closeIdx]
+            return "tok#" + String(inner.suffix(4))
+        }
+        return "tok#" + String(s.suffix(4))
+    }
+
+    static func createTraceId(nowMs: Int64? = nil) -> String {
+        let ms = nowMs ?? safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0)
+        let b36 = String(max(0, ms), radix: 36, uppercase: false)
+        let r4 = String(format: "%04x", UInt32.random(in: 0...0xFFFF))
+        return "tr_\(b36)_\(r4)"
+    }
+
+    // MARK: - 4層完全共通 stateRev 算出
+
+    static func normalizeSeatKey(seatNumber: Int, seatLabel: String?) -> String {
+        var lbl = (seatLabel ?? "").precomposedStringWithCompatibilityMapping
+        lbl = lbl.replacingOccurrences(of: "(サンプル)", with: "")
+                 .replacingOccurrences(of: "（サンプル）", with: "")
+        let scalars = lbl.unicodeScalars.filter { scalar in
+            !CharacterSet.whitespacesAndNewlines.contains(scalar) && scalar.value != 0x3000 && scalar.value != 0xFEFF
+        }
+        lbl = String(String.UnicodeScalarView(scalars))
+        if lbl.hasSuffix("席") {
+            lbl = String(lbl.dropLast())
+        }
+        if lbl.hasSuffix("番") {
+            let stem = String(lbl.dropLast())
+            if !stem.isEmpty && stem.unicodeScalars.allSatisfy({ $0.value >= 0x30 && $0.value <= 0x39 }) {
+                lbl = stem
+            }
+        }
+        lbl = lbl.lowercased()
+        if !lbl.isEmpty,
+           lbl.first != "0",
+           lbl.unicodeScalars.allSatisfy({ $0.value >= 0x30 && $0.value <= 0x39 }),
+           let n = Int(lbl), n > 0 {
+            return "s\(n)"
+        }
+        if !lbl.isEmpty {
+            return lbl
+        }
+        if seatNumber > 0 {
+            return "s\(seatNumber)"
+        }
+        return "s0"
+    }
+
+    static func isCustomPostStopProcessLabel(_ rawProc: String?) -> Bool {
+        let p = (rawProc ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !p.isEmpty else { return false }
+        let lower = p.lowercased()
+        return p != "シャンプー"
+            && p != "ヘルプなし"
+            && lower != "none"
+            && p != "募集中"
+            && p != "未定"
+    }
+
+    static func computeStateRevFromFields(
+        seatNumber: Int,
+        seatLabel: String?,
+        isRunning: Bool,
+        targetEndMs: Int64,
+        pausedRemainingSeconds: Int = 0,
+        hasActiveCheck: Bool,
+        checkTargetEndMs: Int64,
+        isPostStopProcessActive: Bool,
+        assistToken: String?,
+        checkToken: String?
+    ) -> String {
+        let seatKey = normalizeSeatKey(seatNumber: seatNumber, seatLabel: seatLabel)
+        let runFlag = (isRunning && targetEndMs > 0) ? 1 : 0
+        let pausedSec = (runFlag == 0) ? max(0, pausedRemainingSeconds) : 0
+        let shampooFlag = (runFlag == 0 && pausedSec <= 0 && isPostStopProcessActive) ? 1 : 0
+        let endBucket5s: Int64 = (runFlag == 1)
+            ? Int64((Double(targetEndMs) / 5000.0).rounded(.toNearestOrAwayFromZero))
+            : ((shampooFlag == 0 && pausedSec > 0) ? Int64(pausedSec) : 0)
+        let chkFlag = (runFlag == 1 && hasActiveCheck && checkTargetEndMs > 0) ? 1 : 0
+        let checkEndBucket5s: Int64 = (chkFlag == 1)
+            ? Int64((Double(checkTargetEndMs) / 5000.0).rounded(.toNearestOrAwayFromZero))
+            : 0
+        let shouldKeepAssist = (runFlag == 1) || (shampooFlag == 1) || (pausedSec > 0)
+        let assistMasked = shouldKeepAssist ? maskStaff(assistToken) : "empty"
+        let checkMasked = (chkFlag == 1) ? maskStaff(checkToken) : "empty"
+        let canonical = "\(seatKey)|\(runFlag)|\(endBucket5s)|\(chkFlag)|\(checkEndBucket5s)|\(shampooFlag)|\(assistMasked)|\(checkMasked)"
+        return fnv1a32HexUtf8(canonical)
+    }
+
+    static func computeSeatStateRev(_ item: SeatTimerItem) -> String {
+        let endMs: Int64 = item.isRunning
+            ? safeEpochMillisInt64(item.targetEndTime.timeIntervalSince1970 * 1000.0)
+            : 0
+        let runFlag = item.isRunning && endMs > 0
+        let pausedSec = !runFlag ? max(0, item.pausedRemainingSeconds) : 0
+        let checkTot = item.checkTotalSeconds ?? 0
+        let chkEndMs: Int64 = {
+            guard runFlag, !item.isCheckCompleted, checkTot > 0, let d = item.checkTargetEndTime else { return 0 }
+            return safeEpochMillisInt64(d.timeIntervalSince1970 * 1000.0)
+        }()
+        let hasCheck = runFlag && !item.isCheckCompleted && checkTot > 0 && chkEndMs > 0
+        let isPostStopProcessActive = !runFlag && pausedSec <= 0 && (item.status != .normal || isCustomPostStopProcessLabel(item.helpProcess))
+        let assistToken: String = {
+            if item.isRecruiting { return "募集中" }
+            if item.isNoHelpNeeded { return "ヘルプなし" }
+            return item.shampooStaff ?? ""
+        }()
+        let checkToken = hasCheck ? (item.checkStaff ?? "") : ""
+        return computeStateRevFromFields(
+            seatNumber: item.seatNumber,
+            seatLabel: item.displaySeatName,
+            isRunning: runFlag,
+            targetEndMs: endMs,
+            pausedRemainingSeconds: pausedSec,
+            hasActiveCheck: hasCheck,
+            checkTargetEndMs: chkEndMs,
+            isPostStopProcessActive: isPostStopProcessActive,
+            assistToken: assistToken,
+            checkToken: checkToken
+        )
+    }
+
+    static func computeCloudRowStateRev(_ row: [String: Any]) -> String {
+        let statusStr = (row["status"] as? String) ?? ""
+        let rawEnd = (row["target_end_timestamp"] as? NSNumber)?.doubleValue
+            ?? (row["target_end_timestamp"] as? Double)
+            ?? 0
+        let endMs = safeEpochMillisInt64(rawEnd)
+        let isRunning = (statusStr == "running" && endMs > 0)
+        let rawShampoo = (row["is_shampooing"] as? NSNumber)?.boolValue
+            ?? (row["is_shampooing"] as? Bool)
+            ?? false
+        let rawPausedSec = max(0, (row["paused_remaining_seconds"] as? NSNumber)?.intValue ?? (row["paused_remaining_seconds"] as? Int) ?? 0)
+        let pausedSec: Int = (!isRunning && statusStr == "paused" && rawPausedSec > 0)
+            ? rawPausedSec
+            : 0
+        let checkTot = (row["check_total_seconds"] as? NSNumber)?.intValue
+            ?? (row["check_total_seconds"] as? Int)
+            ?? 0
+        let rawChkEnd = (row["check_target_end_timestamp"] as? NSNumber)?.doubleValue
+            ?? (row["check_target_end_timestamp"] as? Double)
+            ?? 0
+        let chkEndMs = safeEpochMillisInt64(rawChkEnd)
+        let isCheckDone = (row["is_check_completed"] as? NSNumber)?.boolValue
+            ?? (row["is_check_completed"] as? Bool)
+            ?? false
+        let hasCheck = isRunning && !isCheckDone && checkTot > 0 && chkEndMs > 0
+        let rawHelpProc = (row["help_process"] as? String) ?? ""
+        let isPostStopProcessActive = !isRunning && pausedSec <= 0 && (rawShampoo || isCustomPostStopProcessLabel(rawHelpProc))
+        let assistToken = (row["assistant_staff_name"] as? String) ?? ""
+        let checkToken = hasCheck ? ((row["check_staff_name"] as? String) ?? "") : ""
+        let seatLabel = (row["seat_label"] as? String) ?? ""
+        return computeStateRevFromFields(
+            seatNumber: 0,
+            seatLabel: seatLabel,
+            isRunning: isRunning,
+            targetEndMs: endMs,
+            pausedRemainingSeconds: pausedSec,
+            hasActiveCheck: hasCheck,
+            checkTargetEndMs: chkEndMs,
+            isPostStopProcessActive: isPostStopProcessActive,
+            assistToken: assistToken,
+            checkToken: checkToken
+        )
+    }
+
+    static func computeCompositeStateRev(_ timers: [SeatTimerItem]) -> String {
+        let regularSeats = timers.filter { !$0.isMainTimer }
+        guard !regularSeats.isEmpty else { return "empty000" }
+        let parts = regularSeats.map { item -> String in
+            let key = normalizeSeatKey(seatNumber: item.seatNumber, seatLabel: item.displaySeatName)
+            return "\(key):\(computeSeatStateRev(item))"
+        }.sorted()
+        return String(parts.joined(separator: ",").prefix(200))
+    }
+
+    static func formatSeatRef(seatNumber: Int, seatLabel: String?, id: String?) -> String {
+        let key = normalizeSeatKey(seatNumber: seatNumber, seatLabel: seatLabel)
+        let masked = maskId(id, prefix: "t")
+        return masked.isEmpty ? key : "\(key)(\(masked))"
+    }
+
+    // MARK: - 状態管理・メモリ追記・App Groupファイル非同期永続化
+
+    private func currentWatchAppState() -> String {
+        if Thread.isMainThread {
+            let txt: String
+            switch WKApplication.shared().applicationState {
+            case .active: txt = "active"
+            case .inactive: txt = "inactive"
+            case .background: txt = "background"
+            @unknown default: txt = "unknown"
+            }
+            lock.lock()
+            cachedAppState = txt
+            lock.unlock()
+            return txt
+        }
+        lock.lock()
+        let snap = cachedAppState
+        lock.unlock()
+        return snap
+    }
+
+    func updateAppState(_ stateText: String) {
+        lock.lock()
+        cachedAppState = stateText
+        lock.unlock()
+    }
+
+    func setScene(_ scene: String) {
+        let clean = scene.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        lock.lock()
+        currentScene = clean.isEmpty ? "S1" : clean
+        lock.unlock()
+    }
+
+    func getScene() -> String {
+        lock.lock()
+        let s = currentScene
+        lock.unlock()
+        return s
+    }
+
+    private static let forbiddenPiiKeys: Set<String> = [
+        "comment", "memo", "note", "customerName", "body", "title", "expoPushToken", "expo_push_token"
+    ]
+
+    private func sanitizeMetaValue(_ val: Any, key: String = "", depth: Int = 0) -> Any? {
+        if val is NSNull { return nil }
+        if let b = val as? Bool { return b }
+        if let i = val as? Int { return i }
+        if let i64 = val as? Int64 { return NSNumber(value: i64) }
+        if let d = val as? Double { return d.isFinite ? d : nil }
+        if let f = val as? Float { return f.isFinite ? Double(f) : nil }
+        if let n = val as? NSNumber {
+            if CFNumberIsFloatType(n) {
+                let dv = n.doubleValue
+                return dv.isFinite ? n : nil
+            }
+            return n
+        }
+        if let s = val as? String {
+            let maxLen = key.lowercased().hasSuffix("rev") ? 200 : 96
+            return s.count > maxLen ? String(s.prefix(maxLen)) + "…" : s
+        }
+        if depth >= 2 { return nil }
+        if let arr = val as? [Any] {
+            return arr.prefix(12).compactMap { sanitizeMetaValue($0, key: key, depth: depth + 1) }
+        }
+        if let dict = val as? [String: Any] {
+            var out: [String: Any] = [:]
+            for (k, v) in dict.prefix(20) {
+                if Self.forbiddenPiiKeys.contains(k) { continue }
+                if let cv = sanitizeMetaValue(v, key: k, depth: depth + 1) {
+                    out[k] = cv
+                }
+            }
+            return out
+        }
+        return nil
+    }
+
+    private static func sanitizePlistValue(_ val: Any, key: String = "", depth: Int = 0) -> Any? {
+        if val is NSNull { return nil }
+        if let s = val as? String {
+            let maxLen = (key == "stateRev" || key.lowercased().hasSuffix("rev")) ? 200 : 120
+            return s.count > maxLen ? String(s.prefix(maxLen)) : s
+        }
+        if let b = val as? Bool { return b }
+        if let i = val as? Int { return i }
+        if let i64 = val as? Int64 { return NSNumber(value: i64) }
+        if let d = val as? Double { return d.isFinite ? NSNumber(value: d) : nil }
+        if let f = val as? Float { return f.isFinite ? NSNumber(value: Double(f)) : nil }
+        if let n = val as? NSNumber {
+            if CFNumberIsFloatType(n) {
+                let dv = n.doubleValue
+                return dv.isFinite ? n : nil
+            }
+            return n
+        }
+        if depth >= 3 { return nil }
+        if let arr = val as? [Any] {
+            return arr.prefix(20).compactMap { sanitizePlistValue($0, key: key, depth: depth + 1) }
+        }
+        if let dict = val as? [String: Any] {
+            var out: [String: Any] = [:]
+            for (k, v) in dict {
+                if forbiddenPiiKeys.contains(k) { continue }
+                if let cv = sanitizePlistValue(v, key: k, depth: depth + 1) {
+                    out[k] = cv
+                }
+            }
+            return out
+        }
+        return nil
+    }
+
+    static func sanitizePlistDictionary(_ dict: [String: Any]) -> [String: Any]? {
+        guard let cleaned = sanitizePlistValue(dict, depth: 0) as? [String: Any],
+              !cleaned.isEmpty,
+              PropertyListSerialization.propertyList(cleaned, isValidFor: .binary) else {
+            return nil
+        }
+        return cleaned
+    }
+
+    func log(
+        hop: String,
+        ch: String = "",
+        seat: String = "",
+        act: String = "",
+        res: String = "ok",
+        rsn: String = "",
+        traceId: String = "",
+        stateRev: String = "",
+        ms: Int? = nil,
+        meta: [String: Any]? = nil
+    ) {
+        let wallMs = safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0)
+        let monoMs = Int64((ProcessInfo.processInfo.systemUptime * 1000.0).rounded())
+        let appState = currentWatchAppState()
+        let rawUid = WatchSessionManager.shared.cloudUserId
+        let devId = rawUid.isEmpty ? sessionDevFallback : Self.maskId(rawUid, prefix: "u")
+
+        var cleanMeta: [String: Any]? = nil
+        if let meta = meta, let sanitized = sanitizeMetaValue(meta, key: "meta", depth: 0) as? [String: Any], !sanitized.isEmpty {
+            cleanMeta = sanitized
+        }
+
+        lock.lock()
+        nextSeq += 1
+        var entry: [String: Any] = [
+            "seq": nextSeq,
+            "dev": devId,
+            "layer": "watch_app",
+            "wallMs": NSNumber(value: wallMs),
+            "monoMs": NSNumber(value: monoMs),
+            "scene": currentScene,
+            "traceId": String(traceId.prefix(40)),
+            "stateRev": String(stateRev.prefix(200)),
+            "hop": hop,
+            "ch": ch,
+            "seat": String(seat.prefix(32)),
+            "act": act,
+            "res": res,
+            "rsn": rsn,
+            "appState": appState
+        ]
+        if let ms = ms {
+            entry["ms"] = ms
+        }
+        if let cleanMeta = cleanMeta {
+            entry["meta"] = cleanMeta
+        }
+        entries.append(entry)
+        if entries.count > Self.maxEntries {
+            entries.removeFirst(entries.count - Self.maxEntries)
+        }
+        lock.unlock()
+
+        schedulePersist()
+    }
+
+    private static func containerFileURL(_ fileName: String) -> URL? {
+        return FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
+            .appendingPathComponent(fileName)
+    }
+
+    private func hydrateFromDiskAsync() {
+        ioQueue.async { [weak self] in
+            guard let self = self,
+                  let url = Self.containerFileURL(Self.watchLogFileName),
+                  let data = try? Data(contentsOf: url),
+                  let text = String(data: data, encoding: .utf8) else { return }
+            var loaded: [[String: Any]] = []
+            for line in text.split(separator: "\n") {
+                if let lData = line.data(using: .utf8),
+                   let obj = try? JSONSerialization.jsonObject(with: lData) as? [String: Any],
+                   let safeObj = Self.sanitizePlistDictionary(obj) {
+                    loaded.append(safeObj)
+                }
+            }
+            guard !loaded.isEmpty else { return }
+            self.lock.lock()
+            let combined = Array((loaded + self.entries).suffix(Self.maxEntries))
+            self.entries = combined.enumerated().map { idx, item in
+                var copy = item
+                copy["seq"] = idx + 1
+                return copy
+            }
+            self.nextSeq = self.entries.count
+            self.lock.unlock()
+        }
+    }
+
+    private func schedulePersist() {
+        ioQueue.async { [weak self] in
+            guard let self = self else { return }
+            if self.persistWorkItem != nil { return }
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                self.persistWorkItem = nil
+                self.lock.lock()
+                let snapshot = self.entries
+                self.lock.unlock()
+                guard let url = Self.containerFileURL(Self.watchLogFileName) else { return }
+                var lines: [String] = []
+                lines.reserveCapacity(snapshot.count)
+                for item in snapshot {
+                    if JSONSerialization.isValidJSONObject(item),
+                       let d = try? JSONSerialization.data(withJSONObject: item),
+                       let s = String(data: d, encoding: .utf8) {
+                        lines.append(s)
+                    }
+                }
+                let joined = lines.joined(separator: "\n")
+                try? joined.data(using: .utf8)?.write(to: url, options: .atomic)
+            }
+            self.persistWorkItem = work
+            self.ioQueue.asyncAfter(deadline: .now() + 1.2, execute: work)
+        }
+    }
+
+    func clearAll(scene: String? = nil) {
+        lock.lock()
+        entries.removeAll()
+        nextSeq = 0
+        if let scene = scene, !scene.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            currentScene = scene.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        }
+        let activeScene = currentScene
+        lock.unlock()
+
+        ioQueue.async { [weak self] in
+            self?.persistWorkItem?.cancel()
+            self?.persistWorkItem = nil
+            if let wUrl = Self.containerFileURL(Self.watchLogFileName) {
+                try? FileManager.default.removeItem(at: wUrl)
+            }
+            if let wgUrl = Self.containerFileURL(Self.widgetLogFileName) {
+                try? FileManager.default.removeItem(at: wgUrl)
+            }
+        }
+
+        log(hop: "W_SESSION_CLEAR", ch: "diag", act: activeScene, res: "ok", rsn: "cleared_from_phone")
+    }
+
+    func exportForPhonePull(maxBytes: Int = 28_000) -> [[String: Any]] {
+        lock.lock()
+        let watchSnapshot = entries.compactMap { Self.sanitizePlistDictionary($0) }
+        lock.unlock()
+
+        var widgetEntries: [[String: Any]] = []
+        if let wgUrl = Self.containerFileURL(Self.widgetLogFileName),
+           let data = try? Data(contentsOf: wgUrl),
+           let text = String(data: data, encoding: .utf8) {
+            for line in text.split(separator: "\n") {
+                if let lData = line.data(using: .utf8),
+                   let obj = try? JSONSerialization.jsonObject(with: lData) as? [String: Any],
+                   let safeObj = Self.sanitizePlistDictionary(obj) {
+                    widgetEntries.append(safeObj)
+                }
+            }
+        }
+
+        let merged = (watchSnapshot + widgetEntries).sorted { a, b in
+            let wa = (a["wallMs"] as? NSNumber)?.int64Value ?? 0
+            let wb = (b["wallMs"] as? NSNumber)?.int64Value ?? 0
+            if wa != wb { return wa < wb }
+            let sa = (a["seq"] as? NSNumber)?.intValue ?? 0
+            let sb = (b["seq"] as? NSNumber)?.intValue ?? 0
+            return sa < sb
+        }
+
+        var selectedReversed: [[String: Any]] = []
+        var usedBytes = 0
+        for item in merged.reversed() {
+            guard PropertyListSerialization.propertyList(item, isValidFor: .binary),
+                  JSONSerialization.isValidJSONObject(item),
+                  let d = try? JSONSerialization.data(withJSONObject: item) else { continue }
+            let itemBytes = d.count + 8
+            if usedBytes + itemBytes > maxBytes {
+                break
+            }
+            usedBytes += itemBytes
+            selectedReversed.append(item)
+        }
+        return selectedReversed.reversed()
     }
 }

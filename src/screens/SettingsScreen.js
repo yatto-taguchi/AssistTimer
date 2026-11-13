@@ -3,7 +3,7 @@ import {
   StyleSheet, Text, View, Switch, TouchableOpacity, Modal, 
   TextInput, KeyboardAvoidingView, Platform, ScrollView,
   LayoutAnimation, UIManager, Vibration, Linking, Animated,
-  Image, Dimensions, Alert, AppState 
+  Image, Dimensions, Alert, AppState, ActivityIndicator 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
@@ -11,6 +11,17 @@ import { AppContext } from '../utils/AppContext';
 import ProSubscriptionModal from '../components/ProSubscriptionModal';
 import NewsModal from '../components/NewsModal';
 import { YAMAIMO_SOUNDS } from '../components/CheerYamaimoOverlay';
+import {
+  getDiagBarVisible,
+  setDiagBarVisible,
+  subscribeDiagBarVisible,
+  getDiagScene,
+  subscribeDiagScene,
+  setDiagSceneMarker,
+  resetSyncTraceLogsAndSyncClock,
+  collectAndExportMergedTraceLogs,
+  getSyncTraceStatusSummary,
+} from '../utils/syncTraceLogger';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -286,7 +297,71 @@ export default function SettingsScreen({ route }) {
   const [isMainVoiceOpen, setIsMainVoiceOpen] = useState(false);
   const [isPrepVoiceOpen, setIsPrepVoiceOpen] = useState(false);
   const [isOverVoiceOpen, setIsOverVoiceOpen] = useState(false);
+  const [isSyncDiagOpen, setIsSyncDiagOpen] = useState(false);
+  const [diagBarVisibleState, setDiagBarVisibleState] = useState(() => getDiagBarVisible());
+  const [diagSceneState, setDiagSceneState] = useState(() => getDiagScene());
+  const [diagSummaryState, setDiagSummaryState] = useState(() => getSyncTraceStatusSummary());
+  const [diagBusyKey, setDiagBusyKey] = useState(null);
   const scrollViewRef = useRef(null);
+
+  useEffect(() => {
+    const unsubVis = subscribeDiagBarVisible((vis) => setDiagBarVisibleState(vis));
+    const unsubScene = subscribeDiagScene((sc) => setDiagSceneState(sc));
+    return () => {
+      unsubVis();
+      unsubScene();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isSyncDiagOpen) {
+      setDiagSummaryState(getSyncTraceStatusSummary());
+    }
+  }, [isSyncDiagOpen]);
+
+  const handleToggleDiagBarSetting = async (val) => {
+    await setDiagBarVisible(val);
+    setDiagSummaryState(getSyncTraceStatusSummary());
+  };
+
+  const handleInitSyncDiagFromSettings = async () => {
+    if (diagBusyKey) return;
+    setDiagBusyKey('init');
+    try {
+      const res = await resetSyncTraceLogsAndSyncClock();
+      setDiagSummaryState(getSyncTraceStatusSummary());
+      Alert.alert(
+        '⏱ 時計ズレ計測 ＆ ログ初期化完了',
+        `シーン: ${res.scene}\nサーバー時計オフセット: ${res.serverOffsetMs >= 0 ? `+${res.serverOffsetMs}` : res.serverOffsetMs}ms${res.minRttMs != null ? ` (最小RTT: ${res.minRttMs}ms)` : ''}\nペアWatch消去結果: ${res.watchClearResult}`
+      );
+    } catch (e) {
+      Alert.alert('初期化エラー', String(e?.message || e));
+    } finally {
+      setDiagBusyKey(null);
+    }
+  };
+
+  const handleSelectDiagSceneFromSettings = (sceneCode) => {
+    if (diagBusyKey) return;
+    setDiagSceneMarker(sceneCode, { reason: 'settings_select' });
+    setDiagSummaryState(getSyncTraceStatusSummary());
+    if (Platform.OS !== 'web') {
+      Vibration.vibrate(25);
+    }
+  };
+
+  const handleExportSyncDiagFromSettings = async () => {
+    if (diagBusyKey) return;
+    setDiagBusyKey('export');
+    try {
+      await collectAndExportMergedTraceLogs({ openShareSheet: true });
+      setDiagSummaryState(getSyncTraceStatusSummary());
+    } catch (e) {
+      Alert.alert('書き出しエラー', String(e?.message || e));
+    } finally {
+      setDiagBusyKey(null);
+    }
+  };
 
   // モード切替時のアコーディオン発光ハイライト演出（「こっちも調整しとく？」アピール）
   const accordionHighlightAnim = useRef(new Animated.Value(0)).current;
@@ -1655,6 +1730,160 @@ export default function SettingsScreen({ route }) {
           <Text style={[styles.settingText, { color: textColor }]}>購入の復元（Restore）</Text>
           <Ionicons name="chevron-forward" size={18} color={subTextColor} />
         </TouchableOpacity>
+      </View>
+
+      {/* 5.5 共有同期の経路診断セクション（Issue #13） */}
+      <Text style={[styles.sectionTitle, { color: sectionHeaderColor }]}>開発・サポート診断</Text>
+      <View style={[styles.groupCard, { backgroundColor: cardBgColor, borderColor: cardBorderColor }]}>
+        <TouchableOpacity
+          style={styles.accordionHeader}
+          onPress={() => toggleAccordion(setIsSyncDiagOpen)}
+          activeOpacity={0.7}
+        >
+          <View style={styles.accordionTitleContainer}>
+            <Text style={{ fontSize: 16, marginRight: 6 }}>🔧</Text>
+            <Text
+              style={[styles.settingText, styles.accordionTitleText, { color: textColor, fontWeight: '600' }]}
+              numberOfLines={1}
+            >
+              共有同期の経路診断（Issue #13）
+            </Text>
+          </View>
+          <View style={styles.accordionRightContainer}>
+            <View style={[styles.summaryBadge, { backgroundColor: isEcoMode ? '#1C2E42' : '#EBF4FF' }]}>
+              <Text style={[styles.summaryBadgeText, { color: isEcoMode ? '#38BDF8' : '#007AFF' }]}>
+                {diagSceneState}
+              </Text>
+            </View>
+            <Ionicons
+              name={isSyncDiagOpen ? 'chevron-up' : 'chevron-down'}
+              size={18}
+              color={subTextColor}
+              style={{ marginLeft: 6 }}
+            />
+          </View>
+        </TouchableOpacity>
+
+        {isSyncDiagOpen && (
+          <View style={{ borderTopWidth: 1, borderTopColor: innerBorderColor }}>
+            {/* 1) サロン画面に診断ミニバーを表示 */}
+            <View style={[styles.settingRowInCard, { borderBottomWidth: 1, borderBottomColor: innerBorderColor }]}>
+              <View style={styles.settingTextContainer}>
+                <Text style={[styles.settingText, { color: textColor, fontSize: 15 }]}>
+                  サロン画面に診断ミニバーを表示
+                </Text>
+                <Text style={[styles.settingDescription, { color: subTextColor }]}>
+                  サロン画面上部でWatch接続状態・シーン切替・ワンタップログ共有を行えます（営業中はOFF推奨）
+                </Text>
+              </View>
+              <Switch
+                value={diagBarVisibleState}
+                onValueChange={handleToggleDiagBarSetting}
+                trackColor={{ false: '#333', true: '#34C759' }}
+              />
+            </View>
+
+            {/* 現在の記録ステータス表示 */}
+            <View style={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8 }}>
+              <Text style={{ fontSize: 12, color: subTextColor, lineHeight: 17 }}>
+                端末ID(匿名): {diagSummaryState.dev} / 記録件数(iPhone): {diagSummaryState.bufferCount}件 / 時計補正: {diagSummaryState.serverOffsetMs >= 0 ? `+${diagSummaryState.serverOffsetMs}` : diagSummaryState.serverOffsetMs}ms
+              </Text>
+              <Text style={{ fontSize: 11, color: subTextColor, marginTop: 2 }}>
+                ※ 施術コメントやスタッフ実名などの個人情報は自動マスクされます
+              </Text>
+            </View>
+
+            {/* 2) 時計ズレ計測 ＆ ログ初期化ボタン */}
+            <View style={{ paddingHorizontal: 16, paddingBottom: 12 }}>
+              <TouchableOpacity
+                style={{
+                  paddingVertical: 11,
+                  paddingHorizontal: 14,
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: isEcoMode ? '#3A3A3C' : '#D1D1D6',
+                  backgroundColor: isEcoMode ? '#141414' : '#F2F4F8',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+                onPress={handleInitSyncDiagFromSettings}
+                disabled={!!diagBusyKey}
+                activeOpacity={0.75}
+              >
+                {diagBusyKey === 'init' ? (
+                  <ActivityIndicator size="small" color="#007AFF" />
+                ) : (
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: textColor }}>
+                    ⏱ 時計ズレ計測 ＆ ログ初期化（テスト開始前）
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+
+            {/* 3) シーン区切りマーカー記録（Scene 1〜6） */}
+            <View style={{ paddingHorizontal: 16, paddingBottom: 12 }}>
+              <Text style={{ fontSize: 12, fontWeight: '700', color: subTextColor, marginBottom: 8 }}>
+                🏷 シーン区切りマーカー記録（Scene 1〜6）
+              </Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                {['S1', 'S2', 'S3', 'S4', 'S5', 'S6'].map((sc) => {
+                  const selected = diagSceneState === sc;
+                  return (
+                    <TouchableOpacity
+                      key={sc}
+                      style={{
+                        paddingVertical: 7,
+                        paddingHorizontal: 12,
+                        borderRadius: 8,
+                        borderWidth: 1,
+                        borderColor: selected ? '#007AFF' : (isEcoMode ? '#3A3A3C' : '#D1D1D6'),
+                        backgroundColor: selected ? '#007AFF' : (isEcoMode ? '#141414' : '#F2F2F7'),
+                      }}
+                      onPress={() => handleSelectDiagSceneFromSettings(sc)}
+                      disabled={!!diagBusyKey}
+                      activeOpacity={0.75}
+                    >
+                      <Text
+                        style={{
+                          fontSize: 12,
+                          fontWeight: '700',
+                          color: selected ? '#FFFFFF' : textColor,
+                        }}
+                      >
+                        {sc}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+
+            {/* 4) ペアWatch込みで診断ログを書き出しボタン */}
+            <View style={{ paddingHorizontal: 16, paddingBottom: 16 }}>
+              <TouchableOpacity
+                style={{
+                  paddingVertical: 12,
+                  paddingHorizontal: 14,
+                  borderRadius: 10,
+                  backgroundColor: '#007AFF',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+                onPress={handleExportSyncDiagFromSettings}
+                disabled={!!diagBusyKey}
+                activeOpacity={0.8}
+              >
+                {diagBusyKey === 'export' ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={{ fontSize: 14, fontWeight: '800', color: '#FFFFFF' }}>
+                    📤 ペアWatch込みで診断ログを書き出し
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
       </View>
 
       {/* 6. 最下部 PROモード案内・購入ボタン */}

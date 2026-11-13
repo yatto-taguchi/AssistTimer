@@ -31,6 +31,7 @@ interface SalonTimerRecord {
   check_total_seconds?: number | null;
   check_process?: string | null;
   check_staff_name?: string | null;
+  is_check_completed?: boolean | null;
   sort_order?: number | null;
   comment?: string | null;
   updated_at?: string | null;
@@ -123,6 +124,117 @@ const fnv1a32HexUtf8 = (input: string): string => {
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
   return (hash >>> 0).toString(16).padStart(8, '0');
+};
+
+const normalizeStaffTokenForMask = (raw?: string | null): string => {
+  if (raw == null) return '';
+  let s = String(raw);
+  try {
+    s = s.normalize('NFKC');
+  } catch {}
+  return s.replace(/[\s\u3000\ufeff]+/g, '').toLowerCase();
+};
+
+const maskStaffName = (raw?: string | null): string => {
+  const norm = normalizeStaffTokenForMask(raw);
+  if (!norm) return 'empty';
+  if (norm === '未定') return 'unset';
+  if (norm === 'ヘルプなし' || norm === 'none') return 'none';
+  if (norm === '募集中') return 'recruit';
+  if (norm === 'スタイリスト' || norm === 'スタッフ') return 'default_stylist';
+  return `stf#${fnv1a32HexUtf8(norm).slice(0, 4)}`;
+};
+
+const maskEntityId = (raw?: string | null, prefix = ''): string => {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(s);
+  if (prefix === 'u' || prefix === 's') {
+    return `${prefix}#${s.slice(0, 6).toLowerCase()}`;
+  }
+  if (isUuid) {
+    const p = prefix || 't';
+    return `${p}#${s.slice(0, 6).toLowerCase()}`;
+  }
+  return s.slice(0, 24);
+};
+
+const normalizeSeatKeyForStateRev = (seatNumber: number, seatLabel?: string | null): string => {
+  let lbl = String(seatLabel ?? '');
+  try {
+    lbl = lbl.normalize('NFKC');
+  } catch {}
+  lbl = lbl
+    .replace(/[\(（]サンプル[\)）]/g, '')
+    .replace(/[\s\u3000\ufeff]+/g, '')
+    .replace(/席$/u, '')
+    .replace(/^(\d+)番$/u, '$1')
+    .toLowerCase();
+
+  if (/^[1-9]\d*$/.test(lbl)) {
+    return `s${parseInt(lbl, 10)}`;
+  }
+  if (lbl.length > 0) {
+    return lbl;
+  }
+  const num = Math.round(Number(seatNumber || 0));
+  if (Number.isFinite(num) && num > 0) {
+    return `s${num}`;
+  }
+  return 's0';
+};
+
+const toMillisSafeForRev = (rawVal: unknown): number => {
+  const n = Number(rawVal || 0);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n < 10000000000 ? Math.round(n * 1000) : Math.round(n);
+};
+
+const isCustomPostStopProcessLabelForRev = (rawProc?: string | null): boolean => {
+  const p = String(rawProc ?? '').trim();
+  if (!p) return false;
+  const lower = p.toLowerCase();
+  return (
+    p !== 'シャンプー' &&
+    p !== 'ヘルプなし' &&
+    lower !== 'none' &&
+    p !== '募集中' &&
+    p !== '未定'
+  );
+};
+
+const computeCloudRowStateRev = (row?: SalonTimerRecord | null): string => {
+  if (!row || typeof row !== 'object') return '00000000';
+  const seatKey = normalizeSeatKeyForStateRev(0, row.seat_label);
+  const endMs = toMillisSafeForRev(row.target_end_timestamp ?? 0);
+  const statusStr = String(row.status || '');
+  const runFlag = statusStr === 'running' && endMs > 0 ? 1 : 0;
+  const rawShampoo = Boolean(row.is_shampooing);
+  const rawPausedSec = Math.max(0, Math.round(Number(row.paused_remaining_seconds ?? 0)));
+  const pausedSec =
+    !runFlag && statusStr === 'paused' && rawPausedSec > 0
+      ? rawPausedSec
+      : 0;
+  const isPostStopProcessActive =
+    runFlag === 0 &&
+    pausedSec <= 0 &&
+    (rawShampoo || isCustomPostStopProcessLabelForRev(row.help_process));
+  const shampooFlag = isPostStopProcessActive ? 1 : 0;
+  const endBucket5s = runFlag
+    ? Math.round(endMs / 5000)
+    : shampooFlag === 0 && pausedSec > 0
+      ? pausedSec
+      : 0;
+  const checkTotalSec = Number(row.check_total_seconds ?? 0);
+  const chkEndMs = toMillisSafeForRev(row.check_target_end_timestamp ?? 0);
+  const isCheckDone = Boolean(row.is_check_completed);
+  const chkFlag = runFlag === 1 && !isCheckDone && checkTotalSec > 0 && chkEndMs > 0 ? 1 : 0;
+  const checkEndBucket5s = chkFlag ? Math.round(chkEndMs / 5000) : 0;
+  const shouldKeepAssist = runFlag === 1 || shampooFlag === 1 || pausedSec > 0;
+  const assistMasked = shouldKeepAssist ? maskStaffName(row.assistant_staff_name ?? '') : 'empty';
+  const checkMasked = chkFlag === 1 ? maskStaffName(row.check_staff_name ?? '') : 'empty';
+  const canonical = `${seatKey}|${runFlag}|${endBucket5s}|${chkFlag}|${checkEndBucket5s}|${shampooFlag}|${assistMasked}|${checkMasked}`;
+  return fnv1a32HexUtf8(canonical);
 };
 
 const buildExpoCollapseId = (timerId: string, eventType: string, stateDisc = ''): string => {
@@ -244,6 +356,46 @@ Deno.serve(async (req: Request) => {
     const salonId = curr.salon_id;
     const actorUserId = String(curr.updated_by || '').trim();
     const label = cleanSeatLabel(curr.seat_label || prev?.seat_label);
+    const traceId =
+      typeof payload?.traceId === 'string' && payload.traceId.trim()
+        ? payload.traceId.trim().slice(0, 40)
+        : `tr_db_${Date.now().toString(36)}`;
+    const triggerType = Array.isArray(payload?.alreadyNotifiedTokens)
+      ? 'client_fallback'
+      : 'db_webhook';
+    const stateRev = computeCloudRowStateRev(curr);
+    const alreadyNotifiedCount = Array.isArray(payload?.alreadyNotifiedTokens)
+      ? payload.alreadyNotifiedTokens.map((t: unknown) => String(t || '').trim()).filter(Boolean).length
+      : 0;
+    const emitEdgeTraceLog = (
+      res: 'ok' | 'skip' | 'err',
+      rsn: string,
+      eventTypes: string[],
+      targetCount: number,
+      tokenCount: number,
+      sentCount: number
+    ) => {
+      console.log(
+        JSON.stringify({
+          schema: 'salon_edge_trace_v1',
+          hop: 'C_EDGE_PUSH',
+          traceId,
+          stateRev,
+          triggerType,
+          dbEvent: String(payload?.type || 'UPDATE'),
+          salon: maskEntityId(salonId, 's'),
+          actor: maskEntityId(actorUserId, 'u'),
+          seat: `${normalizeSeatKeyForStateRev(0, label)}(${maskEntityId(curr.id, 't')})`,
+          res,
+          rsn,
+          eventTypes,
+          targetCount,
+          tokenCount,
+          alreadyNotifiedCount,
+          sentCount,
+        })
+      );
+    };
 
     // サロン所属メンバー一覧を取得（表示名⇔user_id解決および全員募集通知用）
     const { data: memberRows, error: memberErr } = await supabase
@@ -915,9 +1067,11 @@ Deno.serve(async (req: Request) => {
       .filter((p) => p.userIds.size > 0);
 
     if (activePlans.length === 0) {
+      emitEdgeTraceLog('skip', 'no_target_recipients', [], 0, 0, 0);
       return Response.json({ ok: true, sent: 0, reason: 'no_target_recipients' });
     }
 
+    const planEventTypes = activePlans.map((p) => p.eventType);
     const allTargetUserIds = Array.from(mergeSets(...activePlans.map((p) => p.userIds)));
     const { data: tokenRows, error: tokenErr } = await supabase
       .from('salon_member_push_tokens')
@@ -927,11 +1081,13 @@ Deno.serve(async (req: Request) => {
 
     if (tokenErr) {
       console.error('[notify-salon-event] fetch push tokens error:', tokenErr);
+      emitEdgeTraceLog('err', 'token_query_err', planEventTypes, allTargetUserIds.length, 0, 0);
       return Response.json({ ok: false, error: tokenErr.message }, { status: 500 });
     }
 
     const tokens: PushTokenRow[] = Array.isArray(tokenRows) ? tokenRows : [];
     if (tokens.length === 0) {
+      emitEdgeTraceLog('skip', 'no_registered_tokens', planEventTypes, allTargetUserIds.length, 0, 0);
       return Response.json({ ok: true, sent: 0, reason: 'no_registered_tokens' });
     }
 
@@ -957,6 +1113,7 @@ Deno.serve(async (req: Request) => {
       checkStaffName: curr.check_staff_name || null,
       updatedBy: actorUserId || null,
       updatedAt: Number.isFinite(updatedTsMs) && updatedTsMs > 0 ? updatedTsMs : nowMs,
+      traceId,
     };
 
     const messages: Record<string, unknown>[] = [];
@@ -1012,6 +1169,7 @@ Deno.serve(async (req: Request) => {
             updatedBy: actorUserId || null,
             actorId: actorUserId || null,
             updatedAt: Number.isFinite(updatedTsMs) && updatedTsMs > 0 ? updatedTsMs : nowMs,
+            traceId,
             seatSnapshot,
           },
         });
@@ -1019,6 +1177,7 @@ Deno.serve(async (req: Request) => {
     }
 
     if (messages.length === 0) {
+      emitEdgeTraceLog('skip', 'all_already_notified', planEventTypes, allTargetUserIds.length, tokens.length, 0);
       return Response.json({ ok: true, sent: 0 });
     }
 
@@ -1055,6 +1214,15 @@ Deno.serve(async (req: Request) => {
         .delete()
         .in('expo_push_token', invalidTokens);
     }
+
+    emitEdgeTraceLog(
+      'ok',
+      'expo_sent',
+      planEventTypes,
+      allTargetUserIds.length,
+      tokens.length,
+      messages.length
+    );
 
     return Response.json({
       ok: true,

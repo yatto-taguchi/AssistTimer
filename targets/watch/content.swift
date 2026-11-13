@@ -676,6 +676,7 @@ struct PeerConfirmationAlertItem: Identifiable, Equatable, Codable {
     var seatNumber: Int = 0
     var seatLabel: String = ""
     var semanticKey: String = ""
+    var cloudRev: String = ""
 
     init(
         id: String,
@@ -687,7 +688,8 @@ struct PeerConfirmationAlertItem: Identifiable, Equatable, Codable {
         seatId: String = "",
         seatNumber: Int = 0,
         seatLabel: String = "",
-        semanticKey: String = ""
+        semanticKey: String = "",
+        cloudRev: String = ""
     ) {
         self.id = id
         self.timeText = timeText
@@ -699,10 +701,11 @@ struct PeerConfirmationAlertItem: Identifiable, Equatable, Codable {
         self.seatNumber = seatNumber
         self.seatLabel = seatLabel
         self.semanticKey = semanticKey
+        self.cloudRev = cloudRev
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, timeText, text, colorHex, createdAt, eventType, seatId, seatNumber, seatLabel, semanticKey
+        case id, timeText, text, colorHex, createdAt, eventType, seatId, seatNumber, seatLabel, semanticKey, cloudRev
     }
 
     init(from decoder: Decoder) throws {
@@ -717,6 +720,7 @@ struct PeerConfirmationAlertItem: Identifiable, Equatable, Codable {
         self.seatNumber = try c.decodeIfPresent(Int.self, forKey: .seatNumber) ?? 0
         self.seatLabel = try c.decodeIfPresent(String.self, forKey: .seatLabel) ?? ""
         self.semanticKey = try c.decodeIfPresent(String.self, forKey: .semanticKey) ?? ""
+        self.cloudRev = try c.decodeIfPresent(String.self, forKey: .cloudRev) ?? ""
     }
 }
 
@@ -914,6 +918,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     private let savedConfirmedPeerStoppedSeatsKey = "assisttimer.watch.confirmedPeerStoppedEnds.v1"
     // ★ acknowledgeSeatTimer や applyLocalStop で peerStoppedSeatEnds がクリアされた直後（15秒以内）に続く STOP_ALARM / STOP_TIMER 送信でも wasPeerStopped を確実に維持するキャッシュ
     private var recentlyClearedPeerStoppedAt: [String: Date] = [:]
+    // ★ Scene S6 診断用: 各物理席キーごとに直近 WCSession で受信した peerStoppedCloudRev（第2段階遷移の検出＆同一値の冗長ログ抑止）
+    private var lastRxPeerStopCloudRevBySeat: [String: String] = [:]
     private let savedMainStopActionTimeKey = "assisttimer.watch.mainStopActionTime.v1"
     private let savedMainStopActionTypeKey = "assisttimer.watch.mainStopActionType.v1"
     private let savedMainStopEndTimeKey = "assisttimer.watch.mainStopEndTime.v1"
@@ -1022,7 +1028,11 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         var changed = false
         var maxRemovedEnd: Double = confirmedEndEpoch
         let now = Date()
+        if seatNumber > 0 {
+            lastRxPeerStopCloudRevBySeat.removeValue(forKey: "s\(seatNumber)")
+        }
         for key in keys {
+            lastRxPeerStopCloudRevBySeat.removeValue(forKey: key)
             if let prevEnd = peerStoppedSeatEnds.removeValue(forKey: key) {
                 changed = true
                 if prevEnd > maxRemovedEnd {
@@ -1839,10 +1849,12 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         seatId: String = "",
         seatNumber: Int = 0,
         seatLabel: String = "",
-        semanticKey: String = ""
+        semanticKey: String = "",
+        cloudRev: String = ""
     ) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
+        let cleanCloudRev = cloudRev.trimmingCharacters(in: .whitespacesAndNewlines)
         var didEnqueueNew = false
         let work = {
             let nowEpoch = Date().timeIntervalSince1970
@@ -1980,7 +1992,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         if existingKind == "timer_start" && resolvedKind != "timer_start" {
                             self.recentEnqueuedPeerBodies.removeAll { $0.seatNumber == resolvedSeatNum && $0.kind == "timer_start" }
                         }
-                        if shouldUpgradeText || (prevItem.seatId.isEmpty && !seatId.isEmpty) || (prevItem.semanticKey.isEmpty && !mergedSemKey.isEmpty) {
+                        if shouldUpgradeText || (prevItem.seatId.isEmpty && !seatId.isEmpty) || (prevItem.semanticKey.isEmpty && !mergedSemKey.isEmpty) || (prevItem.cloudRev.isEmpty && !cleanCloudRev.isEmpty) {
                             var updatedList = self.unconfirmedPeerAlerts
                             updatedList[existingIdx] = PeerConfirmationAlertItem(
                                 id: id.isEmpty ? prevItem.id : id,
@@ -1992,7 +2004,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                 seatId: !seatId.isEmpty ? seatId : prevItem.seatId,
                                 seatNumber: resolvedSeatNum > 0 ? resolvedSeatNum : prevItem.seatNumber,
                                 seatLabel: !seatLabel.isEmpty ? seatLabel : prevItem.seatLabel,
-                                semanticKey: mergedSemKey
+                                semanticKey: mergedSemKey,
+                                cloudRev: !cleanCloudRev.isEmpty ? cleanCloudRev : prevItem.cloudRev
                             )
                             self.unconfirmedPeerAlerts = updatedList
                             self.persistUnconfirmedPeerAlerts()
@@ -2039,7 +2052,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 seatId: seatId,
                 seatNumber: resolvedSeatNum,
                 seatLabel: seatLabel,
-                semanticKey: cleanSemKey
+                semanticKey: cleanSemKey,
+                cloudRev: cleanCloudRev
             )
             var next = self.unconfirmedPeerAlerts
             if next.count >= 15 {
@@ -2704,12 +2718,47 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     }
     
     func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
+        if let msgType = message["type"] as? String {
+            if msgType == "PULL_SYNC_TRACE_LOGS" {
+                return
+            }
+            if msgType == "CLEAR_SYNC_TRACE_LOGS" {
+                SyncTraceLogger.shared.clearAll(scene: message["scene"] as? String)
+                return
+            }
+            if msgType == "SET_DIAG_SCENE" {
+                SyncTraceLogger.shared.setScene((message["scene"] as? String) ?? "S1")
+                return
+            }
+        }
         DispatchQueue.main.async {
             self.processReceivedData(message, kind: "即時")
         }
     }
     
     func session(_ session: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
+        if let msgType = message["type"] as? String {
+            if msgType == "PULL_SYNC_TRACE_LOGS" {
+                let entries = SyncTraceLogger.shared.exportForPhonePull(maxBytes: 28_000)
+                let nowMs = safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0)
+                replyHandler([
+                    "status": "ok",
+                    "entries": entries,
+                    "watchNowMs": NSNumber(value: nowMs)
+                ])
+                return
+            }
+            if msgType == "CLEAR_SYNC_TRACE_LOGS" {
+                SyncTraceLogger.shared.clearAll(scene: message["scene"] as? String)
+                replyHandler(["status": "ok"])
+                return
+            }
+            if msgType == "SET_DIAG_SCENE" {
+                SyncTraceLogger.shared.setScene((message["scene"] as? String) ?? "S1")
+                replyHandler(["status": "ok"])
+                return
+            }
+        }
         DispatchQueue.main.async {
             self.processReceivedData(message, kind: "即時")
             replyHandler(["status": "ok"])
@@ -2718,6 +2767,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     
     // ★ バックグラウンドキュー経由の確実な受信
     func session(_ session: WCSession, didReceiveUserInfo userInfo: [String : Any] = [:]) {
+        if let msgType = userInfo["type"] as? String,
+           (msgType == "PULL_SYNC_TRACE_LOGS" || msgType == "CLEAR_SYNC_TRACE_LOGS" || msgType == "SET_DIAG_SCENE") {
+            if msgType == "CLEAR_SYNC_TRACE_LOGS" {
+                SyncTraceLogger.shared.clearAll(scene: userInfo["scene"] as? String)
+            } else if msgType == "SET_DIAG_SCENE" {
+                SyncTraceLogger.shared.setScene((userInfo["scene"] as? String) ?? "S1")
+            }
+            return
+        }
         DispatchQueue.main.async {
             self.processReceivedData(userInfo, kind: "予備")
         }
@@ -3031,23 +3089,63 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
               !text.isEmpty else {
             return false
         }
-        let notifId = notif["id"] as? String ?? ""
-        let isFreshSavedContext = (kind == "保存データ" && !notifId.isEmpty && payloadTs > 0 && abs(nowMs - payloadTs) <= 25_000)
-        let isRecentNotif = ((kind != "保存データ") && (payloadTs <= 0 || abs(nowMs - payloadTs) <= 90_000)) || isFreshSavedContext
-        guard isRecentNotif else { return false }
-        let colorHex = notif["color"] as? String ?? "#30D158"
-        let timeStr = notif["time"] as? String
-        let sourceUser = notif["sourceUser"] as? String ?? ""
-        guard sourceUser == "__remote__" else { return false }
-
+        let rxTraceId: String = {
+            if let t = (notif["traceId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
+            if let t = (data["traceId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
+            return ""
+        }()
+        let rxCh: String = (kind == "保存データ") ? "wc_ctx" : ((kind == "即時") ? "wc_msg" : ((kind == "予備") ? "wc_userinfo" : "wc_other"))
         let eventType = (notif["eventType"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let notifSeatId = (notif["seatId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let notifSeatNum = (notif["seatNumber"] as? NSNumber)?.intValue ?? (notif["seatNumber"] as? Int) ?? 0
         let notifSeatLabel = (notif["seatLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let notifCloudRev = (notif["cloudRev"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let notifSeatRef = SyncTraceLogger.formatSeatRef(seatNumber: notifSeatNum, seatLabel: notifSeatLabel, id: notifSeatId)
+
+        let notifId = notif["id"] as? String ?? ""
+        let isFreshSavedContext = (kind == "保存データ" && !notifId.isEmpty && payloadTs > 0 && abs(nowMs - payloadTs) <= 25_000)
+        let isRecentNotif = ((kind != "保存データ") && (payloadTs <= 0 || abs(nowMs - payloadTs) <= 90_000)) || isFreshSavedContext
+        guard isRecentNotif else {
+            SyncTraceLogger.shared.log(
+                hop: "W_WC_RX",
+                ch: rxCh,
+                seat: notifSeatRef,
+                act: eventType.isEmpty ? "PEER_NOTIF" : eventType,
+                res: "drop",
+                rsn: kind == "保存データ" ? "notif_stale_gt_25s" : "notif_stale_gt_90s",
+                traceId: rxTraceId
+            )
+            return false
+        }
+        let colorHex = notif["color"] as? String ?? "#30D158"
+        let timeStr = notif["time"] as? String
+        let sourceUser = notif["sourceUser"] as? String ?? ""
+        guard sourceUser == "__remote__" else {
+            SyncTraceLogger.shared.log(
+                hop: "W_WC_RX",
+                ch: rxCh,
+                seat: notifSeatRef,
+                act: eventType.isEmpty ? "PEER_NOTIF" : eventType,
+                res: "drop",
+                rsn: "notif_self_echo",
+                traceId: rxTraceId
+            )
+            return false
+        }
+
         let semanticKey = (notif["semanticKey"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         if !notifId.isEmpty {
             if notifId == self.lastHandledPeerNotifId || self.handledPeerNotifIds.contains(notifId) {
+                SyncTraceLogger.shared.log(
+                    hop: "W_WC_RX",
+                    ch: rxCh,
+                    seat: notifSeatRef,
+                    act: eventType.isEmpty ? "PEER_NOTIF" : eventType,
+                    res: "drop",
+                    rsn: "notif_dup_id",
+                    traceId: rxTraceId
+                )
                 return false
             }
             self.lastHandledPeerNotifId = notifId
@@ -3066,6 +3164,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         if !semanticKey.isEmpty {
             let nowSec = nowMs / 1000.0
             if self.hasHandledPeerSemanticKey(semanticKey, channel: "wcsession_self", nowSec: nowSec) {
+                SyncTraceLogger.shared.log(
+                    hop: "W_WC_RX",
+                    ch: rxCh,
+                    seat: notifSeatRef,
+                    act: eventType.isEmpty ? "PEER_NOTIF" : eventType,
+                    res: "drop",
+                    rsn: "notif_dup_semantic",
+                    traceId: rxTraceId
+                )
                 return false
             }
             alreadyHandledByDirectPoll = self.hasHandledPeerSemanticKey(semanticKey, channel: "direct_poll_cross", nowSec: nowSec)
@@ -3103,9 +3210,19 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         seatId: notifSeatId,
                         seatNumber: notifSeatNum,
                         seatLabel: notifSeatLabel,
-                        semanticKey: semanticKey
+                        semanticKey: semanticKey,
+                        cloudRev: notifCloudRev
                     )
                 }
+                SyncTraceLogger.shared.log(
+                    hop: "W_WC_RX",
+                    ch: rxCh,
+                    seat: notifSeatRef,
+                    act: eventType.isEmpty ? "PEER_NOTIF" : eventType,
+                    res: "skip",
+                    rsn: "notif_upgraded_after_poll",
+                    traceId: rxTraceId
+                )
                 return
             }
             let didAdd = self.enqueuePeerConfirmationAlert(
@@ -3117,7 +3234,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 seatId: notifSeatId,
                 seatNumber: notifSeatNum,
                 seatLabel: notifSeatLabel,
-                semanticKey: semanticKey
+                semanticKey: semanticKey,
+                cloudRev: notifCloudRev
             )
             if didAdd {
                 self.incomingNotification = (text: text, color: colorHex, eventType: eventType)
@@ -3125,7 +3243,18 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     text: text,
                     forceSystemBanner: self.isModalSheetCurrentlyPresented,
                     isGentleInfo: isGentleInfo,
-                    eventType: eventType
+                    eventType: eventType,
+                    traceId: rxTraceId
+                )
+                SyncTraceLogger.shared.log(
+                    hop: "W_WC_RX",
+                    ch: rxCh,
+                    seat: notifSeatRef,
+                    act: eventType.isEmpty ? "PEER_NOTIF" : eventType,
+                    res: "ok",
+                    rsn: "notif_accepted_banner",
+                    traceId: rxTraceId,
+                    meta: notifCloudRev.isEmpty ? nil : ["cloudRev": notifCloudRev]
                 )
             }
         }
@@ -3145,6 +3274,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         let previousPayloadTimestamp = self.lastPayloadTimestamp
         let nowCheckMs = Date().timeIntervalSince1970 * 1000.0
         let incomingPayloadTs = (data["timestamp"] as? NSNumber)?.doubleValue ?? (data["timestamp"] as? Double) ?? 0
+        let rxTraceId: String = {
+            if let t = (data["traceId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
+            if let notif = data["notification"] as? [String: Any],
+               let t = (notif["traceId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { return t }
+            return ""
+        }()
+        let rxCh: String = (kind == "保存データ") ? "wc_ctx" : ((kind == "即時") ? "wc_msg" : ((kind == "予備") ? "wc_userinfo" : "wc_other"))
 
         // ★ タイムスタンプ逆転による古い seats/mainTimer 早期破棄より前に、未処理の共有相手通知（notifId）だけは確実に取り出して通知発火する
         let didAcceptFreshPeerNotification = handleIncomingPeerNotificationIfNeeded(data, kind: kind, payloadTs: incomingPayloadTs, nowMs: nowCheckMs)
@@ -3155,6 +3291,19 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             if isSavedTsValid {
                 if (kind == "保存データ" && incomingPayloadTs <= previousPayloadTimestamp) || incomingPayloadTs < previousPayloadTimestamp {
                     self.lastReceivedKind = "\(kind)(古いデータのため無視)"
+                    SyncTraceLogger.shared.log(
+                        hop: "W_WC_RX",
+                        ch: rxCh,
+                        act: (data["type"] as? String) ?? "SYNC",
+                        res: "drop",
+                        rsn: "stale_ts_ignored",
+                        traceId: rxTraceId,
+                        stateRev: SyncTraceLogger.computeCompositeStateRev(self.timers),
+                        meta: [
+                            "inTs": NSNumber(value: safeEpochMillisInt64(incomingPayloadTs)),
+                            "prevTs": NSNumber(value: safeEpochMillisInt64(previousPayloadTimestamp))
+                        ]
+                    )
                     return
                 }
             }
@@ -3603,6 +3752,14 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     .replacingOccurrences(of: "席", with: "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 var didProtectWatchStartedSeats = false
+                var diagProtectedModCount = 0
+                var diagProtectedWatchStartCount = 0
+                var diagProtectedLocalStopCount = 0
+                var diagPeerStopKeptRunningCount = 0
+                var didChangePeerStopCloudRev = false
+                var changedRxPeerStopCloudRevs: [String] = []
+                var rxPeerStopCloudRevs: [String] = []
+                let rawNotifCloudRev = ((rawNotifDict?["cloudRev"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 for i in parsed.indices {
                     let id = parsed[i].id
                     let rawSeat = parsedPairs[i].raw
@@ -3612,8 +3769,29 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     let lastStoppedEndSec = lastStoppedEndMs > 0 ? (lastStoppedEndMs / 1000.0) : 0
                     let incomingPeerStoppedEndMs = (rawSeat["peerStoppedTargetEndTimestamp"] as? NSNumber)?.doubleValue ?? (rawSeat["peerStoppedTargetEndTimestamp"] as? Double) ?? 0
                     if incomingPeerStoppedEndMs > 0 {
+                        let wasAlreadyPeerStopped = self.isPeerStoppedSeat(seatId: id, seatNumber: parsed[i].seatNumber, endTimeEpoch: incomingPeerStoppedEndMs / 1000.0)
                         self.markPeerStoppedSeat(seatId: id, seatNumber: parsed[i].seatNumber, endTimeEpoch: incomingPeerStoppedEndMs / 1000.0)
+                        if !wasAlreadyPeerStopped {
+                            diagPeerStopKeptRunningCount += 1
+                        }
+                        let incomingPeerStopRev = ((rawSeat["peerStoppedCloudRev"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !incomingPeerStopRev.isEmpty {
+                            let sk = SyncTraceLogger.normalizeSeatKey(seatNumber: parsed[i].seatNumber, seatLabel: parsed[i].displaySeatName)
+                            let pair = "\(sk):\(incomingPeerStopRev)"
+                            if self.lastRxPeerStopCloudRevBySeat[sk] != incomingPeerStopRev {
+                                self.lastRxPeerStopCloudRevBySeat[sk] = incomingPeerStopRev
+                                didChangePeerStopCloudRev = true
+                                if !changedRxPeerStopCloudRevs.contains(pair) {
+                                    changedRxPeerStopCloudRevs.append(pair)
+                                }
+                            }
+                            if !rxPeerStopCloudRevs.contains(pair) {
+                                rxPeerStopCloudRevs.append(pair)
+                            }
+                        }
                     } else if parsed[i].isRunning {
+                        let sk = SyncTraceLogger.normalizeSeatKey(seatNumber: parsed[i].seatNumber, seatLabel: parsed[i].displaySeatName)
+                        self.lastRxPeerStopCloudRevBySeat.removeValue(forKey: sk)
                         let newRunEndEpoch = parsed[i].targetEndTime.timeIntervalSince1970
                         if !self.isPeerStoppedSeat(seatId: id, seatNumber: parsed[i].seatNumber, endTimeEpoch: newRunEndEpoch) {
                             self.clearPeerStoppedSeat(seatId: id, seatNumber: parsed[i].seatNumber, recordRecentClear: false)
@@ -3708,6 +3886,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                     restored.seatLabel = newLabel
                                 }
                                 parsed[i] = restored
+                                diagProtectedModCount += 1
                             }
                             localSeatMods[id] = modAt
                             localSeatMods[prevKey] = modAt
@@ -3759,6 +3938,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             watchStartedSeatTimes[seatNumKey] = startedAt
                             persistWatchStartedSeats()
                             didProtectWatchStartedSeats = true
+                            diagProtectedWatchStartCount += 1
                         } else {
                             watchStartedSeatTimes[id] = nil
                             watchStartedSeatTimes[prevKey] = nil
@@ -3835,6 +4015,21 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                 && !matchesStoppedSeatEnd
                                 && prev.shouldAlertMainTimer(for: self.currentUserName)
                             if shouldKeepRunningOnPeerStop {
+                                let stoppedIncomingRev = SyncTraceLogger.computeSeatStateRev(parsed[i])
+                                if !stoppedIncomingRev.isEmpty {
+                                    let sk = SyncTraceLogger.normalizeSeatKey(seatNumber: parsed[i].seatNumber, seatLabel: parsed[i].displaySeatName)
+                                    let pair = "\(sk):\(stoppedIncomingRev)"
+                                    if self.lastRxPeerStopCloudRevBySeat[sk] != stoppedIncomingRev {
+                                        self.lastRxPeerStopCloudRevBySeat[sk] = stoppedIncomingRev
+                                        didChangePeerStopCloudRev = true
+                                        if !changedRxPeerStopCloudRevs.contains(pair) {
+                                            changedRxPeerStopCloudRevs.append(pair)
+                                        }
+                                    }
+                                    if !rxPeerStopCloudRevs.contains(pair) {
+                                        rxPeerStopCloudRevs.append(pair)
+                                    }
+                                }
                                 self.markPeerStoppedSeat(seatId: id, seatNumber: parsed[i].seatNumber, endTimeEpoch: prevEndEpoch)
                                 if prevKey != id {
                                     self.markPeerStoppedSeat(seatId: prevKey, seatNumber: parsed[i].seatNumber, endTimeEpoch: prevEndEpoch)
@@ -3844,6 +4039,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                 parsed[i].totalSeconds = prev.totalSeconds
                                 parsed[i].pausedRemainingSeconds = prev.pausedRemainingSeconds
                                 parsed[i].isCollapsed = false
+                                diagPeerStopKeptRunningCount += 1
                             } else {
                                 self.clearPeerStoppedSeat(seatId: id, seatNumber: parsed[i].seatNumber, recordRecentClear: true, confirmedEndEpoch: prevEndEpoch)
                                 if prevKey != id {
@@ -3971,6 +4167,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             parsed[i].isNoHelpNeeded = false
                             parsed[i].isCollapsed = true
                             parsed[i].clearCheck()
+                            diagProtectedLocalStopCount += 1
                         } else {
                             // 異なる新しい終了時刻で再スタートされた場合はブロック解除
                             localStops[id] = nil
@@ -4014,8 +4211,49 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     }
                     self.hasReceivedAuthoritativeSyncInSession = true
                 }
+                let prevCompRev = SyncTraceLogger.computeCompositeStateRev(self.timers)
+                let nextCompRev = SyncTraceLogger.computeCompositeStateRev(parsed)
                 self.lastReceivedSeatCount = parsed.count
                 self.timers = parsed
+                let anyProtectionFired = (diagProtectedModCount + diagProtectedWatchStartCount + diagProtectedLocalStopCount + diagPeerStopKeptRunningCount) > 0
+                if nextCompRev != prevCompRev || !rxTraceId.isEmpty || anyProtectionFired || didAcceptFreshPeerNotification || didChangePeerStopCloudRev {
+                    var wcRxMeta: [String: Any] = [
+                        "prevRev": prevCompRev,
+                        "seats": parsed.count,
+                        "protMod": diagProtectedModCount,
+                        "protStart": diagProtectedWatchStartCount,
+                        "protStop": diagProtectedLocalStopCount,
+                        "peerKeep": diagPeerStopKeptRunningCount,
+                        "freshNotif": didAcceptFreshPeerNotification,
+                        "peerRevChg": didChangePeerStopCloudRev
+                    ]
+                    let joinedCloudRevs: String = {
+                        if !changedRxPeerStopCloudRevs.isEmpty {
+                            return changedRxPeerStopCloudRevs.joined(separator: ",")
+                        }
+                        if !rawNotifCloudRev.isEmpty {
+                            if extractedNotifSeatNum > 0 || !cleanNotifSeatLabel.isEmpty {
+                                let notifSk = SyncTraceLogger.normalizeSeatKey(seatNumber: extractedNotifSeatNum, seatLabel: cleanNotifSeatLabel)
+                                return "\(notifSk):\(rawNotifCloudRev)"
+                            }
+                            return rawNotifCloudRev
+                        }
+                        return rxPeerStopCloudRevs.joined(separator: ",")
+                    }()
+                    if !joinedCloudRevs.isEmpty {
+                        wcRxMeta["cloudRev"] = joinedCloudRevs
+                    }
+                    SyncTraceLogger.shared.log(
+                        hop: "W_WC_RX",
+                        ch: rxCh,
+                        act: (data["type"] as? String) ?? "SYNC_SEATS",
+                        res: "ok",
+                        rsn: isStaleContextForAlarm ? "applied_stale_ctx" : (nextCompRev != prevCompRev ? "applied_changed" : "applied_same_rev"),
+                        traceId: rxTraceId,
+                        stateRev: nextCompRev,
+                        meta: wcRxMeta
+                    )
+                }
                 // ★ バックグラウンド受信でもアラーム予定（通知・スマートアラーム）を更新（関係者判定・コールド起動時の古い保存データ保護付き）
                 WatchAlarmCoordinator.shared.update(
                     timers: parsed,
@@ -4028,6 +4266,17 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 WidgetSync.save(timers: parsed, mainTimer: self.mainTimer, userName: self.currentUserName, forceReload: true)
             }
         } else if data["mainTimer"] != nil || didUpdateMain {
+            if didUpdateMain || !rxTraceId.isEmpty {
+                SyncTraceLogger.shared.log(
+                    hop: "W_WC_RX",
+                    ch: rxCh,
+                    seat: "main-timer",
+                    act: (data["type"] as? String) ?? "SYNC_MAIN",
+                    res: didUpdateMain ? "ok" : "skip",
+                    rsn: didUpdateMain ? "main_applied" : "main_protected",
+                    traceId: rxTraceId
+                )
+            }
             // ★ メインタイマーのみの更新時（seatsキーなし）も文字盤・アラームを同期
             WatchAlarmCoordinator.shared.update(
                 timers: self.timers,
@@ -4094,6 +4343,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         var shouldDispatchDirectPush: Bool = false
         var didPatchSucceed: Bool = false
         var didTriggerPush: Bool = false
+        var didPhoneAck: Bool = false
+        var traceId: String = ""
+        var seatRef: String = ""
+        var action: String = ""
         var onReadyToDispatchPush: (() -> Void)? = nil
 
         func markNeedsDirectPush() {
@@ -4109,19 +4362,311 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             fire?()
         }
 
+        func markPhoneAcked() {
+            var logSkip = false
+            let tId: String
+            let sRef: String
+            let act: String
+            lock.lock()
+            didPhoneAck = true
+            tId = traceId
+            sRef = seatRef
+            act = action
+            if didPatchSucceed && !shouldDispatchDirectPush && !didTriggerPush {
+                onReadyToDispatchPush = nil
+                logSkip = true
+            }
+            lock.unlock()
+            if logSkip {
+                SyncTraceLogger.shared.log(
+                    hop: "W_DIRECT_PUSH",
+                    ch: "expo_push",
+                    seat: sRef,
+                    act: act,
+                    res: "skip",
+                    rsn: "skipped_iphone_acked",
+                    traceId: tId
+                )
+            }
+        }
+
         func markPatchSucceeded(dispatchBlock: @escaping () -> Void) {
             var fire: (() -> Void)? = nil
+            var logSkip = false
+            let tId: String
+            let sRef: String
+            let act: String
             lock.lock()
             didPatchSucceed = true
+            tId = traceId
+            sRef = seatRef
+            act = action
             if shouldDispatchDirectPush && !didTriggerPush {
                 didTriggerPush = true
                 fire = dispatchBlock
+            } else if didPhoneAck && !didTriggerPush {
+                onReadyToDispatchPush = nil
+                logSkip = true
             } else if !didTriggerPush {
                 onReadyToDispatchPush = dispatchBlock
             }
             lock.unlock()
+            if logSkip {
+                SyncTraceLogger.shared.log(
+                    hop: "W_DIRECT_PUSH",
+                    ch: "expo_push",
+                    seat: sRef,
+                    act: act,
+                    res: "skip",
+                    rsn: "skipped_iphone_acked",
+                    traceId: tId
+                )
+            }
             fire?()
         }
+    }
+
+    private func derivePostActionSeat(
+        action: String,
+        resolvedSeatId: String,
+        baseSeat: SeatTimerItem?,
+        extra: [String: Any]
+    ) -> SeatTimerItem? {
+        let extraNum = (extra["seatNumber"] as? NSNumber)?.intValue ?? (extra["seatNumber"] as? Int) ?? 0
+        let seatNum = baseSeat?.seatNumber ?? extraNum
+        let rawExtraLbl = (extra["seatLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let seatLbl: String? = !rawExtraLbl.isEmpty ? rawExtraLbl : baseSeat?.seatLabel
+        if seatNum <= 0 && (seatLbl ?? "").isEmpty && baseSeat == nil {
+            return nil
+        }
+        let staffName = ((extra["userName"] as? String) ?? self.currentUserName).trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveStaff = staffName.isEmpty ? "スタイリスト" : staffName
+
+        var s = baseSeat ?? SeatTimerItem(
+            id: resolvedSeatId,
+            seatNumber: seatNum,
+            seatLabel: seatLbl,
+            creatorName: effectiveStaff
+        )
+        if s.seatNumber <= 0 && seatNum > 0 {
+            s.seatNumber = seatNum
+        }
+        if (s.seatLabel ?? "").isEmpty, let seatLbl = seatLbl {
+            s.seatLabel = seatLbl
+        }
+
+        let applyMainStop = { (seat: inout SeatTimerItem) in
+            let expectedEndMs = (extra["expectedEnd"] as? NSNumber)?.doubleValue ?? (extra["expectedEnd"] as? Double) ?? 0
+            let refEndDate = expectedEndMs > 0 ? Date(timeIntervalSince1970: expectedEndMs / 1000.0) : baseSeat?.targetEndTime
+            let wasAlreadyPeerStopped = ((extra["wasPeerStopped"] as? NSNumber)?.boolValue ?? (extra["wasPeerStopped"] as? Bool) ?? false)
+                || self.wasRecentlyOrCurrentlyPeerStoppedSeat(seatId: resolvedSeatId, seatNumber: seat.seatNumber, targetEndTime: refEndDate)
+                || (!(baseSeat?.isRunning ?? true) && (baseSeat?.status ?? .normal) != .normal)
+            let explicitPeerShampoo = (extra["peerIsShampooing"] as? NSNumber)?.boolValue ?? (extra["peerIsShampooing"] as? Bool) ?? false
+            let explicitPeerProc = ((extra["peerHelpProcess"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let explicitPeerAssist = ((extra["peerAssistantStaffName"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let seatHasActiveAction = (seat.status != .normal) || explicitPeerShampoo || !explicitPeerProc.isEmpty
+
+            seat.isRunning = false
+            seat.pausedRemainingSeconds = 0
+            seat.totalSeconds = 0
+            seat.clearCheck()
+            seat.isRecruiting = false
+            seat.isNoHelpNeeded = false
+
+            if wasAlreadyPeerStopped && seatHasActiveAction && action != "RESET_ZERO" {
+                let isShampoo = explicitPeerShampoo || (seat.status == .shampoo) || (explicitPeerProc == "シャンプー")
+                if isShampoo {
+                    seat.status = .shampoo
+                    seat.helpProcess = !explicitPeerProc.isEmpty ? explicitPeerProc : "シャンプー"
+                } else if explicitPeerProc == "コーミング" || seat.status == .combing {
+                    seat.status = .combing
+                    seat.helpProcess = "コーミング"
+                } else if explicitPeerProc == "チェック" || seat.status == .check {
+                    seat.status = .check
+                    seat.helpProcess = "チェック"
+                } else {
+                    seat.status = .shampoo
+                    seat.helpProcess = !explicitPeerProc.isEmpty ? explicitPeerProc : seat.helpProcess
+                }
+                let rawAssist = (!explicitPeerAssist.isEmpty ? explicitPeerAssist : (seat.shampooStaff ?? "")).trimmingCharacters(in: .whitespacesAndNewlines)
+                seat.shampooStaff = (!rawAssist.isEmpty && rawAssist != "募集中" && rawAssist != "ヘルプなし" && rawAssist != "none" && rawAssist != "未定") ? rawAssist : nil
+            } else {
+                seat.status = .normal
+                seat.helpProcess = ""
+                seat.shampooStaff = nil
+            }
+        }
+
+        switch action {
+        case "STOP_TIMER", "RESET_ZERO", "FINISH_MEASURE":
+            applyMainStop(&s)
+
+        case "STOP_ALARM":
+            let stopKind = ((extra["kind"] as? String) ?? "").lowercased()
+            if stopKind == "check" {
+                s.isCheckCompleted = true
+                s.checkTargetEndTime = nil
+                s.checkStaff = effectiveStaff
+            } else {
+                applyMainStop(&s)
+            }
+
+        case "ENTER_HELP", "START_SHAMPOO":
+            let rawProc = ((extra["helpProcess"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedProc = (action == "START_SHAMPOO" || rawProc.isEmpty || rawProc == "shampoo") ? "シャンプー" : rawProc
+            s.isRunning = false
+            s.pausedRemainingSeconds = 0
+            s.totalSeconds = 0
+            s.clearCheck()
+            s.helpProcess = resolvedProc
+            s.status = (resolvedProc == "コーミング") ? .combing : ((resolvedProc == "チェック") ? .check : .shampoo)
+            s.shampooStaff = effectiveStaff
+            s.isRecruiting = false
+            s.isNoHelpNeeded = false
+
+        case "FINISH_SHAMPOO", "UPDATE_STATUS":
+            s.isRunning = false
+            s.pausedRemainingSeconds = 0
+            s.status = .normal
+            s.helpProcess = ""
+            s.shampooStaff = nil
+            s.isRecruiting = false
+            s.isNoHelpNeeded = false
+
+        case "COMPLETE_CHECK":
+            s.isCheckCompleted = true
+            s.checkTargetEndTime = nil
+            s.checkStaff = effectiveStaff
+
+        case "CANCEL_CHECK":
+            s.clearCheck()
+
+        case "SET_CHECK_TIMER":
+            let chkSec = (extra["checkTotalSeconds"] as? NSNumber)?.intValue ?? (extra["checkTotalSeconds"] as? Int) ?? 0
+            let chkEndVal = (extra["checkEndTimestamp"] as? NSNumber)?.doubleValue ?? (extra["checkEndTimestamp"] as? Double) ?? 0
+            if chkSec > 0 && chkEndVal.isFinite && chkEndVal > 1_000_000_000_000 {
+                let rawChkProc = ((extra["checkProcess"] as? String) ?? "チェック").trimmingCharacters(in: .whitespacesAndNewlines)
+                let rawChkStaff = ((extra["checkStaffName"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                s.isCheckCompleted = false
+                s.checkTotalSeconds = chkSec
+                s.checkTargetEndTime = Date(timeIntervalSince1970: chkEndVal / 1000.0)
+                s.checkProcess = rawChkProc.isEmpty ? "チェック" : rawChkProc
+                s.checkStaff = rawChkStaff.isEmpty ? nil : rawChkStaff
+            }
+
+        case "ASSIGN_HELP":
+            let isSubCheck = (extra["isSubCheck"] as? NSNumber)?.boolValue ?? (extra["isSubCheck"] as? Bool) ?? false
+            if isSubCheck {
+                let rawChkStaff = ((extra["checkStaffName"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let rawChkProc = ((extra["checkProcess"] as? String) ?? "チェック").trimmingCharacters(in: .whitespacesAndNewlines)
+                s.checkProcess = rawChkProc.isEmpty ? "チェック" : rawChkProc
+                s.checkStaff = rawChkStaff.isEmpty ? nil : rawChkStaff
+            } else {
+                let rawProc = ((extra["helpProcess"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                let rawAssist = ((extra["assistantStaffName"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if rawProc == "ヘルプなし" || rawAssist == "ヘルプなし" {
+                    s.isNoHelpNeeded = true
+                    s.isRecruiting = false
+                    s.shampooStaff = nil
+                    s.helpProcess = ""
+                    if !s.isRunning { s.status = .normal }
+                } else {
+                    let resolvedProc = (rawProc.isEmpty && !rawAssist.isEmpty) ? "シャンプー" : rawProc
+                    s.isNoHelpNeeded = false
+                    s.isRecruiting = (rawAssist == "募集中")
+                    s.shampooStaff = (rawAssist.isEmpty || rawAssist == "募集中") ? nil : rawAssist
+                    s.helpProcess = resolvedProc
+                    if !s.isRunning { s.status = .normal }
+                    if resolvedProc == "チェック" && !rawAssist.isEmpty {
+                        s.checkStaff = rawAssist
+                    }
+                }
+            }
+
+        case "RECRUIT_HELP":
+            let isSubCheck = (extra["isSubCheck"] as? NSNumber)?.boolValue ?? (extra["isSubCheck"] as? Bool) ?? false
+            let rawProc = ((extra["helpProcess"] as? String) ?? (extra["checkProcess"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if isSubCheck {
+                s.checkProcess = rawProc.isEmpty ? "チェック" : rawProc
+                s.checkStaff = "募集中"
+            } else {
+                s.helpProcess = rawProc.isEmpty ? "シャンプー" : rawProc
+                s.isRecruiting = true
+                s.isNoHelpNeeded = false
+                s.shampooStaff = nil
+                if !s.isRunning { s.status = .normal }
+            }
+
+        case "CLEAR_STAFF":
+            s.helpProcess = ""
+            s.shampooStaff = nil
+            s.isRecruiting = false
+            s.isNoHelpNeeded = false
+            if !s.isRunning { s.status = .normal }
+
+        case "CLAIM_CHECK":
+            s.checkStaff = effectiveStaff
+
+        case "START_TIMER":
+            let targetSec = (extra["targetSeconds"] as? NSNumber)?.intValue ?? (extra["targetSeconds"] as? Int) ?? 0
+            let targetEndVal = (extra["targetEndTimestamp"] as? NSNumber)?.doubleValue ?? (extra["targetEndTimestamp"] as? Double) ?? 0
+            if targetSec > 0 && targetEndVal.isFinite && targetEndVal > 1_000_000_000_000 {
+                s.isRunning = true
+                s.totalSeconds = targetSec
+                s.pausedRemainingSeconds = 0
+                s.targetEndTime = Date(timeIntervalSince1970: targetEndVal / 1000.0)
+                s.status = .normal
+                s.shampooStaff = nil
+                s.helpProcess = ""
+                s.isRecruiting = false
+                s.isNoHelpNeeded = false
+                let chkSec = (extra["checkTotalSeconds"] as? NSNumber)?.intValue ?? (extra["checkTotalSeconds"] as? Int) ?? 0
+                let chkEndVal = (extra["checkEndTimestamp"] as? NSNumber)?.doubleValue ?? (extra["checkEndTimestamp"] as? Double) ?? 0
+                if chkSec > 0 && chkSec < targetSec && chkEndVal.isFinite && chkEndVal > 1_000_000_000_000 {
+                    let rawChkProc = ((extra["checkProcess"] as? String) ?? "チェック").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let rawChkStaff = ((extra["checkStaffName"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    s.isCheckCompleted = false
+                    s.checkTotalSeconds = chkSec
+                    s.checkTargetEndTime = Date(timeIntervalSince1970: chkEndVal / 1000.0)
+                    s.checkProcess = rawChkProc.isEmpty ? "チェック" : rawChkProc
+                    s.checkStaff = rawChkStaff.isEmpty ? nil : rawChkStaff
+                } else {
+                    s.clearCheck()
+                }
+            }
+
+        case "ADJUST_TIME":
+            let isSubCheck = (extra["isSubCheck"] as? NSNumber)?.boolValue ?? (extra["isSubCheck"] as? Bool) ?? false
+            if isSubCheck {
+                let chkEndVal = (extra["checkEndTimestamp"] as? NSNumber)?.doubleValue ?? (extra["checkEndTimestamp"] as? Double) ?? 0
+                if chkEndVal.isFinite && chkEndVal > 1_000_000_000_000 {
+                    s.checkTargetEndTime = Date(timeIntervalSince1970: chkEndVal / 1000.0)
+                    let chkSec = (extra["checkTotalSeconds"] as? NSNumber)?.intValue ?? (extra["checkTotalSeconds"] as? Int) ?? 0
+                    if chkSec > 0 {
+                        s.checkTotalSeconds = chkSec
+                    }
+                    s.isCheckCompleted = false
+                }
+            } else {
+                let targetEndVal = (extra["targetEndTimestamp"] as? NSNumber)?.doubleValue ?? (extra["targetEndTimestamp"] as? Double) ?? 0
+                if targetEndVal.isFinite && targetEndVal > 1_000_000_000_000 {
+                    s.targetEndTime = Date(timeIntervalSince1970: targetEndVal / 1000.0)
+                    let totalSec = (extra["totalSeconds"] as? NSNumber)?.intValue ?? (extra["totalSeconds"] as? Int) ?? 0
+                    if totalSec > 0 {
+                        s.totalSeconds = totalSec
+                    }
+                    if targetEndVal > Date().timeIntervalSince1970 * 1000.0 {
+                        s.isRunning = true
+                        s.status = .normal
+                        s.pausedRemainingSeconds = 0
+                    }
+                }
+            }
+
+        default:
+            break
+        }
+        return s
     }
 
     // MARK: - iPhoneへのアクション送信（＋クラウド共有サロン接続時はWatchからSupabaseへも0ms直接REST同期）
@@ -4129,10 +4674,10 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     // ②即時通信できなければ最初から transferUserInfo（iPhoneアプリ起動時に届く予備ルート）
     // ③ペアリング中のiPhoneがロック・バックグラウンド休止中でも共有相手のWatch/iPhoneへ即座に停止・担当変更等を届けるため、
     //   Watch自身からも直接 Supabase REST API へ PATCH 更新を実行（Realtime + ダイレクトPush / Edge Function トリガーを即時発火）
-    func sendActionToPhone(action: String, seatId: String, extra: [String: Any] = [:], preActionSeat: SeatTimerItem? = nil) {
+    func sendActionToPhone(action: String, seatId: String, extra: [String: Any] = [:], preActionSeat: SeatTimerItem? = nil, postActionSeat: SeatTimerItem? = nil) {
         if !Thread.isMainThread {
             DispatchQueue.main.async { [weak self] in
-                self?.sendActionToPhone(action: action, seatId: seatId, extra: extra, preActionSeat: preActionSeat)
+                self?.sendActionToPhone(action: action, seatId: seatId, extra: extra, preActionSeat: preActionSeat, postActionSeat: postActionSeat)
             }
             return
         }
@@ -4161,6 +4706,25 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             payload[k] = v
         }
 
+        let traceId: String = {
+            if let existing = (payload["traceId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !existing.isEmpty {
+                return existing
+            }
+            guard action != "REQUEST_SYNC" else { return "" }
+            let generated = SyncTraceLogger.createTraceId()
+            payload["traceId"] = generated
+            return generated
+        }()
+        let diagSeatRef: String = {
+            if seatId == "main-timer" || action.hasPrefix("MAIN_TIMER_") { return "main-timer" }
+            if seatId.isEmpty { return "" }
+            let sNum = matchedSeatForCloud?.seatNumber
+                ?? (payload["seatNumber"] as? NSNumber)?.intValue
+                ?? (payload["seatNumber"] as? Int)
+                ?? 0
+            let sLbl = (payload["seatLabel"] as? String) ?? matchedSeatForCloud?.displaySeatName
+            return SyncTraceLogger.formatSeatRef(seatNumber: sNum, seatLabel: sLbl, id: resolvedSeatId)
+        }()
         if !seatId.isEmpty && seatId != "main-timer" {
             let stopKind = (payload["kind"] as? String) ?? ""
             let isMainStopAction = (action == "STOP_TIMER" || action == "RESET_ZERO" || action == "FINISH_MEASURE" || (action == "STOP_ALARM" && stopKind != "check"))
@@ -4190,12 +4754,47 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
         }
 
+        if action != "REQUEST_SYNC" {
+            let postSeatForRev: SeatTimerItem? = {
+                if seatId == "main-timer" || action.hasPrefix("MAIN_TIMER_") || seatId.isEmpty {
+                    return nil
+                }
+                return postActionSeat ?? self.derivePostActionSeat(
+                    action: action,
+                    resolvedSeatId: resolvedSeatId,
+                    baseSeat: preActionSeat ?? matchedSeatForCloud,
+                    extra: payload
+                )
+            }()
+            let postRev = postSeatForRev.map { SyncTraceLogger.computeSeatStateRev($0) } ?? ""
+            let preRev = (preActionSeat ?? matchedSeatForCloud).map { SyncTraceLogger.computeSeatStateRev($0) } ?? ""
+            let originMeta: [String: Any]? = (!preRev.isEmpty && preRev != postRev) ? ["prevRev": preRev] : nil
+            SyncTraceLogger.shared.log(
+                hop: "W_ORIGIN_ACT",
+                ch: "watch_ui",
+                seat: diagSeatRef,
+                act: action,
+                res: "ok",
+                rsn: "origin",
+                traceId: traceId,
+                stateRev: postRev,
+                meta: originMeta
+            )
+        }
+
         let canWatchDirectCloudPush = !seatId.isEmpty
             && seatId != "main-timer"
             && action != "REQUEST_SYNC"
             && Self.isValidCloudUUID(self.cloudSalonId.trimmingCharacters(in: .whitespacesAndNewlines))
             && Self.isValidCloudUUID(self.cloudUserId.trimmingCharacters(in: .whitespacesAndNewlines))
-        let pushCoord: DirectPushCoordinationState? = canWatchDirectCloudPush ? DirectPushCoordinationState() : nil
+        let pushCoord: DirectPushCoordinationState? = {
+            guard canWatchDirectCloudPush else { return nil }
+            let c = DirectPushCoordinationState()
+            c.traceId = traceId
+            c.seatRef = diagSeatRef
+            c.action = action
+            return c
+        }()
 
         if !seatId.isEmpty && seatId != "main-timer" && action != "REQUEST_SYNC" {
             self.syncSeatActionDirectlyToCloud(
@@ -4295,6 +4894,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                         coord.markNeedsDirectPush()
                     }
                     self.pendingPayloads.append(queuedPayload)
+                    SyncTraceLogger.shared.log(
+                        hop: "W_WC_TX",
+                        ch: "wc_pending",
+                        seat: diagSeatRef,
+                        act: action,
+                        res: "skip",
+                        rsn: "not_activated_queued",
+                        traceId: traceId
+                    )
                 }
                 self.lastSendResult = "未準備（有効化待ち・保留\(self.pendingPayloads.count)件）"
                 session.activate()
@@ -4315,6 +4923,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         var fallbackSent = false
         var superseded = false
         var ackSema: DispatchSemaphore?
+        var traceId: String = ""
+        var seatRef: String = ""
+        var action: String = ""
     }
     private let activeDeliveriesLock = NSLock()
     private var activeDeliveriesByTarget: [String: DeliveryFallbackState] = [:]
@@ -4333,6 +4944,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
     private func deliver(_ payload: [String: Any], session: WCSession, pushCoord: DirectPushCoordinationState? = nil) {
         let action = (payload["action"] as? String) ?? ""
         let targetSid = (payload["seatId"] as? String) ?? ""
+        let traceId = (payload["traceId"] as? String) ?? ""
+        let sendStartMs = safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0)
         let isMainStopOrReset = (action == "MAIN_TIMER_RESET" || action == "MAIN_TIMER_PAUSE")
         if isMainStopOrReset {
             // ★ メインタイマーの停止・リセット送信時は、未送信キューに残っている古い開始命令をクリアして順序逆転による再稼働を防止
@@ -4351,6 +4964,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             (action == "STOP_ALARM" && (payload["kind"] as? String) != "check")
         )
         let targetSeatNum = (payload["seatNumber"] as? NSNumber)?.intValue ?? (payload["seatNumber"] as? Int) ?? 0
+        let seatRef: String = {
+            if targetSid == "main-timer" || action.hasPrefix("MAIN_TIMER_") { return "main-timer" }
+            if targetSid.isEmpty && targetSeatNum <= 0 { return "" }
+            return SyncTraceLogger.formatSeatRef(
+                seatNumber: targetSeatNum,
+                seatLabel: payload["seatLabel"] as? String,
+                id: targetSid
+            )
+        }()
         if isSeatStopOrReset && (!targetSid.isEmpty || targetSeatNum > 0) {
             // ★ 客席タイマー停止時も、同一席の未送信 START_TIMER がローカル保留キューに残っていればクリアして順序逆転による再稼働を防止
             pendingPayloads.removeAll { item in
@@ -4385,6 +5007,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }()
 
         let state = DeliveryFallbackState()
+        state.traceId = traceId
+        state.seatRef = seatRef
+        state.action = action
         let ackSema = DispatchSemaphore(value: 0)
         state.ackSema = ackSema
 
@@ -4405,13 +5030,34 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             activeDeliveriesLock.unlock()
 
             for prev in visitedPrev.values {
+                var didSupersedeActive = false
+                let prevTrace: String
+                let prevSeat: String
+                let prevAct: String
                 prev.lock.lock()
+                if !prev.acked && !prev.fallbackSent && !prev.superseded {
+                    didSupersedeActive = true
+                }
                 prev.superseded = true
+                prevTrace = prev.traceId
+                prevSeat = prev.seatRef
+                prevAct = prev.action
                 if let prevSema = prev.ackSema {
                     prev.ackSema = nil
                     semasToSignal.append(prevSema)
                 }
                 prev.lock.unlock()
+                if didSupersedeActive && !prevAct.isEmpty {
+                    SyncTraceLogger.shared.log(
+                        hop: "W_WC_TX",
+                        ch: "wc_msg",
+                        seat: prevSeat,
+                        act: prevAct,
+                        res: "drop",
+                        rsn: "superseded",
+                        traceId: prevTrace
+                    )
+                }
             }
             for s in semasToSignal {
                 s.signal()
@@ -4447,6 +5093,22 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     coord.markNeedsDirectPush()
                 }
                 session.transferUserInfo(fallbackPayload)
+                let elapsed = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - sendStartMs))
+                let fallbackCode: String = {
+                    if reason.hasPrefix("即時失敗") { return "err_fallback_userinfo" }
+                    if reason.hasPrefix("スリープ") { return "expiring_fallback_userinfo" }
+                    return "timeout_750ms_fallback"
+                }()
+                SyncTraceLogger.shared.log(
+                    hop: "W_WC_TX",
+                    ch: "wc_userinfo",
+                    seat: seatRef,
+                    act: action,
+                    res: "fallback",
+                    rsn: fallbackCode,
+                    traceId: traceId,
+                    ms: elapsed
+                )
                 DispatchQueue.main.async {
                     self?.recordSend(reason)
                 }
@@ -4473,6 +5135,18 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     state.lock.unlock()
                     clearActiveDeliveryIfCurrent()
                     ackSema.signal()
+                    pushCoord?.markPhoneAcked()
+                    let rttMs = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - sendStartMs))
+                    SyncTraceLogger.shared.log(
+                        hop: "W_WC_TX",
+                        ch: "wc_msg",
+                        seat: seatRef,
+                        act: action,
+                        res: "ok",
+                        rsn: "ack_ok",
+                        traceId: traceId,
+                        ms: rttMs
+                    )
                     DispatchQueue.main.async {
                         self?.recordSend("iPhone受信OK")
                     }
@@ -4501,6 +5175,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     coord.markNeedsDirectPush()
                 }
                 session.transferUserInfo(fallbackPayload)
+                SyncTraceLogger.shared.log(
+                    hop: "W_WC_TX",
+                    ch: "wc_userinfo",
+                    seat: seatRef,
+                    act: action,
+                    res: "fallback",
+                    rsn: "unreachable_userinfo",
+                    traceId: traceId
+                )
             }
             lastSendResult = "iPhone未接続→予備ルート＋クラウド直接同期"
         }
@@ -4527,7 +5210,42 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         for (k, v) in extra {
             payload[k] = v
         }
+        let traceId: String = {
+            if let existing = (payload["traceId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !existing.isEmpty {
+                return existing
+            }
+            let generated = SyncTraceLogger.createTraceId()
+            payload["traceId"] = generated
+            return generated
+        }()
+        let seatRef = SyncTraceLogger.formatSeatRef(
+            seatNumber: seatNumber,
+            seatLabel: payload["seatLabel"] as? String,
+            id: seatId
+        )
+        let postDirectStopSeat = self.derivePostActionSeat(
+            action: "STOP_TIMER",
+            resolvedSeatId: seatId,
+            baseSeat: matchedSeat,
+            extra: payload
+        )
+        let postDirectStopRev = postDirectStopSeat.map { SyncTraceLogger.computeSeatStateRev($0) } ?? ""
+        let preDirectStopRev = matchedSeat.map { SyncTraceLogger.computeSeatStateRev($0) } ?? ""
+        SyncTraceLogger.shared.log(
+            hop: "W_ORIGIN_ACT",
+            ch: "watch_alarm",
+            seat: seatRef,
+            act: "STOP_TIMER_DIRECT",
+            res: "ok",
+            rsn: "origin",
+            traceId: traceId,
+            stateRev: postDirectStopRev,
+            meta: (!preDirectStopRev.isEmpty && preDirectStopRev != postDirectStopRev) ? ["prevRev": preDirectStopRev] : nil
+        )
         let standaloneCoord = DirectPushCoordinationState()
+        standaloneCoord.traceId = traceId
+        standaloneCoord.seatRef = seatRef
+        standaloneCoord.action = "STOP_TIMER"
         standaloneCoord.markNeedsDirectPush()
         syncSeatActionDirectlyToCloud(
             action: "STOP_TIMER",
@@ -4547,8 +5265,34 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         extra: [String: Any],
         pushCoord: DirectPushCoordinationState? = nil
     ) {
+        let traceId = (extra["traceId"] as? String) ?? ""
+        let rawLabelForDiag = ((extra["seatLabel"] as? String) ?? matchedSeat?.seatLabel ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let seatNumForDiag = (extra["seatNumber"] as? NSNumber)?.intValue ?? (extra["seatNumber"] as? Int) ?? matchedSeat?.seatNumber ?? 0
+        let diagSeatRef = SyncTraceLogger.formatSeatRef(
+            seatNumber: seatNumForDiag,
+            seatLabel: rawLabelForDiag.isEmpty ? matchedSeat?.displaySeatName : rawLabelForDiag,
+            id: resolvedSeatId
+        )
+        let postPatchStateRev = self.derivePostActionSeat(
+            action: action,
+            resolvedSeatId: resolvedSeatId,
+            baseSeat: preActionSeat ?? matchedSeat,
+            extra: extra
+        ).map { SyncTraceLogger.computeSeatStateRev($0) } ?? ""
         let salonId = self.cloudSalonId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard Self.isValidCloudUUID(salonId) else { return }
+        guard Self.isValidCloudUUID(salonId) else {
+            SyncTraceLogger.shared.log(
+                hop: "W_CLOUD_PATCH",
+                ch: "supabase_rest",
+                seat: diagSeatRef,
+                act: action,
+                res: "skip",
+                rsn: "skip_no_salon_id",
+                traceId: traceId,
+                stateRev: postPatchStateRev
+            )
+            return
+        }
 
         let uid = self.cloudUserId.trimmingCharacters(in: .whitespacesAndNewlines)
         let memberIdMapSnapshot = self.memberIdMap
@@ -4559,8 +5303,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         let isoNow = isoFormatter.string(from: Date())
 
         let hasUUIDSeatId = Self.isValidCloudUUID(resolvedSeatId)
-        let rawLabel = ((extra["seatLabel"] as? String) ?? matchedSeat?.seatLabel ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let seatNum = (extra["seatNumber"] as? NSNumber)?.intValue ?? (extra["seatNumber"] as? Int) ?? matchedSeat?.seatNumber ?? 0
+        let rawLabel = rawLabelForDiag
+        let seatNum = seatNumForDiag
         let cleanNumLabel = seatNum > 0 ? "\(seatNum)番" : ""
         let hasLabelCandidate = !rawLabel.isEmpty || !cleanNumLabel.isEmpty
         let baseLabel = !rawLabel.isEmpty ? rawLabel.replacingOccurrences(of: "席", with: "") : cleanNumLabel
@@ -4577,6 +5321,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         } else if hasLabelCandidate {
             queryItems.append(URLQueryItem(name: "seat_label", value: "in.(\"\(baseLabel)\",\"\(withSuffixLabel)\")"))
         } else {
+            SyncTraceLogger.shared.log(
+                hop: "W_CLOUD_PATCH",
+                ch: "supabase_rest",
+                seat: diagSeatRef,
+                act: action,
+                res: "skip",
+                rsn: "skip_no_target_selector",
+                traceId: traceId,
+                stateRev: postPatchStateRev
+            )
             return
         }
 
@@ -4885,6 +5639,16 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
 
         default:
+            SyncTraceLogger.shared.log(
+                hop: "W_CLOUD_PATCH",
+                ch: "supabase_rest",
+                seat: diagSeatRef,
+                act: action,
+                res: "skip",
+                rsn: "skip_unsupported_action",
+                traceId: traceId,
+                stateRev: postPatchStateRev
+            )
             return
         }
 
@@ -4910,10 +5674,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             var isExpired = false
             var shouldRetryWithoutUpdatedBy = false
             var patchSucceeded = false
+            var lastStatusCode = 0
+            var hadError = false
             var currentTask: URLSessionDataTask?
             var currentSema: DispatchSemaphore?
         }
         let expState = DirectCloudExpiringState()
+        let patchStartMs = safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0)
 
         // ★ タップ直後に手首を下ろして画面が消灯してもwatchOSがHTTPS送信完了までネットワークを保持するよう expiringActivity で保護
         //   （万一OSから expired == true が通知された場合は即座に通信タスクを cancel しセマフォを解放して 0xbada5e47 強制終了を100%防止）
@@ -4928,6 +5695,17 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 expState.lock.unlock()
                 taskToCancel?.cancel()
                 semaToSignal?.signal()
+                SyncTraceLogger.shared.log(
+                    hop: "W_CLOUD_PATCH",
+                    ch: "supabase_rest",
+                    seat: diagSeatRef,
+                    act: action,
+                    res: "err",
+                    rsn: "expiring_cancelled",
+                    traceId: traceId,
+                    stateRev: postPatchStateRev,
+                    ms: Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - patchStartMs))
+                )
                 return
             }
             expState.lock.lock()
@@ -4941,8 +5719,14 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
 
             let task = URLSession.shared.dataTask(with: request) { _, response, error in
                 if let error = error {
+                    expState.lock.lock()
+                    expState.hadError = true
+                    expState.lock.unlock()
                     print("[WatchCloudSync] Direct PATCH \(action) error: \(error.localizedDescription)")
                 } else if let http = response as? HTTPURLResponse {
+                    expState.lock.lock()
+                    expState.lastStatusCode = http.statusCode
+                    expState.lock.unlock()
                     if (200...299).contains(http.statusCode) {
                         expState.lock.lock()
                         expState.patchSucceeded = true
@@ -4994,8 +5778,14 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     let retrySema = DispatchSemaphore(value: 0)
                     let retryTask = URLSession.shared.dataTask(with: retryReq) { _, retryResp, retryErr in
                         if let retryErr = retryErr {
+                            expState.lock.lock()
+                            expState.hadError = true
+                            expState.lock.unlock()
                             print("[WatchCloudSync] Direct PATCH retry \(action) error: \(retryErr.localizedDescription)")
                         } else if let http = retryResp as? HTTPURLResponse {
+                            expState.lock.lock()
+                            expState.lastStatusCode = http.statusCode
+                            expState.lock.unlock()
                             if (200...299).contains(http.statusCode) {
                                 expState.lock.lock()
                                 expState.patchSucceeded = true
@@ -5033,12 +5823,32 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
 
             expState.lock.lock()
             let didPatchSucceed = expState.patchSucceeded
+            let finalStatusCode = expState.lastStatusCode
+            let finalHadError = expState.hadError
             expState.lock.unlock()
+
+            let patchRttMs = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - patchStartMs))
+            SyncTraceLogger.shared.log(
+                hop: "W_CLOUD_PATCH",
+                ch: "supabase_rest",
+                seat: diagSeatRef,
+                act: action,
+                res: didPatchSucceed ? "ok" : "err",
+                rsn: didPatchSucceed
+                    ? (shouldRetry ? "patch_ok_retry_no_updated_by" : "patch_http_\(finalStatusCode)")
+                    : (finalHadError ? "patch_net_err" : "patch_http_\(finalStatusCode)"),
+                traceId: traceId,
+                stateRev: postPatchStateRev,
+                ms: patchRttMs
+            )
 
             if didPatchSucceed {
                 let effectivePushCoord: DirectPushCoordinationState = {
                     if let c = pushCoord { return c }
                     let c = DirectPushCoordinationState()
+                    c.traceId = traceId
+                    c.seatRef = diagSeatRef
+                    c.action = action
                     c.markNeedsDirectPush()
                     return c
                 }()
@@ -5263,13 +6073,17 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             oldRecord["check_staff_name"] = nullOrStr(prev.checkStaff)
         }
 
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "type": "UPDATE",
             "table": "salon_timers",
             "record": record,
             "old_record": oldRecord,
             "alreadyNotifiedTokens": alreadyNotifiedTokens
         ]
+        let edgeTraceId = (seatSnapshot["traceId"] as? String) ?? ""
+        if !edgeTraceId.isEmpty {
+            payload["traceId"] = edgeTraceId
+        }
         guard JSONSerialization.isValidJSONObject(payload),
               let bodyData = try? JSONSerialization.data(withJSONObject: payload, options: []) else { return }
 
@@ -5280,7 +6094,24 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         req.setValue("Bearer \(Self.supabaseAnonKey)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = bodyData
-        URLSession.shared.dataTask(with: req).resume()
+        let edgeStartMs = safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0)
+        let edgeSeatRef = SyncTraceLogger.formatSeatRef(seatNumber: 0, seatLabel: seatLabel, id: resolvedSeatId)
+        URLSession.shared.dataTask(with: req) { _, edgeResp, edgeErr in
+            let rttMs = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - edgeStartMs))
+            let statusCode = (edgeResp as? HTTPURLResponse)?.statusCode ?? 0
+            let ok = edgeErr == nil && (200...299).contains(statusCode)
+            SyncTraceLogger.shared.log(
+                hop: "W_EDGE_FALLBACK",
+                ch: "edge_fn",
+                seat: edgeSeatRef,
+                act: "notify-salon-event",
+                res: ok ? "ok" : "err",
+                rsn: ok ? "edge_http_\(statusCode)" : (edgeErr != nil ? "edge_net_err" : "edge_http_\(statusCode)"),
+                traceId: edgeTraceId,
+                ms: rttMs,
+                meta: ["alreadyNotified": alreadyNotifiedTokens.count]
+            )
+        }.resume()
     }
 
     // ★ Watch単独でSupabase直接PATCHが成功し、かつ自端末iPhoneへの即時sendMessageが未接続/失敗した際、
@@ -5416,7 +6247,13 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
             return nil
         }()
-        let seatSnapshot: [String: Any] = [
+        let pushTraceId = (extra["traceId"] as? String) ?? ""
+        let pushSeatRef = SyncTraceLogger.formatSeatRef(
+            seatNumber: seatNum > 0 ? seatNum : (matchedSeat?.seatNumber ?? 0),
+            seatLabel: seatLabel,
+            id: resolvedSeatId
+        )
+        var seatSnapshot: [String: Any] = [
             "id": resolvedSeatId,
             "seatNumber": seatNum > 0 ? seatNum : (matchedSeat?.seatNumber ?? 1),
             "seatLabel": seatLabel,
@@ -5436,6 +6273,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             "updatedBy": uid,
             "updatedAt": nowMs
         ]
+        if !pushTraceId.isEmpty {
+            seatSnapshot["traceId"] = pushTraceId
+        }
 
         // ★ A-1: 変更前スナップショット（prevSeat）と変更後を比較し、担当解除（unassign_assist / unassign_check）を検出
         var plans: [WatchPushPlanItem] = []
@@ -5748,10 +6588,30 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         case "CLEAR_STAFF":
             break
         default:
+            SyncTraceLogger.shared.log(
+                hop: "W_DIRECT_PUSH",
+                ch: "expo_push",
+                seat: pushSeatRef,
+                act: action,
+                res: "skip",
+                rsn: "no_plans",
+                traceId: pushTraceId
+            )
             return
         }
 
-        guard !plans.isEmpty else { return }
+        guard !plans.isEmpty else {
+            SyncTraceLogger.shared.log(
+                hop: "W_DIRECT_PUSH",
+                ch: "expo_push",
+                seat: pushSeatRef,
+                act: action,
+                res: "skip",
+                rsn: "no_plans",
+                traceId: pushTraceId
+            )
+            return
+        }
 
         let seatCreatedBy: String = {
             let snapCb = (resolvedSnapCreatedBy ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5801,6 +6661,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                   httpOk,
                   let data = data,
                   let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                SyncTraceLogger.shared.log(
+                    hop: "W_DIRECT_PUSH",
+                    ch: "expo_push",
+                    seat: pushSeatRef,
+                    act: action,
+                    res: "err",
+                    rsn: "token_fetch_err_edge_fallback",
+                    traceId: pushTraceId
+                )
                 self.invokeNotifySalonEventEdgeFunctionFromWatch(
                     salonId: salonId,
                     uid: uid,
@@ -5821,7 +6690,18 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                 }
                 return true
             }
-            guard !nonSelfRows.isEmpty else { return }
+            guard !nonSelfRows.isEmpty else {
+                SyncTraceLogger.shared.log(
+                    hop: "W_DIRECT_PUSH",
+                    ch: "expo_push",
+                    seat: pushSeatRef,
+                    act: action,
+                    res: "skip",
+                    rsn: "no_non_self_tokens",
+                    traceId: pushTraceId
+                )
+                return
+            }
 
             var allMessages: [[String: Any]] = []
             var needsEdgeFallbackForUnresolved = false
@@ -5949,6 +6829,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                             "updatedBy": uid,
                             "actorId": uid,
                             "updatedAt": nowMs,
+                            "traceId": pushTraceId,
                             "seatSnapshot": seatSnapshot
                         ]
                     ]
@@ -5960,6 +6841,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             }
 
             if allMessages.isEmpty {
+                SyncTraceLogger.shared.log(
+                    hop: "W_DIRECT_PUSH",
+                    ch: "expo_push",
+                    seat: pushSeatRef,
+                    act: action,
+                    res: "skip",
+                    rsn: needsEdgeFallbackForUnresolved ? "no_scoped_msgs_edge_fallback" : "no_scoped_messages",
+                    traceId: pushTraceId
+                )
                 if needsEdgeFallbackForUnresolved {
                     self.invokeNotifySalonEventEdgeFunctionFromWatch(
                         salonId: salonId,
@@ -5985,8 +6875,26 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             pushReq.setValue("application/json", forHTTPHeaderField: "Accept")
             pushReq.httpBody = pushBody
             let sentToTokens = Array(Set(allMessages.compactMap { ($0["to"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }))
+            let expoStartMs = safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0)
             URLSession.shared.dataTask(with: pushReq) { [weak self] _, pushResp, pushErr in
-                let pushOk = (pushResp as? HTTPURLResponse).map { (200...299).contains($0.statusCode) } ?? false
+                let expoRttMs = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - expoStartMs))
+                let pushStatusCode = (pushResp as? HTTPURLResponse)?.statusCode ?? 0
+                let pushOk = (200...299).contains(pushStatusCode)
+                SyncTraceLogger.shared.log(
+                    hop: "W_DIRECT_PUSH",
+                    ch: "expo_push",
+                    seat: pushSeatRef,
+                    act: action,
+                    res: (pushErr == nil && pushOk) ? "ok" : "err",
+                    rsn: (pushErr == nil && pushOk) ? "expo_http_\(pushStatusCode)" : (pushErr != nil ? "expo_net_err" : "expo_http_\(pushStatusCode)"),
+                    traceId: pushTraceId,
+                    ms: expoRttMs,
+                    meta: [
+                        "plans": plans.count,
+                        "tokens": sentToTokens.count,
+                        "edgeFallback": needsEdgeFallbackForUnresolved
+                    ]
+                )
                 if pushErr != nil || !pushOk || needsEdgeFallbackForUnresolved {
                     let alreadyDelivered = (pushErr == nil && pushOk) ? sentToTokens : []
                     self?.invokeNotifySalonEventEdgeFunctionFromWatch(
@@ -6059,6 +6967,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
 
         let requestGeneration = self.localActionGeneration
+        let pollStartMs = safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0)
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 4.5
@@ -6071,9 +6980,18 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 defer { self.isDirectCloudPollInFlight = false }
+                let pollRttMs = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - pollStartMs))
                 // ★ GETリクエスト飛行中にWatch上でローカル操作（タイム入力開始・ヘルプ指定・停止等）が行われた場合は、
                 //   リクエスト送信前の古いクラウド応答でローカル状態を上書きしないよう破棄し、0.8秒後に再ポーリングする
                 guard self.localActionGeneration == requestGeneration else {
+                    SyncTraceLogger.shared.log(
+                        hop: "W_POLL_DIFF",
+                        ch: "supabase_rest",
+                        act: "poll",
+                        res: "skip",
+                        rsn: "skip_gen_mismatch",
+                        ms: pollRttMs
+                    )
                     self.lastDirectCloudPollAt = .distantPast
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                         self?.pollCloudTimersFromSupabaseIfNeeded(force: true)
@@ -6092,6 +7010,15 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                       (200...299).contains(http.statusCode),
                       let data = data,
                       let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+                    let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    SyncTraceLogger.shared.log(
+                        hop: "W_POLL_DIFF",
+                        ch: "supabase_rest",
+                        act: "poll",
+                        res: "err",
+                        rsn: error != nil ? "poll_net_err" : "poll_http_\(statusCode)",
+                        ms: pollRttMs
+                    )
                     return
                 }
                 guard self.cloudSalonId.trimmingCharacters(in: .whitespacesAndNewlines) == salonId else { return }
@@ -6204,6 +7131,9 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             didChange = true
         }
 
+        var cloudRevBySeatId: [String: String] = [:]
+        var loggedPeerHoldDiffIds = Set<String>()
+
         for i in updatedTimers.indices {
             let cur = updatedTimers[i]
             let prevKey = "seat-\(cur.seatNumber)"
@@ -6222,6 +7152,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             guard let row = matchedRow else { continue }
 
             let rowId = (row["id"] as? String) ?? cur.id
+            let rowCloudRev = SyncTraceLogger.computeCloudRowStateRev(row)
+            cloudRevBySeatId[rowId] = rowCloudRev
             let cloudUpdatedAt = Self.parseCloudISODate(row["updated_at"])
             let cloudLabel = ((row["seat_label"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let rawCloudStatus = (row["status"] as? String) ?? "idle"
@@ -6313,6 +7245,25 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     && (cur.isRunning != (cloudStatus == "running" && cloudTargetEndMs > 0))
                     && now.timeIntervalSince(modAt) >= 6.0
                 if !isAuthoritativeNewerPeerChange && !isFallbackStopTransitionWithoutUid && now.timeIntervalSince(modAt) < self.localSeatModHoldSeconds {
+                    let prevSeatRev = newlyAppendedRowIds.contains(rowId) ? "new00000" : SyncTraceLogger.computeSeatStateRev(cur)
+                    let cloudRowRev = SyncTraceLogger.computeCloudRowStateRev(row)
+                    if cloudRowRev != prevSeatRev {
+                        let pollSeatRef = SyncTraceLogger.formatSeatRef(
+                            seatNumber: cur.seatNumber,
+                            seatLabel: !cloudLabel.isEmpty ? cloudLabel : cur.displaySeatName,
+                            id: rowId
+                        )
+                        SyncTraceLogger.shared.log(
+                            hop: "W_POLL_DIFF",
+                            ch: "supabase_rest",
+                            seat: pollSeatRef,
+                            act: "reconcile",
+                            res: "skip",
+                            rsn: "blocked_local_seat_mod",
+                            stateRev: prevSeatRev,
+                            meta: ["cloudRev": cloudRowRev]
+                        )
+                    }
                     continue
                 }
             }
@@ -6327,6 +7278,21 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     let startHoldSec: TimeInterval = isCloudRowOlderThanLocalStart ? 15.0 : 5.0
                     if now.timeIntervalSince(startedAt) < startHoldSec {
                         // 自Watchから開始した直後（クラウド反映完了前やiPhone中継待ちの間）に古い paused 行で巻き戻されるのを保護
+                        let pollSeatRef = SyncTraceLogger.formatSeatRef(
+                            seatNumber: cur.seatNumber,
+                            seatLabel: !cloudLabel.isEmpty ? cloudLabel : cur.displaySeatName,
+                            id: rowId
+                        )
+                        SyncTraceLogger.shared.log(
+                            hop: "W_POLL_DIFF",
+                            ch: "supabase_rest",
+                            seat: pollSeatRef,
+                            act: "reconcile",
+                            res: "skip",
+                            rsn: "blocked_watch_started",
+                            stateRev: SyncTraceLogger.computeSeatStateRev(cur),
+                            meta: ["cloudRev": SyncTraceLogger.computeCloudRowStateRev(row)]
+                        )
                         continue
                     }
                 }
@@ -6480,7 +7446,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                 seatId: rowId,
                                 seatNumber: cur.seatNumber,
                                 seatLabel: seatDisplay,
-                                semanticKey: stopSemKey
+                                semanticKey: stopSemKey,
+                                cloudRev: rowCloudRev
                             )
                             if didAdd {
                                 self.incomingNotification = (text: msg, color: colorHex, eventType: stopEvType)
@@ -6492,6 +7459,29 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                 didChange = true
                             }
                         }
+                    }
+                    let prevHoldRev = SyncTraceLogger.computeSeatStateRev(cur)
+                    let nextHoldRev = SyncTraceLogger.computeSeatStateRev(updatedTimers[i])
+                    if !alreadyHandledPeerStop || didTransitionToActiveProcess || prevHoldRev != nextHoldRev {
+                        let holdSeatRef = SyncTraceLogger.formatSeatRef(
+                            seatNumber: updatedTimers[i].seatNumber,
+                            seatLabel: updatedTimers[i].displaySeatName,
+                            id: updatedTimers[i].id
+                        )
+                        SyncTraceLogger.shared.log(
+                            hop: "W_POLL_DIFF",
+                            ch: "supabase_rest",
+                            seat: holdSeatRef,
+                            act: "reconcile",
+                            res: "ok",
+                            rsn: "local_peer_stop_hold",
+                            stateRev: nextHoldRev,
+                            meta: [
+                                "prevRev": prevHoldRev,
+                                "cloudRev": rowCloudRev
+                            ]
+                        )
+                        loggedPeerHoldDiffIds.insert(updatedTimers[i].id)
                     }
                     continue
                 }
@@ -6617,7 +7607,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                 seatId: rowId,
                                 seatNumber: cur.seatNumber,
                                 seatLabel: seatDisplay,
-                                semanticKey: chkDoneSemKey
+                                semanticKey: chkDoneSemKey,
+                                cloudRev: rowCloudRev
                             )
                             if didAdd {
                                 self.incomingNotification = (text: msg, color: "#30D158", eventType: "check_done")
@@ -6642,6 +7633,21 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     if let stop = self.localStops[rowId] ?? self.localStops[cur.id] ?? self.localStops[prevKey],
                        now.timeIntervalSince(stop.at) < self.localStopHoldSeconds,
                        abs(cloudTargetEndSec - stop.end) <= 2.5 {
+                        let pollSeatRef = SyncTraceLogger.formatSeatRef(
+                            seatNumber: cur.seatNumber,
+                            seatLabel: !cloudLabel.isEmpty ? cloudLabel : cur.displaySeatName,
+                            id: rowId
+                        )
+                        SyncTraceLogger.shared.log(
+                            hop: "W_POLL_DIFF",
+                            ch: "supabase_rest",
+                            seat: pollSeatRef,
+                            act: "reconcile",
+                            res: "skip",
+                            rsn: "blocked_local_stop",
+                            stateRev: SyncTraceLogger.computeSeatStateRev(cur),
+                            meta: ["cloudRev": SyncTraceLogger.computeCloudRowStateRev(row)]
+                        )
                         continue
                     }
                     self.clearLocalStop(seatId: rowId)
@@ -7111,7 +8117,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                 seatId: rowId,
                                 seatNumber: nextItem.seatNumber,
                                 seatLabel: seatDisplay,
-                                semanticKey: pollSemKey
+                                semanticKey: pollSemKey,
+                                cloudRev: rowCloudRev
                             )
                             if didAdd {
                                 self.incomingNotification = (text: pollMsg, color: pollColor, eventType: pollEventType)
@@ -7248,7 +8255,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                         seatId: rowId,
                                         seatNumber: cur.seatNumber,
                                         seatLabel: seatDisplay,
-                                        semanticKey: procSemKey
+                                        semanticKey: procSemKey,
+                                        cloudRev: rowCloudRev
                                     )
                                     if didAdd {
                                         self.incomingNotification = (text: msg, color: colorHex, eventType: evKind)
@@ -7296,7 +8304,8 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                                         seatId: rowId,
                                         seatNumber: cur.seatNumber,
                                         seatLabel: seatDisplay,
-                                        semanticKey: secStopSemKey
+                                        semanticKey: secStopSemKey,
+                                        cloudRev: rowCloudRev
                                     )
                                     if didAdd {
                                         self.incomingNotification = (text: msg, color: "#FF9500", eventType: "stop")
@@ -7318,6 +8327,32 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         self.hasReceivedAuthoritativeSyncInSession = true
 
         if didChange {
+            for nextSeat in updatedTimers {
+                if loggedPeerHoldDiffIds.contains(nextSeat.id) { continue }
+                let prevSeat = self.timers.first(where: { $0.id == nextSeat.id || $0.seatNumber == nextSeat.seatNumber })
+                let prevRev = prevSeat.map { SyncTraceLogger.computeSeatStateRev($0) } ?? "new00000"
+                let nextRev = SyncTraceLogger.computeSeatStateRev(nextSeat)
+                if nextRev != prevRev {
+                    var diffMeta: [String: Any] = ["prevRev": prevRev]
+                    if let cRev = cloudRevBySeatId[nextSeat.id] {
+                        diffMeta["cloudRev"] = cRev
+                    }
+                    SyncTraceLogger.shared.log(
+                        hop: "W_POLL_DIFF",
+                        ch: "supabase_rest",
+                        seat: SyncTraceLogger.formatSeatRef(
+                            seatNumber: nextSeat.seatNumber,
+                            seatLabel: nextSeat.displaySeatName,
+                            id: nextSeat.id
+                        ),
+                        act: "reconcile",
+                        res: "ok",
+                        rsn: prevSeat == nil ? "seat_added" : "state_changed",
+                        stateRev: nextRev,
+                        meta: diffMeta
+                    )
+                }
+            }
             self.timers = updatedTimers
             WatchAlarmCoordinator.shared.update(
                 timers: updatedTimers,
@@ -7446,6 +8481,8 @@ struct ContentView: View {
     
     // 新規席追加シートフラグ
     @State private var showingAddSeatSheet = false
+    @State private var lastCommittedCompositeRev: String = ""
+    @State private var committedPeerAlertCloudRevByKey: [String: String] = [:]
     
     // タイム操作シート対象席
     @State private var timeActionTargetId: String? = nil
@@ -7622,6 +8659,19 @@ struct ContentView: View {
             freshest.id = localMatch.id
         }
         pendingMainTimerSheetActionBox.cachedSheetItems[cacheKey] = freshest
+        SyncTraceLogger.shared.log(
+            hop: "W_USER_TAP_WAKE",
+            ch: "watch_ui",
+            seat: SyncTraceLogger.formatSeatRef(
+                seatNumber: freshest.seatNumber,
+                seatLabel: freshest.displaySeatName,
+                id: freshest.id
+            ),
+            act: cacheKey,
+            res: "ok",
+            rsn: "open_sheet",
+            stateRev: SyncTraceLogger.computeSeatStateRev(freshest)
+        )
         return freshest
     }
 
@@ -8075,6 +9125,142 @@ struct ContentView: View {
         )
     }
 
+    private func recordWatchUiCommitIfNeeded(_ newTimers: [SeatTimerItem]) {
+        let nextRev = SyncTraceLogger.computeCompositeStateRev(newTimers)
+        guard nextRev != lastCommittedCompositeRev else { return }
+        let prevRev = lastCommittedCompositeRev
+        lastCommittedCompositeRev = nextRev
+        let meta: [String: Any] = [
+            "prevRev": prevRev,
+            "modalOpen": isAnyModalSheetPresented,
+            "seats": newTimers.count
+        ]
+        SyncTraceLogger.shared.log(
+            hop: "W_UI_COMMIT",
+            ch: "swiftui",
+            act: "timers_state_commit",
+            res: "ok",
+            rsn: "state_changed",
+            stateRev: nextRev,
+            meta: meta
+        )
+    }
+
+    private func peerAlertLogicalCommitKey(_ alert: PeerConfirmationAlertItem) -> String {
+        let createdMs = safeEpochMillisInt64(alert.createdAt * 1000.0)
+        let kindToken: String = {
+            if let p = WatchSessionManager.parsePeerSemanticKeyParts(alert.semanticKey) {
+                return p.ev
+            }
+            let ev = alert.eventType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return ev.isEmpty ? alert.id : ev
+        }()
+        return "s\(alert.seatNumber)|\(createdMs)|\(kindToken)"
+    }
+
+    private func seedCommittedPeerAlerts(_ alerts: [PeerConfirmationAlertItem]) {
+        var seeded: [String: String] = [:]
+        for alert in alerts {
+            let key = peerAlertLogicalCommitKey(alert)
+            let rev = alert.cloudRev.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let prev = seeded[key], !prev.isEmpty {
+                continue
+            }
+            seeded[key] = rev
+        }
+        committedPeerAlertCloudRevByKey = seeded
+    }
+
+    private func recordPeerAlertBannerCommits(_ alerts: [PeerConfirmationAlertItem]) {
+        guard !alerts.isEmpty else {
+            if !committedPeerAlertCloudRevByKey.isEmpty {
+                committedPeerAlertCloudRevByKey.removeAll()
+            }
+            return
+        }
+        var activeKeys = Set<String>()
+        for alert in alerts {
+            let key = peerAlertLogicalCommitKey(alert)
+            activeKeys.insert(key)
+            let startKey = "s\(alert.seatNumber)|\(safeEpochMillisInt64(alert.createdAt * 1000.0))|timer_start"
+            if key != startKey,
+               let prevStartRev = committedPeerAlertCloudRevByKey[startKey],
+               committedPeerAlertCloudRevByKey[key] == nil {
+                committedPeerAlertCloudRevByKey[key] = prevStartRev
+            }
+        }
+        committedPeerAlertCloudRevByKey = committedPeerAlertCloudRevByKey.filter { activeKeys.contains($0.key) }
+        let compRev = SyncTraceLogger.computeCompositeStateRev(timers)
+        for alert in alerts {
+            let key = peerAlertLogicalCommitKey(alert)
+            let cleanRev = alert.cloudRev.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let existingCommittedRev = committedPeerAlertCloudRevByKey[key] {
+                if !existingCommittedRev.isEmpty || cleanRev.isEmpty {
+                    continue
+                }
+            }
+            committedPeerAlertCloudRevByKey[key] = cleanRev
+            let seatRef = SyncTraceLogger.formatSeatRef(
+                seatNumber: alert.seatNumber,
+                seatLabel: alert.seatLabel.isEmpty ? nil : alert.seatLabel,
+                id: alert.seatId.isEmpty ? nil : alert.seatId
+            )
+            var meta: [String: Any] = [
+                "alertCount": alerts.count,
+                "modalOpen": isAnyModalSheetPresented
+            ]
+            if !alert.eventType.isEmpty {
+                meta["ev"] = alert.eventType
+            }
+            if !cleanRev.isEmpty {
+                meta["cloudRev"] = cleanRev
+            }
+            SyncTraceLogger.shared.log(
+                hop: "W_UI_COMMIT",
+                ch: "swiftui",
+                seat: seatRef,
+                act: "peer_alert_banner_commit",
+                res: "ok",
+                rsn: "peer_stop_hold_banner",
+                stateRev: compRev,
+                meta: meta
+            )
+        }
+    }
+
+    private func recordScenePhaseTransition(_ newPhase: ScenePhase, currentTimers: [SeatTimerItem]) {
+        let phaseText: String
+        switch newPhase {
+        case .active: phaseText = "active"
+        case .inactive: phaseText = "inactive"
+        case .background: phaseText = "background"
+        @unknown default: phaseText = "unknown"
+        }
+        SyncTraceLogger.shared.updateAppState(phaseText)
+        let meta: [String: Any] = ["modalOpen": isAnyModalSheetPresented]
+        SyncTraceLogger.shared.log(
+            hop: "W_SCENE_PHASE",
+            ch: "watch_os",
+            act: phaseText,
+            res: "ok",
+            rsn: "phase_transition",
+            stateRev: SyncTraceLogger.computeCompositeStateRev(currentTimers),
+            meta: meta
+        )
+    }
+
+    private func recordTapOpenSheet(seat: String = "", act: String, stateRev: String = "") {
+        SyncTraceLogger.shared.log(
+            hop: "W_USER_TAP_WAKE",
+            ch: "watch_ui",
+            seat: seat,
+            act: act,
+            res: "ok",
+            rsn: "open_sheet",
+            stateRev: stateRev
+        )
+    }
+
     var body: some View {
         ZStack {
             NavigationStack {
@@ -8091,6 +9277,9 @@ struct ContentView: View {
                         } else {
                             cardsScrollView
                         }
+                    }
+                    .onChange(of: sessionManager.unconfirmedPeerAlerts.map { "\($0.id)|\($0.cloudRev)" }) { _, _ in
+                        recordPeerAlertBannerCommits(sessionManager.unconfirmedPeerAlerts)
                     }
                     
                     if let banner = notificationBannerText, sessionManager.unconfirmedPeerAlerts.isEmpty {
@@ -8110,6 +9299,7 @@ struct ContentView: View {
                     if newTimers.contains(where: { $0.isRunning }) {
                         self.now = Date()
                     }
+                    recordWatchUiCommitIfNeeded(newTimers)
                     if pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync {
                         pendingMainTimerSheetActionBox.skipNextTimersOnChangeSync = false
                         return
@@ -8125,6 +9315,8 @@ struct ContentView: View {
                 .onChange(of: showingMainTimerSheet) { _, isShowing in
                     if isShowing && !alarm.ringing.isEmpty {
                         showingMainTimerSheet = false
+                    } else if isShowing {
+                        recordTapOpenSheet(seat: "main-timer", act: "mainTimerSheet")
                     }
                 }
                 .navigationTitle(showingThumbnailMap ? "客席一覧" : "共有タイマー")
@@ -8459,6 +9651,7 @@ struct ContentView: View {
                 }
             }
             .onAppear {
+                seedCommittedPeerAlerts(sessionManager.unconfirmedPeerAlerts)
                 sessionManager.syncFromLatestApplicationContextIfNewer()
                 sessionManager.requestSyncFromPhone()
                 sessionManager.pollCloudTimersFromSupabaseIfNeeded(force: true)
@@ -8502,6 +9695,7 @@ struct ContentView: View {
                 }
                 let currentMain = sessionManager.mainTimer ?? self.mainTimer
                 let currentTimers = sessionManager.timers.isEmpty ? self.timers : sessionManager.timers
+                recordScenePhaseTransition(newPhase, currentTimers: currentTimers)
                 WidgetSync.save(
                     timers: currentTimers,
                     mainTimer: currentMain,
@@ -9575,6 +10769,7 @@ struct ContentView: View {
                     // ② 一番下に「新しい席を追加」ボタンを配置（席の増減は招待元オーナーのみ）
                     if sessionManager.isSalonOwner {
                         Button(action: {
+                            recordTapOpenSheet(act: "addSeatSheet", stateRev: SyncTraceLogger.computeCompositeStateRev(timers))
                             showingAddSeatSheet = true
                             playHaptic(.click)
                         }) {
@@ -10173,6 +11368,7 @@ struct ContentView: View {
                 }
             },
             onAddSeat: sessionManager.isSalonOwner ? {
+                recordTapOpenSheet(act: "addSeatSheet", stateRev: SyncTraceLogger.computeCompositeStateRev(timers))
                 showingAddSeatSheet = true
             } : nil
         )

@@ -272,14 +272,15 @@ enum ComplicationData {
     static func fetchLatestFromSupabaseIfAvailable(
         baseSnapshot: ComplicationSnapshot,
         timeout: TimeInterval = 2.2,
-        completion: @escaping (ComplicationSnapshot, Bool) -> Void
+        completion: @escaping (ComplicationSnapshot, Bool, String, Int, [String: String], String) -> Void
     ) {
+        let fetchStartMs = WidgetSyncTrace.safeMillisInt64(Date().timeIntervalSince1970 * 1000.0)
         let salonId = baseSnapshot.cloudSalonId
         let now = Date()
         let nowEpoch = now.timeIntervalSince1970
         let lastWidgetFetchEpoch = UserDefaults(suiteName: appGroup)?.double(forKey: widgetFetchedAtEpochKey) ?? 0
         guard UUID(uuidString: salonId) != nil else {
-            completion(baseSnapshot, false)
+            completion(baseSnapshot, false, "no_salon_id", 0, [:], "")
             return
         }
         // ★ HIGH-6: 直近1.2秒以内にWatch本体アプリがWidgetSyncを書き込んだばかり、または0.6秒以内にフェッチ済みの場合は通信をスキップし、
@@ -287,7 +288,7 @@ enum ComplicationData {
         let shouldDebounce = (nowEpoch - baseSnapshot.savedAtEpoch < 1.2) ||
             (nowEpoch - lastWidgetFetchEpoch < 0.6 && !baseSnapshot.seats.isEmpty)
         if shouldDebounce {
-            completion(baseSnapshot, true)
+            completion(baseSnapshot, true, "debounced", 0, [:], "")
             return
         }
 
@@ -298,7 +299,7 @@ enum ComplicationData {
             URLQueryItem(name: "order", value: "updated_at.desc")
         ]
         guard let url = comps?.url else {
-            completion(baseSnapshot, false)
+            completion(baseSnapshot, false, "invalid_url", 0, [:], "")
             return
         }
 
@@ -312,7 +313,7 @@ enum ComplicationData {
 
         let lock = NSLock()
         var didComplete = false
-        let finishOnce: (ComplicationSnapshot, Bool) -> Void = { snap, skipped in
+        let finishOnce: (ComplicationSnapshot, Bool, String, [String: String], String) -> Void = { snap, skipped, outcome, cloudRevMap, cloudCompRev in
             lock.lock()
             if didComplete {
                 lock.unlock()
@@ -320,16 +321,26 @@ enum ComplicationData {
             }
             didComplete = true
             lock.unlock()
-            completion(snap, skipped)
+            let nowMs = WidgetSyncTrace.safeMillisInt64(Date().timeIntervalSince1970 * 1000.0)
+            let elapsedMs = Int(max(0, nowMs - fetchStartMs))
+            completion(snap, skipped, outcome, elapsedMs, cloudRevMap, cloudCompRev)
         }
 
         let task = URLSession.shared.dataTask(with: req) { data, response, error in
-            guard error == nil,
-                  let http = response as? HTTPURLResponse,
-                  (200...299).contains(http.statusCode),
+            if let error = error {
+                let nsErr = error as NSError
+                let reason = (nsErr.code == NSURLErrorTimedOut) ? "http_timeout" : "net_err_\(nsErr.code)"
+                finishOnce(baseSnapshot, false, reason, [:], "")
+                return
+            }
+            guard let http = response as? HTTPURLResponse else {
+                finishOnce(baseSnapshot, false, "no_http_resp", [:], "")
+                return
+            }
+            guard (200...299).contains(http.statusCode),
                   let data = data,
                   let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-                finishOnce(baseSnapshot, false)
+                finishOnce(baseSnapshot, false, "http_\(http.statusCode)", [:], "")
                 return
             }
 
@@ -361,6 +372,8 @@ enum ComplicationData {
             var seenLabels = Set<String>()
             var touchedRelatedId: String? = nil
             var touchedOtherId: String? = nil
+            var cloudRevBySeatId: [String: String] = [:]
+            var cloudCompositeParts: [String] = []
 
             for (idx, row) in rows.enumerated() {
                 guard let id = row["id"] as? String, !id.isEmpty else { continue }
@@ -509,6 +522,17 @@ enum ComplicationData {
                     }
                 }
 
+                let resolvedHelpProcForSeat = (!isRunning && pausedRem <= 0 && !hasActivePostStopProcess)
+                    ? ""
+                    : (cloudIsShampooing && helpProc.isEmpty ? "シャンプー" : helpProc)
+                let resolvedShampooStaffForSeat = (!isRunning && pausedRem <= 0 && !hasActivePostStopProcess)
+                    ? nil
+                    : shampooStaff
+                let rowCloudRev = WidgetSyncTrace.computeCloudRowStateRev(row, fallbackSeatNumber: seatNum)
+                cloudRevBySeatId[id] = rowCloudRev
+                let rowRevSeatKey = WidgetSyncTrace.normalizeSeatKey(seatNumber: seatNum, seatLabel: seatLabel)
+                cloudCompositeParts.append("\(rowRevSeatKey):\(rowCloudRev)")
+
                 let seatItem = ComplicationSeat(
                     id: id,
                     seatNumber: seatNum,
@@ -533,13 +557,17 @@ enum ComplicationData {
                     checkTotalSeconds: hasActiveCheck ? chkTotalSec : nil,
                     checkProcess: checkProc.isEmpty ? "チェック" : checkProc,
                     checkStaff: checkStaff.isEmpty ? nil : checkStaff,
-                    shampooStaff: shampooStaff,
-                    helpProcess: helpProc,
+                    shampooStaff: resolvedShampooStaffForSeat,
+                    helpProcess: resolvedHelpProcForSeat,
                     isRecruiting: isRecruiting,
                     isCheckCompleted: isCheckCompleted
                 )
                 cloudSeats.append(seatItem)
             }
+
+            let cloudCompositeRev = cloudCompositeParts.isEmpty
+                ? "empty000"
+                : String(cloudCompositeParts.sorted().joined(separator: ",").prefix(200))
 
             cloudSeats.sort {
                 if $0.seatNumber != $1.seatNumber {
@@ -583,12 +611,12 @@ enum ComplicationData {
                 savedAtEpoch: baseSnapshot.savedAtEpoch
             )
             persistSnapshotToAppGroup(updatedSnapshot)
-            finishOnce(updatedSnapshot, false)
+            finishOnce(updatedSnapshot, false, "http_ok_\(rows.count)", cloudRevBySeatId, cloudCompositeRev)
         }
         task.resume()
 
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout) {
-            finishOnce(baseSnapshot, false)
+            finishOnce(baseSnapshot, false, "watchdog_timeout", [:], "")
         }
     }
 
@@ -834,7 +862,7 @@ struct ComplicationProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<ComplicationEntry>) -> Void) {
         let baseSnapshot = ComplicationData.load()
-        ComplicationData.fetchLatestFromSupabaseIfAvailable(baseSnapshot: baseSnapshot, timeout: 2.2) { snapshot, didSkipByDebounce in
+        ComplicationData.fetchLatestFromSupabaseIfAvailable(baseSnapshot: baseSnapshot, timeout: 2.2) { snapshot, didSkipByDebounce, fetchOutcome, fetchMs, cloudRevBySeatId, cloudCompositeRev in
             let now = Date()
             let seats = snapshot.seats
             var entryDates = Set<Date>()
@@ -903,6 +931,50 @@ struct ComplicationProvider: TimelineProvider {
             //   通常時は稼働席あり60秒後・待機時120秒後の再取得ポリシーを設定する。
             let hasAnyRunning = seats.contains(where: { ComplicationData.isDisplayableRunning($0, at: now) })
             let reloadInterval: TimeInterval = didSkipByDebounce ? 2.0 : (hasAnyRunning ? 60 : 120)
+            let policyLabel = didSkipByDebounce ? "2s" : (hasAnyRunning ? "60s" : "120s")
+            let pickedSeat = entries.first?.seat
+            let compositeRev = WidgetSyncTrace.computeCompositeStateRev(seats)
+            let stateRev: String = {
+                if let picked = pickedSeat {
+                    return WidgetSyncTrace.computeWidgetSeatStateRev(picked)
+                }
+                if fetchOutcome.hasPrefix("http_ok_") && !cloudCompositeRev.isEmpty {
+                    return cloudCompositeRev
+                }
+                return compositeRev
+            }()
+            let seatRef: String = {
+                guard let picked = pickedSeat else { return "idle" }
+                return WidgetSyncTrace.formatSeatRef(seatNumber: picked.seatNumber, seatLabel: picked.seatLabel, id: picked.id)
+            }()
+            var traceMeta: [String: Any] = [
+                "didSkipByDebounce": didSkipByDebounce,
+                "reloadPolicy": policyLabel,
+                "runningCount": entries.first?.runningCount ?? 0,
+                "family": String(describing: context.family),
+                "compositeRev": compositeRev
+            ]
+            if fetchOutcome.hasPrefix("http_ok_") {
+                if !cloudCompositeRev.isEmpty {
+                    traceMeta["cloudCompositeRev"] = cloudCompositeRev
+                }
+                if let picked = pickedSeat, let pickedCloudRev = cloudRevBySeatId[picked.id] {
+                    traceMeta["pickedCloudRev"] = pickedCloudRev
+                    traceMeta["cloudRev"] = pickedCloudRev
+                } else if !cloudCompositeRev.isEmpty {
+                    traceMeta["cloudRev"] = cloudCompositeRev
+                }
+            }
+            WidgetSyncTrace.append(
+                userId: snapshot.cloudUserId,
+                seat: seatRef,
+                act: "getTimeline",
+                res: (fetchOutcome.hasPrefix("http_ok") || fetchOutcome == "debounced" || fetchOutcome == "no_salon_id") ? "ok" : "err",
+                rsn: fetchOutcome,
+                stateRev: stateRev,
+                ms: fetchMs,
+                meta: traceMeta
+            )
             completion(Timeline(entries: entries, policy: .after(now.addingTimeInterval(reloadInterval))))
         }
     }
@@ -1312,5 +1384,340 @@ struct AssistTimerComplication: Widget {
 struct AssistTimerComplicationBundle: WidgetBundle {
     var body: some Widget {
         AssistTimerComplication()
+    }
+}
+
+// MARK: - Issue #13: WidgetKit 軽量トレース追記ヘルパー（App Group 最大60件ローテーション・全時刻Int64）
+private enum WidgetSyncTrace {
+    private static let fileName = "sync_trace_widget.jsonl"
+    private static let maxLines = 60
+    private static let ioQueue = DispatchQueue(label: "com.assisttimer.widget.synctrace", qos: .utility)
+    private static var localSeq: Int = 0
+
+    static func safeMillisInt64(_ rawMs: Double) -> Int64 {
+        guard rawMs.isFinite, rawMs > 0 else { return 0 }
+        let ms = rawMs < 10_000_000_000 ? (rawMs * 1000.0) : rawMs
+        let clamped = min(4_102_444_800_000.0, max(0.0, ms))
+        return Int64(clamped.rounded())
+    }
+
+    static func fnv1a32HexUtf8(_ input: String) -> String {
+        var hash: UInt32 = 0x811c9dc5
+        for byte in input.utf8 {
+            hash ^= UInt32(byte)
+            hash = hash &* 0x01000193
+        }
+        return String(format: "%08x", hash)
+    }
+
+    static func normalizeStaffToken(_ raw: String?) -> String {
+        guard let raw = raw, !raw.isEmpty else { return "" }
+        let nfkc = raw.precomposedStringWithCompatibilityMapping
+        let scalars = nfkc.unicodeScalars.filter { scalar in
+            !CharacterSet.whitespacesAndNewlines.contains(scalar) && scalar.value != 0x3000 && scalar.value != 0xFEFF
+        }
+        return String(String.UnicodeScalarView(scalars)).lowercased()
+    }
+
+    static func maskStaff(_ raw: String?) -> String {
+        let norm = normalizeStaffToken(raw)
+        if norm.isEmpty { return "empty" }
+        if norm == "未定" { return "unset" }
+        if norm == "ヘルプなし" || norm == "none" { return "none" }
+        if norm == "募集中" { return "recruit" }
+        if norm == "スタイリスト" || norm == "スタッフ" { return "default_stylist" }
+        let h = fnv1a32HexUtf8(norm)
+        return "stf#" + String(h.prefix(4))
+    }
+
+    private static func isUuidLike(_ lower: String) -> Bool {
+        let bytes = Array(lower.utf8)
+        guard bytes.count >= 14, bytes[8] == 0x2d, bytes[13] == 0x2d else { return false }
+        let isHex: (UInt8) -> Bool = { b in
+            (b >= 0x30 && b <= 0x39) || (b >= 0x61 && b <= 0x66)
+        }
+        for i in 0..<8 where !isHex(bytes[i]) { return false }
+        for i in 9..<13 where !isHex(bytes[i]) { return false }
+        return true
+    }
+
+    static func maskId(_ raw: String?, prefix: String = "") -> String {
+        let s = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty else { return "" }
+        let lower = s.lowercased()
+        if prefix == "u" || prefix == "s" {
+            return "\(prefix)#\(String(lower.prefix(6)))"
+        }
+        if isUuidLike(lower) {
+            let p = prefix.isEmpty ? "t" : prefix
+            return "\(p)#\(String(lower.prefix(6)))"
+        }
+        return String(s.prefix(24))
+    }
+
+    static func normalizeSeatKey(seatNumber: Int, seatLabel: String?) -> String {
+        var lbl = (seatLabel ?? "").precomposedStringWithCompatibilityMapping
+        lbl = lbl.replacingOccurrences(of: "(サンプル)", with: "")
+                 .replacingOccurrences(of: "（サンプル）", with: "")
+        let scalars = lbl.unicodeScalars.filter { scalar in
+            !CharacterSet.whitespacesAndNewlines.contains(scalar) && scalar.value != 0x3000 && scalar.value != 0xFEFF
+        }
+        lbl = String(String.UnicodeScalarView(scalars))
+        if lbl.hasSuffix("席") {
+            lbl = String(lbl.dropLast())
+        }
+        if lbl.hasSuffix("番") {
+            let stem = String(lbl.dropLast())
+            if !stem.isEmpty && stem.unicodeScalars.allSatisfy({ $0.value >= 0x30 && $0.value <= 0x39 }) {
+                lbl = stem
+            }
+        }
+        lbl = lbl.lowercased()
+        if !lbl.isEmpty,
+           lbl.first != "0",
+           lbl.unicodeScalars.allSatisfy({ $0.value >= 0x30 && $0.value <= 0x39 }),
+           let n = Int(lbl), n > 0 {
+            return "s\(n)"
+        }
+        if !lbl.isEmpty {
+            return lbl
+        }
+        if seatNumber > 0 {
+            return "s\(seatNumber)"
+        }
+        return "s0"
+    }
+
+    static func formatSeatRef(seatNumber: Int, seatLabel: String?, id: String?) -> String {
+        let key = normalizeSeatKey(seatNumber: seatNumber, seatLabel: seatLabel)
+        let masked = maskId(id, prefix: "t")
+        return masked.isEmpty ? key : "\(key)(\(masked))"
+    }
+
+    static func isCustomPostStopProcessLabel(_ rawProc: String?) -> Bool {
+        let p = (rawProc ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !p.isEmpty else { return false }
+        let lower = p.lowercased()
+        return p != "シャンプー"
+            && p != "ヘルプなし"
+            && lower != "none"
+            && p != "募集中"
+            && p != "未定"
+    }
+
+    static func computeStateRevFromFields(
+        seatNumber: Int,
+        seatLabel: String?,
+        isRunning: Bool,
+        targetEndMs: Int64,
+        pausedRemainingSeconds: Int = 0,
+        hasActiveCheck: Bool,
+        checkTargetEndMs: Int64,
+        isPostStopProcessActive: Bool,
+        assistToken: String?,
+        checkToken: String?
+    ) -> String {
+        let seatKey = normalizeSeatKey(seatNumber: seatNumber, seatLabel: seatLabel)
+        let runFlag = (isRunning && targetEndMs > 0) ? 1 : 0
+        let pausedSec = (runFlag == 0) ? max(0, pausedRemainingSeconds) : 0
+        let shampooFlag = (runFlag == 0 && pausedSec <= 0 && isPostStopProcessActive) ? 1 : 0
+        let endBucket5s: Int64 = (runFlag == 1)
+            ? Int64((Double(targetEndMs) / 5000.0).rounded(.toNearestOrAwayFromZero))
+            : ((shampooFlag == 0 && pausedSec > 0) ? Int64(pausedSec) : 0)
+        let chkFlag = (runFlag == 1 && hasActiveCheck && checkTargetEndMs > 0) ? 1 : 0
+        let checkEndBucket5s: Int64 = (chkFlag == 1)
+            ? Int64((Double(checkTargetEndMs) / 5000.0).rounded(.toNearestOrAwayFromZero))
+            : 0
+        let shouldKeepAssist = (runFlag == 1) || (shampooFlag == 1) || (pausedSec > 0)
+        let assistMasked = shouldKeepAssist ? maskStaff(assistToken) : "empty"
+        let checkMasked = (chkFlag == 1) ? maskStaff(checkToken) : "empty"
+        let canonical = "\(seatKey)|\(runFlag)|\(endBucket5s)|\(chkFlag)|\(checkEndBucket5s)|\(shampooFlag)|\(assistMasked)|\(checkMasked)"
+        return fnv1a32HexUtf8(canonical)
+    }
+
+    static func computeWidgetSeatStateRev(_ seat: ComplicationSeat) -> String {
+        let endMs: Int64 = seat.isRunning
+            ? safeMillisInt64(seat.endDate.timeIntervalSince1970 * 1000.0)
+            : 0
+        let runFlag = seat.isRunning && endMs > 0
+        let pausedSec = !runFlag ? max(0, seat.pausedRemaining) : 0
+        let checkTot = seat.checkTotalSeconds ?? 0
+        let chkEndMs: Int64 = {
+            guard runFlag, !seat.isCheckCompleted, checkTot > 0, let d = seat.checkEndDate else { return 0 }
+            return safeMillisInt64(d.timeIntervalSince1970 * 1000.0)
+        }()
+        let hasCheck = runFlag && !seat.isCheckCompleted && checkTot > 0 && chkEndMs > 0
+        let cleanHelpProc = (seat.helpProcess ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let isPostStopProcessActive = !runFlag && pausedSec <= 0
+            && (cleanHelpProc == "シャンプー" || isCustomPostStopProcessLabel(cleanHelpProc))
+        let assistToken: String = {
+            if seat.isRecruiting { return "募集中" }
+            if seat.isNoHelpNeeded { return "ヘルプなし" }
+            return seat.shampooStaff ?? ""
+        }()
+        let checkToken = hasCheck ? (seat.checkStaff ?? "") : ""
+        return computeStateRevFromFields(
+            seatNumber: seat.seatNumber,
+            seatLabel: seat.seatLabel,
+            isRunning: runFlag,
+            targetEndMs: endMs,
+            pausedRemainingSeconds: pausedSec,
+            hasActiveCheck: hasCheck,
+            checkTargetEndMs: chkEndMs,
+            isPostStopProcessActive: isPostStopProcessActive,
+            assistToken: assistToken,
+            checkToken: checkToken
+        )
+    }
+
+    static func computeCloudRowStateRev(_ row: [String: Any], fallbackSeatNumber: Int = 0) -> String {
+        let statusStr = (row["status"] as? String) ?? ""
+        let rawEnd = (row["target_end_timestamp"] as? NSNumber)?.doubleValue
+            ?? (row["target_end_timestamp"] as? Double)
+            ?? 0
+        let endMs = safeMillisInt64(rawEnd)
+        let isRunning = (statusStr == "running" && endMs > 0)
+        let rawShampoo = (row["is_shampooing"] as? NSNumber)?.boolValue
+            ?? (row["is_shampooing"] as? Bool)
+            ?? false
+        let rawPausedSec = max(0, (row["paused_remaining_seconds"] as? NSNumber)?.intValue ?? (row["paused_remaining_seconds"] as? Int) ?? 0)
+        let pausedSec: Int = (!isRunning && statusStr == "paused" && rawPausedSec > 0)
+            ? rawPausedSec
+            : 0
+        let checkTot = (row["check_total_seconds"] as? NSNumber)?.intValue
+            ?? (row["check_total_seconds"] as? Int)
+            ?? 0
+        let rawChkEnd = (row["check_target_end_timestamp"] as? NSNumber)?.doubleValue
+            ?? (row["check_target_end_timestamp"] as? Double)
+            ?? 0
+        let chkEndMs = safeMillisInt64(rawChkEnd)
+        let isCheckDone = (row["is_check_completed"] as? NSNumber)?.boolValue
+            ?? (row["is_check_completed"] as? Bool)
+            ?? false
+        let hasCheck = isRunning && !isCheckDone && checkTot > 0 && chkEndMs > 0
+        let rawHelpProc = (row["help_process"] as? String) ?? ""
+        let isPostStopProcessActive = !isRunning && pausedSec <= 0
+            && (rawShampoo || isCustomPostStopProcessLabel(rawHelpProc))
+        let assistToken = (row["assistant_staff_name"] as? String) ?? ""
+        let checkToken = hasCheck ? ((row["check_staff_name"] as? String) ?? "") : ""
+        let seatLabel = (row["seat_label"] as? String) ?? ""
+        return computeStateRevFromFields(
+            seatNumber: fallbackSeatNumber,
+            seatLabel: seatLabel,
+            isRunning: isRunning,
+            targetEndMs: endMs,
+            pausedRemainingSeconds: pausedSec,
+            hasActiveCheck: hasCheck,
+            checkTargetEndMs: chkEndMs,
+            isPostStopProcessActive: isPostStopProcessActive,
+            assistToken: assistToken,
+            checkToken: checkToken
+        )
+    }
+
+    static func computeCompositeStateRev(_ seats: [ComplicationSeat]) -> String {
+        let regular = seats.filter { !$0.isMainTimer }
+        guard !regular.isEmpty else { return "empty000" }
+        let parts = regular.map { s -> String in
+            let key = normalizeSeatKey(seatNumber: s.seatNumber, seatLabel: s.seatLabel)
+            return "\(key):\(computeWidgetSeatStateRev(s))"
+        }.sorted()
+        return String(parts.joined(separator: ",").prefix(200))
+    }
+
+    private static let forbiddenPiiKeys: Set<String> = [
+        "comment", "memo", "note", "customerName", "body", "title", "expoPushToken", "expo_push_token"
+    ]
+
+    private static func sanitizeMetaValue(_ val: Any, key: String = "", depth: Int = 0) -> Any? {
+        if val is NSNull { return nil }
+        if let b = val as? Bool { return b }
+        if let i = val as? Int { return i }
+        if let i64 = val as? Int64 { return NSNumber(value: i64) }
+        if let d = val as? Double { return d.isFinite ? NSNumber(value: d) : nil }
+        if let f = val as? Float { return f.isFinite ? NSNumber(value: Double(f)) : nil }
+        if let n = val as? NSNumber {
+            if CFNumberIsFloatType(n) {
+                let dv = n.doubleValue
+                return dv.isFinite ? n : nil
+            }
+            return n
+        }
+        if let s = val as? String {
+            let maxLen = key.lowercased().hasSuffix("rev") ? 200 : 96
+            return s.count > maxLen ? String(s.prefix(maxLen)) + "…" : s
+        }
+        if depth >= 2 { return nil }
+        if let arr = val as? [Any] {
+            return arr.prefix(12).compactMap { sanitizeMetaValue($0, key: key, depth: depth + 1) }
+        }
+        if let dict = val as? [String: Any] {
+            var out: [String: Any] = [:]
+            for (k, v) in dict.prefix(20) {
+                if forbiddenPiiKeys.contains(k) { continue }
+                if let cv = sanitizeMetaValue(v, key: k, depth: depth + 1) {
+                    out[k] = cv
+                }
+            }
+            return out
+        }
+        return nil
+    }
+
+    static func append(
+        userId: String,
+        seat: String,
+        act: String,
+        res: String,
+        rsn: String,
+        stateRev: String,
+        ms: Int,
+        meta: [String: Any]
+    ) {
+        let wallMs = safeMillisInt64(Date().timeIntervalSince1970 * 1000.0)
+        let monoMs = Int64((ProcessInfo.processInfo.systemUptime * 1000.0).rounded())
+        let devId = userId.isEmpty ? "wg" : maskId(userId, prefix: "u")
+        let cleanMeta = (sanitizeMetaValue(meta, key: "meta", depth: 0) as? [String: Any]) ?? [:]
+        ioQueue.async {
+            localSeq += 1
+            var entry: [String: Any] = [
+                "seq": localSeq,
+                "dev": devId,
+                "layer": "watch_widget",
+                "wallMs": NSNumber(value: wallMs),
+                "monoMs": NSNumber(value: monoMs),
+                "hop": "WG_TIMELINE",
+                "ch": "widget_timeline",
+                "seat": String(seat.prefix(32)),
+                "act": act,
+                "res": res,
+                "rsn": rsn,
+                "stateRev": String(stateRev.prefix(200)),
+                "ms": ms,
+                "appState": "extension"
+            ]
+            if !cleanMeta.isEmpty {
+                entry["meta"] = cleanMeta
+            }
+            guard PropertyListSerialization.propertyList(entry, isValidFor: .binary),
+                  JSONSerialization.isValidJSONObject(entry),
+                  let lineData = try? JSONSerialization.data(withJSONObject: entry),
+                  let lineStr = String(data: lineData, encoding: .utf8),
+                  let fileUrl = FileManager.default
+                      .containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
+                      .appendingPathComponent(fileName) else { return }
+
+            var lines: [String] = []
+            if let existingData = try? Data(contentsOf: fileUrl),
+               let existingText = String(data: existingData, encoding: .utf8) {
+                lines = existingText.split(separator: "\n").map(String.init)
+            }
+            lines.append(lineStr)
+            if lines.count > maxLines {
+                lines.removeFirst(lines.count - maxLines)
+            }
+            let outText = lines.joined(separator: "\n")
+            try? outText.data(using: .utf8)?.write(to: fileUrl, options: .atomic)
+        }
     }
 }
