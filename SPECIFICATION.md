@@ -1118,12 +1118,14 @@ ALTER PUBLICATION supabase_realtime ADD TABLE salon_timers;
 1. 修正・機能改修を行う前に、**必ず本仕様書を精読**して設計の整合性を確認すること。
 2. 修正や仕様変更が発生した場合は、**Antigravityが責任を持って本仕様書を最新の状態に更新**すること。
 3. コードの勝手な修正・実装は行わず、原因・対策・改善点・質問事項を整理してユーザーの合意を得てから実装すること。
-4. すべての機能追加・仕様変更・バグ修正タスクにおいては、[`AGENTS.md`](AGENTS.md)・[`.agents/rules/multi-agent-review-workflow.md`](.agents/rules/multi-agent-review-workflow.md)・[`.agents/skills/salon-multi-agent-dev/SKILL.md`](.agents/skills/salon-multi-agent-dev/SKILL.md)（および本仕様書セクション67）に定める**「4つの専門サブエージェント（①現場UX批評 `ux-flow-critic` ➜ ②仕様書＆3層整合性監査 `spec-auditor` ➜ ③実装 `implementer` ➜ ④最終品質・意地悪テスト検証 `qa-verifier`）による相互チェック＆ブラッシュアップ開発フロー」**を常時自動適用し、④の意地悪テスト検証が全項目 PASS するまで完了としないこと。
+4. チェック（マルチエージェントレビュー）体制は [`AGENTS.md`](AGENTS.md)・[`.agents/rules/multi-agent-review-workflow.md`](.agents/rules/multi-agent-review-workflow.md)・[`.agents/skills/salon-multi-agent-dev/SKILL.md`](.agents/skills/salon-multi-agent-dev/SKILL.md)（および本仕様書セクション67.3：Issue #17）に従い、**本番の挙動を変える高リスク変更（同期信頼性改善・アラーム・通知まわり）のみ上限1ラウンドで実施**する（ブロッカーは「本番で実際に壊れるもの」に限定し、仮定上のエッジケースはリスト記録のみでブロックしない）。診断ログ追加や機械的ファイル分割など挙動を変えない作業は、テスト＋ビルド通過をもって完了とする。
 5. 修正を行うたびに、以下の形式で変更履歴に追記すること。
 
 ---
 
 ### 6.2. 変更履歴 (Changelog)
+
+| 2026-11-13 | **チェック体制の見直し：レビュー対象を高リスク変更に限定・上限1ラウンド＆実害ブロッカー限定運用への改定仕様 (Issue #17) (`AGENTS.md`, `.agents/rules/multi-agent-review-workflow.md`, `.agents/skills/salon-multi-agent-dev/SKILL.md`, `SPECIFICATION.md`)** | ①**リスク別レビュー対象の分離（セクション67.3）**: これまで全タスクに一律適用していた4エージェント相互チェック体制を見直し、レビュー対象を「本番の挙動を変える高リスク変更（Issue #14 同期信頼性改善、アラーム・通知まわりの変更）」のみに限定。挙動を変えない作業（Issue #13 診断ログ追加、Issue #15 / #16 無振る舞い変更のファイル分割等）はチェック不要とし、テスト＋ビルドの通過で完了とする。<br>②**上限1ラウンド＆実害ブロッカー限定ルール**: 高リスク変更でのチェックは上限1ラウンドとし、作業をブロックして修正するのは「本番で実際に壊れるもの（`BLOCKER`）」のみに限定。仮定上のエッジケース（`NOTE`）はリストに残すに留めて作業をブロックせず、実際に問題が起きた時点で対応する方針を常設ルール・スキル・仕様書へ統一反映。 |
 
 | 2026-11-11 | **4エージェント監査に基づく3層（iPhone / Apple Watch / WidgetKit / Supabase Edge Functions）10大ブラッシュアップ＆文字盤コンプリケーション「20秒プレビュー＋緊急席オーバーライド」・超過ゾンビ復活根絶・意地悪QA境界条件完全対策仕様 (Build 123 / TestFlight `1.0.6 (123)`) (`supabase/functions/notify-salon-event/index.ts`, `src/utils/pushNotificationService.js`, `src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`, `modules/watch-connectivity/index.js`, `app.json`, `targets/watch/content.swift`, `targets/watch/alarm.swift`, `targets/watch/widget_sync.swift`, `targets/watch-widget/widget.swift`, `SPECIFICATION.md`)** | ①**稼働中客席のヘルプ／チェック担当解除・交代通知（`unassign_assist` / `unassign_check`）の静穏トーン配信・0ms アラーム即時消火・Watch リモート Push タップ時の鳴動中アラーム誤停止防止・および未準備 `00:00` 席の主担当引き継ぎ＆施術完了時 `idle` リセット（A-1 / セクション78.1）**: 稼働中客席で担当変更・解除された旧担当者へ `ℹ️` グレーバナー＋無音/`interruptionLevel: 'active'`（Watch は `.click` 1回のみ、リモート `SALON_EVENT_PUSH` も `[.banner, .list]` 無音配信かつ `playNextHaptic()` 非発火・バナー応答時の `didReceive` 即時リターンにより稼働中アラーム誤停止を100%防止）で静かに伝達しつつ、新担当者へは `assign_*` Time-Sensitive 通知を同時個別配信し、担当から外れた端末の予約・鳴動中アラームおよび超過シートを 0ms で即時消火。併せて稼働・準備済み席の `createdBy` 上書き禁止と、未準備 `00:00` 待機席（`isUnpreparedIdleZeroSeat`）での新主担当 `createdBy` / `colorStaffName` 引き継ぎおよび完了・リセット時（`handleFinishSeat` / `FINISH_SHAMPOO` / `UPDATE_STATUS` normal / `RESET_ZERO` / `handleResetSeatTimer`）の `status = 'idle'`, `createdBy = null`, `colorStaffName = ''` クリアを3層統一。<br>②**複数サロン掛け持ち・カスタム呼び名 `userAliases` の3層常時同期（A-2）＆ ロールファミリー（`assist` / `check` / `timer`）状態遷移連動パージ付き4要素 `semanticKey`（45秒デデュープ＋`A➔B➔A` 再操作100%通過）＋ `collapseId` 配備（A-3）＆ Watch ピア通知バナーからのワンタップ対象席直行ナビゲーション（A-4）**: 全 `syncSeatsToWatch` ペイロードへの `userAliases` 同梱、`timerId\|eventType\|actorId\|stateDisc` 4要素キー＋同一席ロール状態変化時の旧 `stateDisc` 即時失効（送信側 `_dispatchedSemanticKeyMap`・iPhone 受信 `purgeStaleSemanticKeysForSeatState`・Watch 受信チャネル別デデュープ＆`purgeStalePeerSemanticKeysForSeatTransition`）による45秒重複排除と `A➔B➔A` / 再募集の100%通知保証、および Watch 未確認バナーの「確認」／「開く」スマート分岐を実装。<br>③**iPhone ロック中の Watch 二重振動根絶（A-5）＆ Watch 単体操作時の全19箇所 `preActionSeat` スナップショット・`DirectPushCoordinationState`・`alreadyNotifiedTokens` 同梱 Edge Function フォールバック協調（A-6）＆ Time-Sensitive Entitlement 配備**: フォアグラウンド時の `SALON_EVENT_PUSH` OSバナー抑止とバックグラウンド時の `watchNotif` 省略で二重振動を根絶し、直接 Push 送信済みトークン `alreadyNotifiedTokens` を `notify-salon-event` の `sentTokens` へ引き継ぐことで解決済みメンバーと未解決名メンバー混在時の二重 Push を100%遮断（キャッシュ利用時の事前 `forceRefresh` および NFKC 正規化対応）。<br>④**Push ファストパス正規化・`reconcileCloudTimersRef` 統合（B-1）＆コンプリケーション日次50回枠の8秒拡張署名デデュープ保護（B-2）＆サロン別 UUID 昇格スコープ分離・削除時パージ（B-3）＆ Watch 12秒ローカル変更保護・席単位 `hasExplicitPeerNotifForSeat` 厳密化・直接ポーリング新規席追加・`ADJUST_TIME` 400エラー解消（B-4）**。<br>⑤**WidgetKit 文字盤コンプリケーションの「20秒プレビュー＋緊急席オーバーライド」（Q1）・3時間超過ゾンビ復活根絶（CRITICAL-1）・連続操作スキップ時の `2.0秒` 高速再取得（HIGH-6）・`shouldAlertCheck`/`isCountUpEnabled`/古い `applicationContext` 除外付きコールド起動逆上書き防止（HIGH-7）（セクション78.3）**。 |
 | 2026-11-11 | **メイン機 ⇄ サブ機（iPhone / Apple Watch）間の共有タイマー通知取りこぼし完全根絶＆Apple Watch手首下げスリープ時の文字盤モジュラー（コンプリケーション）即時起床・0ms同期・WidgetKit自律クラウド取得仕様 (`src/utils/pushNotificationService.js`, `src/utils/salonCloudService.js`, `src/screens/SalonWorkScreen.js`, `modules/watch-connectivity/ios/ExpoWatchConnectivityModule.swift`, `targets/watch/index.swift`, `targets/watch/alarm.swift`, `targets/watch/content.swift`, `targets/watch/widget_sync.swift`, `targets/watch-widget/widget.swift`, `SPECIFICATION.md`)** | ①**稼働中タイマーのヘルプ指名・時間変更・チェック追加が「自己エコー」と誤判定されて握り潰されていたバグの根絶＆エイリアス（`userAliases`）3層完全同期（セクション77.1）**: `SalonWorkScreen.js` の `resolvePeerActorName` において、稼働中タイマーに新規アサインされたヘルプ担当者名（`assistantStaffName`）が「今回の操作の実行者名（`actorName`）」として返され、指名されたサブ機側で「自分の名前＝自分の自己エコー」と誤判定されてヘルプ指名通知もその後の時間変更・チェック追加通知もすべて握り潰されていた致命的バグを解消。稼働中タイマーの自己エコー判定では `updatedByUserId` を最優先とし、`assistantStaffName` は停止時の工程移行（シャンプー・コーミング等）または明示的な立候補検知（`allowCandidateAssist: true` かつ自分がヘルプでない場合）以外では `actorName` に使用しないよう刷新。また `detectPolledRunningPeerNotification` でも新規ヘルプ指名・新規チェック指名時は名前ベースの `actorName` ガードをバイパスし、自分の席に別スタッフがヘルプ参戦した際の通知（`isOtherStaffEnteredAssistOnMySeat`）も追加。さらに自分のサロン別表示名・カスタムニックネーム・元ニックネーム・空白除去名を `userAliases` 配列として iPhone（`checkIsStaffNameMe`）・Watch（`SeatTimerItem.isStaffMe` / `WatchSessionManager.currentUserAliases`）・WidgetKit（`ComplicationSeat.isStaffMe`）の3層へ完全同期。<br>②**クライアント主導のダイレクト Expo Push API 即時配信フォールバック＆二重Push/OSバナー抑止デデュープ＆Watch単体操作時ダイレクトPush＆Push受信時の `seatSnapshot` 0ms Watch即時転送（セクション77.2 / セクション78）**: クラウドDBトリガー（`pg_net` ➔ Edge Function）の遅延・未発火時にも100%確実に相手端末（ロック中iPhone・スリープ中Watch）を起床させるため、`salonCloudService.js` の `upsertCloudTimer`（`_lastKnownCloudSeatBySalonKey` で直前状態を保持）成功時に `pushNotificationService.js` の `dispatchSalonTimerEventPush`（`getOrCreateUserId()` で自身の `actorUserId` を確実解決）を fire-and-forget で即時実行。全12イベント（`check_done`, `stop`, `assign_check`, `unassign_check`, `assign_assist`, `unassign_assist`, `assign_main`, `recruit`, `add_check`, `status_change`, `timer_start`, `time_adjust`）を検知し、`salon_members` およびローカル `staffMembers`（`originalNickname` / `customNickname` 空白正規化対応）で宛先 `user_id` を解決（未解決名は他メンバー全員へ安全フォールバック）し、4秒送信デデュープの上で `https://exp.host/--/api/v2/push/send` へ `priority: 'high'`, `_contentAvailable: true`, `collapseId`, `interruptionLevel`（通常 `'time-sensitive'` + `sound: 'default'`、担当解除 `'active'` + 無音）, `seatSnapshot` 付きで直接POST（失敗時は `supabase.functions.invoke('notify-salon-event')` フォールバック）。受信側では `SEMANTIC_KEY_TTL_MS = 45000`（45秒）および4要素キー（`<timerId>\|<eventType>\|<actorId>\|<stateDisc>`）を展開する `expandSemanticKeyVariants` と `channel: 'os_banner'` を導入し、クライアント直接PushとEdge Function Pushが相次いで届いた際も2発目のOS通知バナー・サウンド・Realtimeローカル通知ミラーリング（1.5秒遅延再確認付き）の重複鳴動を完全抑止。さらに Watch 単体操作時（`syncSeatActionDirectlyToCloud`）にも `Self.isValidCloudUUID(uid)` 必須ガード・関係者フィルタ・4要素 `semanticKey`・`seatSnapshot` 同梱を備えた `sendDirectExpoPushFromWatch` で全19箇所の客席アクションからの直接Pushを実装し、受信側 iPhone の `subscribeRemotePushEvents` では DB 再取得を待たずに Push ペイロード内の `seatSnapshot` を 0ms でマージして `syncSeatsToWatch(..., { immediate: true, highPriorityWake: true, ... })` で即座に Watch を起床。<br>③**Apple Watch 手首下げスリープ中における文字盤モジュラー（コンプリケーション）即時更新の4重保証機構（セクション77.3 / セクション78.3）**: (A) `SalonWorkScreen.js` の自機ローカル操作時（タイマー・担当・工程変更ハンドラ）とリモート更新時（`didRemoteChangeWatchComplicationTarget`：全稼働席の開始・停止・時間変更・チェック増減・担当変更）の双方で `highPriorityWake: true`（`transferCurrentComplicationUserInfo`）を発火するとともに、`ExpoWatchConnectivityModule.swift` の `transferUserInfo` と `flushPendingUserInfo` の予約枠閾値を `> 15` から `> 5`（`isHighPriorityWake` 時は `> 0`）へ統一緩和。さらに iPhone バックグラウンドかつ `!WatchConnectivity.isReachable()` 時は `1500ms` 待機後に Push 未着なら `WatchConnectivity.presentLocalNotification`（Time-Sensitive APNs ミラーリング）で Watch を強制起床。(B) `targets/watch/alarm.swift` の `postPeerActionNotification` にて非アクティブ時（`!isActive`）は `trigger: nil`（0ms即時配信）に変更。(C) `targets/watch/index.swift` の `.backgroundTask(.watchConnectivity)` にて `MainActor` 上で `syncFromLatestApplicationContextIfNewer()` と `pollCloudTimersFromSupabaseIfNeeded(force: true)` を即時発火し、最低300ms〜最大1.8秒待機してから最新スナップショットで `WidgetSync.save(..., forceReload: true)` をフラッシュ。(D) `targets/watch-widget/widget.swift` の `ComplicationProvider.getTimeline` に `ComplicationData.fetchLatestFromSupabaseIfAvailable`（直近 `1.2秒` 以内のWatch本体保存時または `0.6秒` 以内のWidget取得時はスキップし `2.0秒` 後に再評価、最大2.2秒タイムアウト）を実装し、Watch アプリ本体がサスペンド中でも WidgetKit エクステンション自身が Supabase REST API から最新タイマーを取得して `persistSnapshotToAppGroup` で App Group（`snapshotKey` / `widgetFetchedAtEpochKey`）へ分離永続化（①メインタイマー保持、②`localStops`・`peerStoppedSeatEnds`・`confirmedPeerStoppedEnds`・`updated_by` に基づく厳密なローカル停止・未確認ピア停止超過保護、③デバウンススキップ時2秒／稼働中60秒／待機中120秒の `.after` タイムライン更新ポリシーの3大デグレ防止ガード付き）。<br>④**同一客席の連続操作（タイマー開始直後のヘルプ指名等）における席単位直列キュー `seatCloudSyncQueuesRef` 導入（セクション77.4）**: `SalonWorkScreen.js` の `syncChangedSeatsToCloud` にサロン別物理席キー単位の非同期直列キュー `seatCloudSyncQueuesRef` を導入し、ローカル席ID（`"seat-1"`）でのタイマー開始直後にヘルプ指名や時間変更を行った際も、1回目の `upsertCloudTimer` で昇格したクラウド UUID を2回目の操作が確実に引き継いで順次 PATCH する設計を確立。 |
@@ -4119,30 +4121,45 @@ emoveNotifications(forEventKey:) において、対象エポック秒の前後31
 
 ---
 
-## 67. 4つの専門サブエージェント（現場UX批評・仕様整合性監査・実装・最終QA検証）による相互チェック＆ブラッシュアップ開発体制仕様 (Issue #10 / 2026-11-04)
+## 67. マルチエージェント開発・チェック体制仕様 (Issue #10 導入: 2026-11-04 / Issue #17 リスクベース改定: 2026-11-13)
 
 ### 67.1 背景・目的
 
 サロン共有機能（複数スタッフ × iPhone × Apple Watch × Supabase クラウド同期 × バックグラウンド Push 通知 × アラーム制御）は状態遷移と境界条件が極めて多く、単一視点での実装では「1箇所を直すと別経路で競合・逆流・通知漏れが起きる」「現場の実際の動きと仕様書にズレが生じる」といった問題が発生しやすい。
-そのため、今後の修正・機能開発においては、**役割の異なる4つの専門サブエージェントが相互にチェック・批評・ブラッシュアップしながら開発を進めるマルチエージェント体制**を標準開発フローとして採用し、どのウィンドウやPC環境で作業しても毎回自動的にこのフローが適用されるよう常設ルール化する。
+そのため、役割の異なる4つの専門サブエージェントを用いたチェック体制を導入（Issue #10）した上で、2026-11-13 のオーナー決定（Issue #17）により、**完了までの速度と安全性のバランスを最適化するため「本番の挙動を変える高リスク変更」のみにレビュー対象を限定するリスクベース運用**へ改定する。
 
-### 67.2 確定仕様・実装詳細 (`AGENTS.md`, `.agents/rules/multi-agent-review-workflow.md`, `.agents/skills/salon-multi-agent-dev/SKILL.md`)
+### 67.2 4つの専門サブエージェントの役割定義 (`AGENTS.md`, `.agents/rules/multi-agent-review-workflow.md`, `.agents/skills/salon-multi-agent-dev/SKILL.md`)
 
-1. **4つの専門サブエージェントの役割定義**:
+1. **4つの専門サブエージェントの役割（高リスク変更時のみ起動）**:
    - **① 現場フロー・UX批評担当 (`ux-flow-critic`)**:
-     - 美容室のリアルな営業現場（施術中で両手が塞がっている、手首やスマホを見られない状況、スタイリスト・アシスタント・他スタッフそれぞれの立場）の視点から、仕様や操作フローの妥当性を批判的に検証し、実装前にブラッシュアップ案を提示する。
+     - 美容室のリアルな営業現場（施術中で両手が塞がっている、手首やスマホを見られない状況、スタイリスト・アシスタント・他スタッフそれぞれの立場）の視点から、仕様や操作フローに実害がないかを検証する。
    - **② 仕様書＆整合性監査担当 (`spec-auditor`)**:
-     - `SPECIFICATION.md` および過去の GitHub Issues（#5〜#10 等）との整合性を監査し、iPhone（`SalonWorkScreen.js` / `salonCloudService.js` / `HomeScreen.js`）・Apple Watch（`content.swift` / `alarm.swift` / `widget_sync.swift`）・クラウド（`supabase/functions/notify-salon-event/index.ts`）の3層間で判定ロジックに食い違いやデグレがないかを検証する。
+     - `SPECIFICATION.md` および過去の GitHub Issues との整合性を監査し、iPhone（`SalonWorkScreen.js` / `salonCloudService.js` / `HomeScreen.js`）・Apple Watch（`content.swift` / `alarm.swift` / `widget_sync.swift`）・クラウド（`supabase/functions/notify-salon-event/index.ts`）の3層間で判定ロジックに食い違いやデグレがないかを検証する。
    - **③ 実装担当 (`implementer`)**:
-     - ①・②の検証を通過した確定仕様に基づき、iPhone / Apple Watch / Supabase / `SPECIFICATION.md` の実装を正確に行い、④からの差し戻し指摘があった場合は根本原因から修正する。
-   - **④ 最終品質・意地悪テスト検証担当 (`qa-verifier`)**:
-     - ③が実装したコード変更（`git diff`）を「意地悪なテスト視点（Adversarial QA）」で徹底的に検証する。
-     - 「iPhoneロック／バックグラウンド中」「Watch手首下げスリープ中」「モーダルシート展開中」「カウントダウン終了直前・超過中に別スタッフが操作」「他スタッフがシャンプー移行後に設定者が遅れてアラーム停止」「確認バナー消去後の再ポーリング」「同名スタッフ存在時」「通信瞬断後のポーリング復帰時」等の全境界条件でバグが起きないかをコードトレースおよび構文チェック（`node --check`, `swiftc -parse`）で証明し、全項目クリアまで完了を承認しない。
+     - 確定仕様に基づき、iPhone / Apple Watch / Supabase / `SPECIFICATION.md` の実装と構文・ビルド検証を正確に行う。
+   - **④ 最終品質検証担当 (`qa-verifier`) — ※上限1ラウンド**:
+     - ③が実装したコード変更（`git diff`）を検証し、指摘を **`BLOCKER`（本番で実際に壊れるもの）** と **`NOTE`（仮定上のエッジケース・経過観察メモ）** に分離して報告する。
 2. **リポジトリ常設ファイル構成**:
    - **`AGENTS.md` および `.agents/rules/multi-agent-review-workflow.md`**:
-     - `trigger: always_on`（常時自動適用ルール）として、修正・実装タスク実行時に必ず「①現場UX批評 ➜ ②仕様整合性監査 ➜ ③実装 ➜ ④最終QA検証（NG時は差し戻し）」のフローを自動適用する規約を定義。
+     - `trigger: always_on`（常時自動適用ルール）として、タスク開始時に高リスク変更か無振る舞い変更かを判定し、下記 67.3 の運用ルールを自動適用する規約を定義。
    - **`.agents/skills/salon-multi-agent-dev/SKILL.md`**:
-     - `define_subagent` / `invoke_subagent` を用いて上記4つのサブエージェントを起動する具体的なシステムプロンプト、進行フローチャート、および意地悪テスト検証チェックリストを定義。
+     - 高リスク変更時に上記サブエージェントを起動するプロンプト、上限1ラウンドの進行フローチャート、および構文・ビルド確認手順を定義。
+
+### 67.3 リスクベース適用への見直し・現行運用ルール (Issue #17 / 2026-11-13 オーナー決定)
+
+1. **チェック（レビュー）を通す対象**:
+   - **本番の挙動を変える高リスク変更のみ**とする：
+     - Issue #14 の共有タイマー同期信頼性改善（および同期ロジック変更）
+     - アラーム・通知まわりの変更
+2. **チェック不要とする対象（テスト＋ビルドの通過で完了）**:
+   - Issue #13 の診断ログ追加（挙動を変えない作業）
+   - Issue #15 / #16 の無振る舞い変更のファイル分割（機械的整理）
+   - その他、本番の挙動を変えない作業全般
+3. **チェックの運用ルール**:
+   - チェックは **上限1ラウンド** とする（複数回の差し戻し再監査ループは行わない）。
+   - **ブロッカーは「本番で実際に壊れるもの（`BLOCKER`）」だけ** とする（該当箇所があれば修正し、テスト＋ビルド通過で完了）。
+   - **仮定上のエッジケース（`NOTE`）はリストに残すに留め、作業をブロックしない**。問題が実際に起きた時点で対応する（AssistMix で採用した方針と同趣旨）。
+   - 本ルールは Issue #17 の発行時点（2026-11-13）から全作業に適用する。
 
 ---
 
