@@ -12858,7 +12858,7 @@ export default function SalonWorkScreen() {
       {/* ★ Apple Watch 通信状態の常時表示（診断用。不要になったらこの1行を削除） */}
       <WatchDiagnosticsBar
         theme={theme}
-        salonId={cloudSalonId || currentSalon?.id || ''}
+        salonId={cloudSalonIdRef.current || currentSalon?.id || ''}
         userId={myUserId || ''}
         staffRole={isSalonOwner ? 'owner' : 'guest'}
       />
