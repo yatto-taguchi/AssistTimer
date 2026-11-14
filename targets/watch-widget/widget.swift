@@ -322,7 +322,7 @@ enum ComplicationData {
             didComplete = true
             lock.unlock()
             let nowMs = WidgetSyncTrace.safeMillisInt64(Date().timeIntervalSince1970 * 1000.0)
-            let elapsedMs = Int(max(0, nowMs - fetchStartMs))
+            let elapsedMs = Int(min(Int64(86_400_000), max(Int64(0), nowMs - fetchStartMs)))
             completion(snap, skipped, outcome, elapsedMs, cloudRevMap, cloudCompRev)
         }
 
@@ -1675,7 +1675,10 @@ private enum WidgetSyncTrace {
         meta: [String: Any]
     ) {
         let wallMs = safeMillisInt64(Date().timeIntervalSince1970 * 1000.0)
-        let monoMs = Int64((ProcessInfo.processInfo.systemUptime * 1000.0).rounded())
+        let rawMonoMs = ProcessInfo.processInfo.systemUptime * 1000.0
+        let monoMs: Int64 = (rawMonoMs.isFinite && rawMonoMs >= 0)
+            ? Int64(min(4_102_444_800_000.0, max(0.0, rawMonoMs)).rounded())
+            : 0
         let devId = userId.isEmpty ? "wg" : maskId(userId, prefix: "u")
         let cleanMeta = (sanitizeMetaValue(meta, key: "meta", depth: 0) as? [String: Any]) ?? [:]
         ioQueue.async {

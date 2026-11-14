@@ -61,7 +61,7 @@ struct watchEntry: App {
                     userName: WatchSessionManager.shared.currentUserName,
                     forceReload: true
                 )
-                let elapsed = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - startMs))
+                let elapsed = safeClampedMillisInt(safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - startMs)
                 SyncTraceLogger.shared.log(
                     hop: "W_BG_WC_TASK",
                     ch: "bg_wc",

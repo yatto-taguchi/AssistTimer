@@ -32,6 +32,11 @@ func safeEpochMillisInt64(_ rawMs: Double) -> Int64 {
     return Int64(clamped.rounded())
 }
 
+/// Int64ミリ秒差分を32bit Watch (arm64_32: Int.max ≈ 24.8日) でも絶対にオーバーフローしない範囲にクランプしてIntへ変換する
+func safeClampedMillisInt(_ deltaMs: Int64, maxMs: Int64 = 86_400_000) -> Int {
+    return Int(min(maxMs, max(Int64(0), deltaMs)))
+}
+
 // MARK: - ★ 全画面・全モーダルシート共通の常時稼働リアルタイムクロック（シート開閉や親View再描画で停止・リセットしない恒久Timer）
 final class WatchRealtimeClock {
     static let shared = WatchRealtimeClock()
@@ -5093,7 +5098,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     coord.markNeedsDirectPush()
                 }
                 session.transferUserInfo(fallbackPayload)
-                let elapsed = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - sendStartMs))
+                let elapsed = safeClampedMillisInt(safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - sendStartMs)
                 let fallbackCode: String = {
                     if reason.hasPrefix("即時失敗") { return "err_fallback_userinfo" }
                     if reason.hasPrefix("スリープ") { return "expiring_fallback_userinfo" }
@@ -5136,7 +5141,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     clearActiveDeliveryIfCurrent()
                     ackSema.signal()
                     pushCoord?.markPhoneAcked()
-                    let rttMs = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - sendStartMs))
+                    let rttMs = safeClampedMillisInt(safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - sendStartMs)
                     SyncTraceLogger.shared.log(
                         hop: "W_WC_TX",
                         ch: "wc_msg",
@@ -5704,7 +5709,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
                     rsn: "expiring_cancelled",
                     traceId: traceId,
                     stateRev: postPatchStateRev,
-                    ms: Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - patchStartMs))
+                    ms: safeClampedMillisInt(safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - patchStartMs)
                 )
                 return
             }
@@ -5827,7 +5832,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             let finalHadError = expState.hadError
             expState.lock.unlock()
 
-            let patchRttMs = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - patchStartMs))
+            let patchRttMs = safeClampedMillisInt(safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - patchStartMs)
             SyncTraceLogger.shared.log(
                 hop: "W_CLOUD_PATCH",
                 ch: "supabase_rest",
@@ -6097,7 +6102,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         let edgeStartMs = safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0)
         let edgeSeatRef = SyncTraceLogger.formatSeatRef(seatNumber: 0, seatLabel: seatLabel, id: resolvedSeatId)
         URLSession.shared.dataTask(with: req) { _, edgeResp, edgeErr in
-            let rttMs = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - edgeStartMs))
+            let rttMs = safeClampedMillisInt(safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - edgeStartMs)
             let statusCode = (edgeResp as? HTTPURLResponse)?.statusCode ?? 0
             let ok = edgeErr == nil && (200...299).contains(statusCode)
             SyncTraceLogger.shared.log(
@@ -6877,7 +6882,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             let sentToTokens = Array(Set(allMessages.compactMap { ($0["to"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }))
             let expoStartMs = safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0)
             URLSession.shared.dataTask(with: pushReq) { [weak self] _, pushResp, pushErr in
-                let expoRttMs = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - expoStartMs))
+                let expoRttMs = safeClampedMillisInt(safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - expoStartMs)
                 let pushStatusCode = (pushResp as? HTTPURLResponse)?.statusCode ?? 0
                 let pushOk = (200...299).contains(pushStatusCode)
                 SyncTraceLogger.shared.log(
@@ -6980,7 +6985,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 defer { self.isDirectCloudPollInFlight = false }
-                let pollRttMs = Int(max(0, safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - pollStartMs))
+                let pollRttMs = safeClampedMillisInt(safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0) - pollStartMs)
                 // ★ GETリクエスト飛行中にWatch上でローカル操作（タイム入力開始・ヘルプ指定・停止等）が行われた場合は、
                 //   リクエスト送信前の古いクラウド応答でローカル状態を上書きしないよう破棄し、0.8秒後に再ポーリングする
                 guard self.localActionGeneration == requestGeneration else {

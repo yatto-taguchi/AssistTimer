@@ -478,8 +478,14 @@ public class ExpoWatchConnectivityModule: Module {
     ms: Int? = nil,
     meta: [String: Any]? = nil
   ) {
-    let wallMs = Int64((Date().timeIntervalSince1970 * 1000.0).rounded())
-    let monoMs = Int64((ProcessInfo.processInfo.systemUptime * 1000.0).rounded())
+    let rawWallMs = Date().timeIntervalSince1970 * 1000.0
+    let wallMs: Int64 = (rawWallMs.isFinite && rawWallMs > 0)
+      ? Int64(min(4_102_444_800_000.0, max(0.0, rawWallMs)).rounded())
+      : 0
+    let rawMonoMs = ProcessInfo.processInfo.systemUptime * 1000.0
+    let monoMs: Int64 = (rawMonoMs.isFinite && rawMonoMs >= 0)
+      ? Int64(min(4_102_444_800_000.0, max(0.0, rawMonoMs)).rounded())
+      : 0
     let appState = currentAppStateText()
     diagLock.lock()
     nativeDiagSeq += 1
@@ -833,6 +839,11 @@ public class ExpoWatchConnectivityModule: Module {
       self.endWatchActionBackgroundTask()
     }
     let remBgSec = UIApplication.shared.backgroundTimeRemaining
+    // ★ フォアグラウンド時は backgroundTimeRemaining が DBL_MAX (1.797e308, isFinite == true) を返すため、
+    //   Int(remBgSec) を先に評価すると Int.max オーバーフロー (EXC_BREAKPOINT) で即クラッシュする。必ず Double のまま上限クランプしてから Int 化する。
+    let safeBgRemainingSec: Int = (remBgSec.isFinite && remBgSec >= 0)
+      ? Int(min(999.0, max(0.0, remBgSec)).rounded(.down))
+      : -1
     self.appendNativeDiagLog(
       hop: "N_BG_TASK_BEGIN",
       ch: "bg_task",
@@ -840,7 +851,7 @@ public class ExpoWatchConnectivityModule: Module {
       res: startedId == .invalid ? "err" : "ok",
       rsn: startedId == .invalid ? "invalid_task_id" : "started",
       meta: [
-        "bgTimeRemainingSec": remBgSec.isFinite ? min(999, Int(remBgSec)) : -1
+        "bgTimeRemainingSec": safeBgRemainingSec
       ]
     )
     if startedId == .invalid {

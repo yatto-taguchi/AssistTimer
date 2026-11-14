@@ -906,9 +906,16 @@ final class SyncTraceLogger {
         meta: [String: Any]? = nil
     ) {
         let wallMs = safeEpochMillisInt64(Date().timeIntervalSince1970 * 1000.0)
-        let monoMs = Int64((ProcessInfo.processInfo.systemUptime * 1000.0).rounded())
+        let rawMonoMs = ProcessInfo.processInfo.systemUptime * 1000.0
+        let monoMs: Int64 = (rawMonoMs.isFinite && rawMonoMs >= 0)
+            ? Int64(min(4_102_444_800_000.0, max(0.0, rawMonoMs)).rounded())
+            : 0
         let appState = currentWatchAppState()
-        let rawUid = WatchSessionManager.shared.cloudUserId
+        let rawUid = (
+            UserDefaults(suiteName: Self.appGroup)?.string(forKey: "assisttimer.watch.cloudUserId.v1")
+            ?? UserDefaults.standard.string(forKey: "assisttimer.watch.cloudUserId.v1")
+            ?? ""
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
         let devId = rawUid.isEmpty ? sessionDevFallback : Self.maskId(rawUid, prefix: "u")
 
         var cleanMeta: [String: Any]? = nil
